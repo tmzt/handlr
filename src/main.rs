@@ -123,6 +123,15 @@ fn resolve_model_path(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
+    // Detect service account file in .private folder
+    let private_sa = std::path::Path::new(".private/service_account.json");
+    if private_sa.exists() {
+        if let Ok(abs_path) = private_sa.canonicalize() {
+            log::info!("Detected service_account.json in .private; setting GOOGLE_APPLICATION_CREDENTIALS to {}", abs_path.display());
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", abs_path);
+        }
+    }
+
     let args = parse_args();
 
     // 1. Initialize Reasoning Engine
