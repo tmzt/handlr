@@ -1050,7 +1050,6 @@ dependencies = [
  "dotenvy",
  "env_logger",
  "libconversate",
- "libgenai",
  "libherdr",
  "libinfer",
  "log",
@@ -1511,6 +1510,7 @@ name = "libinfer"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "libgenai",
  "serde",
  "serde_json",
  "tempfile",

@@ -9,6 +9,105 @@ pub trait ToolExecutor: Send + Sync {
     async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String>;
 }
 
+// Re-export key libgenai types
+pub use libgenai::{GeminiAgent, Tool, FunctionDeclaration, Model, Role, Message as GenaiMessage, Content};
+
+/// A reasoning engine powered by Google Gemini, implementing `ReasoningEngine`.
+pub struct GeminiReasoningEngine {
+    agent: GeminiAgent,
+    max_turns: usize,
+}
+
+impl GeminiReasoningEngine {
+    /// Create a new `GeminiReasoningEngine` with the given API key.
+    pub fn new(api_key: String, system_prompt: Option<String>, tools: Vec<Tool>) -> Result<Self, String> {
+        let mut agent = GeminiAgent::new(api_key)?;
+        if let Some(prompt) = system_prompt {
+            agent = agent.with_system_prompt(prompt);
+        }
+        for tool in tools {
+            agent = agent.with_tool(tool);
+        }
+        Ok(Self {
+            agent,
+            max_turns: 5,
+        })
+    }
+
+    /// Create from the environment (resolving either `GEMINI_API_KEY` or Google credentials).
+    pub fn from_env(system_prompt: Option<String>, tools: Vec<Tool>) -> Result<Self, String> {
+        let mut agent = GeminiAgent::from_env()?;
+        if let Some(prompt) = system_prompt {
+            agent = agent.with_system_prompt(prompt);
+        }
+        for tool in tools {
+            agent = agent.with_tool(tool);
+        }
+        Ok(Self {
+            agent,
+            max_turns: 5,
+        })
+    }
+
+    /// Construct with a pre-configured `GeminiAgent`.
+    pub fn from_agent(agent: GeminiAgent) -> Self {
+        Self {
+            agent,
+            max_turns: 5,
+        }
+    }
+
+    /// Set the maximum multi-turn tool calling steps allowed per query.
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
+    /// Override the system prompt for the agent.
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.agent = self.agent.with_system_prompt(prompt);
+        self
+    }
+
+    /// Reference to the underlying `GeminiAgent`.
+    pub fn agent(&self) -> &GeminiAgent {
+        &self.agent
+    }
+
+    /// Get the maximum multi-turn tool calling steps allowed per query.
+    pub fn max_turns(&self) -> usize {
+        self.max_turns
+    }
+}
+
+#[async_trait]
+impl ReasoningEngine for GeminiReasoningEngine {
+    async fn process_transcript(
+        &self,
+        transcript: &str,
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        let trimmed = transcript.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+
+        let response = self
+            .agent
+            .query_multi_turn(trimmed, self.max_turns, |name, args| async move {
+                executor.execute_tool(&name, &args).await
+            })
+            .await?;
+
+        let text = response.trim();
+        if text.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(text.to_string()))
+        }
+    }
+}
+
 #[async_trait]
 impl<T: ToolExecutor + ?Sized> ToolExecutor for std::sync::Arc<T> {
     async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
