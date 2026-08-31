@@ -120,33 +120,8 @@ fn resolve_model_path(
     Ok(target_path)
 }
 
-async fn get_oauth_token() -> Result<String, Box<dyn std::error::Error>> {
-    // Bridge GOOGLE_ACCOUNT_CREDENTIALS to GOOGLE_APPLICATION_CREDENTIALS if needed
-    if std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_err() {
-        if let Ok(path) = std::env::var("GOOGLE_ACCOUNT_CREDENTIALS") {
-            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path);
-        }
-    }
-
-    log::info!("Requesting Google OAuth token natively via gcp-auth...");
-    let provider = gcp_auth::provider().await?;
-    let token = provider.token(&["https://www.googleapis.com/auth/cloud-platform"]).await?;
-    log::info!("Successfully acquired native Google OAuth token.");
-    Ok(token.as_str().to_string())
-}
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
-    // Detect service account file in .private folder
-    let private_sa = std::path::Path::new(".private/service_account.json");
-    if private_sa.exists() {
-        if let Ok(abs_path) = private_sa.canonicalize() {
-            log::info!("Detected service_account.json in .private; setting GOOGLE_APPLICATION_CREDENTIALS to {}", abs_path.display());
-            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", &abs_path);
-            std::env::set_var("GOOGLE_ACCOUNT_CREDENTIALS", &abs_path);
-        }
-    }
 
     let args = parse_args();
 
@@ -157,17 +132,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "This is a mock response from handlr.".to_string(),
         )))
     } else {
-        // Resolve API key: arg -> env variable -> oauth token from service account
-        let key = if let Some(k) = args.api_key {
-            k
-        } else {
-            // Block on async OAuth generation
-            smol::block_on(async {
-                get_oauth_token().await
-            })?
-        };
         log::info!("Initializing Gemini Reasoning Engine...");
-        Arc::new(GeminiReasoningEngine::new(key)?)
+        let engine = if let Some(key) = args.api_key {
+            GeminiReasoningEngine::new(key)?
+        } else {
+            GeminiReasoningEngine::from_env()?
+        };
+        Arc::new(engine)
     };
 
     // 2. Initialize Transport / Herdr Client

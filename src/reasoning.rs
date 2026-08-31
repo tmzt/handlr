@@ -293,11 +293,22 @@ impl GeminiReasoningEngine {
         })
     }
 
-    /// Create from the `GEMINI_API_KEY` environment variable.
+    /// Create from the environment (resolving either `GEMINI_API_KEY` or Google credentials).
     pub fn from_env() -> Result<Self, String> {
-        let key = std::env::var("GEMINI_API_KEY")
-            .map_err(|_| "GEMINI_API_KEY not set".to_string())?;
-        Self::new(key)
+        let system_prompt = default_system_prompt()
+            .ok_or_else(|| "could not find <system_prompt> tag in AGENTS.md".to_string())?;
+
+        let mut agent = GeminiAgent::from_env()?
+            .with_system_prompt(system_prompt);
+
+        for tool in declare_gemini_tools() {
+            agent = agent.with_tool(tool);
+        }
+
+        Ok(Self {
+            agent,
+            max_turns: 5,
+        })
     }
 
     /// Construct with a pre-configured `GeminiAgent`.
