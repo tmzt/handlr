@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use async_compat::CompatExt;
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
@@ -143,24 +144,88 @@ impl ReasoningEngine for GeminiReasoningEngine {
         transcript: &str,
         executor: &dyn ToolExecutor,
     ) -> Result<Option<String>, String> {
-        let trimmed = transcript.trim();
-        if trimmed.is_empty() {
+        let msg = Message {
+            role: "user".to_string(),
+            content: transcript.to_string(),
+            name: None,
+            thought_signature: None,
+        };
+        self.process_turns(&[msg], executor).await
+    }
+
+    async fn process_turns(
+        &self,
+        turns: &[Message],
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        if turns.is_empty() {
             return Ok(None);
         }
 
-        let response = self
-            .agent
-            .query_multi_turn(trimmed, self.max_turns, |name, args| async move {
-                executor.execute_tool(&name, &args).await
-            })
-            .await?;
+        let mut builder = self.agent.client().generate_content();
 
-        let text = response.trim();
-        if text.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(text.to_string()))
+        if let Some(ref prompt) = self.agent.system_prompt() {
+            builder = builder.with_system_prompt(*prompt);
         }
+
+        for tool in self.agent.tools() {
+            builder = builder.with_tool(tool.clone());
+        }
+
+        if !self.agent.tools().is_empty() {
+            builder = builder.with_function_calling_mode(libgenai::FunctionCallingMode::Auto);
+        }
+
+        // Add all historical messages to the builder
+        for turn in turns {
+            let role = match turn.role.as_str() {
+                "model" => libgenai::Role::Model,
+                _ => libgenai::Role::User,
+            };
+
+            let content = libgenai::Content::text(&turn.content);
+            builder = builder.with_message(GenaiMessage { role, content });
+        }
+
+        // Loop for tool execution within the current turn
+        for _ in 0..self.max_turns {
+            let response = builder
+                .clone()
+                .execute()
+                .compat()
+                .await
+                .map_err(|e| format!("gemini generate: {e}"))?;
+
+            let calls = response.function_calls_with_thoughts();
+            if let Some((fc, thought_signature)) = calls.first() {
+                let args_val = &fc.args;
+                let exec_result = executor.execute_tool(&fc.name, args_val).await?;
+
+                // Construct model message with thought signature if present
+                let model_content = if let Some(sig) = thought_signature {
+                    libgenai::Content::function_call_with_thought((*fc).clone(), sig.to_string())
+                } else {
+                    libgenai::Content::function_call((*fc).clone())
+                };
+                let model_msg = GenaiMessage {
+                    content: model_content,
+                    role: libgenai::Role::Model,
+                };
+                builder = builder
+                    .with_message(model_msg)
+                    .with_function_response(&fc.name, exec_result)
+                    .map_err(|e| format!("function response: {e}"))?;
+            } else {
+                let text = response.text().trim().to_string();
+                return if text.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(text))
+                };
+            }
+        }
+
+        Err(format!("exceeded maximum multi-turn tool steps ({})", self.max_turns))
     }
 }
 
@@ -185,6 +250,12 @@ pub trait ReasoningEngine: Send + Sync {
         transcript: &str,
         executor: &dyn ToolExecutor,
     ) -> Result<Option<String>, String>;
+
+    async fn process_turns(
+        &self,
+        turns: &[Message],
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String>;
 }
 
 #[async_trait]
@@ -196,6 +267,14 @@ impl<T: ReasoningEngine + ?Sized> ReasoningEngine for std::sync::Arc<T> {
     ) -> Result<Option<String>, String> {
         (**self).process_transcript(transcript, executor).await
     }
+
+    async fn process_turns(
+        &self,
+        turns: &[Message],
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        (**self).process_turns(turns, executor).await
+    }
 }
 
 #[async_trait]
@@ -206,6 +285,14 @@ impl<T: ReasoningEngine + ?Sized> ReasoningEngine for Box<T> {
         executor: &dyn ToolExecutor,
     ) -> Result<Option<String>, String> {
         (**self).process_transcript(transcript, executor).await
+    }
+
+    async fn process_turns(
+        &self,
+        turns: &[Message],
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        (**self).process_turns(turns, executor).await
     }
 }
 
@@ -219,6 +306,7 @@ pub struct Message {
     pub thought_signature: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct SessionManager {
     cache_dir: PathBuf,
 }
@@ -431,13 +519,29 @@ impl ReasoningEngine for MockReasoningEngine {
         transcript: &str,
         executor: &dyn ToolExecutor,
     ) -> Result<Option<String>, String> {
+        let msg = Message {
+            role: "user".to_string(),
+            content: transcript.to_string(),
+            name: None,
+            thought_signature: None,
+        };
+        self.process_turns(&[msg], executor).await
+    }
+
+    async fn process_turns(
+        &self,
+        turns: &[Message],
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        let last_content = turns.last().map(|m| m.content.as_str()).unwrap_or("");
+        
         self.transcripts
             .lock()
             .unwrap()
-            .push(transcript.to_string());
+            .push(last_content.to_string());
 
         if let Some(ref handler) = self.handler {
-            return handler.handle(transcript, executor).await;
+            return handler.handle(last_content, executor).await;
         }
 
         let mut queue = self.responses.lock().unwrap();
@@ -445,7 +549,7 @@ impl ReasoningEngine for MockReasoningEngine {
             return Ok(queue.remove(0));
         }
 
-        if transcript.contains("force_error") {
+        if last_content.contains("force_error") {
             return Err("simulated reasoning error".to_string());
         }
 

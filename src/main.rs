@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use audio_core::cpal_capture::CpalCapture;
 use audio_core::ensure_audio_ring;
-use handlr::reasoning::{ReasoningEngine, EngineType, ReasoningEngineBuilder};
-use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig, HerdrToolExecutor};
+use handlr::reasoning::{ReasoningEngine, EngineType, ReasoningEngineBuilder, Message, SessionManager, SessionBuilder};
+use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig, HerdrToolExecutor, HerdrContextContributor};
 use libconversate::stt::{SttBackend, SttConfig, SttMode};
 use libconversate::tts::{TtsConfig, TtsBackend};
 use libconversate::s2s::SpeechToSpeechBuilder;
@@ -205,19 +205,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_tts_config(tts_config);
     }
 
+    // Initialize Session Manager
+    let session_manager = SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
+    let session_id = "default_session".to_string();
+
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
     let pipeline = builder
         .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
             let engine = Arc::clone(&reasoning_engine);
+            let manager = session_manager.clone();
+            let sid = session_id.clone();
             Box::pin(async move {
                 log::info!("Received transcript: '{}'", transcript);
+
+                // Append the user turn to session history
+                let user_msg = Message {
+                    role: "user".to_string(),
+                    content: transcript.to_string(),
+                    name: None,
+                    thought_signature: None,
+                };
+                if let Err(e) = manager.append_message(&sid, &user_msg) {
+                    log::error!("failed to save user turn to session: {}", e);
+                }
+
+                // Compile history using contributors (RAG layout/agent snapshot context injection)
+                let builder = SessionBuilder::new(sid.clone(), manager.clone())
+                    .with_contributor(Box::new(HerdrContextContributor::new((*client).clone())));
+
+                let messages = match builder.build().await {
+                    Ok(msgs) => msgs,
+                    Err(e) => {
+                        log::error!("failed to compile session messages: {}", e);
+                        // fallback to a single user message if builder fails
+                        vec![user_msg]
+                    }
+                };
+
                 let executor = HerdrToolExecutor((*client).clone());
-                match engine.process_transcript(&transcript, &executor).await {
+                match engine.process_turns(&messages, &executor).await {
                     Ok(response) => {
                         if let Some(ref reply) = response {
                             log::info!("Engine response: '{}'", reply);
+                            // Append model turn to session history
+                            let model_msg = Message {
+                                role: "model".to_string(),
+                                content: reply.clone(),
+                                name: None,
+                                thought_signature: None,
+                            };
+                            if let Err(e) = manager.append_message(&sid, &model_msg) {
+                                log::error!("failed to save model turn to session: {}", e);
+                            }
                         }
                         response
                     }

@@ -27,3 +27,80 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
         self.0.execute_tool_call(name, args).await.map_err(|e| e.to_string())
     }
 }
+
+/// Context contributor that queries `herdr` for the active workspace snapshot and tails active panes,
+/// injecting this layout/agent status context as a system prompt/RAG turn before inference.
+pub struct HerdrContextContributor {
+    pub client: HerdrClient,
+}
+
+impl HerdrContextContributor {
+    pub fn new(client: HerdrClient) -> Self {
+        Self { client }
+    }
+}
+
+#[async_trait]
+impl libinfer::TurnContributor for HerdrContextContributor {
+    async fn contribute(&self, messages: &mut Vec<libinfer::Message>) -> Result<(), String> {
+        // 1. Get the list of all panes
+        let snapshot = self.client.list_panes().await
+            .map_err(|e| format!("failed to list panes: {e}"))?;
+
+        // 2. We can also optionally read logs for active panes ("working") to provide deeper context (RAG)
+        let mut working_panes_details = Vec::new();
+        if let Some(workspaces) = snapshot.get("workspaces").and_then(|w| w.as_array()) {
+            for ws in workspaces {
+                if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
+                    for tab in tabs {
+                        if let Some(panes) = tab.get("panes").and_then(|p| p.as_array()) {
+                            for pane in panes {
+                                let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                                if status == "working" {
+                                    if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
+                                        // Read tail buffer lines (e.g. 50 lines) to find logs / compiler failures
+                                        if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
+                                            if let Some(buffer) = inspect_res.get("buffer").and_then(|b| b.as_str()) {
+                                                working_panes_details.push(format!(
+                                                    "Pane {} tail buffer:\n---\n{}\n---",
+                                                    pane_id, buffer
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Format overall herdr snapshot
+        let snapshot_json = serde_json::to_string_pretty(&snapshot)
+            .unwrap_or_default();
+
+        let mut content = format!(
+            "Current herdr environment snapshot:\n```json\n{}\n```\n",
+            snapshot_json
+        );
+
+        if !working_panes_details.is_empty() {
+            content.push_str("\nActive working agent tail buffers:\n");
+            for detail in working_panes_details {
+                content.push_str(&detail);
+                content.push_str("\n");
+            }
+        }
+
+        // 4. Inject as a system instruction/turn
+        messages.push(libinfer::Message {
+            role: "system".to_string(),
+            content,
+            name: None,
+            thought_signature: None,
+        });
+
+        Ok(())
+    }
+}

@@ -3,8 +3,8 @@
 //! Grounded in the `herdr` terminal multiplexer architecture, converting spoken intent
 //! and natural-language transcripts into tool calls and concise spoken feedback.
 
-use async_trait::async_trait;
-pub use libinfer::{ReasoningEngine, ToolExecutor, GeminiAgent, Tool, FunctionDeclaration, GeminiReasoningEngine, EngineType, ReasoningEngineBuilder};
+
+pub use libinfer::{ReasoningEngine, ToolExecutor, GeminiAgent, Tool, FunctionDeclaration, GeminiReasoningEngine, EngineType, ReasoningEngineBuilder, Message, SessionManager, SessionBuilder};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -171,41 +171,6 @@ impl FocusParams {
 pub fn declare_gemini_tools() -> Vec<Tool> {
     vec![Tool::with_functions(vec![
         FunctionDeclaration::new(
-            "list_panes",
-            "Returns the structural JSON layout of workspaces, tabs, and agent_status across the environment.",
-            None,
-        )
-        .with_parameters::<ListPanesParams>(),
-
-        FunctionDeclaration::new(
-            "inspect_pane",
-            "Reads the raw tail buffer lines of a specific terminal pane to inspect logs, errors, or compiler output.",
-            None,
-        )
-        .with_parameters::<InspectPaneParams>(),
-
-        FunctionDeclaration::new(
-            "run_command",
-            "Executes a command in the target terminal pane.",
-            None,
-        )
-        .with_parameters::<RunCommandParams>(),
-
-        FunctionDeclaration::new(
-            "send_keys",
-            "Sends literal keystrokes (e.g. 'ctrl+c', 'enter') to the specified pane.",
-            None,
-        )
-        .with_parameters::<SendKeysParams>(),
-
-        FunctionDeclaration::new(
-            "manage_layout",
-            "Handles spatial layout commands ('split', 'zoom', 'close') for workspaces and panes.",
-            None,
-        )
-        .with_parameters::<ManageLayoutParams>(),
-
-        FunctionDeclaration::new(
             "focus",
             "Shifts the user's active visual focus to a specific pane or workspace (project).",
             None,
@@ -264,17 +229,12 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 6);
+        assert_eq!(decls.len(), 1);
 
         let names: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
             vec![
-                "list_panes",
-                "inspect_pane",
-                "run_command",
-                "send_keys",
-                "manage_layout",
                 "focus"
             ]
         );
@@ -437,6 +397,6 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 6);
+        assert_eq!(decls.len(), 1);
     }
 }
