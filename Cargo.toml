@@ -18,9 +18,11 @@ async-compat = "0.2"
 schemars = "1"
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
+libinfer = { path = "crates/libinfer" }
 
 [workspace]
 members = [
     ".",
-    "crates/libherdr"
+    "crates/libherdr",
+    "crates/libinfer"
 ]

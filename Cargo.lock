@@ -1052,6 +1052,7 @@ dependencies = [
  "libconversate",
  "libgenai",
  "libherdr",
+ "libinfer",
  "log",
  "schemars",
  "serde",
@@ -1496,12 +1497,23 @@ name = "libherdr"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "libinfer",
  "log",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "libinfer"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

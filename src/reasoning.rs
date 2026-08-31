@@ -7,55 +7,13 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use libgenai::{FunctionDeclaration, GeminiAgent, Tool};
-pub use libherdr::ToolExecutor;
+pub use libinfer::{ReasoningEngine, ToolExecutor};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 /// Embedded system prompt from `AGENTS.md` at compile time.
 pub const AGENTS_MD_RAW: &str = include_str!("../AGENTS.md");
-
-// -------------------------------------------------------------------
-//  Traits
-// -------------------------------------------------------------------
-
-/// Core trait for reasoning engines (Gemini, local LLMs, mock engines).
-///
-/// Accepts a natural language transcript, executes any required tool calls
-/// via the provided `ToolExecutor`, and returns a natural language voice response.
-#[async_trait]
-pub trait ReasoningEngine: Send + Sync {
-    /// Accepts a natural language transcript, executes any required tool calls
-    /// via the provided executor, and returns a natural language voice response
-    /// to be spoken via TTS (or `None` if silent).
-    async fn process_transcript(
-        &self,
-        transcript: &str,
-        executor: &dyn ToolExecutor,
-    ) -> Result<Option<String>, String>;
-}
-
-#[async_trait]
-impl<T: ReasoningEngine + ?Sized> ReasoningEngine for Arc<T> {
-    async fn process_transcript(
-        &self,
-        transcript: &str,
-        executor: &dyn ToolExecutor,
-    ) -> Result<Option<String>, String> {
-        (**self).process_transcript(transcript, executor).await
-    }
-}
-
-#[async_trait]
-impl<T: ReasoningEngine + ?Sized> ReasoningEngine for Box<T> {
-    async fn process_transcript(
-        &self,
-        transcript: &str,
-        executor: &dyn ToolExecutor,
-    ) -> Result<Option<String>, String> {
-        (**self).process_transcript(transcript, executor).await
-    }
-}
 
 // -------------------------------------------------------------------
 //  System Prompt Extraction
