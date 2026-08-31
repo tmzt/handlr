@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use smol::Timer;
@@ -19,6 +19,7 @@ struct AppArgs {
     whisper_model: Option<String>,
     use_sine_tts: bool,
     mock_mode: bool,
+    auto_download: bool,
 }
 
 fn parse_args() -> AppArgs {
@@ -30,6 +31,7 @@ fn parse_args() -> AppArgs {
     let mut whisper_model = None;
     let mut use_sine_tts = false;
     let mut mock_mode = false;
+    let mut auto_download = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -40,6 +42,7 @@ fn parse_args() -> AppArgs {
             "--whisper" => whisper_model = args.next(),
             "--sine-tts" => use_sine_tts = true,
             "--mock" => mock_mode = true,
+            "--auto-download" => auto_download = true,
             _ => {
                 eprintln!("Unknown argument: {}", arg);
             }
@@ -54,7 +57,67 @@ fn parse_args() -> AppArgs {
         whisper_model,
         use_sine_tts,
         mock_mode,
+        auto_download,
     }
+}
+
+fn download_model(repo_id: &str, repo_filename: &str, dest_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let dest_dir = dest_path.parent().ok_or("No parent dir for dest path")?;
+    std::fs::create_dir_all(dest_dir)?;
+
+    let python_code = format!(
+        "from huggingface_hub import hf_hub_download; import shutil, os; \
+         path = hf_hub_download(repo_id='{}', filename='{}'); \
+         shutil.copy(path, '{}')",
+        repo_id,
+        repo_filename,
+        dest_path.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'")
+    );
+
+    log::info!("Running python downloader for {}...", repo_filename);
+    let status = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(&python_code)
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("Python download process exited with error status: {}", status).into());
+    }
+
+    Ok(())
+}
+
+fn resolve_model_path(
+    arg_path: Option<String>,
+    default_filename: &str,
+    repo_id: &str,
+    repo_filename: &str,
+    auto_download: bool,
+    models_dir: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(path) = arg_path {
+        return Ok(PathBuf::from(path));
+    }
+
+    let target_path = models_dir.join(default_filename);
+    let exists = target_path.exists() || target_path.symlink_metadata().is_ok();
+
+    if !exists {
+        if auto_download {
+            log::info!("Model {} not found. Auto-downloading to {}...", default_filename, target_path.display());
+            download_model(repo_id, repo_filename, &target_path)?;
+        } else {
+            log::warn!(
+                "Model {} not found in {} and --auto-download not specified.",
+                default_filename,
+                models_dir.display()
+            );
+        }
+    } else {
+        log::info!("Model {} found at {} (symlink or file)", default_filename, target_path.display());
+    }
+
+    Ok(target_path)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -98,15 +161,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let herdr_client = Arc::new(HerdrClient::new(transport));
 
-    // 3. Initialize STT and TTS Configs
-    let silero_path = PathBuf::from(
-        args.silero_model
-            .unwrap_or_else(|| "silero_vad.onnx".to_string()),
-    );
-    let whisper_path = PathBuf::from(
-        args.whisper_model
-            .unwrap_or_else(|| "ggml-base.en.bin".to_string()),
-    );
+    // 3. Resolve model paths (supporting symlinks in ~/.handlr/models)
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/tmeade".to_string());
+    let models_dir = PathBuf::from(home).join(".handlr").join("models");
+    std::fs::create_dir_all(&models_dir)?;
+
+    let silero_path = resolve_model_path(
+        args.silero_model,
+        "silero_vad.onnx",
+        "onnx-community/silero-vad",
+        "onnx/model.onnx",
+        args.auto_download,
+        &models_dir,
+    )?;
+
+    let whisper_path = resolve_model_path(
+        args.whisper_model,
+        "ggml-base.en.bin",
+        "ggerganov/whisper.cpp",
+        "ggml-base.en.bin",
+        args.auto_download,
+        &models_dir,
+    )?;
 
     let stt_backend = SttBackend::Whisper {
         model: whisper_path,
