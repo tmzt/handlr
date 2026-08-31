@@ -270,6 +270,178 @@ impl SessionBuilder {
     }
 }
 
+/// Handler trait for custom mock logic.
+#[async_trait]
+pub trait MockHandler: Send + Sync {
+    async fn handle(
+        &self,
+        transcript: &str,
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String>;
+}
+
+/// A mock reasoning engine for unit tests and local simulations without LLM network calls.
+pub struct MockReasoningEngine {
+    transcripts: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    executed_tools: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    responses: std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    default_response: Option<String>,
+    handler: Option<std::sync::Arc<dyn MockHandler>>,
+}
+
+impl MockReasoningEngine {
+    /// Create a new mock reasoning engine with an optional canned response.
+    pub fn new(default_response: Option<String>) -> Self {
+        Self {
+            transcripts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            executed_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            responses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            default_response,
+            handler: None,
+        }
+    }
+
+    /// Create with a deterministic string response.
+    pub fn with_response(response: impl Into<String>) -> Self {
+        Self::new(Some(response.into()))
+    }
+
+    /// Create a mock engine that fails with the given error message.
+    pub fn with_error(error: impl Into<String>) -> Self {
+        struct ErrorHandler(String);
+        #[async_trait]
+        impl MockHandler for ErrorHandler {
+            async fn handle(
+                &self,
+                _transcript: &str,
+                _executor: &dyn ToolExecutor,
+            ) -> Result<Option<String>, String> {
+                Err(self.0.clone())
+            }
+        }
+
+        Self {
+            transcripts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            executed_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            responses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            default_response: None,
+            handler: Some(std::sync::Arc::new(ErrorHandler(error.into()))),
+        }
+    }
+
+    /// Create with a custom dynamic asynchronous handler implementing `MockHandler`.
+    pub fn with_handler(handler: impl MockHandler + 'static) -> Self {
+        Self {
+            transcripts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            executed_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            responses: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            default_response: None,
+            handler: Some(std::sync::Arc::new(handler)),
+        }
+    }
+
+    /// Queue multiple canned responses to be returned in sequential order.
+    pub fn with_queued_responses(responses: Vec<Option<String>>) -> Self {
+        Self {
+            transcripts: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            executed_tools: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            responses: std::sync::Arc::new(std::sync::Mutex::new(responses)),
+            default_response: None,
+            handler: None,
+        }
+    }
+
+    /// Retrieve all transcripts processed by this mock engine.
+    pub fn recorded_transcripts(&self) -> Vec<String> {
+        self.transcripts.lock().unwrap().clone()
+    }
+
+    /// Retrieve all tool calls executed through this mock engine.
+    pub fn recorded_tool_calls(&self) -> Vec<(String, serde_json::Value)> {
+        self.executed_tools.lock().unwrap().clone()
+    }
+
+    /// Clear recorded transcripts and tool calls.
+    pub fn clear_records(&self) {
+        self.transcripts.lock().unwrap().clear();
+        self.executed_tools.lock().unwrap().clear();
+    }
+}
+
+#[async_trait]
+impl ReasoningEngine for MockReasoningEngine {
+    async fn process_transcript(
+        &self,
+        transcript: &str,
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        self.transcripts
+            .lock()
+            .unwrap()
+            .push(transcript.to_string());
+
+        if let Some(ref handler) = self.handler {
+            return handler.handle(transcript, executor).await;
+        }
+
+        let mut queue = self.responses.lock().unwrap();
+        if !queue.is_empty() {
+            return Ok(queue.remove(0));
+        }
+
+        if transcript.contains("force_error") {
+            return Err("simulated reasoning error".to_string());
+        }
+
+        Ok(self.default_response.clone())
+    }
+}
+
+/// In-memory mock tool executor for testing reasoning engines without a live Herdr socket.
+#[derive(Default, Clone)]
+pub struct MockToolExecutor {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    canned_responses: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+}
+
+impl MockToolExecutor {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_canned_response(self, tool_name: impl Into<String>, response: serde_json::Value) -> Self {
+        self.canned_responses
+            .lock()
+            .unwrap()
+            .insert(tool_name.into(), response);
+        self
+    }
+
+    pub fn recorded_calls(&self) -> Vec<(String, serde_json::Value)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ToolExecutor for MockToolExecutor {
+    async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((name.to_string(), args.clone()));
+
+        if let Some(resp) = self.canned_responses.lock().unwrap().get(name) {
+            Ok(resp.clone())
+        } else {
+            Ok(serde_json::json!({
+                "status": "success",
+                "tool": name,
+                "args": args
+            }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
