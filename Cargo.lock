@@ -1427,9 +1427,12 @@ dependencies = [
  "asr_core",
  "asr_whisper",
  "audio_core",
+ "futures-util",
  "log",
  "silero_vad",
+ "smol",
  "thiserror 1.0.69",
+ "tokio",
  "tts_impl",
  "voice_proto",
 ]
@@ -1446,6 +1449,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smol",
+ "tokio",
 ]
 
 [[package]]

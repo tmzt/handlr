@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libconversate = { path = "../libconversate/crates/libconversate", features = ["whisper"] }
+libconversate = { path = "../libconversate/crates/libconversate", features = ["whisper", "tokio"] }
 libgenai = { path = "../libgenai" }
 libherdr = { path = "crates/libherdr" }
 audio_core = { path = "../libconversate/crates/audio_core" }

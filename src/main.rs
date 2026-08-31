@@ -198,12 +198,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
     let pipeline = SpeechToSpeechBuilder::new(stt_config, tts_config)
-        .with_processor(move |transcript| {
-            log::info!("Received transcript: '{}'", transcript);
+        .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
             let engine = Arc::clone(&reasoning_engine);
-            smol::block_on(async {
-                match engine.process_transcript(transcript, client.as_ref()).await {
+            Box::pin(async move {
+                log::info!("Received transcript: '{}'", transcript);
+                match engine.process_transcript(&transcript, client.as_ref()).await {
                     Ok(response) => {
                         if let Some(ref reply) = response {
                             log::info!("Engine response: '{}'", reply);
