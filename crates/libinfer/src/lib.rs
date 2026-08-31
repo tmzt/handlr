@@ -60,6 +60,8 @@ pub struct Message {
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 pub struct SessionManager {
@@ -141,16 +143,18 @@ mod tests {
         let manager = SessionManager::with_dir(dir.path().to_path_buf()).unwrap();
         let session_id = "test_session";
 
-        let messages = vec![
+         let messages = vec![
             Message {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
                 name: None,
+                thought_signature: None,
             },
             Message {
                 role: "model".to_string(),
                 content: "Hi there!".to_string(),
                 name: None,
+                thought_signature: Some("opaque_base64_sig".to_string()),
             },
         ];
 
@@ -163,6 +167,7 @@ mod tests {
             role: "user".to_string(),
             content: "How are you?".to_string(),
             name: None,
+            thought_signature: None,
         };
         manager.append_message(session_id, &new_msg).unwrap();
 
