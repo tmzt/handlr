@@ -1,0 +1,403 @@
+//! Protocol definitions and JSON message models for `herdr`.
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+/// Default number of buffer lines to tail when inspecting a pane.
+pub const DEFAULT_INSPECT_LINES: usize = 50;
+
+/// Standard `agent_status` for terminal panes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentStatus {
+    /// The agent in this pane is actively computing/running commands.
+    Working,
+    /// The agent or shell in this pane is idle, waiting for input.
+    Idle,
+    /// Status cannot be reliably determined.
+    Unknown,
+    /// Custom status reported by a specific agent runner.
+    #[serde(untagged)]
+    Custom(String),
+}
+
+impl Default for AgentStatus {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+/// Information describing a single terminal pane within `herdr`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    /// Unique identifier for this pane (e.g. "p1", "pane-42").
+    pub pane_id: String,
+    /// Terminal title if set (e.g. "claude", "cargo test").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
+    /// Current working directory of the process running in the pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Autonomous agent activity status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_status: Option<AgentStatus>,
+    /// Whether this pane currently has active input focus.
+    #[serde(default)]
+    pub focused: bool,
+    /// The primary foreground command or process name if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Additional metadata fields forwarded from `herdr`.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Information describing a tab within a workspace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabInfo {
+    /// Unique identifier for this tab.
+    pub tab_id: String,
+    /// Optional user-defined tab title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// List of panes contained in this tab.
+    #[serde(default)]
+    pub panes: Vec<PaneInfo>,
+    /// Whether this tab is currently selected in its workspace.
+    #[serde(default)]
+    pub focused: bool,
+}
+
+/// Information describing a workspace (project).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceInfo {
+    /// Unique identifier for this workspace (e.g. "w1", "workspace-project").
+    pub workspace_id: String,
+    /// Human-readable workspace / project name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Tabs within the workspace.
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
+    /// Flat list of panes if tabs are not used.
+    #[serde(default)]
+    pub panes: Vec<PaneInfo>,
+    /// Whether this workspace is the active viewport for the user.
+    #[serde(default)]
+    pub focused: bool,
+}
+
+/// Comprehensive layout snapshot of the user's `herdr` environment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentSnapshot {
+    /// All configured workspaces.
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceInfo>,
+    /// ID of the currently focused workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace_id: Option<String>,
+    /// ID of the currently focused pane across the whole session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_pane_id: Option<String>,
+}
+
+impl EnvironmentSnapshot {
+    /// Helper to find all panes with `AgentStatus::Working`.
+    pub fn find_working_panes(&self) -> Vec<&PaneInfo> {
+        let mut working = Vec::new();
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                for pane in &tab.panes {
+                    if pane.agent_status == Some(AgentStatus::Working) {
+                        working.push(pane);
+                    }
+                }
+            }
+            for pane in &ws.panes {
+                if pane.agent_status == Some(AgentStatus::Working) {
+                    working.push(pane);
+                }
+            }
+        }
+        working
+    }
+
+    /// Helper to find a pane by its ID.
+    pub fn find_pane(&self, pane_id: &str) -> Option<&PaneInfo> {
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                for pane in &tab.panes {
+                    if pane.pane_id == pane_id {
+                        return Some(pane);
+                    }
+                }
+            }
+            for pane in &ws.panes {
+                if pane.pane_id == pane_id {
+                    return Some(pane);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Standard layout manipulation actions supported by `manage_layout`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LayoutAction {
+    Split,
+    SplitVertical,
+    SplitHorizontal,
+    Zoom,
+    Unzoom,
+    Close,
+    MoveLeft,
+    MoveRight,
+    MoveUp,
+    MoveDown,
+    #[serde(untagged)]
+    Custom(String),
+}
+
+/// Standard `herdr` protocol request corresponding to LLM tool calls.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum HerdrRequest {
+    /// Returns the structural JSON layout of workspaces, tabs, and `agent_status`.
+    ListPanes {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+    },
+    /// Reads the raw tail buffer of a specific terminal.
+    InspectPane {
+        pane_id: String,
+        #[serde(default = "default_inspect_lines_val")]
+        lines: usize,
+    },
+    /// Executes a command in the target pane.
+    RunCommand {
+        pane_id: String,
+        command: String,
+    },
+    /// Sends literal keystrokes (e.g. `ctrl+c`, `enter`).
+    SendKeys {
+        pane_id: String,
+        keys: String,
+    },
+    /// Handles spatial commands (`split`, `zoom`, `close`).
+    ManageLayout {
+        #[serde(rename = "layout_action", alias = "action_type")]
+        layout_action: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_id: Option<String>,
+    },
+    /// Shifts the user's active visual focus to a specific pane or workspace.
+    Focus {
+        target_id: String,
+    },
+    /// Pass-through for custom or extended tools.
+    #[serde(untagged)]
+    Custom(Value),
+}
+
+fn default_inspect_lines_val() -> usize {
+    DEFAULT_INSPECT_LINES
+}
+
+impl HerdrRequest {
+    /// Create a `list_panes` request.
+    pub fn list_panes() -> Self {
+        Self::ListPanes { workspace_id: None }
+    }
+
+    /// Create a `list_panes` request scoped to a specific workspace.
+    pub fn list_panes_scoped(workspace_id: impl Into<String>) -> Self {
+        Self::ListPanes {
+            workspace_id: Some(workspace_id.into()),
+        }
+    }
+
+    /// Create an `inspect_pane` request with the given number of buffer lines.
+    pub fn inspect_pane(pane_id: impl Into<String>, lines: usize) -> Self {
+        Self::InspectPane {
+            pane_id: pane_id.into(),
+            lines,
+        }
+    }
+
+    /// Create a `run_command` request.
+    pub fn run_command(pane_id: impl Into<String>, command: impl Into<String>) -> Self {
+        Self::RunCommand {
+            pane_id: pane_id.into(),
+            command: command.into(),
+        }
+    }
+
+    /// Create a `send_keys` request.
+    pub fn send_keys(pane_id: impl Into<String>, keys: impl Into<String>) -> Self {
+        Self::SendKeys {
+            pane_id: pane_id.into(),
+            keys: keys.into(),
+        }
+    }
+
+    /// Create a `manage_layout` request.
+    pub fn manage_layout(
+        layout_action: impl Into<String>,
+        target_id: Option<impl Into<String>>,
+    ) -> Self {
+        Self::ManageLayout {
+            layout_action: layout_action.into(),
+            target_id: target_id.map(|t| t.into()),
+        }
+    }
+
+    /// Create a `focus` request.
+    pub fn focus(target_id: impl Into<String>) -> Self {
+        Self::Focus {
+            target_id: target_id.into(),
+        }
+    }
+
+    /// Parse a tool invocation from Gemini function calling (`name` and `args` JSON).
+    pub fn from_tool_call(name: &str, args: &Value) -> Result<Self, String> {
+        match name {
+            "list_panes" => {
+                let workspace_id = args
+                    .get("workspace_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Ok(HerdrRequest::ListPanes { workspace_id })
+            }
+            "inspect_pane" => {
+                let pane_id = args
+                    .get("pane_id")
+                    .or_else(|| args.get("target_id"))
+                    .or_else(|| args.get("id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "inspect_pane requires 'pane_id' argument".to_string())?
+                    .to_string();
+
+                let lines = args
+                    .get("lines")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize)
+                    .unwrap_or(DEFAULT_INSPECT_LINES);
+
+                Ok(HerdrRequest::InspectPane { pane_id, lines })
+            }
+            "run_command" => {
+                let pane_id = args
+                    .get("pane_id")
+                    .or_else(|| args.get("target_id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "run_command requires 'pane_id' argument".to_string())?
+                    .to_string();
+
+                let command = args
+                    .get("command")
+                    .or_else(|| args.get("cmd"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "run_command requires 'command' argument".to_string())?
+                    .to_string();
+
+                Ok(HerdrRequest::RunCommand { pane_id, command })
+            }
+            "send_keys" => {
+                let pane_id = args
+                    .get("pane_id")
+                    .or_else(|| args.get("target_id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "send_keys requires 'pane_id' argument".to_string())?
+                    .to_string();
+
+                let keys = args
+                    .get("keys")
+                    .or_else(|| args.get("keystrokes"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "send_keys requires 'keys' argument".to_string())?
+                    .to_string();
+
+                Ok(HerdrRequest::SendKeys { pane_id, keys })
+            }
+            "manage_layout" => {
+                let layout_action = args
+                    .get("action")
+                    .or_else(|| args.get("layout_action"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "manage_layout requires 'action' argument".to_string())?
+                    .to_string();
+
+                let target_id = args
+                    .get("target_id")
+                    .or_else(|| args.get("pane_id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+
+                Ok(HerdrRequest::ManageLayout {
+                    layout_action,
+                    target_id,
+                })
+            }
+            "focus" => {
+                let target_id = args
+                    .get("target_id")
+                    .or_else(|| args.get("workspace_id"))
+                    .or_else(|| args.get("pane_id"))
+                    .or_else(|| args.get("id"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| "focus requires 'target_id' argument".to_string())?
+                    .to_string();
+
+                Ok(HerdrRequest::Focus { target_id })
+            }
+            other => Err(format!("Unknown tool name: '{other}'")),
+        }
+    }
+}
+
+/// Standard response wrapper from `herdr`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HerdrResponse {
+    /// Whether the command succeeded.
+    pub success: bool,
+    /// Result payload (structured snapshot, buffer text, status, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
+    /// Error message if `success` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl HerdrResponse {
+    /// Create a successful response with data.
+    pub fn ok(data: impl Serialize) -> Result<Self, serde_json::Error> {
+        let value = serde_json::to_value(data)?;
+        Ok(Self {
+            success: true,
+            data: Some(value),
+            error: None,
+        })
+    }
+
+    /// Create an error response.
+    pub fn err(message: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            data: None,
+            error: Some(message.into()),
+        }
+    }
+
+    /// Unwraps the inner `data` payload or returns an error string.
+    pub fn into_result(self) -> Result<Value, String> {
+        if self.success {
+            Ok(self.data.unwrap_or(Value::Null))
+        } else {
+            Err(self
+                .error
+                .unwrap_or_else(|| "Unknown herdr error occurred".to_string()))
+        }
+    }
+}
