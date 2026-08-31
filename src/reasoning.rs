@@ -3,7 +3,7 @@
 //! Grounded in the `herdr` terminal multiplexer architecture, converting spoken intent
 //! and natural-language transcripts into tool calls and concise spoken feedback.
 
-
+use async_trait::async_trait;
 pub use libinfer::{ReasoningEngine, ToolExecutor, GeminiAgent, Tool, FunctionDeclaration, GeminiReasoningEngine, EngineType, ReasoningEngineBuilder};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

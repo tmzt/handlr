@@ -1496,7 +1496,6 @@ name = "libherdr"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "libinfer",
  "log",
  "serde",
  "serde_json",

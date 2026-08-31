@@ -6,13 +6,11 @@
 
 pub mod client;
 pub mod error;
-pub mod executor;
 pub mod protocol;
 pub mod transport;
 
 pub use client::HerdrClient;
 pub use error::{HerdrError, HerdrResult};
-pub use executor::ToolExecutor;
 pub use protocol::{
     AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction, PaneInfo,
     TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
@@ -84,21 +82,21 @@ mod tests {
 
         // 1. list_panes
         let res = client
-            .execute_tool("list_panes", &json!({}))
+            .execute_tool_call("list_panes", &json!({}))
             .await
             .expect("execute list_panes");
         assert!(res.get("workspaces").is_some());
 
         // 2. inspect_pane
         let res = client
-            .execute_tool("inspect_pane", &json!({"pane_id": "p1", "lines": 10}))
+            .execute_tool_call("inspect_pane", &json!({"pane_id": "p1", "lines": 10}))
             .await
             .expect("execute inspect_pane");
         assert!(res.get("buffer").is_some());
 
         // 3. run_command
         let res = client
-            .execute_tool(
+            .execute_tool_call(
                 "run_command",
                 &json!({"pane_id": "p1", "command": "git status"}),
             )
@@ -108,14 +106,14 @@ mod tests {
 
         // 4. send_keys
         let res = client
-            .execute_tool("send_keys", &json!({"pane_id": "p1", "keys": "enter"}))
+            .execute_tool_call("send_keys", &json!({"pane_id": "p1", "keys": "enter"}))
             .await
             .expect("execute send_keys");
         assert_eq!(res["keys_sent"], "enter");
 
         // 5. manage_layout
         let res = client
-            .execute_tool(
+            .execute_tool_call(
                 "manage_layout",
                 &json!({"action": "split_vertical", "target_id": "p1"}),
             )
@@ -125,7 +123,7 @@ mod tests {
 
         // 6. focus
         let res = client
-            .execute_tool("focus", &json!({"target_id": "w1"}))
+            .execute_tool_call("focus", &json!({"target_id": "w1"}))
             .await
             .expect("execute focus");
         assert_eq!(res["focused_id"], "w1");
@@ -236,9 +234,9 @@ mod tests {
         let buffer = inspect_val.get("buffer").unwrap().as_str().unwrap();
         assert!(buffer.contains("Live buffer stream text"));
 
-        // Test ToolExecutor
+        // Test execute_tool_call
         let exec_res = client
-            .execute_tool("focus", &json!({"target_id": "ws-live"}))
+            .execute_tool_call("focus", &json!({"target_id": "ws-live"}))
             .await
             .expect("execute focus over socket");
         assert_eq!(exec_res["focused_target"], "ws-live");
@@ -250,16 +248,16 @@ mod tests {
 
         // Unknown tool
         let err = client
-            .execute_tool("unknown_tool", &json!({}))
+            .execute_tool_call("unknown_tool", &json!({}))
             .await
             .unwrap_err();
-        assert!(err.contains("Unknown tool name"));
+        assert!(err.to_string().contains("Unknown tool name"));
 
         // Missing required parameter
         let err = client
-            .execute_tool("inspect_pane", &json!({}))
+            .execute_tool_call("inspect_pane", &json!({}))
             .await
             .unwrap_err();
-        assert!(err.contains("requires 'pane_id'"));
+        assert!(err.to_string().contains("requires 'pane_id'"));
     }
 }

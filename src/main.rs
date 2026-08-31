@@ -5,7 +5,7 @@ use std::time::Duration;
 use audio_core::cpal_capture::CpalCapture;
 use audio_core::ensure_audio_ring;
 use handlr::reasoning::{ReasoningEngine, EngineType, ReasoningEngineBuilder};
-use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig};
+use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig, HerdrToolExecutor};
 use libconversate::stt::{SttBackend, SttConfig, SttMode};
 use libconversate::tts::{TtsConfig, TtsBackend};
 use libconversate::s2s::SpeechToSpeechBuilder;
@@ -213,7 +213,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let engine = Arc::clone(&reasoning_engine);
             Box::pin(async move {
                 log::info!("Received transcript: '{}'", transcript);
-                match engine.process_transcript(&transcript, client.as_ref()).await {
+                let executor = HerdrToolExecutor((*client).clone());
+                match engine.process_transcript(&transcript, &executor).await {
                     Ok(response) => {
                         if let Some(ref reply) = response {
                             log::info!("Engine response: '{}'", reply);

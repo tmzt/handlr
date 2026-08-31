@@ -12,7 +12,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
 thiserror = "1"
-libinfer = { path = "../libinfer" }
 
 [dev-dependencies]
 tempfile = "3"
