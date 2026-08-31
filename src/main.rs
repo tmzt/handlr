@@ -120,6 +120,44 @@ fn resolve_model_path(
     Ok(target_path)
 }
 
+fn get_oauth_token() -> Option<String> {
+    let credentials_path = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+        .or_else(|_| std::env::var("GOOGLE_ACCOUNT_CREDENTIALS"))
+        .ok()?;
+
+    log::info!("Generating Google OAuth access token from credentials at {}...", credentials_path);
+
+    let python_code = format!(
+        "import google.auth; \
+         from google.auth.transport.requests import Request; \
+         credentials, project = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform']); \
+         credentials.refresh(Request()); \
+         print(credentials.token)"
+    );
+
+    let output = std::process::Command::new("python3")
+        .env("GOOGLE_APPLICATION_CREDENTIALS", &credentials_path)
+        .arg("-c")
+        .arg(&python_code)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !token.is_empty() {
+            log::info!("Successfully generated OAuth token.");
+            return Some(token);
+        }
+    } else {
+        log::error!(
+            "Failed to generate OAuth token: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    None
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
@@ -128,7 +166,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if private_sa.exists() {
         if let Ok(abs_path) = private_sa.canonicalize() {
             log::info!("Detected service_account.json in .private; setting GOOGLE_APPLICATION_CREDENTIALS to {}", abs_path.display());
-            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", abs_path);
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", &abs_path);
+            std::env::set_var("GOOGLE_ACCOUNT_CREDENTIALS", &abs_path);
         }
     }
 
@@ -141,12 +180,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "This is a mock response from handlr.".to_string(),
         )))
     } else {
-        let key = args.api_key.ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Gemini API key is required (use --api-key or GEMINI_API_KEY environment variable)",
-            )
-        })?;
+        // Resolve API key: arg -> env variable -> oauth token from service account
+        let key = args.api_key
+            .or_else(|| get_oauth_token())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Gemini API key or Google Application/Account credentials are required.",
+                )
+            })?;
         log::info!("Initializing Gemini Reasoning Engine...");
         Arc::new(GeminiReasoningEngine::new(key)?)
     };
