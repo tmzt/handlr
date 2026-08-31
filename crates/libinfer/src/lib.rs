@@ -132,6 +132,45 @@ impl SessionManager {
     }
 }
 
+/// A contributor that dynamically injects context or modifies turns in a session.
+#[async_trait]
+pub trait TurnContributor: Send + Sync {
+    /// Modify or inject turns into the conversation history.
+    async fn contribute(&self, messages: &mut Vec<Message>) -> Result<(), String>;
+}
+
+/// Builder pattern for compiling session turns using contributors.
+pub struct SessionBuilder {
+    session_id: String,
+    manager: SessionManager,
+    contributors: Vec<Box<dyn TurnContributor>>,
+}
+
+impl SessionBuilder {
+    pub fn new(session_id: impl Into<String>, manager: SessionManager) -> Self {
+        Self {
+            session_id: session_id.into(),
+            manager,
+            contributors: Vec::new(),
+        }
+    }
+
+    /// Add a contributor to the session builder.
+    pub fn with_contributor(mut self, contributor: Box<dyn TurnContributor>) -> Self {
+        self.contributors.push(contributor);
+        self
+    }
+
+    /// Build the final list of messages, running all turn contributors in sequence.
+    pub async fn build(self) -> Result<Vec<Message>, String> {
+        let mut messages = self.manager.load_session(&self.session_id)?;
+        for contributor in &self.contributors {
+            contributor.contribute(&mut messages).await?;
+        }
+        Ok(messages)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +213,43 @@ mod tests {
         let loaded_after_append = manager.load_session(session_id).unwrap();
         assert_eq!(loaded_after_append.len(), 3);
         assert_eq!(loaded_after_append[2], new_msg);
+    }
+
+    #[tokio::test]
+    async fn test_session_builder_with_contributor() {
+        struct MockContributor;
+        #[async_trait]
+        impl TurnContributor for MockContributor {
+            async fn contribute(&self, messages: &mut Vec<Message>) -> Result<(), String> {
+                messages.push(Message {
+                    role: "system".to_string(),
+                    content: "Injected context".to_string(),
+                    name: None,
+                    thought_signature: None,
+                });
+                Ok(())
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::with_dir(dir.path().to_path_buf()).unwrap();
+        let session_id = "test_builder";
+
+        let initial_msgs = vec![Message {
+            role: "user".to_string(),
+            content: "Hello".to_string(),
+            name: None,
+            thought_signature: None,
+        }];
+        manager.save_session(session_id, &initial_msgs).unwrap();
+
+        let builder = SessionBuilder::new(session_id, manager)
+            .with_contributor(Box::new(MockContributor));
+
+        let built = builder.build().await.unwrap();
+        assert_eq!(built.len(), 2);
+        assert_eq!(built[0], initial_msgs[0]);
+        assert_eq!(built[1].role, "system");
+        assert_eq!(built[1].content, "Injected context");
     }
 }
