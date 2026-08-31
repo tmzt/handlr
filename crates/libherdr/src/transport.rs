@@ -17,7 +17,13 @@ use crate::protocol::{
 };
 
 /// Default socket path on local Unix systems.
-pub const DEFAULT_LOCAL_SOCKET_PATH: &str = "/tmp/herdr.sock";
+pub fn default_local_socket_path() -> PathBuf {
+    if let Ok(home) = std::env::var("HOME") {
+        PathBuf::from(home).join(".config").join("herdr").join("herdr.sock")
+    } else {
+        PathBuf::from("/tmp/herdr.sock")
+    }
+}
 
 /// Remote invocation strategy when bridging over SSH.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +87,7 @@ impl RemoteSshConfig {
             user: None,
             port: None,
             identity_file: None,
-            remote_socket_path: Some(PathBuf::from(DEFAULT_LOCAL_SOCKET_PATH)),
+            remote_socket_path: Some(default_local_socket_path()),
             control_path: Some(PathBuf::from("/tmp/handlr_ssh_%C")),
             control_persist: Some("10m".to_string()),
             ssh_binary: Some("ssh".to_string()),
@@ -218,7 +224,7 @@ impl HerdrTransport {
 
     /// Create a local transport targeting the default socket path `/tmp/herdr.sock`.
     pub fn local_default() -> Self {
-        Self::local(DEFAULT_LOCAL_SOCKET_PATH)
+        Self::local(default_local_socket_path())
     }
 
     /// Create a remote SSH transport with destination `user@host`.
@@ -340,10 +346,11 @@ impl HerdrTransport {
         let target = config.target();
         cmd.arg(&target);
 
+        let default_sock = default_local_socket_path();
         let remote_sock = config
             .remote_socket_path
             .as_deref()
-            .unwrap_or_else(|| Path::new(DEFAULT_LOCAL_SOCKET_PATH))
+            .unwrap_or_else(|| &default_sock)
             .to_string_lossy();
 
         // Determine remote command invocation

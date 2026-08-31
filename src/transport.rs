@@ -9,6 +9,6 @@ pub use libherdr::{
         TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
     },
     transport::{
-        HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod, DEFAULT_LOCAL_SOCKET_PATH,
+        HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod, default_local_socket_path,
     },
 };

@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::error::{HerdrError, HerdrResult};
 use crate::protocol::{EnvironmentSnapshot, HerdrRequest, DEFAULT_INSPECT_LINES};
-use crate::transport::{HerdrTransport, MockState, RemoteSshConfig, DEFAULT_LOCAL_SOCKET_PATH};
+use crate::transport::{HerdrTransport, MockState, RemoteSshConfig};
 
 /// High-level client providing structured and ergonomic access to `herdr`.
 #[derive(Clone)]
@@ -71,7 +71,8 @@ impl HerdrClient {
         }
 
         let socket_path = std::env::var("HERDR_SOCK")
-            .unwrap_or_else(|_| DEFAULT_LOCAL_SOCKET_PATH.to_string());
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| crate::transport::default_local_socket_path());
 
         Ok(Self::local(socket_path))
     }
