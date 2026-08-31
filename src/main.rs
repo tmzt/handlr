@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
-use smol::Timer;
 
 use audio_core::cpal_capture::CpalCapture;
 use audio_core::ensure_audio_ring;
@@ -120,7 +119,8 @@ fn resolve_model_path(
     Ok(target_path)
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = parse_args();
@@ -235,11 +235,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("handlr is running. Speak into your microphone...");
 
     // Main thread event loop
-    smol::block_on(async {
-        loop {
-            Timer::after(Duration::from_secs(1)).await;
-        }
-    });
+    loop {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
 
     Ok(())
 }
