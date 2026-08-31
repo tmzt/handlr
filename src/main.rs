@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use audio_core::cpal_capture::CpalCapture;
 use audio_core::ensure_audio_ring;
-use handlr::reasoning::{GeminiReasoningEngine, MockReasoningEngine, ReasoningEngine};
+use handlr::reasoning::{ReasoningEngine, EngineType, ReasoningEngineBuilder};
 use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig};
 use libconversate::stt::{SttBackend, SttConfig, SttMode};
 use libconversate::tts::{TtsConfig, TtsBackend};
@@ -127,20 +127,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = parse_args();
 
     // 1. Initialize Reasoning Engine
-    let reasoning_engine: Arc<dyn ReasoningEngine> = if args.mock_mode {
+    let system_prompt = handlr::reasoning::default_system_prompt()
+        .ok_or_else(|| "could not find <system_prompt> tag in AGENTS.md".to_string())?;
+    let tools = handlr::reasoning::declare_gemini_tools();
+
+    let engine_type = if args.mock_mode {
         log::info!("Starting in MOCK reasoning mode");
-        Arc::new(MockReasoningEngine::new(Some(
-            "This is a mock response from handlr.".to_string(),
-        )))
+        EngineType::Mock {
+            default_response: Some("This is a mock response from handlr.".to_string()),
+        }
     } else {
         log::info!("Initializing Gemini Reasoning Engine...");
-        let engine = if let Some(key) = args.api_key {
-            GeminiReasoningEngine::new(key)?
-        } else {
-            GeminiReasoningEngine::from_env()?
-        };
-        Arc::new(engine)
+        EngineType::Gemini {
+            api_key: args.api_key.clone(),
+            tools,
+        }
     };
+
+    let reasoning_engine = ReasoningEngineBuilder::new(engine_type)
+        .with_system_prompt(system_prompt)
+        .build()?;
 
     // 2. Initialize Transport / Herdr Client
     let transport = if args.mock_mode {

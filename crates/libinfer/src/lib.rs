@@ -12,6 +12,62 @@ pub trait ToolExecutor: Send + Sync {
 // Re-export key libgenai types
 pub use libgenai::{GeminiAgent, Tool, FunctionDeclaration, Model, Role, Message as GenaiMessage, Content};
 
+/// Supported reasoning engine types.
+pub enum EngineType {
+    Gemini {
+        api_key: Option<String>,
+        tools: Vec<Tool>,
+    },
+    Mock {
+        default_response: Option<String>,
+    },
+}
+
+/// Builder for setting up a ReasoningEngine instance.
+pub struct ReasoningEngineBuilder {
+    engine_type: EngineType,
+    system_prompt: Option<String>,
+    max_turns: usize,
+}
+
+impl ReasoningEngineBuilder {
+    pub fn new(engine_type: EngineType) -> Self {
+        Self {
+            engine_type,
+            system_prompt: None,
+            max_turns: 5,
+        }
+    }
+
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(prompt.into());
+        self
+    }
+
+    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
+    pub fn build(self) -> Result<std::sync::Arc<dyn ReasoningEngine>, String> {
+        match self.engine_type {
+            EngineType::Gemini { api_key, tools } => {
+                let engine = if let Some(key) = api_key {
+                    GeminiReasoningEngine::new(key, self.system_prompt, tools)?
+                } else {
+                    GeminiReasoningEngine::from_env(self.system_prompt, tools)?
+                };
+                let engine = engine.with_max_turns(self.max_turns);
+                Ok(std::sync::Arc::new(engine))
+            }
+            EngineType::Mock { default_response } => {
+                let engine = MockReasoningEngine::new(default_response);
+                Ok(std::sync::Arc::new(engine))
+            }
+        }
+    }
+}
+
 /// A reasoning engine powered by Google Gemini, implementing `ReasoningEngine`.
 pub struct GeminiReasoningEngine {
     agent: GeminiAgent,

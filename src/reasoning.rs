@@ -3,8 +3,8 @@
 //! Grounded in the `herdr` terminal multiplexer architecture, converting spoken intent
 //! and natural-language transcripts into tool calls and concise spoken feedback.
 
-use async_trait::async_trait;
-pub use libinfer::{ReasoningEngine, ToolExecutor, GeminiAgent, Tool, FunctionDeclaration};
+
+pub use libinfer::{ReasoningEngine, ToolExecutor, GeminiAgent, Tool, FunctionDeclaration, GeminiReasoningEngine, EngineType, ReasoningEngineBuilder};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -218,79 +218,6 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
 //  GeminiReasoningEngine
 // -------------------------------------------------------------------
 
-/// A reasoning engine powered by Google Gemini, grounded in terminal orchestration tools.
-pub struct GeminiReasoningEngine {
-    inner: libinfer::GeminiReasoningEngine,
-}
-
-impl GeminiReasoningEngine {
-    /// Create a new `GeminiReasoningEngine` with the given API key.
-    pub fn new(api_key: impl Into<String>) -> Result<Self, String> {
-        let system_prompt = default_system_prompt()
-            .ok_or_else(|| "could not find <system_prompt> tag in AGENTS.md".to_string())?;
-
-        let inner = libinfer::GeminiReasoningEngine::new(
-            api_key.into(),
-            Some(system_prompt),
-            declare_gemini_tools(),
-        )?;
-
-        Ok(Self { inner })
-    }
-
-    /// Create from the environment (resolving either `GEMINI_API_KEY` or Google credentials).
-    pub fn from_env() -> Result<Self, String> {
-        let system_prompt = default_system_prompt()
-            .ok_or_else(|| "could not find <system_prompt> tag in AGENTS.md".to_string())?;
-
-        let inner = libinfer::GeminiReasoningEngine::from_env(
-            Some(system_prompt),
-            declare_gemini_tools(),
-        )?;
-
-        Ok(Self { inner })
-    }
-
-    /// Construct with a pre-configured `GeminiAgent`.
-    pub fn from_agent(agent: libinfer::GeminiAgent) -> Self {
-        Self {
-            inner: libinfer::GeminiReasoningEngine::from_agent(agent),
-        }
-    }
-
-    /// Set the maximum multi-turn tool calling steps allowed per query.
-    pub fn with_max_turns(mut self, max_turns: usize) -> Self {
-        self.inner = self.inner.with_max_turns(max_turns);
-        self
-    }
-
-    /// Override the system prompt for the agent.
-    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.inner = self.inner.with_system_prompt(prompt);
-        self
-    }
-
-    /// Reference to the underlying `GeminiAgent`.
-    pub fn agent(&self) -> &libinfer::GeminiAgent {
-        self.inner.agent()
-    }
-
-    /// Get the maximum multi-turn tool calling steps allowed per query.
-    pub fn max_turns(&self) -> usize {
-        self.inner.max_turns()
-    }
-}
-
-#[async_trait]
-impl ReasoningEngine for GeminiReasoningEngine {
-    async fn process_transcript(
-        &self,
-        transcript: &str,
-        executor: &dyn ToolExecutor,
-    ) -> Result<Option<String>, String> {
-        self.inner.process_transcript(transcript, executor).await
-    }
-}
 
 // -------------------------------------------------------------------
 //  MockReasoningEngine
@@ -305,6 +232,7 @@ pub use libinfer::{MockHandler, MockReasoningEngine, MockToolExecutor};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn test_system_prompt_extraction() {
@@ -490,7 +418,9 @@ mod tests {
     #[test]
     fn test_gemini_reasoning_engine_initialization() {
         // Verify constructor builds agent with prompt and all 6 tools
-        let engine = GeminiReasoningEngine::new("test_api_key")
+        let system_prompt = default_system_prompt().unwrap();
+        let tools = declare_gemini_tools();
+        let engine = GeminiReasoningEngine::new("test_api_key".to_string(), Some(system_prompt), tools)
             .expect("failed to construct GeminiReasoningEngine");
 
         assert_eq!(engine.max_turns(), 5);
