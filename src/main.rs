@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&models_dir)?;
 
     let silero_path = resolve_model_path(
-        args.silero_model,
+        args.silero_model.clone(),
         "silero_vad.onnx",
         "onnx-community/silero-vad",
         "onnx/model.onnx",
@@ -175,7 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let whisper_path = resolve_model_path(
-        args.whisper_model,
+        args.whisper_model.clone(),
         "ggml-base.en.bin",
         "ggerganov/whisper.cpp",
         "ggml-base.en.bin",
@@ -183,21 +183,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &models_dir,
     )?;
 
-    let stt_backend = SttBackend::Whisper {
-        model: whisper_path,
-    };
-    let stt_config = SttConfig::new(silero_path, stt_backend).with_input_pull(true);
+    let mut builder = SpeechToSpeechBuilder::default();
 
-    let tts_backend = if args.use_sine_tts {
-        TtsBackend::Sine
-    } else {
-        TtsBackend::Sine // Default to Sine for simplicity
-    };
-    let tts_config = TtsConfig::new(tts_backend);
+    if args.silero_model.is_some() || args.whisper_model.is_some() {
+        let stt_backend = SttBackend::Whisper {
+            model: whisper_path,
+        };
+        let stt_config = SttConfig::new(silero_path, stt_backend).with_input_pull(true);
+        builder = builder.with_stt_config(stt_config);
+    }
+
+    if args.use_sine_tts {
+        let tts_config = TtsConfig::new(TtsBackend::Sine);
+        builder = builder.with_tts_config(tts_config);
+    }
 
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
-    let pipeline = SpeechToSpeechBuilder::new(stt_config, tts_config)
+    let pipeline = builder
         .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
             let engine = Arc::clone(&reasoning_engine);
