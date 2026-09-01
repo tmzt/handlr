@@ -5,8 +5,8 @@
 # Transport mode: "local" (direct Unix domain socket) or "remote" (SSH bridge)
 mode = "local"
 
-# Optional socket path for local mode (default: /tmp/herdr.sock)
-socket = "/tmp/herdr.sock"
+# Optional socket path for local mode (default: ~/.config/herdr/herdr.sock)
+# socket = "~/.config/herdr/herdr.sock"
 
 # Optional remote SSH connection string (e.g. "user@host")
 # remote = "user@host"

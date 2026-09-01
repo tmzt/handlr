@@ -189,6 +189,16 @@ fn resolve_model_path(
     Ok(target_path)
 }
 
+fn expand_tilde(p: impl AsRef<Path>) -> PathBuf {
+    let p = p.as_ref();
+    if let Ok(stripped) = p.strip_prefix("~") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    }
+    p.to_path_buf()
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
@@ -233,7 +243,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ssh_config = RemoteSshConfig::new(ssh_target.clone());
         HerdrTransport::remote_ssh_with_config(ssh_config)
     } else if let Some(ref socket_str) = args.socket {
-        let socket_path = PathBuf::from(socket_str);
+        let socket_path = expand_tilde(socket_str);
         log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
         HerdrTransport::local(socket_path)
     } else if config.transport.mode.eq_ignore_ascii_case("remote") {
@@ -250,7 +260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let socket_path = config
             .transport
             .socket
-            .map(PathBuf::from)
+            .map(expand_tilde)
             .unwrap_or_else(handlr::transport::default_local_socket_path);
         log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
         HerdrTransport::local(socket_path)
