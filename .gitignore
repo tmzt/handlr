@@ -4,3 +4,6 @@
 .private
 
 /target
+
+handlr*.log
+*.wav
