@@ -14,6 +14,11 @@ pub enum AgentStatus {
     Working,
     /// The agent or shell in this pane is idle, waiting for input.
     Idle,
+    /// The agent is stopped waiting on the user — a prompt, a permission
+    /// request, a confirmation it cannot answer itself.
+    Blocked,
+    /// The agent finished the task it was working on.
+    Done,
     /// Status cannot be reliably determined.
     Unknown,
     /// Custom status reported by a specific agent runner.

@@ -9,9 +9,10 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::error::{HerdrError, HerdrResult};
+use crate::events::{HerdrEvent, Subscription};
 use crate::protocol::{
     AgentStatus, EnvironmentSnapshot, HerdrRequest, PaneInfo, TabInfo, WorkspaceInfo,
 };
@@ -199,6 +200,31 @@ impl Default for MockState {
     }
 }
 
+/// A held-open subscription connection.
+///
+/// Unlike [`HerdrTransport::send_request`], which opens a connection per call,
+/// this keeps one connection alive and yields every event herdr pushes down it.
+/// Dropping the stream aborts the reader task, which closes the connection —
+/// that is how a subscription set is changed, since herdr closes any connection
+/// that receives a second `events.subscribe`.
+pub struct HerdrEventStream {
+    rx: mpsc::Receiver<HerdrEvent>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl HerdrEventStream {
+    /// Next event, or `None` once herdr closed the stream or the reader stopped.
+    pub async fn next_event(&mut self) -> Option<HerdrEvent> {
+        self.rx.recv().await
+    }
+}
+
+impl Drop for HerdrEventStream {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
 /// Transport variants supported by `libherdr`.
 #[derive(Clone)]
 pub enum HerdrTransport {
@@ -252,6 +278,122 @@ impl HerdrTransport {
     pub fn mock_with_state(state: MockState) -> Self {
         Self::Mock {
             state: Arc::new(RwLock::new(state)),
+        }
+    }
+
+    /// Open a live subscription connection and stream decoded events from it.
+    ///
+    /// The connection stays open until the returned [`HerdrEventStream`] is
+    /// dropped or herdr closes it. Callers that need to change what they are
+    /// subscribed to must drop the stream and open a new one.
+    pub async fn open_event_stream(
+        &self,
+        subscriptions: &[Subscription],
+    ) -> HerdrResult<HerdrEventStream> {
+        if subscriptions.is_empty() {
+            return Err(HerdrError::Socket(
+                "Refusing to open an event stream with no subscriptions".to_string(),
+            ));
+        }
+        let request = serde_json::json!({
+            "id": crate::protocol::generate_request_id(),
+            "method": "events.subscribe",
+            "params": { "subscriptions": subscriptions },
+        });
+        let payload = {
+            let mut bytes = serde_json::to_vec(&request)?;
+            bytes.push(b'\n');
+            bytes
+        };
+
+        // Bounded so a stalled consumer applies backpressure to the reader
+        // rather than growing without limit on a chatty subscription.
+        let (tx, rx) = mpsc::channel(256);
+
+        let reader = match self {
+            Self::LocalSocket { socket_path } => {
+                let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
+                    HerdrError::Socket(format!(
+                        "Failed to connect to herdr socket at {:?} for events: {}",
+                        socket_path, e
+                    ))
+                })?;
+                stream.write_all(&payload).await.map_err(|e| {
+                    HerdrError::Socket(format!("Failed to write events.subscribe: {}", e))
+                })?;
+                stream.flush().await.map_err(|e| {
+                    HerdrError::Socket(format!("Failed to flush events.subscribe: {}", e))
+                })?;
+                let lines = BufReader::new(stream).lines();
+                tokio::spawn(Self::pump_event_lines(lines, tx))
+            }
+            Self::RemoteSsh { config } => {
+                let mut cmd = Self::build_ssh_command(config);
+                cmd.stdin(std::process::Stdio::piped());
+                cmd.stdout(std::process::Stdio::piped());
+                cmd.stderr(std::process::Stdio::piped());
+                cmd.kill_on_drop(true);
+
+                let mut child = cmd.spawn().map_err(|e| {
+                    HerdrError::Ssh(format!("Failed to spawn SSH process for events: {}", e))
+                })?;
+                let mut stdin = child.stdin.take().ok_or_else(|| {
+                    HerdrError::Ssh("SSH child has no stdin for events.subscribe".to_string())
+                })?;
+                stdin.write_all(&payload).await.map_err(|e| {
+                    HerdrError::Ssh(format!("Failed writing events.subscribe to SSH: {}", e))
+                })?;
+                stdin.flush().await.map_err(|e| {
+                    HerdrError::Ssh(format!("Failed flushing events.subscribe to SSH: {}", e))
+                })?;
+                // Held for the life of the stream: dropping stdin can make the
+                // remote `nc` see EOF and hang up the subscription.
+                let stdout = child.stdout.take().ok_or_else(|| {
+                    HerdrError::Ssh("SSH child has no stdout for events".to_string())
+                })?;
+                let lines = BufReader::new(stdout).lines();
+                tokio::spawn(async move {
+                    let _stdin = stdin;
+                    let _child = child;
+                    Self::pump_event_lines(lines, tx).await;
+                })
+            }
+            Self::Mock { .. } => {
+                // Mock transports have no event source; the stream stays open
+                // and idle so callers can be exercised without a live herdr.
+                tokio::spawn(async move {
+                    tx.closed().await;
+                })
+            }
+        };
+
+        Ok(HerdrEventStream { rx, reader })
+    }
+
+    /// Decode lines off a subscription connection until it closes.
+    async fn pump_event_lines<R>(mut lines: tokio::io::Lines<BufReader<R>>, tx: mpsc::Sender<HerdrEvent>)
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    if let Some(event) = HerdrEvent::from_line(&line) {
+                        if tx.send(event).await.is_err() {
+                            log::debug!("libherdr: event consumer dropped; closing subscription");
+                            return;
+                        }
+                    }
+                }
+                Ok(None) => {
+                    log::info!("libherdr: herdr closed the event subscription");
+                    return;
+                }
+                Err(e) => {
+                    log::warn!("libherdr: error reading event subscription: {e}");
+                    return;
+                }
+            }
         }
     }
 
@@ -332,12 +474,11 @@ impl HerdrTransport {
         Ok(parsed)
     }
 
-    /// Internal executor for Remote SSH Multiplexed connections.
-    async fn execute_remote_ssh(
-        config: &RemoteSshConfig,
-        request: &HerdrRequest,
-    ) -> HerdrResult<Value> {
-        let rpc = request.to_jsonrpc();
+    /// Build the `ssh` invocation for a remote herdr socket: multiplexing
+    /// flags, connection options, and the remote command that bridges stdio to
+    /// the socket. Shared by the one-shot request path and the subscription
+    /// path so both reach herdr the same way.
+    fn build_ssh_command(config: &RemoteSshConfig) -> Command {
         let binary = config.ssh_binary.as_deref().unwrap_or("ssh");
         let mut cmd = Command::new(binary);
 
@@ -390,6 +531,18 @@ impl HerdrTransport {
                 cmd.arg(remote_cmd);
             }
         }
+
+        cmd
+    }
+
+    /// Internal executor for Remote SSH Multiplexed connections.
+    async fn execute_remote_ssh(
+        config: &RemoteSshConfig,
+        request: &HerdrRequest,
+    ) -> HerdrResult<Value> {
+        let rpc = request.to_jsonrpc();
+        let binary = config.ssh_binary.as_deref().unwrap_or("ssh");
+        let mut cmd = Self::build_ssh_command(config);
 
         cmd.stdin(std::process::Stdio::piped());
         cmd.stdout(std::process::Stdio::piped());

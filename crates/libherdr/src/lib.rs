@@ -6,17 +6,20 @@
 
 pub mod client;
 pub mod error;
+pub mod events;
 pub mod protocol;
 pub mod transport;
 
 pub use client::HerdrClient;
 pub use error::{HerdrError, HerdrResult};
+pub use events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
 pub use protocol::{
     AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction, PaneInfo,
     TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
 };
 pub use transport::{
-    HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod, default_local_socket_path,
+    HerdrEventStream, HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod,
+    default_local_socket_path,
 };
 
 #[cfg(test)]
@@ -246,6 +249,70 @@ mod tests {
             .await
             .expect("execute focus over socket");
         assert_eq!(exec_res["focused_id"], "ws-live");
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_over_real_unix_socket() {
+        use crate::events::Subscription;
+        use crate::protocol::AgentStatus;
+
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("herdr_events.sock");
+        let listener = UnixListener::bind(&sock_path).expect("failed to bind events UDS");
+
+        // Stand-in herdr: acknowledge the subscription, push two events, close.
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.split();
+            let mut buf_reader = BufReader::new(reader);
+            let mut line = String::new();
+            buf_reader.read_line(&mut line).await.unwrap();
+            let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(req["method"], "events.subscribe");
+            assert_eq!(req["params"]["subscriptions"][0]["type"], "pane.agent_status_changed");
+            assert_eq!(req["params"]["subscriptions"][0]["pane_id"], "w1:p6");
+
+            for payload in [
+                json!({"id": req["id"], "result": {"type": "subscription_started"}}),
+                json!({"event": "pane_agent_status_changed", "data": {
+                    "pane_id": "w1:p6", "workspace_id": "w1",
+                    "agent_status": "blocked", "agent": "claude"}}),
+                json!({"event": "pane_agent_status_changed", "data": {
+                    "pane_id": "w1:p6", "workspace_id": "w1",
+                    "agent_status": "done", "agent": "claude"}}),
+            ] {
+                let mut out = serde_json::to_vec(&payload).unwrap();
+                out.push(b'\n');
+                writer.write_all(&out).await.unwrap();
+            }
+        });
+
+        let transport = HerdrTransport::local(&sock_path);
+        let mut stream = transport
+            .open_event_stream(&[Subscription::agent_status("w1:p6")])
+            .await
+            .expect("open event stream");
+
+        assert_eq!(stream.next_event().await, Some(HerdrEvent::SubscriptionStarted));
+        match stream.next_event().await.expect("blocked event") {
+            HerdrEvent::AgentStatusChanged(c) => {
+                assert_eq!(c.agent_status, AgentStatus::Blocked);
+                assert_eq!(c.pane_id, "w1:p6");
+            }
+            other => panic!("expected blocked, got {other:?}"),
+        }
+        match stream.next_event().await.expect("done event") {
+            HerdrEvent::AgentStatusChanged(c) => assert_eq!(c.agent_status, AgentStatus::Done),
+            other => panic!("expected done, got {other:?}"),
+        }
+        // Server hung up: the stream ends rather than stalling.
+        assert_eq!(stream.next_event().await, None);
+    }
+
+    #[tokio::test]
+    async fn test_event_stream_requires_subscriptions() {
+        let transport = HerdrTransport::mock();
+        assert!(transport.open_event_stream(&[]).await.is_err());
     }
 
     #[tokio::test]
