@@ -283,8 +283,12 @@ impl HerdrTransport {
         socket_path: &Path,
         request: &HerdrRequest,
     ) -> HerdrResult<Value> {
-        trace!("Connecting to local Unix socket at {:?}", socket_path);
+        let req_json = serde_json::to_string(request).unwrap_or_default();
+        log::info!("libherdr: Connecting to Unix socket at {:?}", socket_path);
+        log::debug!("libherdr: Sending request to socket: {}", req_json);
+
         let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
+            log::warn!("libherdr: Failed connecting to Unix socket at {:?}: {}", socket_path, e);
             HerdrError::Socket(format!(
                 "Failed to connect to herdr socket at {:?}: {}",
                 socket_path, e
@@ -295,9 +299,11 @@ impl HerdrTransport {
         payload.push(b'\n');
 
         stream.write_all(&payload).await.map_err(|e| {
+            log::warn!("libherdr: Failed writing request to socket: {}", e);
             HerdrError::Socket(format!("Failed to write request to socket: {}", e))
         })?;
         stream.flush().await.map_err(|e| {
+            log::warn!("libherdr: Failed flushing socket write: {}", e);
             HerdrError::Socket(format!("Failed to flush socket write: {}", e))
         })?;
 
@@ -306,13 +312,21 @@ impl HerdrTransport {
         reader
             .read_line(&mut response_line)
             .await
-            .map_err(|e| HerdrError::Socket(format!("Failed to read response from socket: {}", e)))?;
+            .map_err(|e| {
+                log::warn!("libherdr: Failed reading response from socket: {}", e);
+                HerdrError::Socket(format!("Failed to read response from socket: {}", e))
+            })?;
 
-        if response_line.trim().is_empty() {
+        let trimmed_resp = response_line.trim();
+        log::debug!("libherdr: Raw response line from socket: '{}'", trimmed_resp);
+        if trimmed_resp.is_empty() {
+            log::warn!("libherdr: Received empty response from socket");
             return Err(HerdrError::Socket("Received empty response from socket".to_string()));
         }
 
-        Self::parse_herdr_response_json(&response_line)
+        let parsed = Self::parse_herdr_response_json(trimmed_resp)?;
+        log::info!("libherdr: Successfully received and parsed socket response");
+        Ok(parsed)
     }
 
     /// Internal executor for Remote SSH Multiplexed connections.
