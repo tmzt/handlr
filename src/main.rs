@@ -5,6 +5,7 @@ use std::time::Duration;
 use audio_core::cpal_capture::CpalCapture;
 use audio_core::ensure_audio_ring;
 use handlr::reasoning::{ReasoningEngine, EngineType, ReasoningEngineBuilder, Message, SessionManager, SessionBuilder};
+use handlr::commands::parse_confirmation_request;
 use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig, HerdrToolExecutor, HerdrContextContributor};
 use libconversate::stt::{SttBackend, SttConfig, SttMode};
 use libconversate::tts::{TtsConfig, TtsBackend};
@@ -505,13 +506,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(ref reply) = response {
                             log::info!("Engine response: '{}'", reply);
                             // If model asks for confirmation, arm the mechanical gate and flush queued audio input
-                            let is_asking_conf = reply.trim().ends_with('?')
-                                || reply.to_lowercase().contains("should i")
-                                || reply.to_lowercase().contains("confirm")
-                                || reply.to_lowercase().contains("are you sure");
-                            if is_asking_conf {
-                                log::info!("Arming mechanical confirmation gate and flushing queued audio");
-                                vs.arm_confirmation(None, None);
+                            if let Some(req) = parse_confirmation_request(reply) {
+                                log::info!(
+                                    "Arming mechanical confirmation gate (pane={:?}, command={:?}) and flushing queued audio",
+                                    req.pane_id, req.command
+                                );
+                                vs.arm_confirmation(req.pane_id, req.command);
                                 ensure_audio_ring().skip_to_end();
                             }
 

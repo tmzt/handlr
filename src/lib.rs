@@ -5,7 +5,10 @@ pub mod config;
 pub mod reasoning;
 pub mod transport;
 
-pub use commands::validate_arbitrary_command;
+pub use commands::{
+    confirmation_match_candidates, normalize_command_for_match, parse_confirmation_request,
+    validate_arbitrary_command, ConfirmationRequest,
+};
 pub use config::AppConfig;
 pub use reasoning::{
     declare_gemini_tools, default_system_prompt, GeminiReasoningEngine, MockReasoningEngine,

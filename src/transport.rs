@@ -14,7 +14,7 @@ pub use libherdr::{
     },
 };
 
-use crate::commands::validate_arbitrary_command;
+use crate::commands::{confirmation_match_candidates, validate_arbitrary_command};
 use crate::config::AgentConfig;
 use libconversate::VoiceState;
 use std::sync::Arc;
@@ -189,8 +189,11 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
             // Mechanical confirmation gate check
             if agent_cfg.require_confirmation {
                 if let Some(ref vs) = self.voice_state {
-                    let confirmed = vs.verify_and_consume_confirmation(pane_id, &final_cmd)
-                        || vs.verify_and_consume_confirmation(pane_id, cmd);
+                    // The gate was armed from the assistant's own phrasing, which may
+                    // differ cosmetically from the string it passes here.
+                    let confirmed = confirmation_match_candidates(&final_cmd, cmd)
+                        .iter()
+                        .any(|candidate| vs.verify_and_consume_confirmation(pane_id, candidate));
                     if !confirmed {
                         log::warn!("Mechanical confirmation gate blocked '{}' on pane '{}' (confirmation not armed or confirmed)", final_cmd, pane_id);
                         return Err(format!(
@@ -615,6 +618,60 @@ mod tests {
             .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
             .await;
         assert!(blocked_after.is_err());
+    }
+
+    /// End-to-end: the gate is armed from the assistant's own confirmation
+    /// question, so an arbitrary command only runs if it matches what the user
+    /// was actually asked about.
+    #[tokio::test]
+    async fn test_arbitrary_command_gate_bound_to_confirmation_question() {
+        use crate::commands::parse_confirmation_request;
+
+        let executor = HerdrToolExecutor::new(
+            HerdrClient::mock(),
+            vec![AgentConfig::new("claude", vec!["continue".to_string()], true)
+                .with_arbitrary_commands(true)],
+        );
+        let vs = Arc::new(VoiceState::default());
+        let executor = executor.with_voice_state(Arc::clone(&vs));
+
+        // The assistant asks, so the gate is armed with the pane and command it named.
+        let req = parse_confirmation_request(
+            "Should I send 'please run the tests' to Claude in pane w2:p1?",
+        )
+        .expect("assistant turn is a confirmation request");
+        vs.arm_confirmation(req.pane_id.clone(), req.command.clone());
+        assert!(vs.confirm_gate(), "user said yes");
+
+        // A different command than the one confirmed is refused even though the
+        // gate is in the Confirmed state.
+        let swapped = executor
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "w2:p1", "command": "delete the repo" }),
+            )
+            .await;
+        assert!(swapped.is_err());
+        assert!(swapped.unwrap_err().contains("requires vocal confirmation"));
+
+        // The confirmed command runs, with the model's trailing punctuation and
+        // casing normalized away.
+        let ok = executor
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "w2:p1", "command": "Please run the tests." }),
+            )
+            .await;
+        assert!(ok.is_ok(), "expected success, got {:?}", ok);
+
+        // The confirmation is single-use.
+        let replay = executor
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "w2:p1", "command": "Please run the tests." }),
+            )
+            .await;
+        assert!(replay.is_err());
     }
 
     #[tokio::test]
