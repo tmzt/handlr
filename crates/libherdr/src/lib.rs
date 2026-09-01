@@ -131,18 +131,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_protocol_serialization() {
-        let req = HerdrRequest::InspectPane {
-            pane_id: "pane_9".to_string(),
-            lines: 100,
-        };
-        let serialized = serde_json::to_string(&req).unwrap();
-        assert_eq!(
-            serialized,
-            r#"{"action":"inspect_pane","pane_id":"pane_9","lines":100}"#
-        );
+        let req = HerdrRequest::inspect_pane("pane_9", 100);
+        let rpc = req.to_jsonrpc();
+        assert_eq!(rpc.method, "pane.read");
+        assert_eq!(rpc.params["pane_id"], "pane_9");
+        assert_eq!(rpc.params["count"], 100);
+        assert_eq!(rpc.params["source"], "recent");
 
-        let parsed: HerdrRequest = serde_json::from_str(&serialized).unwrap();
-        assert_eq!(parsed, req);
+        let serialized = serde_json::to_string(&rpc).unwrap();
+        let parsed: HerdrJsonRpcRequest = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed.method, "pane.read");
     }
 
     #[test]
@@ -176,11 +174,11 @@ mod tests {
                     let mut buf_reader = BufReader::new(reader);
                     let mut line = String::new();
                     if buf_reader.read_line(&mut line).await.is_ok() {
-                        if let Ok(req) = serde_json::from_str::<HerdrRequest>(line.trim()) {
-                            let resp = match req {
-                                HerdrRequest::ListPanes { .. } => json!({
-                                    "success": true,
-                                    "data": {
+                        if let Ok(req) = serde_json::from_str::<HerdrJsonRpcRequest>(line.trim()) {
+                            let resp = match req.method.as_str() {
+                                "session.snapshot" => json!({
+                                    "id": req.id,
+                                    "result": {
                                         "workspaces": [{
                                             "workspace_id": "ws-live",
                                             "name": "Live Server",
@@ -195,20 +193,20 @@ mod tests {
                                         }]
                                     }
                                 }),
-                                HerdrRequest::InspectPane { pane_id, .. } => json!({
-                                    "success": true,
-                                    "data": {
-                                        "pane_id": pane_id,
+                                "pane.read" => json!({
+                                    "id": req.id,
+                                    "result": {
+                                        "pane_id": req.params.get("pane_id"),
                                         "buffer": "Live buffer stream text\nLine 2"
                                     }
                                 }),
-                                HerdrRequest::Focus { target_id } => json!({
-                                    "success": true,
-                                    "data": {
-                                        "focused_target": target_id
+                                "pane.focus" | "workspace.focus" | "tab.focus" => json!({
+                                    "id": req.id,
+                                    "result": {
+                                        "focused_id": req.params.get("pane_id").or_else(|| req.params.get("workspace_id"))
                                     }
                                 }),
-                                _ => json!({"success": true, "data": {"status": "ok"}}),
+                                _ => json!({"id": req.id, "result": {"status": "ok"}}),
                             };
                             let mut out = serde_json::to_vec(&resp).unwrap();
                             out.push(b'\n');

@@ -283,9 +283,10 @@ impl HerdrTransport {
         socket_path: &Path,
         request: &HerdrRequest,
     ) -> HerdrResult<Value> {
-        let req_json = serde_json::to_string(request).unwrap_or_default();
-        log::info!("libherdr: Connecting to Unix socket at {:?}", socket_path);
-        log::debug!("libherdr: Sending request to socket: {}", req_json);
+        let rpc = request.to_jsonrpc();
+        let req_json = serde_json::to_string(&rpc).unwrap_or_default();
+        log::info!("libherdr: Connecting to Unix socket at {:?} (method: '{}', id: {})", socket_path, rpc.method, rpc.id);
+        log::debug!("libherdr: Sending JSON-RPC payload to socket: {}", req_json);
 
         let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
             log::warn!("libherdr: Failed connecting to Unix socket at {:?}: {}", socket_path, e);
@@ -295,7 +296,7 @@ impl HerdrTransport {
             ))
         })?;
 
-        let mut payload = serde_json::to_vec(request)?;
+        let mut payload = serde_json::to_vec(&rpc)?;
         payload.push(b'\n');
 
         stream.write_all(&payload).await.map_err(|e| {
@@ -325,7 +326,7 @@ impl HerdrTransport {
         }
 
         let parsed = Self::parse_herdr_response_json(trimmed_resp)?;
-        log::info!("libherdr: Successfully received and parsed socket response");
+        log::info!("libherdr: Successfully received and parsed socket response for method '{}'", rpc.method);
         Ok(parsed)
     }
 
@@ -334,6 +335,7 @@ impl HerdrTransport {
         config: &RemoteSshConfig,
         request: &HerdrRequest,
     ) -> HerdrResult<Value> {
+        let rpc = request.to_jsonrpc();
         let binary = config.ssh_binary.as_deref().unwrap_or("ssh");
         let mut cmd = Command::new(binary);
 
@@ -396,7 +398,7 @@ impl HerdrTransport {
             HerdrError::Ssh(format!("Failed to spawn SSH process '{}': {}", binary, e))
         })?;
 
-        let request_bytes = serde_json::to_vec(request)?;
+        let request_bytes = serde_json::to_vec(&rpc)?;
 
         if let Some(mut stdin) = child.stdin.take() {
             stdin.write_all(&request_bytes).await.map_err(|e| {

@@ -60,14 +60,46 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         };
 
-        // 2. Read tail buffers for focused, working, and visible panes to provide context (RAG)
+        // 2. Read tail buffers for all panes in the snapshot
         let mut pane_details = Vec::new();
-        if let Some(workspaces) = snapshot.get("workspaces").and_then(|w| w.as_array()) {
+        let snap_obj = snapshot.get("snapshot").unwrap_or(&snapshot);
+
+        // Check flat panes list from session.snapshot
+        if let Some(panes) = snap_obj.get("panes").and_then(|p| p.as_array()) {
+            for pane in panes {
+                if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
+                    let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                    let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
+                    let agent = pane.get("agent").and_then(|a| a.as_str()).unwrap_or("shell");
+                    let cwd = pane.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
+                    let ws_id = pane.get("workspace_id").and_then(|w| w.as_str()).unwrap_or("");
+                    let tab_id = pane.get("tab_id").and_then(|t| t.as_str()).unwrap_or("");
+
+                    if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
+                        let buffer_opt = inspect_res
+                            .get("read")
+                            .and_then(|r| r.get("text"))
+                            .and_then(|t| t.as_str())
+                            .or_else(|| inspect_res.get("buffer").and_then(|b| b.as_str()))
+                            .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
+
+                        if let Some(buffer) = buffer_opt {
+                            if !buffer.trim().is_empty() {
+                                pane_details.push(format!(
+                                    "Pane {} [workspace: {}, tab: {}, agent: '{}', status: {}, cwd: '{}', focused: {}]:\n```\n{}\n```",
+                                    pane_id, ws_id, tab_id, agent, status, cwd, focused, buffer.trim()
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(workspaces) = snap_obj.get("workspaces").and_then(|w| w.as_array()) {
+            // Fallback for nested workspace/tab structure
             for ws in workspaces {
                 let ws_id = ws.get("workspace_id").and_then(|i| i.as_str()).unwrap_or("");
                 let ws_name = ws.get("name").and_then(|n| n.as_str()).unwrap_or(ws_id);
 
-                // Collect from tabs
                 if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
                     for tab in tabs {
                         let tab_title = tab.get("title").and_then(|t| t.as_str()).unwrap_or("");
@@ -78,9 +110,15 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                     let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
                                     let title = pane.get("terminal_title").and_then(|t| t.as_str()).unwrap_or("untitled");
 
-                                    // Inspect pane tail lines
                                     if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
-                                        if let Some(buffer) = inspect_res.get("buffer").and_then(|b| b.as_str()) {
+                                        let buffer_opt = inspect_res
+                                            .get("read")
+                                            .and_then(|r| r.get("text"))
+                                            .and_then(|t| t.as_str())
+                                            .or_else(|| inspect_res.get("buffer").and_then(|b| b.as_str()))
+                                            .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
+
+                                        if let Some(buffer) = buffer_opt {
                                             if !buffer.trim().is_empty() {
                                                 pane_details.push(format!(
                                                     "Pane {} [workspace: {}, tab: {}, title: '{}', status: {}, focused: {}]:\n```\n{}\n```",
@@ -88,28 +126,6 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                                 ));
                                             }
                                         }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Collect from direct panes (if not nested in tabs)
-                if let Some(panes) = ws.get("panes").and_then(|p| p.as_array()) {
-                    for pane in panes {
-                        if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
-                            let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                            let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
-                            let title = pane.get("terminal_title").and_then(|t| t.as_str()).unwrap_or("untitled");
-
-                            if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
-                                if let Some(buffer) = inspect_res.get("buffer").and_then(|b| b.as_str()) {
-                                    if !buffer.trim().is_empty() {
-                                        pane_details.push(format!(
-                                            "Pane {} [workspace: {}, title: '{}', status: {}, focused: {}]:\n```\n{}\n```",
-                                            pane_id, ws_name, title, status, focused, buffer.trim()
-                                        ));
                                     }
                                 }
                             }

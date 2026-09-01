@@ -386,6 +386,158 @@ impl HerdrRequest {
             }
         }
     }
+
+    /// Convert this `HerdrRequest` to standard JSON-RPC 2.0 format expected by the `herdr` daemon.
+    pub fn to_jsonrpc(&self) -> HerdrJsonRpcRequest {
+        match self {
+            HerdrRequest::ListPanes { id, workspace_id } => {
+                let params = if let Some(ws) = workspace_id {
+                    serde_json::json!({ "workspace_id": ws })
+                } else {
+                    serde_json::json!({})
+                };
+                HerdrJsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method: "session.snapshot".to_string(),
+                    params,
+                }
+            }
+            HerdrRequest::InspectPane { id, pane_id, lines } => {
+                HerdrJsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method: "pane.read".to_string(),
+                    params: serde_json::json!({
+                        "pane_id": pane_id,
+                        "source": "recent",
+                        "count": lines,
+                    }),
+                }
+            }
+            HerdrRequest::RunCommand { id, pane_id, command } => {
+                let text = if command.ends_with('\n') {
+                    command.clone()
+                } else {
+                    format!("{}\n", command)
+                };
+                HerdrJsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method: "pane.send_text".to_string(),
+                    params: serde_json::json!({
+                        "pane_id": pane_id,
+                        "text": text,
+                    }),
+                }
+            }
+            HerdrRequest::SendKeys { id, pane_id, keys } => {
+                HerdrJsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method: "pane.send_keys".to_string(),
+                    params: serde_json::json!({
+                        "pane_id": pane_id,
+                        "keys": keys,
+                    }),
+                }
+            }
+            HerdrRequest::ManageLayout { id, layout_action, target_id } => {
+                let (method, params) = match layout_action.as_str() {
+                    "zoom" | "unzoom" => (
+                        "pane.zoom".to_string(),
+                        if let Some(tid) = target_id {
+                            serde_json::json!({ "pane_id": tid })
+                        } else {
+                            serde_json::json!({})
+                        },
+                    ),
+                    "split" | "split_vertical" => (
+                        "pane.split".to_string(),
+                        if let Some(tid) = target_id {
+                            serde_json::json!({ "pane_id": tid, "direction": "vertical" })
+                        } else {
+                            serde_json::json!({ "direction": "vertical" })
+                        },
+                    ),
+                    "split_horizontal" => (
+                        "pane.split".to_string(),
+                        if let Some(tid) = target_id {
+                            serde_json::json!({ "pane_id": tid, "direction": "horizontal" })
+                        } else {
+                            serde_json::json!({ "direction": "horizontal" })
+                        },
+                    ),
+                    "close" => (
+                        "pane.close".to_string(),
+                        if let Some(tid) = target_id {
+                            serde_json::json!({ "pane_id": tid })
+                        } else {
+                            serde_json::json!({})
+                        },
+                    ),
+                    other => (
+                        other.to_string(),
+                        if let Some(tid) = target_id {
+                            serde_json::json!({ "target_id": tid })
+                        } else {
+                            serde_json::json!({})
+                        },
+                    ),
+                };
+                HerdrJsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method,
+                    params,
+                }
+            }
+            HerdrRequest::Focus { id, target_id } => {
+                let (method, params) = if target_id.starts_with('w') && !target_id.contains(':') {
+                    ("workspace.focus".to_string(), serde_json::json!({ "workspace_id": target_id }))
+                } else if target_id.contains(":t") && !target_id.contains(":p") {
+                    ("tab.focus".to_string(), serde_json::json!({ "tab_id": target_id }))
+                } else {
+                    ("pane.focus".to_string(), serde_json::json!({ "pane_id": target_id }))
+                };
+                HerdrJsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method,
+                    params,
+                }
+            }
+            HerdrRequest::Custom(val) => {
+                if let Some(obj) = val.as_object() {
+                    let id = obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(generate_request_id);
+                    let method = obj.get("method").or_else(|| obj.get("action")).and_then(|v| v.as_str()).unwrap_or("custom").to_string();
+                    let params = obj.get("params").cloned().unwrap_or_else(|| val.clone());
+                    HerdrJsonRpcRequest {
+                        jsonrpc: "2.0".to_string(),
+                        id,
+                        method,
+                        params,
+                    }
+                } else {
+                    HerdrJsonRpcRequest {
+                        jsonrpc: "2.0".to_string(),
+                        id: generate_request_id(),
+                        method: "custom".to_string(),
+                        params: val.clone(),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Standard JSON-RPC 2.0 request envelope for `herdr`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HerdrJsonRpcRequest {
+    pub jsonrpc: String,
+    pub id: String,
+    pub method: String,
+    pub params: Value,
 }
 
 /// Standard response wrapper from `herdr`.
