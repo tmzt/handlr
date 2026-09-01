@@ -187,6 +187,12 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
             None,
         )
         .with_parameters::<FocusParams>(),
+        FunctionDeclaration::new(
+            "run_command",
+            "Sends an allowed command (e.g. 'continue', '/compact') to a target terminal pane. Requires explicit vocal confirmation from the user before executing.",
+            None,
+        )
+        .with_parameters::<RunCommandParams>(),
     ])]
 }
 
@@ -216,7 +222,8 @@ mod tests {
         let prompt = default_system_prompt().expect("should extract system prompt from PROMPT.md");
         assert!(prompt.contains("reasoning engine for `handlr`"));
         assert!(prompt.contains("RAG-Based Environment Context"));
-        assert!(prompt.contains("Action Tool (`focus`)"));
+        assert!(prompt.contains("Action Tools (`focus`, `run_command`)"));
+        assert!(prompt.contains("Rules for Commands & Vocal Confirmation"));
         assert!(prompt.contains("Voice Output Guidelines"));
         assert!(!prompt.contains("<system_prompt>"));
         assert!(!prompt.contains("</system_prompt>"));
@@ -241,13 +248,14 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 1);
+        assert_eq!(decls.len(), 2);
 
         let names: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
             vec![
-                "focus"
+                "focus",
+                "run_command"
             ]
         );
     }
@@ -409,6 +417,6 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 1);
+        assert_eq!(decls.len(), 2);
     }
 }

@@ -318,7 +318,7 @@ impl HerdrRequest {
 
                 Ok(Self::inspect_pane(pane_id, lines))
             }
-            "run_command" => {
+            "run_command" | "send_command" => {
                 let pane_id = args
                     .get("pane_id")
                     .or_else(|| args.get("target_id"))

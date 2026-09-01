@@ -37,6 +37,12 @@ engine = "whisper"
 # silero_model = "~/.handlr/models/silero_vad.onnx"
 # whisper_model = "~/.handlr/models/ggml-base.en.bin"
 
+[commands]
+# Permitted commands that voice/Gemini is allowed to send to agent panes
+allowed_commands = ["continue", "/compact"]
+# Require vocal confirmation before executing commands
+require_confirmation = true
+
 [gemini]
 # Optional Gemini API Key (defaults to GEMINI_API_KEY environment variable)
 # api_key = "..."

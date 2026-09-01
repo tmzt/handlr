@@ -414,6 +414,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Session Manager
     let session_manager = SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
     let session_id = "default_session".to_string();
+    let allowed_commands = config.commands.allowed_commands.clone();
 
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
@@ -425,6 +426,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manager = session_manager.clone();
             let sid = session_id.clone();
             let proc_mute = Arc::clone(&mute_for_proc);
+            let allowed_cmds = allowed_commands.clone();
             Box::pin(async move {
                 // Instantly mute mic while reasoning & generating response
                 proc_mute.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -454,7 +456,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let executor = HerdrToolExecutor((*client).clone());
+                let executor = HerdrToolExecutor::new((*client).clone(), allowed_cmds);
                 match engine.process_turns(&messages, &executor).await {
                     Ok(response) => {
                         if let Some(ref reply) = response {

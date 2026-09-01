@@ -15,7 +15,19 @@ pub use libherdr::{
 };
 
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
-pub struct HerdrToolExecutor(pub HerdrClient);
+pub struct HerdrToolExecutor {
+    pub client: HerdrClient,
+    pub allowed_commands: Vec<String>,
+}
+
+impl HerdrToolExecutor {
+    pub fn new(client: HerdrClient, allowed_commands: Vec<String>) -> Self {
+        Self {
+            client,
+            allowed_commands,
+        }
+    }
+}
 
 #[async_trait]
 impl libinfer::ToolExecutor for HerdrToolExecutor {
@@ -24,7 +36,23 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        self.0.execute_tool_call(name, args).await.map_err(|e| e.to_string())
+        if name == "run_command" || name == "send_command" {
+            let cmd = args
+                .get("command")
+                .or_else(|| args.get("cmd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let is_allowed = self.allowed_commands.iter().any(|allowed| {
+                allowed.trim().eq_ignore_ascii_case(cmd.trim())
+            });
+            if !is_allowed {
+                return Err(format!(
+                    "Command '{}' is not permitted by configuration. Allowed commands: {:?}",
+                    cmd, self.allowed_commands
+                ));
+            }
+        }
+        self.client.execute_tool_call(name, args).await.map_err(|e| e.to_string())
     }
 }
 
@@ -299,4 +327,38 @@ fn should_include_pane_buffer(
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libinfer::ToolExecutor;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn test_allowed_commands_filtering() {
+        let client = HerdrClient::mock();
+        let executor = HerdrToolExecutor::new(
+            client,
+            vec!["continue".to_string(), "/compact".to_string()],
+        );
+
+        // Allowed command should execute
+        let ok_res = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .await;
+        assert!(ok_res.is_ok());
+
+        let ok_res2 = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "/compact" }))
+            .await;
+        assert!(ok_res2.is_ok());
+
+        // Disallowed command should be rejected
+        let err_res = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "rm -rf /" }))
+            .await;
+        assert!(err_res.is_err());
+        assert!(err_res.unwrap_err().contains("not permitted by configuration"));
+    }
 }
