@@ -13,6 +13,7 @@ use libconversate::s2s::SpeechToSpeechBuilder;
 #[allow(dead_code)]
 struct AppArgs {
     config: Option<String>,
+    transport_name: Option<String>,
     api_key: Option<String>,
     remote: Option<String>,
     socket: Option<String>,
@@ -32,6 +33,7 @@ struct AppArgs {
 fn parse_args() -> AppArgs {
     let mut args = std::env::args().skip(1);
     let mut config = None;
+    let mut transport_name = None;
     let mut api_key = None;
     let mut remote = None;
     let mut socket = None;
@@ -50,6 +52,7 @@ fn parse_args() -> AppArgs {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--config" | "-c" => config = args.next(),
+            "--transport" | "-t" => transport_name = args.next(),
             "--api-key" => api_key = args.next(),
             "--remote" => remote = args.next(),
             "--socket" => socket = args.next(),
@@ -76,6 +79,7 @@ fn parse_args() -> AppArgs {
 
     AppArgs {
         config,
+        transport_name,
         api_key,
         remote,
         socket,
@@ -214,7 +218,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api_key = args
         .api_key
-        .or(config.gemini.api_key)
+        .or(config.gemini.api_key.clone())
         .or_else(|| std::env::var("GEMINI_API_KEY").ok());
 
     let engine_type = if args.mock_mode {
@@ -235,6 +239,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // 2. Initialize Transport / Herdr Client
+    let target_transport = config.find_transport(args.transport_name.as_deref()).cloned();
+
     let transport = if args.mock_mode {
         log::info!("Using Mock Transport");
         HerdrTransport::mock()
@@ -246,23 +252,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let socket_path = expand_tilde(socket_str);
         log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
         HerdrTransport::local(socket_path)
-    } else if config.transport.mode.eq_ignore_ascii_case("remote") {
-        if let Some(ref remote_target) = config.transport.remote {
-            log::info!("Connecting via SSH (from config) to: {}", remote_target);
-            let ssh_config = RemoteSshConfig::new(remote_target.clone());
-            HerdrTransport::remote_ssh_with_config(ssh_config)
+    } else if let Some(t) = target_transport {
+        let transport_name = t.name.as_deref().unwrap_or("unnamed");
+        if t.mode.eq_ignore_ascii_case("remote") {
+            if let Some(ref remote_target) = t.remote {
+                log::info!("Connecting via SSH (from config transport '{}') to: {}", transport_name, remote_target);
+                let ssh_config = RemoteSshConfig::new(remote_target.clone());
+                HerdrTransport::remote_ssh_with_config(ssh_config)
+            } else {
+                let socket_path = handlr::transport::default_local_socket_path();
+                log::warn!("Config transport '{}' mode is 'remote' but 'remote' string is missing; falling back to local socket: {:?}", transport_name, socket_path);
+                HerdrTransport::local(socket_path)
+            }
         } else {
-            let socket_path = handlr::transport::default_local_socket_path();
-            log::warn!("Config transport mode is 'remote' but 'remote' string is missing; falling back to local socket: {:?}", socket_path);
+            let socket_path = t
+                .socket
+                .as_ref()
+                .map(expand_tilde)
+                .unwrap_or_else(handlr::transport::default_local_socket_path);
+            log::info!("Connecting via UNIX domain socket (from config transport '{}'): {:?}", transport_name, socket_path);
             HerdrTransport::local(socket_path)
         }
     } else {
-        let socket_path = config
-            .transport
-            .socket
-            .map(expand_tilde)
-            .unwrap_or_else(handlr::transport::default_local_socket_path);
-        log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
+        let socket_path = handlr::transport::default_local_socket_path();
+        log::info!("Connecting via default UNIX domain socket: {:?}", socket_path);
         HerdrTransport::local(socket_path)
     };
 

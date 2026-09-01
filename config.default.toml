@@ -1,15 +1,19 @@
 # Default configuration for handlr
 # Copy to ~/.config/handlr/config.toml to customize
 
-[transport]
+[[transports]]
+name = "local"
 # Transport mode: "local" (direct Unix domain socket) or "remote" (SSH bridge)
 mode = "local"
-
 # Optional socket path for local mode (default: ~/.config/herdr/herdr.sock)
 # socket = "~/.config/herdr/herdr.sock"
+default = true
 
-# Optional remote SSH connection string (e.g. "user@host")
-# remote = "user@host"
+[[transports]]
+name = "mini"
+mode = "remote"
+# Remote SSH connection string (e.g. "user@host")
+remote = "tmeade@timothys-mac-mini-1"
 
 [voice.tts]
 # TTS engine backend: "sherpa-kokoro" (neural), "system" (macOS say), "kokoro", or "sine"
