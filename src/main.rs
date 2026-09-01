@@ -228,6 +228,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cfg
     };
     builder = builder.with_tts_config(tts_config);
+    let mute_atomic = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    builder = builder.with_mute_flag(Arc::clone(&mute_atomic));
 
     // Initialize Session Manager
     let session_manager = SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
@@ -235,13 +237,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
+    let mute_for_proc = Arc::clone(&mute_atomic);
     let pipeline = builder
         .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
             let engine = Arc::clone(&reasoning_engine);
             let manager = session_manager.clone();
             let sid = session_id.clone();
+            let proc_mute = Arc::clone(&mute_for_proc);
             Box::pin(async move {
+                // Instantly mute mic while reasoning & generating response
+                proc_mute.store(true, std::sync::atomic::Ordering::SeqCst);
                 log::info!("Received transcript: '{}'", transcript);
 
                 // Append the user turn to session history
@@ -299,9 +305,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     pipeline.stt().set_mode(SttMode::Live);
     pipeline.stt().set_recording(true);
 
-    // 5. Start audio capture stream
+    // 5. Start audio capture stream (with atomic hardware muting)
     log::info!("Starting CPAL microphone audio capture...");
-    let _capture = CpalCapture::start_with_processor(|samples| {
+    let mute_for_capture = Arc::clone(&mute_atomic);
+    let _capture = CpalCapture::start_with_processor(move |samples| {
+        if mute_for_capture.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
         ensure_audio_ring().push_samples(samples);
     }).map_err(|e| format!("Capture error: {}", e))?;
 
