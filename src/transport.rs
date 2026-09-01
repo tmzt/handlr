@@ -15,11 +15,14 @@ pub use libherdr::{
 };
 
 use crate::config::AgentConfig;
+use libconversate::VoiceState;
+use std::sync::Arc;
 
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
 pub struct HerdrToolExecutor {
     pub client: HerdrClient,
     pub agents: Vec<AgentConfig>,
+    pub voice_state: Option<Arc<VoiceState>>,
 }
 
 impl HerdrToolExecutor {
@@ -27,7 +30,13 @@ impl HerdrToolExecutor {
         Self {
             client,
             agents,
+            voice_state: None,
         }
+    }
+
+    pub fn with_voice_state(mut self, voice_state: Arc<VoiceState>) -> Self {
+        self.voice_state = Some(voice_state);
+        self
     }
 }
 
@@ -160,6 +169,21 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                     "Command '{}' is not permitted for agent '{}'. Allowed commands for {}: {:?}",
                     cmd, agent_name, agent_name, agent_cfg.allowed_commands
                 ));
+            }
+
+            // Mechanical confirmation gate check
+            if agent_cfg.require_confirmation {
+                if let Some(ref vs) = self.voice_state {
+                    let confirmed = vs.verify_and_consume_confirmation(pane_id, cmd);
+                    if !confirmed {
+                        log::warn!("Mechanical confirmation gate blocked '{}' on pane '{}' (confirmation not armed or confirmed)", cmd, pane_id);
+                        return Err(format!(
+                            "Mechanical confirmation gate blocked execution: Command '{}' on pane '{}' requires vocal confirmation. You must ask the user for confirmation first.",
+                            cmd, pane_id
+                        ));
+                    }
+                    log::info!("Mechanical confirmation gate validated for '{}' on pane '{}'", cmd, pane_id);
+                }
             }
         }
         self.client.execute_tool_call(name, args).await.map_err(|e| e.to_string())
@@ -515,5 +539,50 @@ mod tests {
         assert_eq!(extract_agent_name_for_pane(&nested_snap, "p1"), "claude");
         assert_eq!(extract_agent_name_for_pane(&nested_snap, "w2:pA"), "agy");
         assert_eq!(extract_agent_name_for_pane(&nested_snap, "unknown"), "shell");
+    }
+
+    #[tokio::test]
+    async fn test_mechanical_confirmation_gate_enforcement() {
+        let client = HerdrClient::mock();
+        let vs = Arc::new(VoiceState::default());
+        let executor = HerdrToolExecutor::new(
+            client,
+            vec![
+                AgentConfig::new("claude", vec!["continue".to_string(), "/compact".to_string()], true),
+            ],
+        )
+        .with_voice_state(Arc::clone(&vs));
+
+        // 1. Initial attempt without confirmation should be blocked by the mechanical gate
+        let blocked_res = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .await;
+        assert!(blocked_res.is_err());
+        assert!(blocked_res.unwrap_err().contains("Mechanical confirmation gate blocked execution"));
+
+        // 2. Arm confirmation gate
+        vs.arm_confirmation(Some("p1".to_string()), Some("continue".to_string()));
+        assert!(vs.is_confirmation_armed());
+
+        // Still blocked while armed (not yet confirmed)
+        let blocked_armed = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .await;
+        assert!(blocked_armed.is_err());
+
+        // 3. Confirm the gate
+        assert!(vs.confirm_gate());
+
+        // 4. Execution now succeeds and consumes the confirmation
+        let ok_res = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .await;
+        assert!(ok_res.is_ok());
+
+        // 5. Subsequent execution without a new confirmation cycle is blocked again
+        let blocked_after = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .await;
+        assert!(blocked_after.is_err());
     }
 }

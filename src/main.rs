@@ -431,9 +431,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Box::pin(async move {
                 // Instantly mute mic while reasoning & generating response
                 vs.set_muted(true);
-                // Reset confirmation mode for the incoming turn
-                vs.set_confirmation_mode(false);
                 log::info!("Received transcript: '{}'", transcript);
+
+                // Helper to detect affirmative responses
+                let clean_text = transcript.trim().to_lowercase().replace(['.', '!', '?', ','], "");
+                let is_affirmative = matches!(
+                    clean_text.as_str(),
+                    "yes"
+                        | "yeah"
+                        | "yep"
+                        | "yup"
+                        | "sure"
+                        | "ok"
+                        | "okay"
+                        | "confirm"
+                        | "confirmed"
+                        | "go ahead"
+                        | "do it"
+                        | "send it"
+                        | "proceed"
+                        | "yes please"
+                        | "yes do it"
+                );
+
+                // Advance or reset mechanical confirmation gate based on incoming transcript
+                if vs.is_confirmation_armed() {
+                    if is_affirmative {
+                        log::info!("User affirmed confirmation: advancing confirmation gate to Confirmed");
+                        vs.confirm_gate();
+                    } else {
+                        log::info!("User provided non-affirmative response while armed: resetting confirmation gate");
+                        vs.reset_confirmation_gate();
+                    }
+                } else {
+                    vs.reset_confirmation_gate();
+                }
 
                 // Append the user turn to session history
                 let user_msg = Message {
@@ -459,19 +491,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let executor = HerdrToolExecutor::new((*client).clone(), agents_cfg);
+                let executor = HerdrToolExecutor::new((*client).clone(), agents_cfg)
+                    .with_voice_state(Arc::clone(&vs));
                 match engine.process_turns(&messages, &executor).await {
                     Ok(response) => {
                         if let Some(ref reply) = response {
                             log::info!("Engine response: '{}'", reply);
-                            // If model asks for confirmation, enable confirmation mode on STT (bypassing too-short VAD rejections)
+                            // If model asks for confirmation, arm the mechanical gate and flush queued audio input
                             let is_asking_conf = reply.trim().ends_with('?')
                                 || reply.to_lowercase().contains("should i")
                                 || reply.to_lowercase().contains("confirm")
                                 || reply.to_lowercase().contains("are you sure");
                             if is_asking_conf {
-                                log::info!("Enabling vocal confirmation mode (bypassing too-short VAD rejection)");
-                                vs.set_confirmation_mode(true);
+                                log::info!("Arming mechanical confirmation gate and flushing queued audio");
+                                vs.arm_confirmation(None, None);
+                                ensure_audio_ring().skip_to_end();
                             }
 
                             // Append model turn to session history
