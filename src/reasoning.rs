@@ -8,29 +8,40 @@ pub use libinfer::{ReasoningEngine, ToolExecutor, GeminiAgent, Tool, FunctionDec
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// Embedded system prompt from `AGENTS.md` at compile time.
-pub const AGENTS_MD_RAW: &str = include_str!("../AGENTS.md");
+/// Embedded system prompt from `PROMPT.md` at compile time.
+pub const PROMPT_MD_RAW: &str = include_str!("../PROMPT.md");
 
 // -------------------------------------------------------------------
 //  System Prompt Extraction
 // -------------------------------------------------------------------
 
-/// Parses the system prompt content between `<system_prompt>` and `</system_prompt>` tags.
+/// Parses the system prompt content between `<system_prompt>` and `</system_prompt>` tags if present,
+/// or returns the raw trimmed content.
 pub fn parse_system_prompt(content: &str) -> Option<String> {
     let start_tag = "<system_prompt>";
     let end_tag = "</system_prompt>";
 
-    let start_idx = content.find(start_tag)? + start_tag.len();
-    let end_idx = content[start_idx..].find(end_tag)?;
-    Some(content[start_idx..start_idx + end_idx].trim().to_string())
+    if let (Some(start_pos), Some(end_pos)) = (content.find(start_tag), content.find(end_tag)) {
+        let start_idx = start_pos + start_tag.len();
+        if end_pos > start_idx {
+            return Some(content[start_idx..end_pos].trim().to_string());
+        }
+    }
+
+    let trimmed = content.trim();
+    if !trimmed.is_empty() {
+        Some(trimmed.to_string())
+    } else {
+        None
+    }
 }
 
-/// Extracts the system prompt from the embedded `AGENTS.md` file.
+/// Extracts the system prompt from the embedded `PROMPT.md` file.
 pub fn default_system_prompt() -> Option<String> {
-    parse_system_prompt(AGENTS_MD_RAW)
+    parse_system_prompt(PROMPT_MD_RAW)
 }
 
-/// Loads the system prompt from a specific file path (e.g. `AGENTS.md`),
+/// Loads the system prompt from a specific file path (e.g. `PROMPT.md`),
 /// falling back to the embedded compile-time prompt if file is missing.
 pub fn load_system_prompt_from_file(path: impl AsRef<std::path::Path>) -> Result<String, String> {
     let p = path.as_ref();
@@ -38,10 +49,10 @@ pub fn load_system_prompt_from_file(path: impl AsRef<std::path::Path>) -> Result
         let content = std::fs::read_to_string(p)
             .map_err(|e| format!("failed to read system prompt file {}: {e}", p.display()))?;
         parse_system_prompt(&content)
-            .ok_or_else(|| format!("no <system_prompt> tag found in {}", p.display()))
+            .ok_or_else(|| format!("failed to parse system prompt from {}", p.display()))
     } else {
         default_system_prompt()
-            .ok_or_else(|| "failed to parse system prompt from embedded AGENTS.md".to_string())
+            .ok_or_else(|| "failed to load default system prompt from embedded PROMPT.md".to_string())
     }
 }
 

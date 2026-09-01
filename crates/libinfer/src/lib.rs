@@ -177,7 +177,9 @@ impl ReasoningEngine for GeminiReasoningEngine {
         }
 
         // Add all historical messages to the builder
-        for turn in turns {
+        log::info!("libinfer: Compiling {} messages into Gemini request context (tools: {})", turns.len(), self.agent.tools().len());
+        for (i, turn) in turns.iter().enumerate() {
+            log::debug!("libinfer: Context msg [{}][role={}]: {}", i + 1, turn.role, turn.content);
             let role = match turn.role.as_str() {
                 "model" => libgenai::Role::Model,
                 _ => libgenai::Role::User,
@@ -188,18 +190,24 @@ impl ReasoningEngine for GeminiReasoningEngine {
         }
 
         // Loop for tool execution within the current turn
-        for _ in 0..self.max_turns {
+        for turn_idx in 0..self.max_turns {
+            log::info!("libinfer: Dispatching Gemini API request (turn {}/{})", turn_idx + 1, self.max_turns);
             let response = builder
                 .clone()
                 .execute()
                 .compat()
                 .await
-                .map_err(|e| format!("gemini generate: {e}"))?;
+                .map_err(|e| {
+                    log::error!("libinfer: Gemini API request failed: {}", e);
+                    format!("gemini generate: {e}")
+                })?;
 
             let calls = response.function_calls_with_thoughts();
             if let Some((fc, thought_signature)) = calls.first() {
+                log::info!("libinfer: Gemini requested tool call '{}' with arguments: {}", fc.name, fc.args);
                 let args_val = &fc.args;
                 let exec_result = executor.execute_tool(&fc.name, args_val).await?;
+                log::info!("libinfer: Tool '{}' returned output: {}", fc.name, exec_result);
 
                 // Construct model message with thought signature if present
                 let model_content = if let Some(sig) = thought_signature {
@@ -217,6 +225,7 @@ impl ReasoningEngine for GeminiReasoningEngine {
                     .map_err(|e| format!("function response: {e}"))?;
             } else {
                 let text = response.text().trim().to_string();
+                log::info!("libinfer: Gemini final response text: '{}'", text);
                 return if text.is_empty() {
                     Ok(None)
                 } else {
