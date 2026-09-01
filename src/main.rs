@@ -10,12 +10,17 @@ use libconversate::stt::{SttBackend, SttConfig, SttMode};
 use libconversate::tts::{TtsConfig, TtsBackend};
 use libconversate::s2s::SpeechToSpeechBuilder;
 
+#[allow(dead_code)]
 struct AppArgs {
     api_key: Option<String>,
     remote: Option<String>,
     socket: Option<String>,
     silero_model: Option<String>,
     whisper_model: Option<String>,
+    tts_engine: Option<String>,
+    kokoro_model: Option<String>,
+    kokoro_voices: Option<String>,
+    sherpa_model_dir: Option<String>,
     use_sine_tts: bool,
     tts_voice: Option<String>,
     tts_speed: Option<f32>,
@@ -30,6 +35,10 @@ fn parse_args() -> AppArgs {
     let mut socket = None;
     let mut silero_model = None;
     let mut whisper_model = None;
+    let mut tts_engine = None;
+    let mut kokoro_model = None;
+    let mut kokoro_voices = None;
+    let mut sherpa_model_dir = None;
     let mut use_sine_tts = false;
     let mut tts_voice = None;
     let mut tts_speed = None;
@@ -43,6 +52,10 @@ fn parse_args() -> AppArgs {
             "--socket" => socket = args.next(),
             "--silero" => silero_model = args.next(),
             "--whisper" => whisper_model = args.next(),
+            "--tts-engine" | "--tts-backend" => tts_engine = args.next(),
+            "--kokoro-model" => kokoro_model = args.next(),
+            "--kokoro-voices" => kokoro_voices = args.next(),
+            "--sherpa-model-dir" => sherpa_model_dir = args.next(),
             "--sine-tts" => use_sine_tts = true,
             "--tts-voice" => tts_voice = args.next(),
             "--tts-speed" => {
@@ -64,6 +77,10 @@ fn parse_args() -> AppArgs {
         socket,
         silero_model,
         whisper_model,
+        tts_engine,
+        kokoro_model,
+        kokoro_voices,
+        sherpa_model_dir,
         use_sine_tts,
         tts_voice,
         tts_speed,
@@ -213,20 +230,85 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_stt_config(stt_config);
     }
 
-    let tts_config = if args.use_sine_tts {
-        log::info!("TTS configured to use Sine test tone");
-        TtsConfig::new(TtsBackend::Sine)
+    let tts_engine_choice = args.tts_engine.as_deref().unwrap_or(if args.use_sine_tts {
+        "sine"
     } else {
-        let mut cfg = TtsConfig::default();
-        if let Some(ref voice) = args.tts_voice {
-            cfg.voice = voice.clone();
+        "system"
+    });
+
+    let backend = match tts_engine_choice.to_lowercase().as_str() {
+        "sine" => {
+            log::info!("TTS backend: Sine test tone");
+            TtsBackend::Sine
         }
-        if let Some(speed) = args.tts_speed {
-            cfg.speed = speed;
+        "system" => {
+            log::info!("TTS backend: System TTS");
+            TtsBackend::System
         }
-        log::info!("TTS configured with voice='{}' speed={}", cfg.voice, cfg.speed);
-        cfg
+        #[cfg(feature = "kokoro")]
+        "kokoro" => {
+            let model_path = resolve_model_path(
+                args.kokoro_model.clone(),
+                "kokoro-v1.0.onnx",
+                "hexgrad/Kokoro-82M",
+                "kokoro-v1.0.onnx",
+                args.auto_download,
+                &models_dir,
+            )?;
+            let voices_path = resolve_model_path(
+                args.kokoro_voices.clone(),
+                "voices.bin",
+                "hexgrad/Kokoro-82M",
+                "voices.bin",
+                args.auto_download,
+                &models_dir,
+            )?;
+            log::info!(
+                "TTS backend: Kokoro (model={}, voices={})",
+                model_path.display(),
+                voices_path.display()
+            );
+            TtsBackend::Kokoro {
+                model: model_path,
+                voices: voices_path,
+            }
+        }
+        #[cfg(not(feature = "kokoro"))]
+        "kokoro" => {
+            return Err("Kokoro TTS requested, but handlr was built without '--features kokoro'. Recompile with --features kokoro.".into());
+        }
+        #[cfg(feature = "sherpa-kokoro")]
+        "sherpa-kokoro" | "sherpa" => {
+            let model_dir = if let Some(dir) = args.sherpa_model_dir.clone() {
+                PathBuf::from(dir)
+            } else {
+                models_dir.join("sherpa-kokoro")
+            };
+            log::info!(
+                "TTS backend: Sherpa Kokoro (model_dir={})",
+                model_dir.display()
+            );
+            TtsBackend::SherpaKokoro {
+                model_dir,
+            }
+        }
+        #[cfg(not(feature = "sherpa-kokoro"))]
+        "sherpa-kokoro" | "sherpa" => {
+            return Err("Sherpa Kokoro TTS requested, but handlr was built without '--features sherpa-kokoro'. Recompile with --features sherpa-kokoro.".into());
+        }
+        unknown => {
+            return Err(format!("Unknown TTS engine: '{}'. Valid options: system, sine, kokoro, sherpa-kokoro", unknown).into());
+        }
     };
+
+    let mut tts_config = TtsConfig::new(backend);
+    if let Some(ref voice) = args.tts_voice {
+        tts_config.voice = voice.clone();
+    }
+    if let Some(speed) = args.tts_speed {
+        tts_config.speed = speed;
+    }
+    log::info!("TTS configured with voice='{}' speed={}", tts_config.voice, tts_config.speed);
     builder = builder.with_tts_config(tts_config);
     let mute_atomic = Arc::new(std::sync::atomic::AtomicBool::new(false));
     builder = builder.with_mute_flag(Arc::clone(&mute_atomic));
