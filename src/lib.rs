@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod reasoning;
 pub mod transport;
+pub mod watch;
 
 pub use commands::{
     confirmation_match_candidates, normalize_command_for_match, parse_confirmation_request,
@@ -15,3 +16,4 @@ pub use reasoning::{
     ReasoningEngine, ToolExecutor,
 };
 pub use transport::HerdrClient;
+pub use watch::WatchRegistry;

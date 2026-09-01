@@ -178,6 +178,21 @@ impl FocusParams {
     }
 }
 
+/// Parameters for the `watch_pane` and `unwatch_pane` tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct WatchPaneParams {
+    /// Target pane ID to start or stop watching (e.g. "w1:p6", "p6").
+    pub pane_id: String,
+}
+
+impl WatchPaneParams {
+    pub fn new(pane_id: impl Into<String>) -> Self {
+        Self {
+            pane_id: pane_id.into(),
+        }
+    }
+}
+
 /// Construct the full list of Gemini tool declarations for `herdr` orchestration.
 pub fn declare_gemini_tools() -> Vec<Tool> {
     vec![Tool::with_functions(vec![
@@ -193,6 +208,18 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
             None,
         )
         .with_parameters::<RunCommandParams>(),
+        FunctionDeclaration::new(
+            "watch_pane",
+            "Start watching a pane so the user is told out loud when the agent there needs input or finishes its task. Use when the user asks to be notified about, watched, or told about a pane or agent.",
+            None,
+        )
+        .with_parameters::<WatchPaneParams>(),
+        FunctionDeclaration::new(
+            "unwatch_pane",
+            "Stop watching a pane, ending spoken notifications about the agent in it.",
+            None,
+        )
+        .with_parameters::<WatchPaneParams>(),
     ])]
 }
 
@@ -222,7 +249,8 @@ mod tests {
         let prompt = default_system_prompt().expect("should extract system prompt from PROMPT.md");
         assert!(prompt.contains("reasoning engine for `handlr`"));
         assert!(prompt.contains("RAG-Based Environment Context"));
-        assert!(prompt.contains("Action Tools (`focus`, `run_command`)"));
+        assert!(prompt.contains("Action Tools (`focus`, `run_command`"));
+        assert!(prompt.contains("`watch_pane(pane_id)`"));
         assert!(prompt.contains("Rules for Commands & Vocal Confirmation"));
         assert!(prompt.contains("Voice Output Guidelines"));
         assert!(!prompt.contains("<system_prompt>"));
@@ -248,14 +276,16 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 2);
+        assert_eq!(decls.len(), 4);
 
         let names: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
             vec![
                 "focus",
-                "run_command"
+                "run_command",
+                "watch_pane",
+                "unwatch_pane"
             ]
         );
     }
@@ -417,6 +447,7 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 2);
+        assert_eq!(decls.len(), 4);
+        assert!(decls.iter().any(|d| d.name == "watch_pane"));
     }
 }

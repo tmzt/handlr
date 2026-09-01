@@ -16,6 +16,7 @@ pub use libherdr::{
 
 use crate::commands::{confirmation_match_candidates, validate_arbitrary_command};
 use crate::config::AgentConfig;
+use crate::watch::WatchRegistry;
 use libconversate::VoiceState;
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ pub struct HerdrToolExecutor {
     pub client: HerdrClient,
     pub agents: Vec<AgentConfig>,
     pub voice_state: Option<Arc<VoiceState>>,
+    pub watches: Option<Arc<WatchRegistry>>,
 }
 
 impl HerdrToolExecutor {
@@ -32,6 +34,7 @@ impl HerdrToolExecutor {
             client,
             agents,
             voice_state: None,
+            watches: None,
         }
     }
 
@@ -39,81 +42,158 @@ impl HerdrToolExecutor {
         self.voice_state = Some(voice_state);
         self
     }
+
+    pub fn with_watches(mut self, watches: Arc<WatchRegistry>) -> Self {
+        self.watches = Some(watches);
+        self
+    }
+
+    /// Handle the local `watch_pane` / `unwatch_pane` tools.
+    ///
+    /// These touch no herdr state — they only decide which panes the event
+    /// subscription covers — but the pane id is canonicalized against the live
+    /// snapshot first, because herdr matches subscriptions by exact id and a
+    /// watch registered as "p6" would silently never fire.
+    async fn execute_watch_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let Some(ref watches) = self.watches else {
+            return Err("Pane watching is not available in this session.".to_string());
+        };
+        let requested = args
+            .get("pane_id")
+            .or_else(|| args.get("target_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if requested.is_empty() {
+            return Err(format!("'{name}' requires a 'pane_id'."));
+        }
+
+        let resolved = match self.client.list_panes().await {
+            Ok(snapshot) => resolve_pane_id(&snapshot, requested),
+            Err(e) => {
+                log::warn!("Could not resolve pane '{requested}' for {name}: {e}");
+                None
+            }
+        };
+        let Some(pane_id) = resolved else {
+            return Err(format!(
+                "No pane matching '{requested}' exists in the current herdr session."
+            ));
+        };
+
+        if name == "watch_pane" {
+            let added = watches.watch(&pane_id);
+            log::info!("watch_pane '{pane_id}' (newly added: {added})");
+            Ok(serde_json::json!({
+                "pane_id": pane_id,
+                "watching": true,
+                "already_watching": !added,
+                "watched_panes": watches.watched(),
+            }))
+        } else {
+            let removed = watches.unwatch(&pane_id);
+            log::info!("unwatch_pane '{pane_id}' (was watching: {removed})");
+            Ok(serde_json::json!({
+                "pane_id": pane_id,
+                "watching": false,
+                "was_watching": removed,
+                "watched_panes": watches.watched(),
+            }))
+        }
+    }
+}
+
+/// Unwrap the session snapshot from whatever envelope it arrived in.
+fn snapshot_root(snapshot: &serde_json::Value) -> &serde_json::Value {
+    snapshot
+        .get("result")
+        .and_then(|r| r.get("snapshot").or(Some(r)))
+        .or_else(|| snapshot.get("snapshot"))
+        .unwrap_or(snapshot)
+}
+
+/// Collect every pane object in a session snapshot, from both the flat `panes`
+/// list and the nested workspaces -> tabs -> panes hierarchy.
+fn collect_panes(snapshot: &serde_json::Value) -> Vec<&serde_json::Value> {
+    let root = snapshot_root(snapshot);
+    let mut panes = Vec::new();
+
+    if let Some(flat) = root.get("panes").and_then(|p| p.as_array()) {
+        panes.extend(flat.iter());
+    }
+    if let Some(workspaces) = root.get("workspaces").and_then(|w| w.as_array()) {
+        for ws in workspaces {
+            if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
+                for tab in tabs {
+                    if let Some(tab_panes) = tab.get("panes").and_then(|p| p.as_array()) {
+                        panes.extend(tab_panes.iter());
+                    }
+                }
+            }
+            if let Some(ws_panes) = ws.get("panes").and_then(|p| p.as_array()) {
+                panes.extend(ws_panes.iter());
+            }
+        }
+    }
+    panes
+}
+
+/// Whether a pane object is the one the caller meant, tolerating the short
+/// (`p6`) and fully-qualified (`w1:p6`) spellings of an id.
+fn pane_matches(pane: &serde_json::Value, target: &str) -> bool {
+    pane.get("pane_id")
+        .and_then(|id| id.as_str())
+        .is_some_and(|pid| crate::watch::pane_ids_match(pid, target))
+}
+
+/// Resolve a pane id to the fully-qualified form herdr uses (`w1:p6`).
+///
+/// Event subscriptions are matched by exact pane id server-side, so a watch
+/// registered as "p6" would silently never fire.
+pub fn resolve_pane_id(snapshot: &serde_json::Value, target: &str) -> Option<String> {
+    let clean = target.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    collect_panes(snapshot)
+        .into_iter()
+        .find(|pane| pane_matches(pane, clean))
+        .and_then(|pane| pane.get("pane_id"))
+        .and_then(|id| id.as_str())
+        .map(|id| id.to_string())
 }
 
 /// Extracts the lowercased agent name for a target pane from Herdr's session snapshot.
 pub fn extract_agent_name_for_pane(snapshot: &serde_json::Value, target_pane_id: &str) -> String {
     let clean_target = target_pane_id.trim();
 
-    // Unwrap if wrapped in JSON-RPC result or snapshot key
-    let snap_obj = snapshot
-        .get("result")
-        .and_then(|r| r.get("snapshot").or(Some(r)))
-        .or_else(|| snapshot.get("snapshot"))
-        .unwrap_or(snapshot);
-
-    let get_agent_from_pane = |pane: &serde_json::Value| -> Option<String> {
-        let pid = pane.get("pane_id").and_then(|id| id.as_str())?;
-        if pid == clean_target
-            || pid.ends_with(&format!(":{}", clean_target))
-            || clean_target.ends_with(&format!(":{}", pid))
-        {
-            if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
+    for pane in collect_panes(snapshot) {
+        if !pane_matches(pane, clean_target) {
+            continue;
+        }
+        if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
+            let lower = agent.trim().to_lowercase();
+            if !lower.is_empty() {
+                return lower;
+            }
+        }
+        if let Some(extra) = pane.get("extra").and_then(|e| e.as_object()) {
+            if let Some(agent) = extra.get("agent").and_then(|a| a.as_str()) {
                 let lower = agent.trim().to_lowercase();
                 if !lower.is_empty() {
-                    return Some(lower);
-                }
-            }
-            if let Some(extra) = pane.get("extra").and_then(|e| e.as_object()) {
-                if let Some(agent) = extra.get("agent").and_then(|a| a.as_str()) {
-                    let lower = agent.trim().to_lowercase();
-                    if !lower.is_empty() {
-                        return Some(lower);
-                    }
-                }
-            }
-            if let Some(title) = pane.get("terminal_title").and_then(|t| t.as_str()) {
-                let lower_title = title.to_lowercase();
-                if lower_title.contains("claude") {
-                    return Some("claude".to_string());
-                } else if lower_title.contains("omp") {
-                    return Some("omp".to_string());
-                } else if lower_title.contains("agy") {
-                    return Some("agy".to_string());
+                    return lower;
                 }
             }
         }
-        None
-    };
-
-    // 1. Check flat panes list from session.snapshot
-    if let Some(panes) = snap_obj.get("panes").and_then(|p| p.as_array()) {
-        for pane in panes {
-            if let Some(agent) = get_agent_from_pane(pane) {
-                return agent;
-            }
-        }
-    }
-
-    // 2. Check nested workspaces -> tabs -> panes
-    if let Some(workspaces) = snap_obj.get("workspaces").and_then(|w| w.as_array()) {
-        for ws in workspaces {
-            if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
-                for tab in tabs {
-                    if let Some(panes) = tab.get("panes").and_then(|p| p.as_array()) {
-                        for pane in panes {
-                            if let Some(agent) = get_agent_from_pane(pane) {
-                                return agent;
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(panes) = ws.get("panes").and_then(|p| p.as_array()) {
-                for pane in panes {
-                    if let Some(agent) = get_agent_from_pane(pane) {
-                        return agent;
-                    }
+        if let Some(title) = pane.get("terminal_title").and_then(|t| t.as_str()) {
+            let lower_title = title.to_lowercase();
+            for known in ["claude", "omp", "agy"] {
+                if lower_title.contains(known) {
+                    return known.to_string();
                 }
             }
         }
@@ -129,6 +209,9 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        if name == "watch_pane" || name == "unwatch_pane" {
+            return self.execute_watch_tool(name, args).await;
+        }
         if name == "run_command" || name == "send_command" {
             let cmd = args
                 .get("command")
@@ -220,11 +303,21 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
 pub struct HerdrContextContributor {
     pub client: HerdrClient,
     pub agents: Vec<AgentConfig>,
+    pub watches: Option<Arc<WatchRegistry>>,
 }
 
 impl HerdrContextContributor {
     pub fn new(client: HerdrClient, agents: Vec<AgentConfig>) -> Self {
-        Self { client, agents }
+        Self {
+            client,
+            agents,
+            watches: None,
+        }
+    }
+
+    pub fn with_watches(mut self, watches: Arc<WatchRegistry>) -> Self {
+        self.watches = Some(watches);
+        self
     }
 }
 
@@ -417,6 +510,22 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                 ));
             }
             content.push_str("\n");
+        }
+
+        if let Some(ref watches) = self.watches {
+            let watched = watches.watched();
+            content.push_str("### Watched Panes\n");
+            if watched.is_empty() {
+                content.push_str(
+                    "No panes are being watched. Use `watch_pane` when the user asks to be \
+                     notified when an agent needs input or finishes.\n\n",
+                );
+            } else {
+                content.push_str(&format!(
+                    "Announcing status changes for: {}. Use `unwatch_pane` to stop.\n\n",
+                    watched.join(", ")
+                ));
+            }
         }
 
         // 4. Inject as a system instruction/turn
@@ -672,6 +781,81 @@ mod tests {
             )
             .await;
         assert!(replay.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_watch_and_unwatch_pane_tools() {
+        let watches = Arc::new(WatchRegistry::new());
+        let executor = HerdrToolExecutor::new(HerdrClient::mock(), vec![])
+            .with_watches(Arc::clone(&watches));
+
+        let res = executor
+            .execute_tool("watch_pane", &json!({ "pane_id": "p1" }))
+            .await
+            .expect("watch_pane should succeed");
+        assert_eq!(res["pane_id"], "p1");
+        assert_eq!(res["watching"], true);
+        assert_eq!(res["already_watching"], false);
+        assert!(watches.is_watched("p1"));
+
+        // Watching again is reported as a no-op rather than an error.
+        let again = executor
+            .execute_tool("watch_pane", &json!({ "pane_id": "p1" }))
+            .await
+            .expect("second watch_pane should succeed");
+        assert_eq!(again["already_watching"], true);
+
+        let off = executor
+            .execute_tool("unwatch_pane", &json!({ "pane_id": "p1" }))
+            .await
+            .expect("unwatch_pane should succeed");
+        assert_eq!(off["watching"], false);
+        assert_eq!(off["was_watching"], true);
+        assert!(watches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_watch_pane_rejects_unknown_and_missing_panes() {
+        let watches = Arc::new(WatchRegistry::new());
+        let executor = HerdrToolExecutor::new(HerdrClient::mock(), vec![])
+            .with_watches(Arc::clone(&watches));
+
+        // A pane herdr does not know about would subscribe to nothing.
+        let err = executor
+            .execute_tool("watch_pane", &json!({ "pane_id": "p999" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("No pane matching"), "got: {err}");
+
+        let err = executor
+            .execute_tool("watch_pane", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("requires a 'pane_id'"), "got: {err}");
+        assert!(watches.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_watch_tools_unavailable_without_registry() {
+        let executor = HerdrToolExecutor::new(HerdrClient::mock(), vec![]);
+        let err = executor
+            .execute_tool("watch_pane", &json!({ "pane_id": "p1" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not available"), "got: {err}");
+    }
+
+    #[test]
+    fn test_resolve_pane_id_canonicalizes() {
+        let snap = json!({"snapshot": {"panes": [
+            {"pane_id": "w1:p6", "agent": "claude"},
+            {"pane_id": "w1:p1", "agent": "agy"}
+        ]}});
+        assert_eq!(resolve_pane_id(&snap, "p6").as_deref(), Some("w1:p6"));
+        assert_eq!(resolve_pane_id(&snap, "w1:p6").as_deref(), Some("w1:p6"));
+        assert_eq!(resolve_pane_id(&snap, "  P1 ").as_deref(), Some("w1:p1"));
+        assert_eq!(resolve_pane_id(&snap, "p9"), None);
+        assert_eq!(resolve_pane_id(&snap, ""), None);
     }
 
     #[tokio::test]
