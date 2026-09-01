@@ -9,6 +9,7 @@ use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig, HerdrToolE
 use libconversate::stt::{SttBackend, SttConfig, SttMode};
 use libconversate::tts::{TtsConfig, TtsBackend};
 use libconversate::s2s::SpeechToSpeechBuilder;
+use libconversate::VoiceState;
 
 #[allow(dead_code)]
 struct AppArgs {
@@ -408,8 +409,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tts_config.speed = speed;
     log::info!("TTS configured with voice='{}' speed={}", tts_config.voice, tts_config.speed);
     builder = builder.with_tts_config(tts_config);
-    let mute_atomic = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    builder = builder.with_mute_flag(Arc::clone(&mute_atomic));
+    let voice_state = Arc::new(VoiceState::default());
+    builder = builder.with_voice_state(Arc::clone(&voice_state));
 
     // Initialize Session Manager
     let session_manager = SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
@@ -418,24 +419,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
-    let confirmation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let conf_for_proc = Arc::clone(&confirmation_flag);
-    let mute_for_proc = Arc::clone(&mute_atomic);
+    let vs_for_proc = Arc::clone(&voice_state);
     let pipeline = builder
-        .with_confirmation_flag(Arc::clone(&confirmation_flag))
         .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
             let engine = Arc::clone(&reasoning_engine);
             let manager = session_manager.clone();
             let sid = session_id.clone();
-            let proc_mute = Arc::clone(&mute_for_proc);
-            let proc_conf = Arc::clone(&conf_for_proc);
+            let vs = Arc::clone(&vs_for_proc);
             let allowed_cmds = allowed_commands.clone();
             Box::pin(async move {
                 // Instantly mute mic while reasoning & generating response
-                proc_mute.store(true, std::sync::atomic::Ordering::SeqCst);
+                vs.set_muted(true);
                 // Reset confirmation mode for the incoming turn
-                proc_conf.store(false, std::sync::atomic::Ordering::SeqCst);
+                vs.set_confirmation_mode(false);
                 log::info!("Received transcript: '{}'", transcript);
 
                 // Append the user turn to session history
@@ -474,7 +471,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 || reply.to_lowercase().contains("are you sure");
                             if is_asking_conf {
                                 log::info!("Enabling vocal confirmation mode (bypassing too-short VAD rejection)");
-                                proc_conf.store(true, std::sync::atomic::Ordering::SeqCst);
+                                vs.set_confirmation_mode(true);
                             }
 
                             // Append model turn to session history
@@ -505,9 +502,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 5. Start audio capture stream (with atomic hardware muting)
     log::info!("Starting CPAL microphone audio capture...");
-    let mute_for_capture = Arc::clone(&mute_atomic);
+    let vs_for_capture = Arc::clone(&voice_state);
     let _capture = CpalCapture::start_with_processor(move |samples| {
-        if mute_for_capture.load(std::sync::atomic::Ordering::Relaxed) {
+        if vs_for_capture.is_muted() {
             return;
         }
         ensure_audio_ring().push_samples(samples);
