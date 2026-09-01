@@ -93,47 +93,62 @@ fn download_model(repo_id: &str, repo_filename: &str, dest_path: &Path) -> Resul
     let dest_dir = dest_path.parent().ok_or("No parent dir for dest path")?;
     std::fs::create_dir_all(dest_dir)?;
 
-    let python_code = format!(
-        "from huggingface_hub import hf_hub_download; import shutil, os; \
-         path = hf_hub_download(repo_id='{}', filename='{}'); \
-         shutil.copy(path, '{}')",
-        repo_id,
-        repo_filename,
-        dest_path.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'")
-    );
+    let url = format!("https://huggingface.co/{repo_id}/resolve/main/{repo_filename}");
+    log::info!("Downloading {} from {} via reqwest...", repo_filename, url);
 
-    log::info!("Running python downloader for {}...", repo_filename);
-    let status = std::process::Command::new("python3")
-        .arg("-c")
-        .arg(&python_code)
-        .status()?;
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("handlr/0.1.0")
+        .build()?;
+    let mut resp = client.get(&url).send()?.error_for_status()?;
 
-    if !status.success() {
-        return Err(format!("Python download process exited with error status: {}", status).into());
-    }
+    let temp_path = dest_path.with_extension("downloading");
+    let mut file = std::fs::File::create(&temp_path)?;
+    std::io::copy(&mut resp, &mut file)?;
+    file.sync_all()?;
+    std::fs::rename(temp_path, dest_path)?;
 
+    log::info!("Successfully downloaded {}", dest_path.display());
     Ok(())
 }
 
 fn download_sherpa_bundle(dest_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dest_dir)?;
 
-    let python_code = format!(
-        "from huggingface_hub import snapshot_download; \
-         snapshot_download('csukuangfj/kokoro-en-v0_19', local_dir='{}')",
-        dest_dir.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'")
-    );
+    let url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2";
+    log::info!("Downloading Sherpa Kokoro bundle from {} via reqwest...", url);
 
-    log::info!("Running python snapshot downloader for Sherpa Kokoro bundle...");
-    let status = std::process::Command::new("python3")
-        .arg("-c")
-        .arg(&python_code)
-        .status()?;
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("handlr/0.1.0")
+        .build()?;
+    let resp = client.get(url).send()?.error_for_status()?;
 
-    if !status.success() {
-        return Err(format!("Python download process exited with error status: {}", status).into());
+    let decompressor = bzip2::read::BzDecoder::new(resp);
+    let mut archive = tar::Archive::new(decompressor);
+
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+
+        // Strip top-level directory (e.g. `kokoro-en-v0_19/...`)
+        let mut components = path.components();
+        let _root = components.next();
+        let sub_path = components.as_path();
+        if sub_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let out_path = dest_dir.join(sub_path);
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&out_path)?;
+        } else {
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            entry.unpack(&out_path)?;
+        }
     }
 
+    log::info!("Successfully unpacked Sherpa Kokoro bundle to {}", dest_dir.display());
     Ok(())
 }
 
