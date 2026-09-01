@@ -108,7 +108,7 @@ impl HerdrToolExecutor {
 }
 
 /// Unwrap the session snapshot from whatever envelope it arrived in.
-fn snapshot_root(snapshot: &serde_json::Value) -> &serde_json::Value {
+pub(crate) fn snapshot_root(snapshot: &serde_json::Value) -> &serde_json::Value {
     snapshot
         .get("result")
         .and_then(|r| r.get("snapshot").or(Some(r)))
@@ -118,7 +118,7 @@ fn snapshot_root(snapshot: &serde_json::Value) -> &serde_json::Value {
 
 /// Collect every pane object in a session snapshot, from both the flat `panes`
 /// list and the nested workspaces -> tabs -> panes hierarchy.
-fn collect_panes(snapshot: &serde_json::Value) -> Vec<&serde_json::Value> {
+pub(crate) fn collect_panes(snapshot: &serde_json::Value) -> Vec<&serde_json::Value> {
     let root = snapshot_root(snapshot);
     let mut panes = Vec::new();
 

@@ -435,6 +435,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     log::info!("Building Speech-to-Speech Pipeline...");
     let vs_for_proc = Arc::clone(&voice_state);
     let watches_for_proc = Arc::clone(&watches);
+    // Kept out of the processor closure, which takes ownership of its clone.
+    let client_for_watch = Arc::clone(&herdr_client);
     let pipeline = builder
         .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
@@ -576,6 +578,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // body — the pipeline is an Arc precisely so the task can hold the speaker.
     let _watch_task = tokio::spawn(run_agent_watch(
         herdr_transport.clone(),
+        client_for_watch,
         Arc::clone(&watches),
         Arc::clone(&voice_state),
         pipeline.tts_handle(),

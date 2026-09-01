@@ -21,6 +21,7 @@ use libconversate::VoiceState;
 use libherdr::events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
 use libherdr::protocol::AgentStatus;
 use libherdr::transport::HerdrTransport;
+use libherdr::client::HerdrClient;
 
 use crate::watch::WatchRegistry;
 
@@ -56,24 +57,26 @@ impl Announcer {
         Self::default()
     }
 
-    /// Record a status change and queue an announcement if it is worth saying.
+    /// Record a status change and report whether it is worth announcing.
     ///
-    /// Only transitions *into* `blocked` or `done` are announced, and only when
-    /// the status actually changed — herdr re-reports a status on reconnect and
-    /// on unrelated pane updates, which would otherwise repeat the notice.
-    pub fn observe(&mut self, event: &PaneAgentStatusChanged) {
-        let previous = self.last_status.insert(event.pane_id.clone(), event.agent_status.clone());
+    /// Only transitions *into* `blocked` or `done` qualify, and only when the
+    /// status actually changed — herdr re-reports a status on reconnect and on
+    /// unrelated pane updates, which would otherwise repeat the notice.
+    ///
+    /// Naming the agent is deliberately not done here: the caller resolves it
+    /// against the live session so a notice only says as much as it must.
+    pub fn note(&mut self, event: &PaneAgentStatusChanged) -> Option<AgentStatus> {
+        let previous = self
+            .last_status
+            .insert(event.pane_id.clone(), event.agent_status.clone());
         if previous.as_ref() == Some(&event.agent_status) {
-            return;
+            return None;
         }
-        let label = event.agent_label();
-        let sentence = match event.agent_status {
-            AgentStatus::Blocked => format!("{label} needs your input."),
-            AgentStatus::Done => format!("{label} finished."),
+        match event.agent_status {
+            AgentStatus::Blocked | AgentStatus::Done => Some(event.agent_status.clone()),
             // Working / Idle / Unknown are normal churn, not notifications.
-            _ => return,
-        };
-        self.queue(sentence);
+            _ => None,
+        }
     }
 
     /// Queue a sentence to be spoken when the voice channel is free.
@@ -107,12 +110,43 @@ impl Announcer {
     }
 }
 
+/// The sentence announcing `status` for an agent named `name`.
+pub fn announcement(status: &AgentStatus, name: &str) -> Option<String> {
+    match status {
+        AgentStatus::Blocked => Some(format!("{name} needs your input.")),
+        AgentStatus::Done => Some(format!("{name} finished.")),
+        _ => None,
+    }
+}
+
 /// Speak everything the announcer is willing to release right now.
 fn drain(announcer: &mut Announcer, voice: &VoiceState, tts: &TtsSpeaker) {
     while let Some(sentence) = announcer.take_speakable(voice.is_confirmation_active()) {
         log::info!("Announcing: {sentence}");
         // barge = false: queue behind the current utterance, never preempt it.
         tts.speak(TTS_SESSION, &sentence, false);
+    }
+}
+
+/// Name the agent in `change` as briefly as the current session allows.
+///
+/// Falls back to the name carried on the event itself when the snapshot cannot
+/// be read — a less precise notice beats a silent one.
+async fn resolve_display_name(client: &HerdrClient, change: &PaneAgentStatusChanged) -> String {
+    let snapshot = match client.list_panes().await {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            log::warn!("Could not read snapshot to name the agent: {e}");
+            return change.agent_label();
+        }
+    };
+    let peers = agent_identities(&snapshot);
+    match peers.iter().find(|p| p.pane_id == change.pane_id) {
+        Some(target) => speakable_name(target, &peers),
+        None => {
+            log::debug!("Pane {} not in snapshot; naming from the event", change.pane_id);
+            change.agent_label()
+        }
     }
 }
 
@@ -123,6 +157,7 @@ fn drain(announcer: &mut Announcer, voice: &VoiceState, tts: &TtsSpeaker) {
 /// can only be changed by opening a new one) and when herdr hangs up.
 pub async fn run_agent_watch(
     transport: HerdrTransport,
+    client: Arc<HerdrClient>,
     registry: Arc<WatchRegistry>,
     voice: Arc<VoiceState>,
     tts: Arc<TtsSpeaker>,
@@ -172,7 +207,16 @@ pub async fn run_agent_watch(
                                 "Agent status change: pane={} agent={:?} status={:?}",
                                 change.pane_id, change.agent, change.agent_status
                             );
-                            announcer.observe(&change);
+                            if let Some(status) = announcer.note(&change) {
+                                // Resolved per announcement rather than cached:
+                                // panes and projects come and go, and how much
+                                // of a name is needed depends on what else is
+                                // running right now.
+                                let name = resolve_display_name(&client, &change).await;
+                                if let Some(sentence) = announcement(&status, &name) {
+                                    announcer.queue(sentence);
+                                }
+                            }
                             drain(&mut announcer, &voice, &tts);
                         }
                     }
@@ -207,9 +251,160 @@ pub async fn run_agent_watch(
     }
 }
 
+// ── Naming an agent out loud ────────────────────────────────────────────
+
+/// One agent that could be named in an announcement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentIdentity {
+    pub pane_id: String,
+    /// Agent name as spoken (e.g. "Claude").
+    pub agent: String,
+    /// Project the pane sits in — the workspace label, or the working
+    /// directory's basename when the workspace is unlabelled.
+    pub project: Option<String>,
+}
+
+/// Capitalize a name for speech; agent and project names are proper nouns here.
+fn speech_case(raw: &str) -> String {
+    let trimmed = raw.trim();
+    let mut chars = trimmed.chars();
+    match chars.next() {
+        Some(first) if first.is_lowercase() => first.to_uppercase().collect::<String>() + chars.as_str(),
+        _ => trimmed.to_string(),
+    }
+}
+
+/// Read every agent-bearing pane out of a session snapshot, resolving each
+/// pane's project from its workspace label (falling back to the cwd basename).
+pub fn agent_identities(snapshot: &serde_json::Value) -> Vec<AgentIdentity> {
+    let root = crate::transport::snapshot_root(snapshot);
+
+    let mut labels: HashMap<String, String> = HashMap::new();
+    if let Some(workspaces) = root.get("workspaces").and_then(|w| w.as_array()) {
+        for ws in workspaces {
+            let id = ws.get("workspace_id").and_then(|v| v.as_str());
+            let label = ws
+                .get("label")
+                .or_else(|| ws.get("name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let (Some(id), Some(label)) = (id, label) {
+                labels.insert(id.to_string(), label.to_string());
+            }
+        }
+    }
+
+    let mut identities = Vec::new();
+    for pane in crate::transport::collect_panes(snapshot) {
+        let Some(pane_id) = pane.get("pane_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let agent = pane
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(agent) = agent else { continue };
+
+        let project = pane
+            .get("workspace_id")
+            .and_then(|v| v.as_str())
+            .and_then(|ws| labels.get(ws).cloned())
+            .or_else(|| {
+                // Unlabelled workspace: the repo directory names it well enough.
+                pane.get("cwd")
+                    .and_then(|v| v.as_str())
+                    .and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            });
+
+        // herdr reports panes both flat and nested under workspaces -> tabs.
+        // Keyed on pane_id, not the whole record: the two copies can carry
+        // different detail, and a pane counted twice would look like a peer of
+        // itself and push every name to its most verbose form.
+        if identities.iter().any(|i: &AgentIdentity| i.pane_id == pane_id) {
+            continue;
+        }
+        identities.push(AgentIdentity {
+            pane_id: pane_id.to_string(),
+            agent: speech_case(agent),
+            project: project.as_deref().map(speech_case),
+        });
+    }
+    identities
+}
+
+/// Shortest phrase that unambiguously names `target` among `peers`.
+///
+/// Escalates only as far as it has to:
+///   1. `"Claude"` — no other agent shares the name.
+///   2. `"Highbay agent"` — the name is shared, but the project is not, so the
+///      project identifies the pane and repeating the agent adds nothing.
+///   3. `"Claude in Highbay"` — neither alone is unique.
+///   4. `"Claude in Highbay, pane 6"` — same agent and project on two panes.
+pub fn speakable_name(target: &AgentIdentity, peers: &[AgentIdentity]) -> String {
+    let others: Vec<&AgentIdentity> = peers
+        .iter()
+        .filter(|p| p.pane_id != target.pane_id)
+        .collect();
+
+    let agent_is_unique = !others
+        .iter()
+        .any(|p| p.agent.eq_ignore_ascii_case(&target.agent));
+    if agent_is_unique {
+        return target.agent.clone();
+    }
+
+    let Some(project) = target.project.as_deref() else {
+        // Nothing to disambiguate with; fall back to the pane.
+        return format!("{} in {}", target.agent, spoken_pane(&target.pane_id));
+    };
+
+    let project_is_unique = !others.iter().any(|p| {
+        p.project
+            .as_deref()
+            .is_some_and(|other| other.eq_ignore_ascii_case(project))
+    });
+    if project_is_unique {
+        return format!("{project} agent");
+    }
+
+    let combination_is_unique = !others.iter().any(|p| {
+        p.agent.eq_ignore_ascii_case(&target.agent)
+            && p.project
+                .as_deref()
+                .is_some_and(|other| other.eq_ignore_ascii_case(project))
+    });
+    if combination_is_unique {
+        return format!("{} in {}", target.agent, project);
+    }
+
+    format!(
+        "{} in {}, {}",
+        target.agent,
+        project,
+        spoken_pane(&target.pane_id)
+    )
+}
+
+/// Render a pane id for speech: `w1:p6` -> `pane 6`.
+fn spoken_pane(pane_id: &str) -> String {
+    let short = pane_id.rsplit(':').next().unwrap_or(pane_id);
+    let digits = short.trim_start_matches(|c: char| !c.is_ascii_digit());
+    if digits.is_empty() {
+        format!("pane {short}")
+    } else {
+        format!("pane {digits}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn change(pane: &str, agent: &str, status: AgentStatus) -> PaneAgentStatusChanged {
         PaneAgentStatusChanged {
@@ -222,59 +417,75 @@ mod tests {
         }
     }
 
+    fn identity(pane: &str, agent: &str, project: Option<&str>) -> AgentIdentity {
+        AgentIdentity {
+            pane_id: pane.to_string(),
+            agent: agent.to_string(),
+            project: project.map(str::to_string),
+        }
+    }
+
+    // ── what is worth announcing ──
+
     #[test]
-    fn test_announces_blocked_and_done_only() {
+    fn test_notes_blocked_and_done_only() {
         let mut a = Announcer::new();
-        a.observe(&change("w1:p6", "claude", AgentStatus::Working));
-        a.observe(&change("w1:p6", "claude", AgentStatus::Idle));
-        assert_eq!(a.pending_count(), 0, "routine churn is not announced");
-
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
+        assert_eq!(a.note(&change("w1:p6", "claude", AgentStatus::Working)), None);
+        assert_eq!(a.note(&change("w1:p6", "claude", AgentStatus::Idle)), None);
         assert_eq!(
-            a.take_speakable(false).as_deref(),
-            Some("claude needs your input.")
+            a.note(&change("w1:p6", "claude", AgentStatus::Blocked)),
+            Some(AgentStatus::Blocked)
         );
-
-        a.observe(&change("w1:p6", "claude", AgentStatus::Done));
-        assert_eq!(a.take_speakable(false).as_deref(), Some("claude finished."));
+        assert_eq!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Done)),
+            Some(AgentStatus::Done)
+        );
     }
 
     #[test]
-    fn test_repeated_status_is_announced_once() {
+    fn test_repeated_status_is_noted_once() {
         let mut a = Announcer::new();
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
-        assert_eq!(a.pending_count(), 1);
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_none());
 
-        // Leaving and re-entering the state does announce again.
-        a.observe(&change("w1:p6", "claude", AgentStatus::Working));
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
-        assert_eq!(a.pending_count(), 2);
+        // Leaving and re-entering the state does qualify again.
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Working)).is_none());
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
     }
 
     #[test]
     fn test_panes_are_tracked_independently() {
         let mut a = Announcer::new();
-        a.observe(&change("w1:p6", "claude", AgentStatus::Done));
-        a.observe(&change("w1:p1", "agy", AgentStatus::Done));
-        assert_eq!(a.take_speakable(false).as_deref(), Some("claude finished."));
-        assert_eq!(a.take_speakable(false).as_deref(), Some("agy finished."));
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Done)).is_some());
+        assert!(a.note(&change("w1:p1", "agy", AgentStatus::Done)).is_some());
     }
+
+    #[test]
+    fn test_announcement_wording() {
+        assert_eq!(
+            announcement(&AgentStatus::Blocked, "Claude").as_deref(),
+            Some("Claude needs your input.")
+        );
+        assert_eq!(
+            announcement(&AgentStatus::Done, "Highbay agent").as_deref(),
+            Some("Highbay agent finished.")
+        );
+        assert_eq!(announcement(&AgentStatus::Working, "Claude"), None);
+    }
+
+    // ── holding back while a confirmation is in flight ──
 
     #[test]
     fn test_held_back_while_confirmation_active() {
         let mut a = Announcer::new();
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
+        a.queue("Claude needs your input.".to_string());
 
-        // Mid-confirmation: nothing is released, and nothing is lost.
         assert_eq!(a.take_speakable(true), None);
-        assert_eq!(a.pending_count(), 1);
+        assert_eq!(a.pending_count(), 1, "nothing is lost while held");
 
-        // Gate clears: the announcement is spoken.
         assert_eq!(
             a.take_speakable(false).as_deref(),
-            Some("claude needs your input.")
+            Some("Claude needs your input.")
         );
         assert_eq!(a.pending_count(), 0);
     }
@@ -286,32 +497,125 @@ mod tests {
             a.queue(format!("notice {i}"));
         }
         assert_eq!(a.pending_count(), MAX_PENDING);
-        // The oldest were dropped, so the newest notice survives.
         assert_eq!(a.take_speakable(false).as_deref(), Some("notice 2"));
-    }
-
-    #[test]
-    fn test_display_name_preferred_for_speech() {
-        let mut ev = change("w1:p6", "claude", AgentStatus::Blocked);
-        ev.display_agent = Some("Claude".to_string());
-        let mut a = Announcer::new();
-        a.observe(&ev);
-        assert_eq!(
-            a.take_speakable(false).as_deref(),
-            Some("Claude needs your input.")
-        );
     }
 
     #[test]
     fn test_forget_allows_reannouncing() {
         let mut a = Announcer::new();
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
-        let _ = a.take_speakable(false);
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
-        assert_eq!(a.pending_count(), 0, "same status is still deduped");
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_none());
 
         a.forget("w1:p6");
-        a.observe(&change("w1:p6", "claude", AgentStatus::Blocked));
-        assert_eq!(a.pending_count(), 1, "after forget, it announces again");
+        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
+    }
+
+    // ── naming an agent out loud ──
+
+    #[test]
+    fn test_lone_agent_is_named_alone() {
+        let peers = vec![
+            identity("w1:p6", "Claude", Some("Handlr")),
+            identity("w1:p1", "Agy", Some("Handlr")),
+        ];
+        assert_eq!(speakable_name(&peers[0], &peers), "Claude");
+        assert_eq!(speakable_name(&peers[1], &peers), "Agy");
+    }
+
+    #[test]
+    fn test_two_claudes_in_different_projects_use_the_project() {
+        let peers = vec![
+            identity("w1:p6", "Claude", Some("Handlr")),
+            identity("w2:p1", "Claude", Some("Highbay")),
+        ];
+        assert_eq!(speakable_name(&peers[0], &peers), "Handlr agent");
+        assert_eq!(speakable_name(&peers[1], &peers), "Highbay agent");
+    }
+
+    #[test]
+    fn test_multiple_combinations_use_agent_in_project() {
+        // Claude appears twice, and Handlr holds two different agents, so
+        // neither half identifies the pane on its own.
+        let peers = vec![
+            identity("w1:p6", "Claude", Some("Handlr")),
+            identity("w1:p1", "Agy", Some("Handlr")),
+            identity("w2:p1", "Claude", Some("Highbay")),
+        ];
+        assert_eq!(speakable_name(&peers[0], &peers), "Claude in Handlr");
+        // Highbay holds only Claude, so the project alone still identifies it.
+        assert_eq!(speakable_name(&peers[2], &peers), "Highbay agent");
+        // Agy is still unique by name.
+        assert_eq!(speakable_name(&peers[1], &peers), "Agy");
+    }
+
+    #[test]
+    fn test_identical_agent_and_project_falls_back_to_pane() {
+        let peers = vec![
+            identity("w1:p6", "Claude", Some("Handlr")),
+            identity("w1:p9", "Claude", Some("Handlr")),
+        ];
+        assert_eq!(speakable_name(&peers[0], &peers), "Claude in Handlr, pane 6");
+        assert_eq!(speakable_name(&peers[1], &peers), "Claude in Handlr, pane 9");
+    }
+
+    #[test]
+    fn test_projectless_duplicate_falls_back_to_pane() {
+        let peers = vec![
+            identity("w1:p6", "Claude", None),
+            identity("w1:p9", "Claude", None),
+        ];
+        assert_eq!(speakable_name(&peers[0], &peers), "Claude in pane 6");
+    }
+
+    // ── reading identities out of a snapshot ──
+
+    #[test]
+    fn test_agent_identities_use_workspace_label() {
+        let snap = json!({"snapshot": {
+            "workspaces": [
+                {"workspace_id": "w1", "label": "handlr"},
+                {"workspace_id": "w2", "label": "highbay"}
+            ],
+            "panes": [
+                {"pane_id": "w1:p6", "agent": "claude", "workspace_id": "w1"},
+                {"pane_id": "w2:p1", "agent": "claude", "workspace_id": "w2"},
+                {"pane_id": "w1:p3", "workspace_id": "w1"}
+            ]
+        }});
+        let ids = agent_identities(&snap);
+        assert_eq!(ids.len(), 2, "panes with no agent are skipped");
+        assert_eq!(ids[0], identity("w1:p6", "Claude", Some("Handlr")));
+        assert_eq!(ids[1], identity("w2:p1", "Claude", Some("Highbay")));
+        assert_eq!(speakable_name(&ids[0], &ids), "Handlr agent");
+    }
+
+    #[test]
+    fn test_agent_identities_fall_back_to_cwd_basename() {
+        let snap = json!({"snapshot": {
+            "workspaces": [{"workspace_id": "w1"}],
+            "panes": [{
+                "pane_id": "w1:p6", "agent": "agy", "workspace_id": "w1",
+                "cwd": "/Users/tmeade/src/handlr"
+            }]
+        }});
+        let ids = agent_identities(&snap);
+        assert_eq!(ids[0].project.as_deref(), Some("Handlr"));
+    }
+
+    #[test]
+    fn test_agent_identities_deduplicate_across_flat_and_nested_lists() {
+        // herdr reports panes both flat and under workspaces -> tabs.
+        let snap = json!({"snapshot": {
+            "workspaces": [{
+                "workspace_id": "w1", "label": "handlr",
+                "tabs": [{"tab_id": "w1:t6", "panes": [
+                    {"pane_id": "w1:p6", "agent": "claude", "workspace_id": "w1"}
+                ]}]
+            }],
+            "panes": [{"pane_id": "w1:p6", "agent": "claude", "workspace_id": "w1"}]
+        }});
+        let ids = agent_identities(&snap);
+        assert_eq!(ids.len(), 1, "the same pane must not become its own peer");
+        assert_eq!(speakable_name(&ids[0], &ids), "Claude");
     }
 }
