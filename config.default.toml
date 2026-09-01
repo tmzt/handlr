@@ -1,0 +1,39 @@
+# Default configuration for handlr
+# Copy to ~/.config/handlr/config.toml to customize
+
+[transport]
+# Transport mode: "local" (direct Unix domain socket) or "remote" (SSH bridge)
+mode = "local"
+
+# Optional socket path for local mode (default: /tmp/herdr.sock)
+socket = "/tmp/herdr.sock"
+
+# Optional remote SSH connection string (e.g. "user@host")
+# remote = "user@host"
+
+[voice.tts]
+# TTS engine backend: "sherpa-kokoro" (neural), "system" (macOS say), "kokoro", or "sine"
+engine = "sherpa-kokoro"
+
+# Voice preset:
+# For sherpa-kokoro / kokoro: "af_bella", "af_sarah", "af_nicole", "am_adam", "bf_emma", "bm_george", etc.
+voice = "am_adam"
+
+# Playback speed multiplier (1.5x speed)
+speed = 1.5
+
+# Custom directory holding sherpa-onnx Kokoro assets (optional)
+# sherpa_model_dir = "~/.handlr/models/sherpa-kokoro"
+
+[voice.stt]
+# STT engine: "whisper"
+engine = "whisper"
+
+# Custom model paths (optional)
+# silero_model = "~/.handlr/models/silero_vad.onnx"
+# whisper_model = "~/.handlr/models/ggml-base.en.bin"
+
+[gemini]
+# Optional Gemini API Key (defaults to GEMINI_API_KEY environment variable)
+# api_key = "..."
+# model = "gemini-2.5-flash"
