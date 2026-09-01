@@ -374,15 +374,7 @@ impl HerdrRequest {
                 Ok(Self::focus(target_id))
             }
             custom_name => {
-                let mut custom_map = match args {
-                    Value::Object(map) => map.clone(),
-                    _ => serde_json::Map::new(),
-                };
-                custom_map.insert("action".to_string(), Value::String(custom_name.to_string()));
-                if !custom_map.contains_key("id") {
-                    custom_map.insert("id".to_string(), Value::String(generate_request_id()));
-                }
-                Ok(HerdrRequest::Custom(Value::Object(custom_map)))
+                Err(format!("Unknown tool name '{custom_name}'"))
             }
         }
     }
@@ -416,29 +408,32 @@ impl HerdrRequest {
                 }
             }
             HerdrRequest::RunCommand { id, pane_id, command } => {
-                let text = if command.ends_with('\n') {
-                    command.clone()
-                } else {
-                    format!("{}\n", command)
-                };
+                let trimmed = command.trim_end_matches('\n');
                 HerdrJsonRpcRequest {
                     jsonrpc: "2.0".to_string(),
                     id: id.clone(),
-                    method: "pane.send_text".to_string(),
+                    method: "pane.send_input".to_string(),
                     params: serde_json::json!({
                         "pane_id": pane_id,
-                        "text": text,
+                        "text": trimmed,
+                        "keys": ["Enter"],
                     }),
                 }
             }
             HerdrRequest::SendKeys { id, pane_id, keys } => {
+                let key_list: Vec<&str> = keys.split_whitespace().collect();
+                let key_array: Vec<&str> = if key_list.is_empty() {
+                    vec![keys.as_str()]
+                } else {
+                    key_list
+                };
                 HerdrJsonRpcRequest {
                     jsonrpc: "2.0".to_string(),
                     id: id.clone(),
                     method: "pane.send_keys".to_string(),
                     params: serde_json::json!({
                         "pane_id": pane_id,
-                        "keys": keys,
+                        "keys": key_array,
                     }),
                 }
             }

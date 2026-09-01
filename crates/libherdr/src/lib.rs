@@ -22,6 +22,7 @@ pub use transport::{
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::HerdrJsonRpcRequest;
     use serde_json::json;
     use tempfile::tempdir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -138,6 +139,13 @@ mod tests {
         assert_eq!(rpc.params["count"], 100);
         assert_eq!(rpc.params["source"], "recent");
 
+        let cmd_req = HerdrRequest::run_command("w2:p1", "/compact");
+        let cmd_rpc = cmd_req.to_jsonrpc();
+        assert_eq!(cmd_rpc.method, "pane.send_input");
+        assert_eq!(cmd_rpc.params["pane_id"], "w2:p1");
+        assert_eq!(cmd_rpc.params["text"], "/compact");
+        assert_eq!(cmd_rpc.params["keys"], serde_json::json!(["Enter"]));
+
         let serialized = serde_json::to_string(&rpc).unwrap();
         let parsed: HerdrJsonRpcRequest = serde_json::from_str(&serialized).unwrap();
         assert_eq!(parsed.method, "pane.read");
@@ -237,7 +245,7 @@ mod tests {
             .execute_tool_call("focus", &json!({"target_id": "ws-live"}))
             .await
             .expect("execute focus over socket");
-        assert_eq!(exec_res["focused_target"], "ws-live");
+        assert_eq!(exec_res["focused_id"], "ws-live");
     }
 
     #[tokio::test]
