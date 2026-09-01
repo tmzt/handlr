@@ -160,8 +160,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let socket_path = args
             .socket
             .clone()
-            .unwrap_or_else(|| "/tmp/herdr.sock".to_string());
-        log::info!("Connecting via UNIX domain socket: {}", socket_path);
+            .map(PathBuf::from)
+            .unwrap_or_else(handlr::transport::default_local_socket_path);
+        log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
         HerdrTransport::local(socket_path)
     };
 

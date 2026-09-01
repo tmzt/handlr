@@ -43,11 +43,24 @@ impl HerdrContextContributor {
 #[async_trait]
 impl libinfer::TurnContributor for HerdrContextContributor {
     async fn contribute(&self, messages: &mut Vec<libinfer::Message>) -> Result<(), String> {
-        // 1. Get the list of all panes
-        let snapshot = self.client.list_panes().await
-            .map_err(|e| format!("failed to list panes: {e}"))?;
+        // 1. Query the list of all panes from herdr
+        let snapshot = match self.client.list_panes().await {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("failed to list herdr panes: {}", e);
+                messages.push(libinfer::Message {
+                    role: "system".to_string(),
+                    content: format!(
+                        "Current herdr environment status:\nMultiplexer connection warning: {e}. If the user asks about agents or panes, inform them that the herdr multiplexer is currently unreachable or returned an error."
+                    ),
+                    name: None,
+                    thought_signature: None,
+                });
+                return Ok(());
+            }
+        };
 
-        // 2. We can also optionally read logs for active panes ("working") to provide deeper context (RAG)
+        // 2. Read logs for active panes ("working") to provide deeper context (RAG)
         let mut working_panes_details = Vec::new();
         if let Some(workspaces) = snapshot.get("workspaces").and_then(|w| w.as_array()) {
             for ws in workspaces {
