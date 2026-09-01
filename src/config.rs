@@ -7,16 +7,47 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppConfig {
     #[serde(default)]
     pub transports: Vec<TransportConfig>,
     #[serde(default)]
     pub voice: VoiceConfig,
-    #[serde(default)]
-    pub commands: CommandsConfig,
+    #[serde(default = "default_agents")]
+    pub agents: Vec<AgentConfig>,
     #[serde(default)]
     pub gemini: GeminiConfig,
+}
+
+fn default_agents() -> Vec<AgentConfig> {
+    vec![
+        AgentConfig {
+            name: "claude".to_string(),
+            allowed_commands: vec!["continue".to_string(), "/compact".to_string()],
+            require_confirmation: true,
+        },
+        AgentConfig {
+            name: "omp".to_string(),
+            allowed_commands: vec!["continue".to_string()],
+            require_confirmation: true,
+        },
+        AgentConfig {
+            name: "agy".to_string(),
+            allowed_commands: vec!["continue".to_string()],
+            require_confirmation: true,
+        },
+    ]
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            transports: Vec::new(),
+            voice: VoiceConfig::default(),
+            agents: default_agents(),
+            gemini: GeminiConfig::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -123,28 +154,27 @@ impl Default for SttSettings {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CommandsConfig {
-    /// List of allowed commands that Gemini/handlr is permitted to send to panes.
-    #[serde(default = "default_allowed_commands")]
+pub struct AgentConfig {
+    /// Herdr's determined agent name (lowercased, e.g. "claude", "omp", "agy", "shell")
+    pub name: String,
+    /// Permitted commands that voice/Gemini is allowed to send to this agent's panes
+    #[serde(default)]
     pub allowed_commands: Vec<String>,
-    /// Whether vocal confirmation is required before executing a command.
-    #[serde(default = "default_require_confirmation")]
+    /// Whether vocal confirmation is required before executing a command
+    #[serde(default = "default_require_confirmation", alias = "required_confirmation")]
     pub require_confirmation: bool,
-}
-
-fn default_allowed_commands() -> Vec<String> {
-    vec!["continue".to_string(), "/compact".to_string()]
 }
 
 fn default_require_confirmation() -> bool {
     true
 }
 
-impl Default for CommandsConfig {
-    fn default() -> Self {
+impl AgentConfig {
+    pub fn new(name: impl Into<String>, allowed_commands: Vec<String>, require_confirmation: bool) -> Self {
         Self {
-            allowed_commands: default_allowed_commands(),
-            require_confirmation: default_require_confirmation(),
+            name: name.into(),
+            allowed_commands,
+            require_confirmation,
         }
     }
 }
@@ -210,6 +240,12 @@ impl AppConfig {
         self.transports.first()
     }
 
+    /// Find an agent configuration by name (case-insensitive).
+    pub fn find_agent(&self, name: &str) -> Option<&AgentConfig> {
+        let lower = name.to_lowercase();
+        self.agents.iter().find(|a| a.name.to_lowercase() == lower)
+    }
+
     /// Generate documented default TOML template string.
     pub fn default_toml_template() -> String {
         r#"# Default configuration for handlr
@@ -249,10 +285,19 @@ engine = "whisper"
 # silero_model = "~/.handlr/models/silero_vad.onnx"
 # whisper_model = "~/.handlr/models/ggml-base.en.bin"
 
-[commands]
-# Permitted commands that voice/Gemini is allowed to send to agent panes
+[[agents]]
+name = "claude"
 allowed_commands = ["continue", "/compact"]
-# Require vocal confirmation before executing commands
+require_confirmation = true
+
+[[agents]]
+name = "omp"
+allowed_commands = ["continue"]
+require_confirmation = true
+
+[[agents]]
+name = "agy"
+allowed_commands = ["continue"]
 require_confirmation = true
 
 [gemini]
@@ -289,6 +334,11 @@ speed = 1.1
 
 [voice.stt]
 engine = "whisper"
+
+[[agents]]
+name = "claude"
+allowed_commands = ["continue", "/compact"]
+require_confirmation = true
 "#;
         let cfg: AppConfig = toml::from_str(sample).unwrap();
         assert_eq!(cfg.transports.len(), 2);
@@ -305,6 +355,11 @@ engine = "whisper"
         assert_eq!(cfg.voice.tts.voice.as_deref(), Some("af_bella"));
         assert_eq!(cfg.voice.tts.speed, 1.1);
         assert_eq!(cfg.voice.stt.engine, "whisper");
+
+        let claude_cfg = cfg.find_agent("Claude").unwrap();
+        assert_eq!(claude_cfg.name, "claude");
+        assert_eq!(claude_cfg.allowed_commands, vec!["continue", "/compact"]);
+        assert!(claude_cfg.require_confirmation);
     }
 
     #[test]
@@ -317,7 +372,9 @@ engine = "whisper"
         assert_eq!(parsed.voice.tts.engine, "sherpa-kokoro");
         assert_eq!(parsed.voice.tts.voice.as_deref(), Some("am_adam"));
         assert_eq!(parsed.voice.tts.speed, 1.5);
-        assert_eq!(parsed.commands.allowed_commands, vec!["continue", "/compact"]);
-        assert!(parsed.commands.require_confirmation);
+        assert_eq!(parsed.agents.len(), 3);
+        let claude = parsed.find_agent("claude").unwrap();
+        assert_eq!(claude.allowed_commands, vec!["continue", "/compact"]);
+        assert!(claude.require_confirmation);
     }
 }

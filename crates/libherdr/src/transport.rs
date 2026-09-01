@@ -150,6 +150,8 @@ pub struct MockState {
 
 impl Default for MockState {
     fn default() -> Self {
+        let mut extra = serde_json::Map::new();
+        extra.insert("agent".to_string(), serde_json::Value::String("claude".to_string()));
         let default_pane = PaneInfo {
             pane_id: "p1".to_string(),
             terminal_title: Some("claude-worker".to_string()),
@@ -157,7 +159,7 @@ impl Default for MockState {
             agent_status: Some(AgentStatus::Working),
             focused: true,
             command: Some("cargo build".to_string()),
-            extra: serde_json::Map::new(),
+            extra,
         };
 
         let default_workspace = WorkspaceInfo {

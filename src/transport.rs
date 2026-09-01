@@ -14,19 +14,82 @@ pub use libherdr::{
     },
 };
 
+use crate::config::AgentConfig;
+
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
 pub struct HerdrToolExecutor {
     pub client: HerdrClient,
-    pub allowed_commands: Vec<String>,
+    pub agents: Vec<AgentConfig>,
 }
 
 impl HerdrToolExecutor {
-    pub fn new(client: HerdrClient, allowed_commands: Vec<String>) -> Self {
+    pub fn new(client: HerdrClient, agents: Vec<AgentConfig>) -> Self {
         Self {
             client,
-            allowed_commands,
+            agents,
         }
     }
+}
+
+/// Extracts the lowercased agent name for a target pane from Herdr's session snapshot.
+pub fn extract_agent_name_for_pane(snapshot: &serde_json::Value, target_pane_id: &str) -> String {
+    let clean_target = target_pane_id.trim();
+
+    // 1. Check flat panes list
+    if let Some(panes) = snapshot.get("panes").and_then(|p| p.as_array()) {
+        for pane in panes {
+            if let Some(pid) = pane.get("pane_id").and_then(|id| id.as_str()) {
+                if pid == clean_target || pid.ends_with(&format!(":{}", clean_target)) {
+                    if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
+                        let lower = agent.trim().to_lowercase();
+                        if !lower.is_empty() {
+                            return lower;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check nested workspaces -> tabs -> panes
+    if let Some(workspaces) = snapshot.get("workspaces").and_then(|w| w.as_array()) {
+        for ws in workspaces {
+            if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
+                for tab in tabs {
+                    if let Some(panes) = tab.get("panes").and_then(|p| p.as_array()) {
+                        for pane in panes {
+                            if let Some(pid) = pane.get("pane_id").and_then(|id| id.as_str()) {
+                                if pid == clean_target || pid.ends_with(&format!(":{}", clean_target)) {
+                                    if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
+                                        let lower = agent.trim().to_lowercase();
+                                        if !lower.is_empty() {
+                                            return lower;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(panes) = ws.get("panes").and_then(|p| p.as_array()) {
+                for pane in panes {
+                    if let Some(pid) = pane.get("pane_id").and_then(|id| id.as_str()) {
+                        if pid == clean_target || pid.ends_with(&format!(":{}", clean_target)) {
+                            if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
+                                let lower = agent.trim().to_lowercase();
+                                if !lower.is_empty() {
+                                    return lower;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    "shell".to_string()
 }
 
 #[async_trait]
@@ -42,13 +105,40 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                 .or_else(|| args.get("cmd"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let is_allowed = self.allowed_commands.iter().any(|allowed| {
+            let pane_id = args
+                .get("pane_id")
+                .or_else(|| args.get("target_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // Determine agent name from herdr session snapshot (lowercased)
+            let agent_name = match self.client.list_panes().await {
+                Ok(snap_val) => extract_agent_name_for_pane(&snap_val, pane_id),
+                Err(e) => {
+                    log::warn!("Failed to query snapshot to determine agent for pane {}: {}", pane_id, e);
+                    "shell".to_string()
+                }
+            };
+
+            log::info!("Permission check: agent='{}' pane='{}' command='{}'", agent_name, pane_id, cmd);
+
+            let agent_config = self.agents.iter().find(|a| a.name.to_lowercase() == agent_name);
+            let Some(agent_cfg) = agent_config else {
+                return Err(format!(
+                    "Agent '{}' (in pane '{}') is not configured in [[agents]]. Permitted agents: {:?}",
+                    agent_name,
+                    pane_id,
+                    self.agents.iter().map(|a| &a.name).collect::<Vec<_>>()
+                ));
+            };
+
+            let is_allowed = agent_cfg.allowed_commands.iter().any(|allowed| {
                 allowed.trim().eq_ignore_ascii_case(cmd.trim())
             });
             if !is_allowed {
                 return Err(format!(
-                    "Command '{}' is not permitted by configuration. Allowed commands: {:?}",
-                    cmd, self.allowed_commands
+                    "Command '{}' is not permitted for agent '{}'. Allowed commands for {}: {:?}",
+                    cmd, agent_name, agent_name, agent_cfg.allowed_commands
                 ));
             }
         }
@@ -340,10 +430,13 @@ mod tests {
         let client = HerdrClient::mock();
         let executor = HerdrToolExecutor::new(
             client,
-            vec!["continue".to_string(), "/compact".to_string()],
+            vec![
+                AgentConfig::new("claude", vec!["continue".to_string(), "/compact".to_string()], true),
+                AgentConfig::new("omp", vec!["continue".to_string()], true),
+            ],
         );
 
-        // Allowed command should execute
+        // Allowed command for claude (mock pane p1 defaults to agent 'claude') should execute
         let ok_res = executor
             .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
             .await;
@@ -354,11 +447,11 @@ mod tests {
             .await;
         assert!(ok_res2.is_ok());
 
-        // Disallowed command should be rejected
+        // Disallowed command for claude should be rejected
         let err_res = executor
             .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "rm -rf /" }))
             .await;
         assert!(err_res.is_err());
-        assert!(err_res.unwrap_err().contains("not permitted by configuration"));
+        assert!(err_res.unwrap_err().contains("not permitted for agent 'claude'"));
     }
 }
