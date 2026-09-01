@@ -150,11 +150,12 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
 /// injecting this layout/agent status context as a system prompt/RAG turn before inference.
 pub struct HerdrContextContributor {
     pub client: HerdrClient,
+    pub agents: Vec<AgentConfig>,
 }
 
 impl HerdrContextContributor {
-    pub fn new(client: HerdrClient) -> Self {
-        Self { client }
+    pub fn new(client: HerdrClient, agents: Vec<AgentConfig>) -> Self {
+        Self { client, agents }
     }
 }
 
@@ -327,6 +328,17 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         } else {
             content.push_str("No active/working terminal pane output to report.\n\n");
+        }
+
+        if !self.agents.is_empty() {
+            content.push_str("### Configured Agents & Permitted Commands\n");
+            for agent in &self.agents {
+                content.push_str(&format!(
+                    "- Agent '{}': Allowed commands: {:?}, Requires Confirmation: {}\n",
+                    agent.name, agent.allowed_commands, agent.require_confirmation
+                ));
+            }
+            content.push_str("\n");
         }
 
         // 4. Inject as a system instruction/turn

@@ -189,7 +189,7 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
         .with_parameters::<FocusParams>(),
         FunctionDeclaration::new(
             "run_command",
-            "Sends an allowed command (e.g. 'continue', '/compact') to a target terminal pane. Requires explicit vocal confirmation from the user before executing.",
+            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. Requires explicit vocal confirmation from the user if configured for that agent.",
             None,
         )
         .with_parameters::<RunCommandParams>(),

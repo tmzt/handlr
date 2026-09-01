@@ -448,7 +448,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Compile history using contributors (RAG layout/agent snapshot context injection)
                 let builder = SessionBuilder::new(sid.clone(), manager.clone())
-                    .with_contributor(Box::new(HerdrContextContributor::new((*client).clone())));
+                    .with_contributor(Box::new(HerdrContextContributor::new((*client).clone(), agents_cfg.clone())));
 
                 let messages = match builder.build().await {
                     Ok(msgs) => msgs,
