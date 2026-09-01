@@ -526,6 +526,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 log::error!("failed to save model turn to session: {}", e);
                             }
                         }
+                        // The mic mute set at the top of this turn is normally
+                        // released by the TTS pipeline when playback finishes. If
+                        // there is nothing to speak, nothing ever releases it and
+                        // the session goes deaf, so drop it here instead.
+                        if response.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                            log::warn!("Turn produced no spoken response; releasing mic mute directly");
+                            vs.set_muted(false);
+                            ensure_audio_ring().skip_to_end();
+                        }
                         response
                     }
                     Err(e) => {
