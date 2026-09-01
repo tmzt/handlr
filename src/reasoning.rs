@@ -213,10 +213,10 @@ mod tests {
 
     #[test]
     fn test_system_prompt_extraction() {
-        let prompt = default_system_prompt().expect("should extract system prompt from AGENTS.md");
-        assert!(prompt.contains("You are the reasoning engine for `handlr`"));
-        assert!(prompt.contains("Data Processing Rules"));
-        assert!(prompt.contains("Execution Rules"));
+        let prompt = default_system_prompt().expect("should extract system prompt from PROMPT.md");
+        assert!(prompt.contains("reasoning engine for `handlr`"));
+        assert!(prompt.contains("RAG-Based Environment Context"));
+        assert!(prompt.contains("Action Tool (`focus`)"));
         assert!(prompt.contains("Voice Output Guidelines"));
         assert!(!prompt.contains("<system_prompt>"));
         assert!(!prompt.contains("</system_prompt>"));
