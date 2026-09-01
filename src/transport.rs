@@ -35,38 +35,65 @@ impl HerdrToolExecutor {
 pub fn extract_agent_name_for_pane(snapshot: &serde_json::Value, target_pane_id: &str) -> String {
     let clean_target = target_pane_id.trim();
 
-    // 1. Check flat panes list
-    if let Some(panes) = snapshot.get("panes").and_then(|p| p.as_array()) {
-        for pane in panes {
-            if let Some(pid) = pane.get("pane_id").and_then(|id| id.as_str()) {
-                if pid == clean_target || pid.ends_with(&format!(":{}", clean_target)) {
-                    if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
-                        let lower = agent.trim().to_lowercase();
-                        if !lower.is_empty() {
-                            return lower;
-                        }
+    // Unwrap if wrapped in JSON-RPC result or snapshot key
+    let snap_obj = snapshot
+        .get("result")
+        .and_then(|r| r.get("snapshot").or(Some(r)))
+        .or_else(|| snapshot.get("snapshot"))
+        .unwrap_or(snapshot);
+
+    let get_agent_from_pane = |pane: &serde_json::Value| -> Option<String> {
+        let pid = pane.get("pane_id").and_then(|id| id.as_str())?;
+        if pid == clean_target
+            || pid.ends_with(&format!(":{}", clean_target))
+            || clean_target.ends_with(&format!(":{}", pid))
+        {
+            if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
+                let lower = agent.trim().to_lowercase();
+                if !lower.is_empty() {
+                    return Some(lower);
+                }
+            }
+            if let Some(extra) = pane.get("extra").and_then(|e| e.as_object()) {
+                if let Some(agent) = extra.get("agent").and_then(|a| a.as_str()) {
+                    let lower = agent.trim().to_lowercase();
+                    if !lower.is_empty() {
+                        return Some(lower);
                     }
                 }
+            }
+            if let Some(title) = pane.get("terminal_title").and_then(|t| t.as_str()) {
+                let lower_title = title.to_lowercase();
+                if lower_title.contains("claude") {
+                    return Some("claude".to_string());
+                } else if lower_title.contains("omp") {
+                    return Some("omp".to_string());
+                } else if lower_title.contains("agy") {
+                    return Some("agy".to_string());
+                }
+            }
+        }
+        None
+    };
+
+    // 1. Check flat panes list from session.snapshot
+    if let Some(panes) = snap_obj.get("panes").and_then(|p| p.as_array()) {
+        for pane in panes {
+            if let Some(agent) = get_agent_from_pane(pane) {
+                return agent;
             }
         }
     }
 
     // 2. Check nested workspaces -> tabs -> panes
-    if let Some(workspaces) = snapshot.get("workspaces").and_then(|w| w.as_array()) {
+    if let Some(workspaces) = snap_obj.get("workspaces").and_then(|w| w.as_array()) {
         for ws in workspaces {
             if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
                 for tab in tabs {
                     if let Some(panes) = tab.get("panes").and_then(|p| p.as_array()) {
                         for pane in panes {
-                            if let Some(pid) = pane.get("pane_id").and_then(|id| id.as_str()) {
-                                if pid == clean_target || pid.ends_with(&format!(":{}", clean_target)) {
-                                    if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
-                                        let lower = agent.trim().to_lowercase();
-                                        if !lower.is_empty() {
-                                            return lower;
-                                        }
-                                    }
-                                }
+                            if let Some(agent) = get_agent_from_pane(pane) {
+                                return agent;
                             }
                         }
                     }
@@ -74,15 +101,8 @@ pub fn extract_agent_name_for_pane(snapshot: &serde_json::Value, target_pane_id:
             }
             if let Some(panes) = ws.get("panes").and_then(|p| p.as_array()) {
                 for pane in panes {
-                    if let Some(pid) = pane.get("pane_id").and_then(|id| id.as_str()) {
-                        if pid == clean_target || pid.ends_with(&format!(":{}", clean_target)) {
-                            if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
-                                let lower = agent.trim().to_lowercase();
-                                if !lower.is_empty() {
-                                    return lower;
-                                }
-                            }
-                        }
+                    if let Some(agent) = get_agent_from_pane(pane) {
+                        return agent;
                     }
                 }
             }
@@ -465,5 +485,35 @@ mod tests {
             .await;
         assert!(err_res.is_err());
         assert!(err_res.unwrap_err().contains("not permitted for agent 'claude'"));
+    }
+
+    #[test]
+    fn test_extract_agent_name_for_pane() {
+        let nested_snap = json!({
+            "snapshot": {
+                "panes": [
+                    { "pane_id": "w2:p1", "agent": "claude", "cwd": "/Users/tmeade/src/highbay" },
+                    { "pane_id": "w2:pA", "agent": "agy", "cwd": "/Users/tmeade/src/highbay" }
+                ],
+                "workspaces": [
+                    {
+                        "workspace_id": "w2",
+                        "tabs": [
+                            {
+                                "tab_id": "w2:t1",
+                                "panes": [
+                                    { "pane_id": "w2:p1", "agent": "claude" }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(extract_agent_name_for_pane(&nested_snap, "w2:p1"), "claude");
+        assert_eq!(extract_agent_name_for_pane(&nested_snap, "p1"), "claude");
+        assert_eq!(extract_agent_name_for_pane(&nested_snap, "w2:pA"), "agy");
+        assert_eq!(extract_agent_name_for_pane(&nested_snap, "unknown"), "shell");
     }
 }
