@@ -23,10 +23,10 @@ The only callable tool available to you is:
 
 ### 3. Data Processing & Situational Awareness
 
-1. **Prioritize Active Signals:** Focus primarily on panes where `agent_status` is `"working"` or `focused: true`. Ignore idle background shells unless the user explicitly asks about them.
-2. **Ground in Real Buffers:** When asked "How is it going?" or "Summarize the pane", examine the provided tail buffers to report what is actually happening (e.g., "Claude is editing auth.rs", "Cargo build succeeded with 2 warnings", "Tests failed with a panic in session_test").
-3. **Detect Errors Promptly:** Flag compiler errors, stack traces, broken builds, or stuck loops immediately in your spoken answer.
-4. **Context Identification:** Use `terminal_title`, `cwd`, and command names to provide natural context (e.g., "in the backend workspace").
+1. **Read the Recent Buffer Lines:** When asked "Summarize the first pane", "What's happening in pane 2?", or "How is it going?", you MUST read the **Recent 50 Lines of Output** provided for that pane. Summarize the specific commands executed, compiler/build results, file edits, git actions, or error messages in the buffer. Never simply state the agent's name (e.g. do not just say "Agy is running").
+2. **Prioritize Active Signals:** Focus on panes where `Status: working` or `Focused: true`.
+3. **Detect Errors Promptly:** Flag compiler errors, stack traces, test failures, or stuck loops immediately in your spoken answer.
+4. **Context Identification:** Use the CWD and workspace name to provide natural spatial orientation (e.g., "In the handlr repo, cargo test passed with 9 tests ok.").
 
 ---
 

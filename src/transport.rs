@@ -61,20 +61,37 @@ impl libinfer::TurnContributor for HerdrContextContributor {
         };
 
         // 2. Read tail buffers for all panes in the snapshot
-        let mut pane_details = Vec::new();
         let snap_obj = snapshot.get("snapshot").unwrap_or(&snapshot);
+
+        let focused_ws_id = snap_obj
+            .get("focused_workspace_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let focused_pane_id = snap_obj
+            .get("focused_pane_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let mut pane_details = Vec::new();
+        let mut pane_summaries = Vec::new();
 
         // Check flat panes list from session.snapshot
         if let Some(panes) = snap_obj.get("panes").and_then(|p| p.as_array()) {
-            for pane in panes {
-                if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
-                    let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                    let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
-                    let agent = pane.get("agent").and_then(|a| a.as_str()).unwrap_or("shell");
-                    let cwd = pane.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
-                    let ws_id = pane.get("workspace_id").and_then(|w| w.as_str()).unwrap_or("");
-                    let tab_id = pane.get("tab_id").and_then(|t| t.as_str()).unwrap_or("");
+            for (idx, pane) in panes.iter().enumerate() {
+                let pane_id = pane.get("pane_id").and_then(|id| id.as_str()).unwrap_or("");
+                let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
+                let agent = pane.get("agent").and_then(|a| a.as_str()).unwrap_or("shell");
+                let cwd = pane.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
+                let ws_id = pane.get("workspace_id").and_then(|w| w.as_str()).unwrap_or("");
+                let tab_id = pane.get("tab_id").and_then(|t| t.as_str()).unwrap_or("");
 
+                pane_summaries.push(format!(
+                    "- Pane {} (ID: {}) [Workspace: {}, Tab: {}, Agent: {}, Status: {}, Focused: {}, CWD: {}]",
+                    idx + 1, pane_id, ws_id, tab_id, agent, status, focused, cwd
+                ));
+
+                if !pane_id.is_empty() {
                     if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
                         let buffer_opt = inspect_res
                             .get("read")
@@ -84,10 +101,16 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                             .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
 
                         if let Some(buffer) = buffer_opt {
-                            if !buffer.trim().is_empty() {
+                            let trimmed = buffer.trim();
+                            if !trimmed.is_empty() {
                                 pane_details.push(format!(
-                                    "Pane {} [workspace: {}, tab: {}, agent: '{}', status: {}, cwd: '{}', focused: {}]:\n```\n{}\n```",
-                                    pane_id, ws_id, tab_id, agent, status, cwd, focused, buffer.trim()
+                                    "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\nRecent 50 Lines of Output:\n```\n{}\n```",
+                                    idx + 1, pane_id, agent, status, focused, cwd, trimmed
+                                ));
+                            } else {
+                                pane_details.push(format!(
+                                    "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\n(Buffer is idle/empty)",
+                                    idx + 1, pane_id, agent, status, focused, cwd
                                 ));
                             }
                         }
@@ -96,6 +119,7 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         } else if let Some(workspaces) = snap_obj.get("workspaces").and_then(|w| w.as_array()) {
             // Fallback for nested workspace/tab structure
+            let mut global_idx = 1;
             for ws in workspaces {
                 let ws_id = ws.get("workspace_id").and_then(|i| i.as_str()).unwrap_or("");
                 let ws_name = ws.get("name").and_then(|n| n.as_str()).unwrap_or(ws_id);
@@ -110,6 +134,11 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                     let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
                                     let title = pane.get("terminal_title").and_then(|t| t.as_str()).unwrap_or("untitled");
 
+                                    pane_summaries.push(format!(
+                                        "- Pane {} (ID: {}) [Workspace: {}, Tab: {}, Title: '{}', Status: {}, Focused: {}]",
+                                        global_idx, pane_id, ws_name, tab_title, title, status, focused
+                                    ));
+
                                     if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
                                         let buffer_opt = inspect_res
                                             .get("read")
@@ -119,14 +148,16 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                             .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
 
                                         if let Some(buffer) = buffer_opt {
-                                            if !buffer.trim().is_empty() {
+                                            let trimmed = buffer.trim();
+                                            if !trimmed.is_empty() {
                                                 pane_details.push(format!(
-                                                    "Pane {} [workspace: {}, tab: {}, title: '{}', status: {}, focused: {}]:\n```\n{}\n```",
-                                                    pane_id, ws_name, tab_title, title, status, focused, buffer.trim()
+                                                    "#### Pane {} (ID: {}) [Workspace: {}, Title: '{}', Status: {}, Focused: {}]:\nRecent 50 Lines of Output:\n```\n{}\n```",
+                                                    global_idx, pane_id, ws_name, title, status, focused, trimmed
                                                 ));
                                             }
                                         }
                                     }
+                                    global_idx += 1;
                                 }
                             }
                         }
@@ -135,21 +166,19 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         }
 
-        // 3. Format overall herdr snapshot
-        let snapshot_json = serde_json::to_string_pretty(&snapshot)
-            .unwrap_or_default();
-
+        // 3. Format overall RAG payload with buffers placed prominently
         let mut content = format!(
-            "Current herdr environment snapshot:\n```json\n{}\n```\n",
-            snapshot_json
+            "### Herdr Multiplexer State\n- Active Workspace: {}\n- Focused Pane: {}\n\nPanes Overview:\n{}\n\n### Recent Terminal Output (Last 50 Lines per Pane)\n\n",
+            focused_ws_id, focused_pane_id, pane_summaries.join("\n")
         );
 
         if !pane_details.is_empty() {
-            content.push_str("\nTerminal pane tail buffers:\n");
             for detail in pane_details {
                 content.push_str(&detail);
                 content.push_str("\n\n");
             }
+        } else {
+            content.push_str("No active terminal pane output available.\n\n");
         }
 
         // 4. Inject as a system instruction/turn
