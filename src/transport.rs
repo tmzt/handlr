@@ -60,26 +60,56 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         };
 
-        // 2. Read logs for active panes ("working") to provide deeper context (RAG)
-        let mut working_panes_details = Vec::new();
+        // 2. Read tail buffers for focused, working, and visible panes to provide context (RAG)
+        let mut pane_details = Vec::new();
         if let Some(workspaces) = snapshot.get("workspaces").and_then(|w| w.as_array()) {
             for ws in workspaces {
+                let ws_id = ws.get("workspace_id").and_then(|i| i.as_str()).unwrap_or("");
+                let ws_name = ws.get("name").and_then(|n| n.as_str()).unwrap_or(ws_id);
+
+                // Collect from tabs
                 if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
                     for tab in tabs {
+                        let tab_title = tab.get("title").and_then(|t| t.as_str()).unwrap_or("");
                         if let Some(panes) = tab.get("panes").and_then(|p| p.as_array()) {
                             for pane in panes {
-                                let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                                if status == "working" {
-                                    if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
-                                        // Read tail buffer lines (e.g. 50 lines) to find logs / compiler failures
-                                        if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
-                                            if let Some(buffer) = inspect_res.get("buffer").and_then(|b| b.as_str()) {
-                                                working_panes_details.push(format!(
-                                                    "Pane {} tail buffer:\n---\n{}\n---",
-                                                    pane_id, buffer
+                                if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
+                                    let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                                    let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
+                                    let title = pane.get("terminal_title").and_then(|t| t.as_str()).unwrap_or("untitled");
+
+                                    // Inspect pane tail lines
+                                    if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
+                                        if let Some(buffer) = inspect_res.get("buffer").and_then(|b| b.as_str()) {
+                                            if !buffer.trim().is_empty() {
+                                                pane_details.push(format!(
+                                                    "Pane {} [workspace: {}, tab: {}, title: '{}', status: {}, focused: {}]:\n```\n{}\n```",
+                                                    pane_id, ws_name, tab_title, title, status, focused, buffer.trim()
                                                 ));
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Collect from direct panes (if not nested in tabs)
+                if let Some(panes) = ws.get("panes").and_then(|p| p.as_array()) {
+                    for pane in panes {
+                        if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
+                            let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
+                            let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
+                            let title = pane.get("terminal_title").and_then(|t| t.as_str()).unwrap_or("untitled");
+
+                            if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
+                                if let Some(buffer) = inspect_res.get("buffer").and_then(|b| b.as_str()) {
+                                    if !buffer.trim().is_empty() {
+                                        pane_details.push(format!(
+                                            "Pane {} [workspace: {}, title: '{}', status: {}, focused: {}]:\n```\n{}\n```",
+                                            pane_id, ws_name, title, status, focused, buffer.trim()
+                                        ));
                                     }
                                 }
                             }
@@ -98,11 +128,11 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             snapshot_json
         );
 
-        if !working_panes_details.is_empty() {
-            content.push_str("\nActive working agent tail buffers:\n");
-            for detail in working_panes_details {
+        if !pane_details.is_empty() {
+            content.push_str("\nTerminal pane tail buffers:\n");
+            for detail in pane_details {
                 content.push_str(&detail);
-                content.push_str("\n");
+                content.push_str("\n\n");
             }
         }
 
