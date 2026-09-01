@@ -17,6 +17,8 @@ struct AppArgs {
     silero_model: Option<String>,
     whisper_model: Option<String>,
     use_sine_tts: bool,
+    tts_voice: Option<String>,
+    tts_speed: Option<f32>,
     mock_mode: bool,
     auto_download: bool,
 }
@@ -29,6 +31,8 @@ fn parse_args() -> AppArgs {
     let mut silero_model = None;
     let mut whisper_model = None;
     let mut use_sine_tts = false;
+    let mut tts_voice = None;
+    let mut tts_speed = None;
     let mut mock_mode = false;
     let mut auto_download = false;
 
@@ -40,6 +44,12 @@ fn parse_args() -> AppArgs {
             "--silero" => silero_model = args.next(),
             "--whisper" => whisper_model = args.next(),
             "--sine-tts" => use_sine_tts = true,
+            "--tts-voice" => tts_voice = args.next(),
+            "--tts-speed" => {
+                if let Some(s) = args.next() {
+                    tts_speed = s.parse::<f32>().ok();
+                }
+            }
             "--mock" => mock_mode = true,
             "--auto-download" => auto_download = true,
             _ => {
@@ -55,6 +65,8 @@ fn parse_args() -> AppArgs {
         silero_model,
         whisper_model,
         use_sine_tts,
+        tts_voice,
+        tts_speed,
         mock_mode,
         auto_download,
     }
@@ -201,10 +213,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_stt_config(stt_config);
     }
 
-    if args.use_sine_tts {
-        let tts_config = TtsConfig::new(TtsBackend::Sine);
-        builder = builder.with_tts_config(tts_config);
-    }
+    let tts_config = if args.use_sine_tts {
+        log::info!("TTS configured to use Sine test tone");
+        TtsConfig::new(TtsBackend::Sine)
+    } else {
+        let mut cfg = TtsConfig::default();
+        if let Some(ref voice) = args.tts_voice {
+            cfg.voice = voice.clone();
+        }
+        if let Some(speed) = args.tts_speed {
+            cfg.speed = speed;
+        }
+        log::info!("TTS configured with voice='{}' speed={}", cfg.voice, cfg.speed);
+        cfg
+    };
+    builder = builder.with_tts_config(tts_config);
 
     // Initialize Session Manager
     let session_manager = SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
