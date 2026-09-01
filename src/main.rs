@@ -489,7 +489,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     Err(e) => {
                         log::error!("Processing error: {}", e);
-                        Some("Error processing request.".to_string())
+                        let err_text = "Error processing request.".to_string();
+                        let model_msg = Message {
+                            role: "model".to_string(),
+                            content: err_text.clone(),
+                            name: None,
+                            thought_signature: None,
+                        };
+                        let _ = manager.append_message(&sid, &model_msg);
+                        Some(err_text)
                     }
                 }
             })
