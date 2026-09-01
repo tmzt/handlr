@@ -60,7 +60,7 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         };
 
-        // 2. Read tail buffers for all panes in the snapshot
+        // 2. Read tail buffers for active/working/focused panes (or explicitly requested panes)
         let snap_obj = snapshot.get("snapshot").unwrap_or(&snapshot);
 
         let focused_ws_id = snap_obj
@@ -71,6 +71,12 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             .get("focused_pane_id")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
+
+        let last_user_query = messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "user")
+            .map(|m| m.content.as_str());
 
         let mut pane_details = Vec::new();
         let mut pane_summaries = Vec::new();
@@ -91,7 +97,18 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                     idx + 1, pane_id, ws_id, tab_id, agent, status, focused, cwd
                 ));
 
-                if !pane_id.is_empty() {
+                let should_include = should_include_pane_buffer(
+                    idx,
+                    pane_id,
+                    status,
+                    focused,
+                    agent,
+                    cwd,
+                    ws_id,
+                    last_user_query,
+                );
+
+                if should_include && !pane_id.is_empty() {
                     if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
                         let buffer_opt = inspect_res
                             .get("read")
@@ -139,21 +156,34 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                         global_idx, pane_id, ws_name, tab_title, title, status, focused
                                     ));
 
-                                    if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
-                                        let buffer_opt = inspect_res
-                                            .get("read")
-                                            .and_then(|r| r.get("text"))
-                                            .and_then(|t| t.as_str())
-                                            .or_else(|| inspect_res.get("buffer").and_then(|b| b.as_str()))
-                                            .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
+                                    let should_include = should_include_pane_buffer(
+                                        global_idx - 1,
+                                        pane_id,
+                                        status,
+                                        focused,
+                                        title,
+                                        "",
+                                        ws_id,
+                                        last_user_query,
+                                    );
 
-                                        if let Some(buffer) = buffer_opt {
-                                            let trimmed = buffer.trim();
-                                            if !trimmed.is_empty() {
-                                                pane_details.push(format!(
-                                                    "#### Pane {} (ID: {}) [Workspace: {}, Title: '{}', Status: {}, Focused: {}]:\nRecent 50 Lines of Output:\n```\n{}\n```",
-                                                    global_idx, pane_id, ws_name, title, status, focused, trimmed
-                                                ));
+                                    if should_include {
+                                        if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
+                                            let buffer_opt = inspect_res
+                                                .get("read")
+                                                .and_then(|r| r.get("text"))
+                                                .and_then(|t| t.as_str())
+                                                .or_else(|| inspect_res.get("buffer").and_then(|b| b.as_str()))
+                                                .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
+
+                                            if let Some(buffer) = buffer_opt {
+                                                let trimmed = buffer.trim();
+                                                if !trimmed.is_empty() {
+                                                    pane_details.push(format!(
+                                                        "#### Pane {} (ID: {}) [Workspace: {}, Title: '{}', Status: {}, Focused: {}]:\nRecent 50 Lines of Output:\n```\n{}\n```",
+                                                        global_idx, pane_id, ws_name, title, status, focused, trimmed
+                                                    ));
+                                                }
                                             }
                                         }
                                     }
@@ -168,7 +198,7 @@ impl libinfer::TurnContributor for HerdrContextContributor {
 
         // 3. Format overall RAG payload with buffers placed prominently
         let mut content = format!(
-            "### Herdr Multiplexer State\n- Active Workspace: {}\n- Focused Pane: {}\n\nPanes Overview:\n{}\n\n### Recent Terminal Output (Last 50 Lines per Pane)\n\n",
+            "### Herdr Multiplexer State\n- Active Workspace: {}\n- Focused Pane: {}\n\nPanes Overview:\n{}\n\n### Recent Terminal Output (Active / Working / Requested Panes)\n\n",
             focused_ws_id, focused_pane_id, pane_summaries.join("\n")
         );
 
@@ -178,7 +208,7 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                 content.push_str("\n\n");
             }
         } else {
-            content.push_str("No active terminal pane output available.\n\n");
+            content.push_str("No active/working terminal pane output to report.\n\n");
         }
 
         // 4. Inject as a system instruction/turn
@@ -191,4 +221,82 @@ impl libinfer::TurnContributor for HerdrContextContributor {
 
         Ok(())
     }
+}
+
+/// Determines whether a pane's 50-line buffer should be fetched and injected into the turn RAG context.
+fn should_include_pane_buffer(
+    pane_idx: usize,
+    pane_id: &str,
+    status: &str,
+    focused: bool,
+    agent: &str,
+    cwd: &str,
+    workspace_id: &str,
+    last_user_query: Option<&str>,
+) -> bool {
+    // 1. Always include working or focused panes
+    if status == "working" || focused {
+        return true;
+    }
+
+    // 2. Check if the user query explicitly requested this pane or all panes
+    if let Some(query) = last_user_query {
+        let q = query.to_lowercase();
+
+        // Did user ask for all panes?
+        if q.contains("all pane") || q.contains("all buffer") || q.contains("every pane") || q.contains("everything") {
+            return true;
+        }
+
+        // Check pane index (e.g. "pane 1", "pain 1", "first pane", "first pain")
+        let idx_str = (pane_idx + 1).to_string();
+        if q.contains(&format!("pane {}", idx_str)) || q.contains(&format!("pain {}", idx_str)) {
+            return true;
+        }
+
+        let ordinal = match pane_idx + 1 {
+            1 => Some("first"),
+            2 => Some("second"),
+            3 => Some("third"),
+            4 => Some("fourth"),
+            5 => Some("fifth"),
+            6 => Some("sixth"),
+            7 => Some("seventh"),
+            8 => Some("eighth"),
+            9 => Some("ninth"),
+            10 => Some("tenth"),
+            _ => None,
+        };
+        if let Some(ord) = ordinal {
+            if q.contains(&format!("{} pane", ord)) || q.contains(&format!("{} pain", ord)) {
+                return true;
+            }
+        }
+
+        // Check pane ID (e.g. "w1:p1", "p1")
+        if !pane_id.is_empty() && q.contains(&pane_id.to_lowercase()) {
+            return true;
+        }
+
+        // Check agent name if not generic shell (e.g. "claude", "omp", "agy")
+        if agent != "shell" && !agent.is_empty() && q.contains(&agent.to_lowercase()) {
+            return true;
+        }
+
+        // Check directory name if user mentioned it
+        if !cwd.is_empty() {
+            if let Some(dir_name) = std::path::Path::new(cwd).file_name().and_then(|f| f.to_str()) {
+                if q.contains(&dir_name.to_lowercase()) {
+                    return true;
+                }
+            }
+        }
+
+        // Check workspace ID (e.g. "w1", "workspace 1", "workspace one")
+        if !workspace_id.is_empty() && q.contains(&workspace_id.to_lowercase()) {
+            return true;
+        }
+    }
+
+    false
 }
