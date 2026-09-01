@@ -115,6 +115,28 @@ fn download_model(repo_id: &str, repo_filename: &str, dest_path: &Path) -> Resul
     Ok(())
 }
 
+fn download_sherpa_bundle(dest_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(dest_dir)?;
+
+    let python_code = format!(
+        "from huggingface_hub import snapshot_download; \
+         snapshot_download('csukuangfj/kokoro-en-v0_19', local_dir='{}')",
+        dest_dir.to_string_lossy().replace('\\', "\\\\").replace('\'', "\\'")
+    );
+
+    log::info!("Running python snapshot downloader for Sherpa Kokoro bundle...");
+    let status = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(&python_code)
+        .status()?;
+
+    if !status.success() {
+        return Err(format!("Python download process exited with error status: {}", status).into());
+    }
+
+    Ok(())
+}
+
 fn resolve_model_path(
     arg_path: Option<String>,
     default_filename: &str,
@@ -284,6 +306,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 models_dir.join("sherpa-kokoro")
             };
+            if !model_dir.exists() || !model_dir.join("model.onnx").exists() {
+                if args.auto_download {
+                    log::info!("Sherpa Kokoro bundle not found. Auto-downloading to {}...", model_dir.display());
+                    download_sherpa_bundle(&model_dir)?;
+                } else {
+                    log::warn!(
+                        "Sherpa Kokoro assets not found at {} and --auto-download not specified.",
+                        model_dir.display()
+                    );
+                }
+            } else {
+                log::info!("Sherpa Kokoro bundle found at {}", model_dir.display());
+            }
             log::info!(
                 "TTS backend: Sherpa Kokoro (model_dir={})",
                 model_dir.display()
