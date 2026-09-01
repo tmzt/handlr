@@ -418,18 +418,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
+    let confirmation_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let conf_for_proc = Arc::clone(&confirmation_flag);
     let mute_for_proc = Arc::clone(&mute_atomic);
     let pipeline = builder
+        .with_confirmation_flag(Arc::clone(&confirmation_flag))
         .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
             let engine = Arc::clone(&reasoning_engine);
             let manager = session_manager.clone();
             let sid = session_id.clone();
             let proc_mute = Arc::clone(&mute_for_proc);
+            let proc_conf = Arc::clone(&conf_for_proc);
             let allowed_cmds = allowed_commands.clone();
             Box::pin(async move {
                 // Instantly mute mic while reasoning & generating response
                 proc_mute.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Reset confirmation mode for the incoming turn
+                proc_conf.store(false, std::sync::atomic::Ordering::SeqCst);
                 log::info!("Received transcript: '{}'", transcript);
 
                 // Append the user turn to session history
@@ -461,6 +467,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(response) => {
                         if let Some(ref reply) = response {
                             log::info!("Engine response: '{}'", reply);
+                            // If model asks for confirmation, enable confirmation mode on STT (bypassing too-short VAD rejections)
+                            let is_asking_conf = reply.trim().ends_with('?')
+                                || reply.to_lowercase().contains("should i")
+                                || reply.to_lowercase().contains("confirm")
+                                || reply.to_lowercase().contains("are you sure");
+                            if is_asking_conf {
+                                log::info!("Enabling vocal confirmation mode (bypassing too-short VAD rejection)");
+                                proc_conf.store(true, std::sync::atomic::Ordering::SeqCst);
+                            }
+
                             // Append model turn to session history
                             let model_msg = Message {
                                 role: "model".to_string(),
