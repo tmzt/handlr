@@ -160,33 +160,51 @@ pub enum LayoutAction {
     Custom(String),
 }
 
+static REQ_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Generate a unique request ID for herdr protocol requests.
+pub fn generate_request_id() -> String {
+    let count = REQ_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("req-{}", count)
+}
+
 /// Standard `herdr` protocol request corresponding to LLM tool calls.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum HerdrRequest {
     /// Returns the structural JSON layout of workspaces, tabs, and `agent_status`.
     ListPanes {
+        #[serde(default = "generate_request_id")]
+        id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace_id: Option<String>,
     },
     /// Reads the raw tail buffer of a specific terminal.
     InspectPane {
+        #[serde(default = "generate_request_id")]
+        id: String,
         pane_id: String,
         #[serde(default = "default_inspect_lines_val")]
         lines: usize,
     },
     /// Executes a command in the target pane.
     RunCommand {
+        #[serde(default = "generate_request_id")]
+        id: String,
         pane_id: String,
         command: String,
     },
     /// Sends literal keystrokes (e.g. `ctrl+c`, `enter`).
     SendKeys {
+        #[serde(default = "generate_request_id")]
+        id: String,
         pane_id: String,
         keys: String,
     },
     /// Handles spatial commands (`split`, `zoom`, `close`).
     ManageLayout {
+        #[serde(default = "generate_request_id")]
+        id: String,
         #[serde(rename = "layout_action", alias = "action_type")]
         layout_action: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,6 +212,8 @@ pub enum HerdrRequest {
     },
     /// Shifts the user's active visual focus to a specific pane or workspace.
     Focus {
+        #[serde(default = "generate_request_id")]
+        id: String,
         target_id: String,
     },
     /// Pass-through for custom or extended tools.
@@ -208,12 +228,16 @@ fn default_inspect_lines_val() -> usize {
 impl HerdrRequest {
     /// Create a `list_panes` request.
     pub fn list_panes() -> Self {
-        Self::ListPanes { workspace_id: None }
+        Self::ListPanes {
+            id: generate_request_id(),
+            workspace_id: None,
+        }
     }
 
     /// Create a `list_panes` request scoped to a specific workspace.
     pub fn list_panes_scoped(workspace_id: impl Into<String>) -> Self {
         Self::ListPanes {
+            id: generate_request_id(),
             workspace_id: Some(workspace_id.into()),
         }
     }
@@ -221,6 +245,7 @@ impl HerdrRequest {
     /// Create an `inspect_pane` request with the given number of buffer lines.
     pub fn inspect_pane(pane_id: impl Into<String>, lines: usize) -> Self {
         Self::InspectPane {
+            id: generate_request_id(),
             pane_id: pane_id.into(),
             lines,
         }
@@ -229,6 +254,7 @@ impl HerdrRequest {
     /// Create a `run_command` request.
     pub fn run_command(pane_id: impl Into<String>, command: impl Into<String>) -> Self {
         Self::RunCommand {
+            id: generate_request_id(),
             pane_id: pane_id.into(),
             command: command.into(),
         }
@@ -237,6 +263,7 @@ impl HerdrRequest {
     /// Create a `send_keys` request.
     pub fn send_keys(pane_id: impl Into<String>, keys: impl Into<String>) -> Self {
         Self::SendKeys {
+            id: generate_request_id(),
             pane_id: pane_id.into(),
             keys: keys.into(),
         }
@@ -248,6 +275,7 @@ impl HerdrRequest {
         target_id: Option<impl Into<String>>,
     ) -> Self {
         Self::ManageLayout {
+            id: generate_request_id(),
             layout_action: layout_action.into(),
             target_id: target_id.map(|t| t.into()),
         }
@@ -256,6 +284,7 @@ impl HerdrRequest {
     /// Create a `focus` request.
     pub fn focus(target_id: impl Into<String>) -> Self {
         Self::Focus {
+            id: generate_request_id(),
             target_id: target_id.into(),
         }
     }
@@ -266,9 +295,12 @@ impl HerdrRequest {
             "list_panes" => {
                 let workspace_id = args
                     .get("workspace_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                Ok(HerdrRequest::ListPanes { workspace_id })
+                    .and_then(|v| v.as_str());
+                if let Some(ws_id) = workspace_id {
+                    Ok(Self::list_panes_scoped(ws_id))
+                } else {
+                    Ok(Self::list_panes())
+                }
             }
             "inspect_pane" => {
                 let pane_id = args
@@ -276,8 +308,7 @@ impl HerdrRequest {
                     .or_else(|| args.get("target_id"))
                     .or_else(|| args.get("id"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "inspect_pane requires 'pane_id' argument".to_string())?
-                    .to_string();
+                    .ok_or_else(|| "inspect_pane requires 'pane_id' argument".to_string())?;
 
                 let lines = args
                     .get("lines")
@@ -285,60 +316,51 @@ impl HerdrRequest {
                     .map(|v| v as usize)
                     .unwrap_or(DEFAULT_INSPECT_LINES);
 
-                Ok(HerdrRequest::InspectPane { pane_id, lines })
+                Ok(Self::inspect_pane(pane_id, lines))
             }
             "run_command" => {
                 let pane_id = args
                     .get("pane_id")
                     .or_else(|| args.get("target_id"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "run_command requires 'pane_id' argument".to_string())?
-                    .to_string();
+                    .ok_or_else(|| "run_command requires 'pane_id' argument".to_string())?;
 
                 let command = args
                     .get("command")
                     .or_else(|| args.get("cmd"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "run_command requires 'command' argument".to_string())?
-                    .to_string();
+                    .ok_or_else(|| "run_command requires 'command' argument".to_string())?;
 
-                Ok(HerdrRequest::RunCommand { pane_id, command })
+                Ok(Self::run_command(pane_id, command))
             }
             "send_keys" => {
                 let pane_id = args
                     .get("pane_id")
                     .or_else(|| args.get("target_id"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "send_keys requires 'pane_id' argument".to_string())?
-                    .to_string();
+                    .ok_or_else(|| "send_keys requires 'pane_id' argument".to_string())?;
 
                 let keys = args
                     .get("keys")
                     .or_else(|| args.get("keystrokes"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "send_keys requires 'keys' argument".to_string())?
-                    .to_string();
+                    .ok_or_else(|| "send_keys requires 'keys' argument".to_string())?;
 
-                Ok(HerdrRequest::SendKeys { pane_id, keys })
+                Ok(Self::send_keys(pane_id, keys))
             }
             "manage_layout" => {
                 let layout_action = args
                     .get("action")
                     .or_else(|| args.get("layout_action"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "manage_layout requires 'action' argument".to_string())?
-                    .to_string();
+                    .ok_or_else(|| "manage_layout requires 'action' argument".to_string())?;
 
                 let target_id = args
                     .get("target_id")
                     .or_else(|| args.get("pane_id"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                    .and_then(|v| v.as_str());
 
-                Ok(HerdrRequest::ManageLayout {
-                    layout_action,
-                    target_id,
-                })
+                Ok(Self::manage_layout(layout_action, target_id))
             }
             "focus" => {
                 let target_id = args
@@ -347,12 +369,21 @@ impl HerdrRequest {
                     .or_else(|| args.get("pane_id"))
                     .or_else(|| args.get("id"))
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| "focus requires 'target_id' argument".to_string())?
-                    .to_string();
+                    .ok_or_else(|| "focus requires 'target_id' argument".to_string())?;
 
-                Ok(HerdrRequest::Focus { target_id })
+                Ok(Self::focus(target_id))
             }
-            other => Err(format!("Unknown tool name: '{other}'")),
+            custom_name => {
+                let mut custom_map = match args {
+                    Value::Object(map) => map.clone(),
+                    _ => serde_json::Map::new(),
+                };
+                custom_map.insert("action".to_string(), Value::String(custom_name.to_string()));
+                if !custom_map.contains_key("id") {
+                    custom_map.insert("id".to_string(), Value::String(generate_request_id()));
+                }
+                Ok(HerdrRequest::Custom(Value::Object(custom_map)))
+            }
         }
     }
 }

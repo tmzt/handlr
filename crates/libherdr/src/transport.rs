@@ -446,7 +446,7 @@ impl HerdrTransport {
                 let snapshot = &state.snapshot;
                 serde_json::to_value(snapshot).map_err(HerdrError::from)
             }
-            HerdrRequest::InspectPane { pane_id, lines } => {
+            HerdrRequest::InspectPane { pane_id, lines, .. } => {
                 let buffer = state
                     .pane_buffers
                     .get(pane_id)
@@ -463,7 +463,7 @@ impl HerdrTransport {
                     "buffer": joined,
                 }))
             }
-            HerdrRequest::RunCommand { pane_id, command } => {
+            HerdrRequest::RunCommand { pane_id, command, .. } => {
                 state.command_log.push((pane_id.clone(), command.clone()));
                 if let Some(buf) = state.pane_buffers.get_mut(pane_id) {
                     buf.push(format!("$ {}", command));
@@ -476,7 +476,7 @@ impl HerdrTransport {
                     "status": "started"
                 }))
             }
-            HerdrRequest::SendKeys { pane_id, keys } => {
+            HerdrRequest::SendKeys { pane_id, keys, .. } => {
                 state.keystroke_log.push((pane_id.clone(), keys.clone()));
                 if let Some(buf) = state.pane_buffers.get_mut(pane_id) {
                     buf.push(format!("[keys: {}]", keys));
@@ -490,12 +490,13 @@ impl HerdrTransport {
             HerdrRequest::ManageLayout {
                 layout_action,
                 target_id,
+                ..
             } => Ok(serde_json::json!({
                 "success": true,
                 "action": layout_action,
                 "target_id": target_id,
             })),
-            HerdrRequest::Focus { target_id } => {
+            HerdrRequest::Focus { target_id, .. } => {
                 state.focused_target = Some(target_id.clone());
                 state.snapshot.active_pane_id = Some(target_id.clone());
                 Ok(serde_json::json!({
@@ -507,12 +508,27 @@ impl HerdrTransport {
         }
     }
 
-    /// Helper to parse response string (handling both structured `HerdrResponse` and raw JSON objects).
+    /// Helper to parse response string (handling structured `HerdrResponse`, JSON-RPC, and raw JSON objects).
     fn parse_herdr_response_json(text: &str) -> HerdrResult<Value> {
         let trimmed = text.trim();
         let val: Value = serde_json::from_str(trimmed)?;
 
-        // If the response follows the { "success": bool, "data": ..., "error": ... } pattern:
+        // Check for JSON-RPC or envelope error objects: { "error": { "code": ..., "message": ... } } or { "error": "..." }
+        if let Some(err_obj) = val.get("error") {
+            if !err_obj.is_null() {
+                let err_msg = if let Some(msg) = err_obj.get("message").and_then(|m| m.as_str()) {
+                    msg.to_string()
+                } else if let Some(msg_str) = err_obj.as_str() {
+                    msg_str.to_string()
+                } else {
+                    err_obj.to_string()
+                };
+                log::warn!("libherdr: Multiplexer server reported error: {}", err_msg);
+                return Err(HerdrError::ServerError(err_msg));
+            }
+        }
+
+        // If the response follows { "success": false, ... }
         if let Some(success) = val.get("success").and_then(|v| v.as_bool()) {
             if !success {
                 let err_msg = val
@@ -520,11 +536,19 @@ impl HerdrTransport {
                     .and_then(|v| v.as_str())
                     .unwrap_or("Server reported failure")
                     .to_string();
+                log::warn!("libherdr: Multiplexer server reported failure: {}", err_msg);
                 return Err(HerdrError::ServerError(err_msg));
             }
-            if let Some(data) = val.get("data") {
-                return Ok(data.clone());
-            }
+        }
+
+        // If the response follows JSON-RPC { "result": ... } pattern:
+        if let Some(result) = val.get("result") {
+            return Ok(result.clone());
+        }
+
+        // If the response follows { "data": ... } pattern:
+        if let Some(data) = val.get("data") {
+            return Ok(data.clone());
         }
 
         // Otherwise, return the entire JSON object / array directly
