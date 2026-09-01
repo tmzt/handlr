@@ -6,6 +6,8 @@ use audio_core::cpal_capture::CpalCapture;
 use audio_core::ensure_audio_ring;
 use handlr::reasoning::{ReasoningEngine, EngineType, ReasoningEngineBuilder, Message, SessionManager, SessionBuilder};
 use handlr::commands::parse_confirmation_request;
+use handlr::notify::run_agent_watch;
+use handlr::watch::WatchRegistry;
 use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig, HerdrToolExecutor, HerdrContextContributor};
 use libconversate::stt::{SttBackend, SttConfig, SttMode};
 use libconversate::tts::{TtsConfig, TtsBackend};
@@ -288,6 +290,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         HerdrTransport::local(socket_path)
     };
 
+    // Kept alongside the client: the event subscription needs its own
+    // connection, held open, separate from the one-shot request path.
+    let herdr_transport = transport.clone();
     let herdr_client = Arc::new(HerdrClient::new(transport));
 
     // 3. Resolve model paths (supporting symlinks in ~/.handlr/models)
@@ -424,10 +429,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let session_manager = SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
     let session_id = "default_session".to_string();
     let agents_config = config.agents.clone();
+    let watches = Arc::new(WatchRegistry::new());
 
     // 4. Build the Speech-to-Speech Pipeline
     log::info!("Building Speech-to-Speech Pipeline...");
     let vs_for_proc = Arc::clone(&voice_state);
+    let watches_for_proc = Arc::clone(&watches);
     let pipeline = builder
         .with_async_processor(move |transcript| {
             let client = Arc::clone(&herdr_client);
@@ -435,6 +442,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manager = session_manager.clone();
             let sid = session_id.clone();
             let vs = Arc::clone(&vs_for_proc);
+            let watches = Arc::clone(&watches_for_proc);
             let agents_cfg = agents_config.clone();
             Box::pin(async move {
                 // Instantly mute mic while reasoning & generating response
@@ -488,7 +496,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Compile history using contributors (RAG layout/agent snapshot context injection)
                 let builder = SessionBuilder::new(sid.clone(), manager.clone())
-                    .with_contributor(Box::new(HerdrContextContributor::new((*client).clone(), agents_cfg.clone())));
+                    .with_contributor(Box::new(
+                        HerdrContextContributor::new((*client).clone(), agents_cfg.clone())
+                            .with_watches(Arc::clone(&watches)),
+                    ));
 
                 let messages = match builder.build().await {
                     Ok(msgs) => msgs,
@@ -500,7 +511,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 let executor = HerdrToolExecutor::new((*client).clone(), agents_cfg)
-                    .with_voice_state(Arc::clone(&vs));
+                    .with_voice_state(Arc::clone(&vs))
+                    .with_watches(Arc::clone(&watches));
                 match engine.process_turns(&messages, &executor).await {
                     Ok(response) => {
                         if let Some(ref reply) = response {
@@ -553,10 +565,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
         })
         .build()?;
+    let pipeline = Arc::new(pipeline);
 
     // Set STT to Live (continuous capture) mode and start recording
     pipeline.stt().set_mode(SttMode::Live);
     pipeline.stt().set_recording(true);
+
+    // Supervise the herdr event subscription for watched panes. It holds one
+    // connection open and speaks status changes, so this must outlive `main`'s
+    // body — the pipeline is an Arc precisely so the task can hold the speaker.
+    let _watch_task = tokio::spawn(run_agent_watch(
+        herdr_transport.clone(),
+        Arc::clone(&watches),
+        Arc::clone(&voice_state),
+        pipeline.tts_handle(),
+    ));
 
     // 5. Start audio capture stream (with atomic hardware muting)
     log::info!("Starting CPAL microphone audio capture...");
