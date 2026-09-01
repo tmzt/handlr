@@ -12,6 +12,7 @@ use libconversate::s2s::SpeechToSpeechBuilder;
 
 #[allow(dead_code)]
 struct AppArgs {
+    config: Option<String>,
     api_key: Option<String>,
     remote: Option<String>,
     socket: Option<String>,
@@ -30,7 +31,8 @@ struct AppArgs {
 
 fn parse_args() -> AppArgs {
     let mut args = std::env::args().skip(1);
-    let mut api_key = std::env::var("GEMINI_API_KEY").ok();
+    let mut config = None;
+    let mut api_key = None;
     let mut remote = None;
     let mut socket = None;
     let mut silero_model = None;
@@ -47,6 +49,7 @@ fn parse_args() -> AppArgs {
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--config" | "-c" => config = args.next(),
             "--api-key" => api_key = args.next(),
             "--remote" => remote = args.next(),
             "--socket" => socket = args.next(),
@@ -72,6 +75,7 @@ fn parse_args() -> AppArgs {
     }
 
     AppArgs {
+        config,
         api_key,
         remote,
         socket,
@@ -191,11 +195,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = parse_args();
+    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
 
     // 1. Initialize Reasoning Engine
     let system_prompt = handlr::reasoning::default_system_prompt()
         .ok_or_else(|| "could not find <system_prompt> tag in AGENTS.md".to_string())?;
     let tools = handlr::reasoning::declare_gemini_tools();
+
+    let api_key = args
+        .api_key
+        .or(config.gemini.api_key)
+        .or_else(|| std::env::var("GEMINI_API_KEY").ok());
 
     let engine_type = if args.mock_mode {
         log::info!("Starting in MOCK reasoning mode");
@@ -205,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         log::info!("Initializing Gemini Reasoning Engine...");
         EngineType::Gemini {
-            api_key: args.api_key.clone(),
+            api_key,
             tools,
         }
     };
@@ -220,12 +230,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         HerdrTransport::mock()
     } else if let Some(ref ssh_target) = args.remote {
         log::info!("Connecting via SSH to: {}", ssh_target);
-        let config = RemoteSshConfig::new(ssh_target.clone());
-        HerdrTransport::remote_ssh_with_config(config)
+        let ssh_config = RemoteSshConfig::new(ssh_target.clone());
+        HerdrTransport::remote_ssh_with_config(ssh_config)
+    } else if let Some(ref socket_str) = args.socket {
+        let socket_path = PathBuf::from(socket_str);
+        log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
+        HerdrTransport::local(socket_path)
+    } else if config.transport.mode.eq_ignore_ascii_case("remote") {
+        if let Some(ref remote_target) = config.transport.remote {
+            log::info!("Connecting via SSH (from config) to: {}", remote_target);
+            let ssh_config = RemoteSshConfig::new(remote_target.clone());
+            HerdrTransport::remote_ssh_with_config(ssh_config)
+        } else {
+            let socket_path = handlr::transport::default_local_socket_path();
+            log::warn!("Config transport mode is 'remote' but 'remote' string is missing; falling back to local socket: {:?}", socket_path);
+            HerdrTransport::local(socket_path)
+        }
     } else {
-        let socket_path = args
+        let socket_path = config
+            .transport
             .socket
-            .clone()
             .map(PathBuf::from)
             .unwrap_or_else(handlr::transport::default_local_socket_path);
         log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
@@ -239,8 +263,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let models_dir = PathBuf::from(home).join(".handlr").join("models");
     std::fs::create_dir_all(&models_dir)?;
 
+    let silero_model_arg = args.silero_model.or(config.voice.stt.silero_model);
+    let whisper_model_arg = args.whisper_model.or(config.voice.stt.whisper_model);
+
     let silero_path = resolve_model_path(
-        args.silero_model.clone(),
+        silero_model_arg.clone(),
         "silero_vad.onnx",
         "onnx-community/silero-vad",
         "onnx/model.onnx",
@@ -249,7 +276,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let whisper_path = resolve_model_path(
-        args.whisper_model.clone(),
+        whisper_model_arg.clone(),
         "ggml-base.en.bin",
         "ggerganov/whisper.cpp",
         "ggml-base.en.bin",
@@ -259,7 +286,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut builder = SpeechToSpeechBuilder::default();
 
-    if args.silero_model.is_some() || args.whisper_model.is_some() {
+    if silero_model_arg.is_some() || whisper_model_arg.is_some() {
         let stt_backend = SttBackend::Whisper {
             model: whisper_path,
         };
@@ -267,11 +294,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         builder = builder.with_stt_config(stt_config);
     }
 
-    let tts_engine_choice = args.tts_engine.as_deref().unwrap_or(if args.use_sine_tts {
-        "sine"
-    } else {
-        "system"
-    });
+    let tts_engine_choice = args
+        .tts_engine
+        .or_else(|| if args.use_sine_tts { Some("sine".to_string()) } else { None })
+        .unwrap_or(config.voice.tts.engine);
 
     let backend = match tts_engine_choice.to_lowercase().as_str() {
         "sine" => {
@@ -285,7 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(feature = "kokoro")]
         "kokoro" => {
             let model_path = resolve_model_path(
-                args.kokoro_model.clone(),
+                args.kokoro_model.or(config.voice.tts.kokoro_model),
                 "kokoro-v1.0.onnx",
                 "hexgrad/Kokoro-82M",
                 "kokoro-v1.0.onnx",
@@ -293,7 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &models_dir,
             )?;
             let voices_path = resolve_model_path(
-                args.kokoro_voices.clone(),
+                args.kokoro_voices.or(config.voice.tts.kokoro_voices),
                 "voices.bin",
                 "hexgrad/Kokoro-82M",
                 "voices.bin",
@@ -316,7 +342,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(feature = "sherpa-kokoro")]
         "sherpa-kokoro" | "sherpa" => {
-            let model_dir = if let Some(dir) = args.sherpa_model_dir.clone() {
+            let model_dir = if let Some(dir) = args.sherpa_model_dir.or(config.voice.tts.sherpa_model_dir) {
                 PathBuf::from(dir)
             } else {
                 models_dir.join("sherpa-kokoro")
@@ -352,12 +378,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let mut tts_config = TtsConfig::new(backend);
-    if let Some(ref voice) = args.tts_voice {
-        tts_config.voice = voice.clone();
+    if let Some(voice) = args.tts_voice.or(config.voice.tts.voice) {
+        tts_config.voice = voice;
     }
-    if let Some(speed) = args.tts_speed {
-        tts_config.speed = speed;
-    }
+    let speed = args.tts_speed.unwrap_or(config.voice.tts.speed);
+    tts_config.speed = speed;
     log::info!("TTS configured with voice='{}' speed={}", tts_config.voice, tts_config.speed);
     builder = builder.with_tts_config(tts_config);
     let mute_atomic = Arc::new(std::sync::atomic::AtomicBool::new(false));

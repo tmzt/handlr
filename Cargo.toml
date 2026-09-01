@@ -21,6 +21,7 @@ libinfer = { path = "crates/libinfer" }
 reqwest = { version = "0.12", features = ["blocking", "stream"] }
 tar = "0.4"
 bzip2 = "0.4"
+toml = "0.8"
 
 [features]
 default = []
