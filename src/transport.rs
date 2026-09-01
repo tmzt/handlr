@@ -14,6 +14,7 @@ pub use libherdr::{
     },
 };
 
+use crate::commands::validate_arbitrary_command;
 use crate::config::AgentConfig;
 use libconversate::VoiceState;
 use std::sync::Arc;
@@ -161,30 +162,51 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                 ));
             };
 
-            let is_allowed = agent_cfg.allowed_commands.iter().any(|allowed| {
+            let is_explicitly_allowed = agent_cfg.allowed_commands.iter().any(|allowed| {
                 allowed.trim().eq_ignore_ascii_case(cmd.trim())
             });
-            if !is_allowed {
+
+            let final_cmd = if is_explicitly_allowed {
+                cmd.trim().to_string()
+            } else if agent_cfg.allow_arbitrary_commands {
+                match validate_arbitrary_command(cmd) {
+                    Ok(cleaned) => cleaned,
+                    Err(reason) => {
+                        log::warn!(
+                            "Rejected arbitrary command for agent '{}' on pane '{}': {}",
+                            agent_name, pane_id, reason
+                        );
+                        return Err(reason);
+                    }
+                }
+            } else {
                 return Err(format!(
                     "Command '{}' is not permitted for agent '{}'. Allowed commands for {}: {:?}",
                     cmd, agent_name, agent_name, agent_cfg.allowed_commands
                 ));
-            }
+            };
 
             // Mechanical confirmation gate check
             if agent_cfg.require_confirmation {
                 if let Some(ref vs) = self.voice_state {
-                    let confirmed = vs.verify_and_consume_confirmation(pane_id, cmd);
+                    let confirmed = vs.verify_and_consume_confirmation(pane_id, &final_cmd)
+                        || vs.verify_and_consume_confirmation(pane_id, cmd);
                     if !confirmed {
-                        log::warn!("Mechanical confirmation gate blocked '{}' on pane '{}' (confirmation not armed or confirmed)", cmd, pane_id);
+                        log::warn!("Mechanical confirmation gate blocked '{}' on pane '{}' (confirmation not armed or confirmed)", final_cmd, pane_id);
                         return Err(format!(
                             "Mechanical confirmation gate blocked execution: Command '{}' on pane '{}' requires vocal confirmation. You must ask the user for confirmation first.",
-                            cmd, pane_id
+                            final_cmd, pane_id
                         ));
                     }
-                    log::info!("Mechanical confirmation gate validated for '{}' on pane '{}'", cmd, pane_id);
+                    log::info!("Mechanical confirmation gate validated for '{}' on pane '{}'", final_cmd, pane_id);
                 }
             }
+
+            let mut final_args = args.clone();
+            if let Some(obj) = final_args.as_object_mut() {
+                obj.insert("command".to_string(), serde_json::Value::String(final_cmd));
+            }
+            return self.client.execute_tool_call(name, &final_args).await.map_err(|e| e.to_string());
         }
         self.client.execute_tool_call(name, args).await.map_err(|e| e.to_string())
     }
@@ -378,8 +400,17 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             content.push_str("### Configured Agents & Permitted Commands\n");
             for agent in &self.agents {
                 content.push_str(&format!(
-                    "- Agent '{}': Allowed commands: {:?}, Requires Confirmation: {}\n",
-                    agent.name, agent.allowed_commands, agent.require_confirmation
+                    "- Agent '{}': Allowed commands: {:?}, Allow Arbitrary Safe Commands: {}, Requires Confirmation: {}\n",
+                    agent.name, agent.allowed_commands, agent.allow_arbitrary_commands, agent.require_confirmation
+                ));
+            }
+            if self.agents.iter().any(|a| a.allow_arbitrary_commands) {
+                content.push_str(&format!(
+                    "Arbitrary commands are validated mechanically before they are sent: ASCII only, \
+                     only letters, digits, spaces and the punctuation . , ' ? : (no '/', no '-', no shell \
+                     metacharacters, no newlines), {} characters max. Rephrase in plain words rather than \
+                     declining when the user's wording needs a forbidden character.\n",
+                    crate::commands::MAX_ARBITRARY_COMMAND_LEN
                 ));
             }
             content.push_str("\n");
@@ -584,5 +615,74 @@ mod tests {
             .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
             .await;
         assert!(blocked_after.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_arbitrary_commands_disabled_by_default() {
+        let executor = HerdrToolExecutor::new(
+            HerdrClient::mock(),
+            vec![AgentConfig::new("claude", vec!["continue".to_string()], false)],
+        );
+        let res = executor
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "please run the tests" }),
+            )
+            .await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("is not permitted for agent"));
+    }
+
+    #[tokio::test]
+    async fn test_arbitrary_safe_commands_validation() {
+        let client = HerdrClient::mock();
+        let vs = Arc::new(VoiceState::default());
+        let executor = HerdrToolExecutor::new(
+            client,
+            vec![
+                AgentConfig::new("claude", vec!["continue".to_string()], true)
+                    .with_arbitrary_commands(true),
+            ],
+        )
+        .with_voice_state(Arc::clone(&vs));
+
+        // Arm and confirm for a safe arbitrary command with periods and commas
+        vs.arm_confirmation(Some("p1".to_string()), Some("please run cargo test, check output.".to_string()));
+        vs.confirm_gate();
+
+        let ok_res = executor
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "please run cargo test, check output." }),
+            )
+            .await;
+        assert!(ok_res.is_ok());
+
+        // Attempting a command with slash '/' must be rejected
+        vs.arm_confirmation(Some("p1".to_string()), Some("cat /etc/passwd".to_string()));
+        vs.confirm_gate();
+        let slash_res = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "cat /etc/passwd" }))
+            .await;
+        assert!(slash_res.is_err());
+        assert!(slash_res.unwrap_err().contains("'/' and '-' are not permitted"));
+
+        // Attempting a command with hyphen '-' must be rejected
+        vs.arm_confirmation(Some("p1".to_string()), Some("cargo test --all".to_string()));
+        vs.confirm_gate();
+        let dash_res = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "cargo test --all" }))
+            .await;
+        assert!(dash_res.is_err());
+        assert!(dash_res.unwrap_err().contains("'/' and '-' are not permitted"));
+
+        // Non-ASCII command must be rejected
+        vs.arm_confirmation(Some("p1".to_string()), Some("你好".to_string()));
+        vs.confirm_gate();
+        let non_ascii_res = executor
+            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "你好" }))
+            .await;
+        assert!(non_ascii_res.is_err());
+        assert!(non_ascii_res.unwrap_err().contains("must be ASCII only"));
     }
 }

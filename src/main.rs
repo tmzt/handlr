@@ -29,6 +29,7 @@ struct AppArgs {
     tts_speed: Option<f32>,
     mock_mode: bool,
     auto_download: bool,
+    allow_arbitrary_commands: Option<bool>,
 }
 
 fn parse_args() -> AppArgs {
@@ -49,6 +50,7 @@ fn parse_args() -> AppArgs {
     let mut tts_speed = None;
     let mut mock_mode = false;
     let mut auto_download = false;
+    let mut allow_arbitrary_commands = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -72,6 +74,8 @@ fn parse_args() -> AppArgs {
             }
             "--mock" => mock_mode = true,
             "--auto-download" => auto_download = true,
+            "--allow-arbitrary-commands" => allow_arbitrary_commands = Some(true),
+            "--no-arbitrary-commands" => allow_arbitrary_commands = Some(false),
             _ => {
                 eprintln!("Unknown argument: {}", arg);
             }
@@ -95,6 +99,7 @@ fn parse_args() -> AppArgs {
         tts_speed,
         mock_mode,
         auto_download,
+        allow_arbitrary_commands,
     }
 }
 
@@ -210,7 +215,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = parse_args();
-    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let mut config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    // CLI master switch wins over both the global and per-agent config settings.
+    config.apply_arbitrary_commands_override(args.allow_arbitrary_commands);
 
     // 1. Initialize Reasoning Engine
     let system_prompt = handlr::reasoning::default_system_prompt()

@@ -15,6 +15,11 @@ pub struct AppConfig {
     pub voice: VoiceConfig,
     #[serde(default = "default_agents")]
     pub agents: Vec<AgentConfig>,
+    /// Master switch for arbitrary (non allow-listed) commands. `Some(true)`
+    /// enables them for every agent, `Some(false)` disables them for every
+    /// agent, and `None` leaves each agent's own setting untouched.
+    #[serde(default)]
+    pub allow_arbitrary_commands: Option<bool>,
     #[serde(default)]
     pub gemini: GeminiConfig,
 }
@@ -25,16 +30,19 @@ fn default_agents() -> Vec<AgentConfig> {
             name: "claude".to_string(),
             allowed_commands: vec!["continue".to_string(), "/compact".to_string()],
             require_confirmation: true,
+            allow_arbitrary_commands: false,
         },
         AgentConfig {
             name: "omp".to_string(),
             allowed_commands: vec!["continue".to_string()],
             require_confirmation: true,
+            allow_arbitrary_commands: false,
         },
         AgentConfig {
             name: "agy".to_string(),
             allowed_commands: vec!["continue".to_string()],
             require_confirmation: true,
+            allow_arbitrary_commands: false,
         },
     ]
 }
@@ -45,6 +53,7 @@ impl Default for AppConfig {
             transports: Vec::new(),
             voice: VoiceConfig::default(),
             agents: default_agents(),
+            allow_arbitrary_commands: None,
             gemini: GeminiConfig::default(),
         }
     }
@@ -163,6 +172,9 @@ pub struct AgentConfig {
     /// Whether vocal confirmation is required before executing a command
     #[serde(default = "default_require_confirmation", alias = "required_confirmation")]
     pub require_confirmation: bool,
+    /// Whether arbitrary safe commands are allowed (must be ASCII, no '/' or '-', '.' and ',' allowed)
+    #[serde(default)]
+    pub allow_arbitrary_commands: bool,
 }
 
 fn default_require_confirmation() -> bool {
@@ -175,7 +187,13 @@ impl AgentConfig {
             name: name.into(),
             allowed_commands,
             require_confirmation,
+            allow_arbitrary_commands: false,
         }
+    }
+
+    pub fn with_arbitrary_commands(mut self, allow: bool) -> Self {
+        self.allow_arbitrary_commands = allow;
+        self
     }
 }
 
@@ -207,8 +225,10 @@ impl AppConfig {
 
         match std::fs::read_to_string(&path) {
             Ok(content) => match toml::from_str::<AppConfig>(&content) {
-                Ok(config) => {
+                Ok(mut config) => {
                     log::info!("Loaded configuration from {}", path.display());
+                    let global = config.allow_arbitrary_commands;
+                    config.apply_arbitrary_commands_override(global);
                     config
                 }
                 Err(e) => {
@@ -221,6 +241,23 @@ impl AppConfig {
                 Self::default()
             }
         }
+    }
+
+    /// Apply a global arbitrary-command override to every configured agent.
+    ///
+    /// `Some(true)`/`Some(false)` force the setting on/off for all agents;
+    /// `None` is a no-op so per-agent settings survive.
+    pub fn apply_arbitrary_commands_override(&mut self, allow: Option<bool>) {
+        let Some(allow) = allow else { return };
+        self.allow_arbitrary_commands = Some(allow);
+        for agent in &mut self.agents {
+            agent.allow_arbitrary_commands = allow;
+        }
+        log::info!(
+            "Arbitrary command support globally {} for all {} configured agents",
+            if allow { "enabled" } else { "disabled" },
+            self.agents.len()
+        );
     }
 
     /// Find an active transport by name/remote string or default flag.
@@ -246,65 +283,10 @@ impl AppConfig {
         self.agents.iter().find(|a| a.name.to_lowercase() == lower)
     }
 
-    /// Generate documented default TOML template string.
+    /// Documented default TOML template, embedded from `config.default.toml`
+    /// so the shipped file and the `--init` output can never drift apart.
     pub fn default_toml_template() -> String {
-        r#"# Default configuration for handlr
-# Copy to ~/.config/handlr/config.toml to customize
-
-[[transports]]
-name = "local"
-mode = "local"
-# Optional socket path for local mode (default: ~/.config/herdr/herdr.sock)
-# socket = "~/.config/herdr/herdr.sock"
-default = true
-
-[[transports]]
-name = "mini"
-mode = "remote"
-remote = "tmeade@timothys-mac-mini-1"
-
-[voice.tts]
-# TTS engine backend: "sherpa-kokoro" (neural), "system" (macOS say), "kokoro", or "sine"
-engine = "sherpa-kokoro"
-
-# Voice preset:
-# For sherpa-kokoro / kokoro: "af_bella", "af_sarah", "af_nicole", "am_adam", "bf_emma", "bm_george", etc.
-voice = "am_adam"
-
-# Playback speed multiplier (1.5x speed)
-speed = 1.5
-
-# Custom directory holding sherpa-onnx Kokoro assets (optional)
-# sherpa_model_dir = "~/.handlr/models/sherpa-kokoro"
-
-[voice.stt]
-# STT engine: "whisper"
-engine = "whisper"
-
-# Custom model paths (optional)
-# silero_model = "~/.handlr/models/silero_vad.onnx"
-# whisper_model = "~/.handlr/models/ggml-base.en.bin"
-
-[[agents]]
-name = "claude"
-allowed_commands = ["continue", "/compact"]
-require_confirmation = true
-
-[[agents]]
-name = "omp"
-allowed_commands = ["continue"]
-require_confirmation = true
-
-[[agents]]
-name = "agy"
-allowed_commands = ["continue"]
-require_confirmation = true
-
-[gemini]
-# Optional Gemini API Key (defaults to GEMINI_API_KEY environment variable)
-# api_key = "..."
-# model = "gemini-2.5-flash"
-"#.to_string()
+        include_str!("../config.default.toml").to_string()
     }
 }
 
@@ -360,6 +342,59 @@ require_confirmation = true
         assert_eq!(claude_cfg.name, "claude");
         assert_eq!(claude_cfg.allowed_commands, vec!["continue", "/compact"]);
         assert!(claude_cfg.require_confirmation);
+    }
+
+    #[test]
+    fn test_parse_arbitrary_commands_settings() {
+        let sample = r#"
+[[agents]]
+name = "claude"
+allowed_commands = ["continue"]
+require_confirmation = true
+allow_arbitrary_commands = true
+
+[[agents]]
+name = "omp"
+allowed_commands = ["continue"]
+"#;
+        let cfg: AppConfig = toml::from_str(sample).unwrap();
+        assert!(cfg.find_agent("claude").unwrap().allow_arbitrary_commands);
+        // Defaults to off when the key is omitted.
+        assert!(!cfg.find_agent("omp").unwrap().allow_arbitrary_commands);
+        assert_eq!(cfg.allow_arbitrary_commands, None);
+    }
+
+    #[test]
+    fn test_global_arbitrary_commands_override() {
+        let sample = r#"
+allow_arbitrary_commands = true
+
+[[agents]]
+name = "claude"
+allowed_commands = ["continue"]
+
+[[agents]]
+name = "agy"
+allowed_commands = ["continue"]
+allow_arbitrary_commands = false
+"#;
+        let mut cfg: AppConfig = toml::from_str(sample).unwrap();
+        let global = cfg.allow_arbitrary_commands;
+        assert_eq!(global, Some(true));
+
+        // Some(true) turns it on everywhere, including agents that opted out.
+        cfg.apply_arbitrary_commands_override(global);
+        assert!(cfg.agents.iter().all(|a| a.allow_arbitrary_commands));
+
+        // Some(false) is a master kill switch.
+        cfg.apply_arbitrary_commands_override(Some(false));
+        assert!(cfg.agents.iter().all(|a| !a.allow_arbitrary_commands));
+
+        // None leaves per-agent settings untouched.
+        cfg.agents[0].allow_arbitrary_commands = true;
+        cfg.apply_arbitrary_commands_override(None);
+        assert!(cfg.agents[0].allow_arbitrary_commands);
+        assert!(!cfg.agents[1].allow_arbitrary_commands);
     }
 
     #[test]

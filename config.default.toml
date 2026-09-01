@@ -1,6 +1,11 @@
 # Default configuration for handlr
 # Copy to ~/.config/handlr/config.toml to customize
 
+# Master switch for arbitrary commands. Uncomment to force the setting on or
+# off for every agent below; leave it out to honour each agent's own value.
+# The --allow-arbitrary-commands / --no-arbitrary-commands CLI flags override both.
+# allow_arbitrary_commands = false
+
 [[transports]]
 name = "local"
 # Transport mode: "local" (direct Unix domain socket) or "remote" (SSH bridge)
@@ -41,16 +46,23 @@ engine = "whisper"
 name = "claude"
 allowed_commands = ["continue", "/compact"]
 require_confirmation = true
+# Allow free-form spoken instructions that are not on the allow list above.
+# These are typed verbatim into the agent's prompt, so they are restricted to
+# ASCII letters, digits, spaces and the punctuation . , ' ? : ; no '/' (slash
+# commands, paths), no '-' (CLI flags), no control characters, 256 chars max.
+allow_arbitrary_commands = false
 
 [[agents]]
 name = "omp"
 allowed_commands = ["continue"]
 require_confirmation = true
+allow_arbitrary_commands = false
 
 [[agents]]
 name = "agy"
 allowed_commands = ["continue"]
 require_confirmation = true
+allow_arbitrary_commands = false
 
 [gemini]
 # Optional Gemini API Key (defaults to GEMINI_API_KEY environment variable)
