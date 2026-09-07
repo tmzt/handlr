@@ -155,6 +155,10 @@ All enums follow the `asr.rs` rule, restated here because it is load-bearing:
 **new variants are appended at the end so bincode discriminants never shift.**
 Same for struct fields: bincode has no field names — fields are append-only
 too, and any non-append change requires a `AUDIO_PROTOCOL_VERSION` bump.
+That is why `PcmFrame.utterance_id`, `ConfirmResponse`, `UtteranceStart`,
+and `ConfirmResolved` sit at the ends of their structs/enums. Nothing has
+shipped: everything below, confirmation challenge/response and utterance
+framing included, is part of `AUDIO_PROTOCOL_VERSION` **1** — no bump.
 
 ```rust
 //! Remote audio wire types — one submodule of `voice_proto`.
@@ -213,6 +217,15 @@ pub struct PcmFrame {
     /// size × channels; receivers drop malformed frames and count
     /// them as a gap.
     pub payload: Vec<u8>,
+    /// Utterance epoch this frame belongs to. 0 for STREAM_MIC (A
+    /// does not segment utterances). For STREAM_TTS, the u32 counter
+    /// announced by the preceding UtteranceStart — any frame is
+    /// attributable to its utterance (and, via the challenge on the
+    /// UtteranceStart, to a confirmation prompt, §3.6) without
+    /// repeating text per frame. Appended field: 4 bytes/frame, no
+    /// version bump. Also exactly the identity a future barge-in
+    /// flush needs to drop only the cancelled utterance's frames.
+    pub utterance_id: u32,
 }
 
 /// First frame on the wire, A → B.
@@ -257,6 +270,41 @@ pub struct StateSync {
     pub confirmation_active: bool,
 }
 
+/// The challenge half of the confirmation protocol (§3.6), B → A,
+/// carried inside UtteranceStart. The nonce is a single-use
+/// capability to answer ONE pending confirmation question; pane_id
+/// and command are display-only copies for the local UI — A never
+/// sends them back, only the nonce.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfirmChallenge {
+    /// 128-bit CSPRNG value minted on B, fresh per gate arming.
+    pub nonce: u128,
+    pub pane_id: Option<String>,
+    pub command: Option<String>,
+}
+
+/// B → A, sent once before the first PcmFrame of each STREAM_TTS
+/// utterance. Binds the compact per-frame utterance_id to the
+/// utterance's full text and, for confirmation prompts, its
+/// challenge — so text crosses the wire once, not per 20 ms frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UtteranceStart {
+    /// STREAM_TTS (a u8 so a future stream can reuse this).
+    pub stream: u8,
+    /// Per-epoch counter starting at 1 (0 means "no utterance").
+    /// Stamped on every PcmFrame of the utterance.
+    pub utterance_id: u32,
+    /// The String utterance id from voice_proto::tts::SpeakRequest,
+    /// so Tts(DaemonMessage) mirrors correlate. Sent once here —
+    /// repeating it per frame would cost ~44 bytes and an allocation
+    /// every 20 ms for what a Copy u32 does in 4.
+    pub tts_utterance_id: String,
+    /// Full text being synthesized — the local UI's display copy.
+    pub text: String,
+    /// Some(_) iff this utterance is a confirmation prompt (§3.6).
+    pub challenge: Option<ConfirmChallenge>,
+}
+
 /// Everything machine A sends. Append-only.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AudioToRemote {
@@ -275,6 +323,13 @@ pub enum AudioToRemote {
     Ping { nonce: u64, t0_us: u64 },
     /// Clean shutdown: A stops sending, half-closes after B's Bye.
     Bye,
+    /// Answer to a ConfirmChallenge from a local UI (§3.6). The
+    /// voice path (a spoken "yes" as PCM) remains valid and carries
+    /// no nonce. accept = false resets the gate immediately — a UI
+    /// "No" must not have to wait for a timeout. The only wire
+    /// message that can mutate VoiceState, and it is inert without a
+    /// fresh nonce B itself minted (§9).
+    ConfirmResponse { nonce: u128, accept: bool },
 }
 
 /// Everything machine B sends. Append-only.
@@ -301,6 +356,14 @@ pub enum AudioToLocal {
     /// Session-fatal daemon error; connection closes after this.
     Error { message: String },
     Bye,
+    /// Utterance framing for STREAM_TTS (§3.5, §3.6). Precedes the
+    /// utterance's first PcmFrame on the same FIFO stream.
+    UtteranceStart(UtteranceStart),
+    /// The challenge carrying this nonce is settled — confirmed
+    /// (either path), declined, reset, or invalidated — so A
+    /// dismisses any UI for it. Advisory: the authoritative
+    /// settlement already happened on B.
+    ConfirmResolved { nonce: u128 },
 }
 ```
 
@@ -316,8 +379,9 @@ pub enum AudioToLocal {
    pipeline pull. Any other first frame from either side → close with
    `Error`.
 3. Steady state: A streams `Pcm(STREAM_MIC)` whenever its (advisory) mute
-   mirror is off; B streams `Pcm(STREAM_TTS)` while speaking, plus `Asr`,
-   `Tts`, and `State` mirrors as they happen.
+   mirror is off; B streams `Pcm(STREAM_TTS)` while speaking — each
+   utterance preceded by its `UtteranceStart` (§3.6) — plus `Asr`, `Tts`,
+   and `State` mirrors as they happen.
 4. Teardown: either side sends `Bye`, the peer replies `Bye`, both close.
    §3.9 for half-close details.
 
@@ -329,7 +393,11 @@ connection inside the envelope enums above, rather than opening a second
 
 * **Ordering is semantic.** `FlushPlayback` must not race the PCM frames it
   flushes; `State { muted: true }` must not race the mic frames it silences.
-  One FIFO byte stream gives ordering for free; two connections would need
+  Concrete example from the confirmation flow: `UtteranceStart` must arrive
+  before the `PcmFrame`s carrying its `utterance_id` (else A plays audio it
+  cannot attribute), and `ConfirmResolved` must arrive after the challenge
+  it settles (else A dismisses a dialog that then pops back up). One FIFO
+  byte stream gives all of this for free; two connections would need
   cross-stream sequencing we'd have to invent.
 * Each extra connection is an extra `ssh` child + UDS accept + reconnect state
   machine. `open_event_stream` already demonstrates the one-held-pipe shape.
@@ -354,9 +422,15 @@ second synthesis chunks and slices them.
 Byte math per frame (bincode 1.x: enum tag u32, struct fields in order,
 `Vec<u8>` as u64 len + bytes):
 
-* Mic: 4 (length prefix) + 4 (AudioToRemote tag) + [1 + 8 + 8 + 8 + 640] =
-  **673 bytes / 20 ms** → ~33.6 KB/s including overhead (5 % overhead).
-* TTS: 4 + 4 + [1 + 8 + 8 + 8 + 960] = **993 bytes / 20 ms** → ~49.7 KB/s.
+* Mic: 4 (length prefix) + 4 (AudioToRemote tag) + [1 + 8 + 8 + 8 + 640 + 4] =
+  **677 bytes / 20 ms** → ~33.9 KB/s including overhead (6 % overhead).
+* TTS: 4 + 4 + [1 + 8 + 8 + 8 + 960 + 4] = **997 bytes / 20 ms** → ~49.9 KB/s.
+
+The trailing 4 bytes are `utterance_id` (u32). This is why utterance *text*
+rides `UtteranceStart` once per utterance instead of per frame: reusing
+`voice_proto::tts`'s `String` utterance id on every frame would cost 8 (len)
++ ~36 (uuid) bytes plus a heap allocation per 20 ms decode, for information
+that never changes mid-utterance.
 
 `MAX_FRAME_BYTES = 1 MiB` corresponds to **32.7 s** of 16 kHz mono i16 in a
 single frame — three orders of magnitude above our 20 ms frames, and even a
@@ -365,35 +439,97 @@ it is not touched. The daemon additionally enforces a *policy* cap of 250 ms
 of audio per `PcmFrame` (larger frames are accepted by the codec but rejected
 with `Error` — nothing legitimate produces them and they defeat pacing).
 
-### 3.6 `VoiceState` across the boundary — one authority, zero shared state
+### 3.6 `VoiceState` across the boundary — one authority, one capability token
 
 This is the security-relevant part; the design is deliberately boring:
 
 **The `VoiceState` instance — `muted`, `confirmation_mode`, and the
-`confirmation_gate` — lives exclusively on machine B, inside the daemon.
-There is no gate state on the wire, ever, in the primary mode.**
+`confirmation_gate` — lives exclusively on machine B, inside the daemon. A
+never holds gate state. While a confirmation is pending, A holds exactly one
+opaque token — a 128-bit nonce — that it can do nothing with except echo
+back. A nonce is a capability to answer *one specific pending question*; it
+is not a grant of gate state.**
 
-Walk the confirmation flow as it exists in `src/main.rs` today and observe
-that every participant moves to B together:
+The confirmation exchange is an explicit challenge/response protocol.
+Walking the flow (the same flow `src/main.rs` runs today, every participant
+moved to B, plus the challenge leg):
 
-1. The async processor (on B) gets a transcript, calls `vs.arm_confirmation()`
-   and `ensure_audio_ring().skip_to_end()` — arming and flushing happen on B,
-   against B's ring, which is the only ring the VAD reads.
-2. The model's confirmation question is synthesized on B and only its *audio*
-   crosses to A.
-3. The user's "yes" crosses as PCM, is transcribed on B, and B's processor
-   calls `vs.confirm_gate()`.
-4. `HerdrToolExecutor` (on B) calls `verify_and_consume_confirmation()` under
-   B's own `Mutex<GateState>` — the same single-process atomicity the local
-   case has today.
+1. The async processor (on B) gets a model reply,
+   `parse_confirmation_request` fires, and `vs.arm_confirmation()` — which
+   now also **mints a fresh nonce** (OS CSPRNG, 128 bits, stored as `u128`)
+   inside the `Armed` state — plus `ensure_audio_ring().skip_to_end()`.
+   Arming and flushing happen on B, against B's ring, which is the only
+   ring the VAD reads.
+2. The confirmation question is synthesized on B. Its `UtteranceStart`
+   crosses to A carrying the prompt **text**, the per-frame `utterance_id`,
+   and the **challenge** (`ConfirmChallenge { nonce, pane_id, command }`).
+   A can therefore render a real dialog — question text, the command being
+   confirmed, Accept/Decline — alongside (or instead of) playing the audio,
+   and can tell that the audio it *is* playing is a confirmation prompt.
+3. The user answers by either path:
+   * **Voice** (unchanged): "yes" crosses as PCM, is transcribed on B, and
+     B's processor calls `vs.confirm_gate()`; any non-affirmative
+     transcript calls `vs.reset_confirmation_gate()`. No nonce involved.
+   * **Local UI**: A sends `ConfirmResponse { nonce, accept }`. B calls
+     `vs.answer_challenge(nonce, accept)`, which under the same
+     `Mutex<GateState>` verifies the nonce against the currently-`Armed`
+     gate, then advances `Armed → Confirmed` (accept) or resets to `Idle`
+     (decline — a UI "No" takes effect immediately, not by timeout).
+4. `HerdrToolExecutor` (on B) calls `verify_and_consume_confirmation()`
+   under B's own `Mutex<GateState>` — the same single-process atomicity the
+   local case has today, identical regardless of which path confirmed.
+5. However the challenge settles — either answer path, reset, the §8
+   outage timeout, session teardown — B sends `ConfirmResolved { nonce }`
+   so A dismisses the dialog (this is what clears the UI when the user
+   answers by voice).
 
-Arm → confirm → consume is a single-machine critical section. A cannot forge
-a `Confirmed` state because no message type can express one; the strongest
-thing A can inject is *audio that sounds like "yes"*, which is precisely the
-capability the user's local microphone already has. Replay of captured PCM
-frames is equivalent to replaying sound into the mic — and is additionally
-bounded by the epoch (frames only arrive over the live, ssh-authenticated
-connection; there is no store-and-forward surface).
+Gate-side additions in `voice_proto::lib.rs` (process-local types, not wire
+types — field-position rules don't apply, but shown for concreteness):
+
+```rust
+pub enum GateState {
+    #[default] Idle,
+    /// nonce: the outstanding challenge for THIS arming.
+    Armed     { pane_id: Option<String>, command: Option<String>, nonce: u128 },
+    Confirmed { pane_id: Option<String>, command: Option<String> },
+}
+
+impl VoiceState {
+    /// As today (also sets confirmation_mode), but mints and
+    /// returns the challenge nonce.
+    pub fn arm_confirmation(&self, pane_id: Option<String>, command: Option<String>) -> u128;
+    /// UI path: verify nonce against the Armed gate under the one
+    /// mutex, then Armed -> Confirmed (accept) or -> Idle (decline).
+    /// false = no armed gate with this nonce; caller logs and drops.
+    pub fn answer_challenge(&self, nonce: u128, accept: bool) -> bool;
+}
+```
+
+Nonce lifecycle, stated as invariants:
+
+* **Fresh and unpredictable.** 128 bits from the OS CSPRNG per arming;
+  never reused, never derived from anything observable on the wire.
+* **Tightly bound.** The nonce lives *inside* `Armed { .. }` — valid only
+  for that specific gate instance (its `pane_id` + `command`). Any
+  transition out of `Armed` — confirmation by either path, reset on a
+  non-affirmative transcript, the 60 s outage reset (§8), daemon shutdown —
+  destroys it. Re-arming (even for the same command) mints a different
+  nonce; a response quoting the superseded one fails.
+* **Single-use, consumed atomically.** `answer_challenge` takes the gate
+  mutex once: verify, transition, done. A second `ConfirmResponse` with
+  the same nonce finds no matching `Armed { nonce }` and is refused.
+* **Epoch-bound.** A nonce never survives a reconnect: session teardown
+  invalidates the outstanding challenge, and if the gate is still armed
+  when a new session (fresh `epoch`, §3.3/§8) attaches, B mints a *new*
+  nonce and re-issues the challenge over the new connection. A response
+  quoting a previous epoch's nonce cannot match anything.
+
+Why replay of a captured `ConfirmResponse` fails, exactly: it can only be
+delivered over the live, ssh-authenticated connection — there is no
+store-and-forward surface (§9) — and by the time an attacker could resend
+it, the nonce has been consumed by the first delivery, destroyed by a gate
+transition, or orphaned by an epoch change. All three checks happen under
+one mutex on B.
 
 `StateSync` (B→A) is a **read-only mirror**, sent on every transition of
 `muted` / `confirmation_mode` / gate activity. A uses it for two things only:
@@ -404,12 +540,14 @@ connection; there is no store-and-forward surface).
   arrive at B and are discarded by B's authoritative check in the pull thread
   (`inner.is_muted()` → `ring.skip_to_end()`), exactly as a hot mic is
   handled locally today. Staleness costs bandwidth, never correctness.
-* Local UI (a future "listening / speaking / confirming" indicator).
+* Local UI (a future "listening / speaking / confirming" indicator; the
+  confirmation dialog itself is driven by `ConfirmChallenge`, not this).
 
-There is no A→B state-mutation message. If a future need appears (e.g. a
-local hardware mute button), it will be expressed as an appended
-`AudioToRemote` variant that *requests* a state change B applies through
-`VoiceState` methods — the authority does not move.
+`ConfirmResponse` is the **only** A→B message that can mutate `VoiceState`,
+and it is inert without a fresh nonce B itself minted for a question B
+itself asked. Any other future state mutation (e.g. a local hardware mute
+button, §11) will be an appended `AudioToRemote` variant that *requests* a
+change B applies through `VoiceState` methods — the authority does not move.
 
 ### 3.7 Backpressure, stalls, and gaps
 
@@ -711,6 +849,17 @@ pub struct RemoteAudioLink {
   `PlaybackProgress` every 250 ms derived from bytes-written minus
   queue-depth (queue depth needs a small `len()` accessor added to
   `CpalAudioSink` — one method, additive).
+* **Confirmation UI:** the reader task handles `UtteranceStart` by
+  recording the live `utterance_id → text` mapping — so "is this TTS frame
+  part of a confirmation prompt?" is a field lookup, not a heuristic — and,
+  when `challenge` is `Some`, handing it to a `ConfirmUi` hook owned by
+  `RemoteAudioLink`. v1's `ConfirmUi` impl lives in `local.rs`: it prints
+  the prompt text and command to the terminal (`confirm? [y/N]: <command>`)
+  and reads a single keypress; the trait seam is the point — a tray dialog
+  or TUI overlay slots in later without touching the protocol. Accept or
+  decline sends `AudioToRemote::ConfirmResponse { nonce, accept }`;
+  `ConfirmResolved` dismisses the prompt, which covers the user answering
+  by voice while the dialog is up.
 * **Mirrors:** `WireSttMirror` implements nothing today beyond logging
   `AsrEvent`s at info level; it is the future seam for local UI and satisfies
   "a remote `SttCallbacks` implementation on the local side" without
@@ -736,6 +885,7 @@ pub struct WireAudioSink {
     peer_played: Arc<AtomicU64>, // updated from PlaybackProgress
     rate: u32,
     channels: u16,
+    utterance: Arc<AtomicU32>,  // current utterance epoch, stamped on every frame
 }
 impl AudioSink for WireAudioSink {
     fn write(&self, samples: &[i16]) -> Result<(), SinkError>  { /* slice to 20 ms frames, throttle at 2 s lookahead */ }
@@ -754,10 +904,26 @@ impl AudioSink for WireAudioSink {
   `.with_sink_factory(move |rate, ch| Arc::new(WireAudioSink::new(conn, rate, ch)))`
   and `.with_stt_callbacks(WireMirrorCallbacks { conn })` (forwards each
   `AsrEvent` as `AudioToLocal::Asr`); a `ManagerCallbacks` impl forwards
-  Started/Finished/Cancelled as `AudioToLocal::Tts`. `StateSync` is emitted
-  from a small wrapper the daemon installs around its `VoiceState` mutations
-  plus a 250 ms poll of the atomics (cheap, catches mutations made deep in
-  libconversate like TTS-driven mute release).
+  Started/Finished/Cancelled as `AudioToLocal::Tts`, and on each Started it
+  bumps the utterance epoch, stamps it into `WireAudioSink.utterance`, and
+  emits `AudioToLocal::UtteranceStart` with the `SpeakRequest`'s text and
+  String utterance id — attaching the pending challenge (below) if one is
+  stashed. `StateSync` is emitted from a small wrapper the daemon installs
+  around its `VoiceState` mutations plus a 250 ms poll of the atomics
+  (cheap, catches mutations made deep in libconversate like TTS-driven
+  mute release).
+* **Challenge wiring:** the arm site is the same one `src/main.rs:523–529`
+  has today (shared via `build_pipeline`): when `parse_confirmation_request`
+  fires, `vs.arm_confirmation(req.pane_id, req.command)` returns the minted
+  nonce, and the daemon stashes `ConfirmChallenge { nonce, pane_id,
+  command }` as pending for the next STREAM_TTS utterance — which is the
+  synthesized confirmation question, since the reply is spoken immediately
+  after arming. The connection reader handles `ConfirmResponse` by calling
+  `vs.answer_challenge(nonce, accept)` and, on any settlement (either
+  answer path, reset, timeout), sends `ConfirmResolved`. The
+  `HerdrToolExecutor` consumption path (`src/transport.rs:272–279`,
+  `verify_and_consume_confirmation`) is untouched — it sees `Confirmed`
+  the same way whichever path produced it.
 * **Herdr:** `HerdrTransport::local(default_local_socket_path())` on B (or
   B's own config transport) — remote-audio mode and `--remote` herdr mode are
   mutually exclusive by construction.
@@ -807,6 +973,12 @@ today's optional keys.
   armed/confirmed gate state is **kept** — it's B-local and a reconnecting
   user should be able to say "yes" to the question they already heard;
   `reset_confirmation_gate()` fires only if the disconnect outlasts 60 s.
+  The outstanding *challenge* is not kept: the nonce dies with the session
+  (§3.6 — it must not survive an epoch change), and when the reconnected
+  session's `HelloAck` lands with a still-armed gate, B mints a fresh nonce
+  and re-issues the challenge (same text, new nonce) over the new epoch, so
+  the local dialog reappears instead of holding a token from a dead
+  connection. A `ConfirmResponse` quoting the pre-drop nonce is refused.
 * **Remote daemon restart.** Bridge exits (socket EOF) → same reconnect path;
   `--autostart` respawns the daemon; models reload (tens of seconds) while
   the bridge heartbeats on stderr. Session history: the daemon's
@@ -844,14 +1016,38 @@ today's optional keys.
   it could equally ptrace the daemon; UDS `0600` + dir `0700` is the correct
   and sufficient posture, same as `herdr.sock`), and it does not authorize
   *which* remote hosts may be brains — that's the user's config/argv choice.
-* **Confirmation-gate trust boundary.** Restating §3.6 as a checkable
-  property: *no wire message can create, advance, or consume `GateState`.*
-  The enums contain no gate-mutation variant; `StateSync` is B→A and
-  read-only; `verify_and_consume_confirmation` runs only on B under B's
-  mutex. A "Confirmed" crossing the wire is therefore unforgeable and
-  unreplayable **because it is inexpressible**. Reviewers of future protocol
-  changes must preserve this: any appended variant that mutates `VoiceState`
-  needs the same scrutiny as a new `run_command` path.
+* **Confirmation-gate trust boundary.** Restating §3.6 as checkable
+  properties: `GateState` itself never crosses the wire. B tells A *that* a
+  question is pending (`ConfirmChallenge`), and the only thing A can say
+  back is *yes or no to that question* (`ConfirmResponse`) by quoting a
+  128-bit CSPRNG nonce that B minted for this arming, verifies and consumes
+  under its own `Mutex<GateState>`, and destroys on any gate transition or
+  epoch change. Compare the two answer routes honestly:
+  * The **voice route** accepts *any audio that transcribes to an
+    affirmative* — "yes", "yeah", "confirm", "do it", "proceed", … per the
+    list in `src/main.rs:476–486`. No secret is involved; every sound
+    source near the mic (or any process feeding the mic stream) already
+    has this capability.
+  * The **nonce route** requires possession of a fresh, single-use secret
+    that only ever traverses the ssh-authenticated channel and B's 0600
+    UDS. Guessing is hopeless (2⁻¹²⁸ per armed window); replay fails per
+    §3.6 — consumed on first use, bound to the specific armed gate, bound
+    to the epoch, and there is no store-and-forward surface to hold a
+    response for later.
+  A nonce-carrying UI response is therefore *at least as* trustworthy as
+  the voice route it supplements. What is newly possible, stated plainly:
+  a compromised machine A can now confirm **without producing audio**,
+  where before it would have had to inject PCM of a spoken "yes". That is
+  acceptable because A already fully controls the microphone — a process
+  positioned to send `ConfirmResponse` can equally send synthesized "yes"
+  audio and pass transcription. The nonce widens *no one's* ability to
+  confirm; it removes an audio-shaped speed bump for an attacker who had
+  already won A. The audit rule for reviewers of future protocol changes:
+  `ConfirmResponse` is the **only** state-mutating wire message, it is
+  inert without a live challenge B minted, and any newly appended variant
+  that mutates `VoiceState` must be either capability-gated the same way
+  or strictly fail-safe (e.g. mute), with the same scrutiny as a new
+  `run_command` path.
 * **Microphone audio leaves machine A.** New for handlr and worth friction:
   remote audio activates only via explicit `--remote-audio` or a transport
   with `audio = true` — never by default, never by fallback. First activation
@@ -865,7 +1061,9 @@ today's optional keys.
   the same allow-list + arbitrary-command validation + confirmation gate as
   local speech — the §3/AGENTS.md gates are the defense, unchanged), and the
   frame decoder (bincode with `MAX_FRAME_BYTES` cap + the 250 ms policy cap;
-  malformed frames close the session). The daemon refuses concurrent
+  malformed frames close the session), and the gate — but only through
+  `ConfirmResponse`, which is inert without the live nonce (bullet above).
+  The daemon refuses concurrent
   sessions, so a hostile same-user connection contends visibly rather than
   eavesdropping silently.
 
@@ -877,13 +1075,18 @@ Each phase compiles, passes tests, and is independently demoable.
 
 **Phase 1 — wire vocabulary** (libconversate; ~350 lines)
 * `crates/voice_proto/src/audio.rs`: every type in §3.2, `pub mod audio` in
-  `lib.rs`.
+  `lib.rs`; plus the §3.6 `GateState`/`VoiceState` additions in `lib.rs`
+  (`Armed.nonce`, `arm_confirmation` returning the nonce,
+  `answer_challenge`), with unit tests for consume-once, decline-resets,
+  and stale-nonce-after-rearm.
 * Tests in-module, matching `asr.rs`'s style: bincode round-trip per variant
-  (`round_trip_hello_preserves_formats`, `round_trip_pcm_frame_payload`,
-  `gap/state/progress` field checks), `try_decode` short-input `None`, an
-  oversize-header rejection, and a **discriminant-pinning test** (encode each
-  variant, assert the leading u32 tag bytes) so an accidental reorder fails
-  loudly.
+  (`round_trip_hello_preserves_formats`, `round_trip_pcm_frame_payload`
+  — asserting `utterance_id` survives —
+  `round_trip_utterance_start_with_challenge`,
+  `round_trip_confirm_response_and_resolved`, `gap/state/progress` field
+  checks), `try_decode` short-input `None`, an oversize-header rejection,
+  and a **discriminant-pinning test** (encode each variant, assert the
+  leading u32 tag bytes) so an accidental reorder fails loudly.
 * Demo: `cargo test -p voice_proto`.
 
 **Phase 2 — framed hygiene** (libconversate; ~90 lines)
@@ -891,7 +1094,7 @@ Each phase compiles, passes tests, and is independently demoable.
   (`FrameReader` over a concatenation of `encode()` outputs, split at every
   possible boundary, yields the same frames).
 
-**Phase 3 — daemon + loopback** (handlr; ~550 lines)
+**Phase 3 — daemon + loopback** (handlr; ~650 lines)
 * `src/remote_audio/{mod,daemon,sink}.rs`; extract
   `handlr::app::build_pipeline` from `main.rs`; subcommand dispatch for
   `audio-daemon`.
@@ -899,7 +1102,20 @@ Each phase compiles, passes tests, and is independently demoable.
   `Hello`, streams a WAV of "what time is it" as 20 ms mic frames into a
   daemon built with `--mock` reasoning + `Sine` TTS, asserts
   `Asr(Transcript)` mirror and `Pcm(STREAM_TTS)` frames come back, asserts
-  seq continuity and drain semantics. **No ssh, no mic, CI-safe.**
+  seq continuity, `UtteranceStart`-before-first-frame ordering with matching
+  `utterance_id`s, and drain semantics. **No ssh, no mic, CI-safe.**
+* Challenge/response tests against the daemon's real `VoiceState` path
+  (§3.6): a mock reply ending in "?" arms the gate and the loopback client
+  receives `UtteranceStart` with text + `Some(challenge)`; accept and
+  decline round-trips through `ConfirmResponse` (accept → the executor's
+  `verify_and_consume_confirmation` succeeds; decline → gate is `Idle`
+  immediately); `ConfirmResolved` emitted on every settlement path. Negative
+  tests, each asserting the gate is unchanged and no `Confirmed` results:
+  **wrong nonce** (random u128), **replayed nonce** (second response after
+  consumption), **nonce from a previous epoch** (drop and reconnect the
+  loopback pair mid-challenge, answer with the pre-drop nonce, assert the
+  re-issued challenge carries a different one), **nonce for a different
+  pane/command** (re-arm, answer with the superseded nonce).
 * Demo: `cargo test remote_audio::loopback` + run `handlr audio-daemon` and
   poke it with the test client binary.
 
@@ -917,7 +1133,9 @@ Each phase compiles, passes tests, and is independently demoable.
 **Phase 5 — A-side integration** (handlr; ~350 lines)
 * `local.rs`, `--remote-audio` flag, `TransportConfig` fields +
   `config.default.toml` doc block, mutual-exclusion with `--remote`,
-  earcons, `CpalAudioSink::len()` (libconversate, ~10 lines).
+  earcons, the `ConfirmUi` trait + v1 terminal prompt (§7) wired to
+  `ConfirmResponse`/`ConfirmResolved`, `CpalAudioSink::len()`
+  (libconversate, ~10 lines).
 * Demo: laptop ↔ dev box over real ssh; speak, hear the remote brain answer.
 
 **Phase 6 — hardening + measurement** (~250 lines)
@@ -934,7 +1152,7 @@ Each phase compiles, passes tests, and is independently demoable.
   frames). Acceptance: added mouth-to-transcript latency over local ≤ RTT +
   40 ms at p95 on a LAN.
 
-Total new code ≈ 2,000 lines across both repos, ~40 % of it tests.
+Total new code ≈ 2,200 lines across both repos, ~40 % of it tests.
 
 ---
 
@@ -956,10 +1174,13 @@ Total new code ≈ 2,000 lines across both repos, ~40 % of it tests.
 4. **Sharing `build_ssh_command` with libherdr** instead of mirroring ~20
    lines. *Recommendation: mirror now; extract a `pub fn ssh_command_base`
    in libherdr the third time it's needed.*
-5. **A-side hardware mute button** (an A→B state *request*). *Recommendation:
-   v1.1 — trivially safe (muting is fail-safe), but keep it out of v1 to
-   ship a wire with zero state-mutation messages, which makes §9's gate
-   argument auditable at a glance.*
+5. **A-side hardware mute button** (an A→B state *request*). The wire
+   already carries exactly one state-mutation message — the nonce-gated
+   `ConfirmResponse` (§3.6) — so the audit rule is not "zero mutation
+   messages" but §9's: every mutating variant is capability-gated or
+   strictly fail-safe. A mute request is fail-safe (it can only suppress
+   input) and would pass that bar trivially. *Recommendation: still v1.1 —
+   for scope, not safety.*
 6. **Which side renders earcons long-term** — local sine blips (v1) vs.
    B-synthesized status speech. *Recommendation: keep link-status sounds
    local forever; a dead link can't announce itself.*
@@ -967,3 +1188,9 @@ Total new code ≈ 2,000 lines across both repos, ~40 % of it tests.
    between raw-PCM and transcripts). *Recommendation: don't build it; the
    two existing endpoints (raw PCM here, `--remote` for transcripts) bracket
    the useful space.*
+8. **UI-confirmation-only mode.** A config knob (`require_ui_confirmation =
+   true`) making B ignore transcribed affirmatives and accept only
+   `ConfirmResponse` — strictly stronger than voice, since a hot mic, a TV,
+   or a passer-by saying "yes" (§9's affirmative list) could no longer
+   confirm anything. *Recommendation: cheap and attractive once the
+   phase-5 `ConfirmUi` exists; build it then, default off.*
