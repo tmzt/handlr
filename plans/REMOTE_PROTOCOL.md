@@ -209,16 +209,22 @@ pub struct PcmFrame {
     /// each Hello. Gaps mean the sender dropped frames (§3.7).
     pub seq: u64,
     /// Sender-side monotonic clock, microseconds. Never compared
-    /// across machines; used for sender pacing, receiver gap sizing,
-    /// and latency accounting against Pong RTT.
+    /// across machines and never consulted by the receiver's audio
+    /// path (§3.8 — gap concealment is sized from seq, §3.7); used
+    /// only for sender pacing, diagnostics, and latency accounting
+    /// against Pong RTT.
     pub timestamp_us: u64,
     /// Raw interleaved samples in the stream's negotiated
     /// StreamFormat. Byte length must be a multiple of the sample
     /// size × channels; receivers drop malformed frames and count
     /// them as a gap.
     pub payload: Vec<u8>,
-    /// Utterance epoch this frame belongs to. 0 for STREAM_MIC (A
-    /// does not segment utterances). For STREAM_TTS, the u32 counter
+    /// Utterance epoch this frame belongs to (§3.8). Always 0 for
+    /// STREAM_MIC — A cannot stamp a mic utterance epoch even in
+    /// principle, because B's VAD defines where the boundary falls
+    /// only after the audio arrives; B assigns the mic utterance
+    /// epoch internally and surfaces it as AsrEvent's utterance_seq.
+    /// For STREAM_TTS, the u32 counter
     /// announced by the preceding UtteranceStart — any frame is
     /// attributable to its utterance (and, via the challenge on the
     /// UtteranceStart, to a confirmation prompt, §3.6) without
@@ -234,8 +240,10 @@ pub struct Hello {
     pub protocol_version: u32,
     /// e.g. "handlr/0.1.0 (macos-aarch64)". Diagnostic only.
     pub client: String,
-    /// Stable per-invocation id (uuid). Lets the daemon log/refuse
-    /// a second concurrent session cleanly (§5).
+    /// Stable per-invocation id (uuid), minted by A — "who is
+    /// calling". A names itself; B names the accepted session
+    /// (HelloAck.epoch, §3.8). Lets the daemon log/refuse a second
+    /// concurrent session cleanly (§5).
     pub session_id: String,
     /// Format of STREAM_MIC frames this client will send.
     pub mic_format: StreamFormat,
@@ -250,8 +258,13 @@ pub struct HelloAck {
     pub protocol_version: u32,
     /// e.g. "handlr/0.1.0 (linux-x86_64)".
     pub server: String,
-    /// Daemon-chosen epoch, unique per accepted session. Frames from
-    /// a previous epoch are dead after reconnect (§8).
+    /// The session epoch: B-minted, unique per accepted session
+    /// (§3.8). A CSPRNG u64, compared for equality only, never
+    /// ordered — so it needs no persistence (a counter would
+    /// silently violate uniqueness across a daemon restart). Frames
+    /// from a previous session epoch are dead after reconnect (§8),
+    /// enforced by connection identity rather than a per-frame
+    /// field (§3.8).
     pub epoch: u64,
     /// The entry from Hello.playback_formats the daemon selected for
     /// STREAM_TTS.
@@ -291,8 +304,9 @@ pub struct ConfirmChallenge {
 pub struct UtteranceStart {
     /// STREAM_TTS (a u8 so a future stream can reuse this).
     pub stream: u8,
-    /// Per-epoch counter starting at 1 (0 means "no utterance").
-    /// Stamped on every PcmFrame of the utterance.
+    /// The TTS utterance epoch (§3.8): per-session-epoch counter
+    /// starting at 1 (0 means "no utterance"). Stamped on every
+    /// PcmFrame of the utterance.
     pub utterance_id: u32,
     /// The String utterance id from voice_proto::tts::SpeakRequest,
     /// so Tts(DaemonMessage) mirrors correlate. Sent once here —
@@ -375,9 +389,10 @@ pub enum AudioToLocal {
    `playback_formats = [{24_000, 1, I16}, {16_000, 1, I16}]`.
 2. B validates the version (equal major = compatible in v1; see §6 for
    mismatch handling), checks no other session is active, replies `HelloAck`
-   with a fresh `epoch` and the chosen `playback_format`, then starts its
-   pipeline pull. Any other first frame from either side → close with
-   `Error`.
+   with a freshly minted session epoch — a CSPRNG `u64`, compared for
+   equality only, never ordered (§3.8) — and the chosen `playback_format`,
+   then starts its pipeline pull. Any other first frame from either side →
+   close with `Error`.
 3. Steady state: A streams `Pcm(STREAM_MIC)` whenever its (advisory) mute
    mirror is off; B streams `Pcm(STREAM_TTS)` while speaking — each
    utterance preceded by its `UtteranceStart` (§3.6) — plus `Asr`, `Tts`,
@@ -518,18 +533,18 @@ Nonce lifecycle, stated as invariants:
 * **Single-use, consumed atomically.** `answer_challenge` takes the gate
   mutex once: verify, transition, done. A second `ConfirmResponse` with
   the same nonce finds no matching `Armed { nonce }` and is refused.
-* **Epoch-bound.** A nonce never survives a reconnect: session teardown
-  invalidates the outstanding challenge, and if the gate is still armed
-  when a new session (fresh `epoch`, §3.3/§8) attaches, B mints a *new*
+* **Session-epoch-bound.** A nonce never survives a reconnect: session
+  teardown invalidates the outstanding challenge, and if the gate is still
+  armed when a new session (fresh session epoch, §3.3/§8) attaches, B mints a *new*
   nonce and re-issues the challenge over the new connection. A response
-  quoting a previous epoch's nonce cannot match anything.
+  quoting a previous session epoch's nonce cannot match anything.
 
 Why replay of a captured `ConfirmResponse` fails, exactly: it can only be
 delivered over the live, ssh-authenticated connection — there is no
 store-and-forward surface (§9) — and by the time an attacker could resend
 it, the nonce has been consumed by the first delivery, destroyed by a gate
-transition, or orphaned by an epoch change. All three checks happen under
-one mutex on B.
+transition, or orphaned by a session-epoch change. All three checks happen
+under one mutex on B.
 
 `StateSync` (B→A) is a **read-only mirror**, sent on every transition of
 `muted` / `confirmation_mode` / gate activity. A uses it for two things only:
@@ -569,27 +584,133 @@ permanently-lagged conversation. Policy, per direction:
   is called from the TTS manager's playback thread (the same thread that
   paces a local `CpalAudioSink`), and gives `drain()` an exact definition:
   block until `played_seq` reaches the last seq written (with a timeout of
-  outstanding-audio-duration + 3 s, then `SinkError::Io`).
+  outstanding-audio-duration + 3 s, then `SinkError::Io`). The timeout is a
+  liveness backstop against a dead feedback loop, never a pacing
+  mechanism — A's DAC clock is the authority for playback rate (§3.8).
 * **Gap handling at B (mic receiver):** on `seq` discontinuity, B feeds
   `min(gap_duration, 500 ms)` of zero samples into the ring before the new
   frame's payload — silence is what silero should see for a dropout, and it
   lets in-progress utterances close naturally instead of splicing two
-  half-words together. Gap duration is computed from the `timestamp_us`
-  delta, not from seq alone (seq gaps have unknown per-frame sizes after
-  coalescing). B reports `Gap { concealed_ms }` so A can log/announce link
-  quality. Gaps ≥ 500 ms also `skip_to_end()` after concealment — don't
-  hallucinate long silences.
+  half-words together. Gap duration is the `seq` delta × the 20 ms nominal
+  frame duration — a length computed in **B's** clock domain. It is
+  deliberately *not* the `timestamp_us` delta: sizing concealment from A's
+  timestamps would let A's clock rate govern how much silence lands in B's
+  ring, and therefore how B's VAD segments (§3.8). The 100 ms coalescing
+  flush means a seq-derived size can err by up to one flush interval —
+  noise against VAD hysteresis measured in hundreds of ms. Between
+  utterances no sizing is needed at all: the boundary resync (below)
+  discards the question. B reports `Gap { concealed_ms }` so A can
+  log/announce link quality. Gaps ≥ 500 ms also `skip_to_end()` after
+  concealment — don't hallucinate long silences.
+* **Clock drift (mic direction): resync at utterance boundaries, don't
+  compensate.** A captures at nominally 16 kHz off its ADC crystal; B's
+  pull thread consumes at nominally 16 kHz on B's clock. Two commodity
+  crystals differ by roughly ±100 ppm, so over a 1-hour session ~360 ms of
+  latency accumulates in B's ring (or the ring starves) — and drop-oldest
+  above never catches it, because it watches A's send deque, not B's ring:
+  A's deque drains fine while B's ring drifts. The fix is to eliminate
+  drift, not compensate for it — no drift controller, no ppm estimation,
+  no drop/insert heuristic. Skew only matters *within* one utterance, and
+  every utterance boundary is a free resync point: within a 10 s
+  utterance, ±100 ppm is 1 ms — 16 samples at 16 kHz — negligible against
+  VAD hysteresis measured in hundreds of ms, and silero's `max_secs` (30 s
+  default, closing with `DiscardReason::Truncated`) hard-bounds the worst
+  case at ~3 ms even for an unbroken monologue. So B resyncs its ring at
+  each utterance boundary via `ensure_audio_ring().skip_to_end()` — the
+  exact call `src/main.rs` already makes at exactly these boundaries today
+  (`src/main.rs:529` on gate arming, `src/main.rs:550` at turn end). The
+  boundary anchor already exists on the wire too: the mic utterance epoch
+  is `AsrEvent`'s `utterance_seq: u64` (§3.8), carried on `SpeechStart` /
+  `Transcript` / `PartialTranscript` / `Discarded` and already mirrored
+  B→A. No new field, no new mechanism.
 * **Gap handling at A (TTS receiver):** none needed — B never drops, and the
   local `CpalAudioSink` VecDeque naturally plays silence on underrun.
 
-### 3.8 Sequence numbers & timestamps
+### 3.8 Clocks, epochs, and who mints what
 
-`seq` is per-stream, per-epoch, starting at 0 after each `Hello`. It is
-stamped by the sender at sample-acquisition time (before the send queue), so
-queue drops are visible. `timestamp_us` is the sender's monotonic clock; the
-two machines' clocks are never compared — RTT and one-way estimates come from
-`Ping`/`Pong` (A stamps `t0_us`, B echoes, A measures; sent every 5 s as
-keepalive, which also makes ssh hangs detectable within ~10 s).
+**Sequence numbers.** `seq` is per-stream, per-session-epoch, starting at 0
+after each `Hello`. It is stamped by the sender at sample-acquisition time
+(before the send queue), so queue drops are visible as gaps. Within an
+utterance, `seq` delta × the nominal frame duration is also how B sizes gap
+concealment (§3.7) — a duration in B's own clock domain.
+
+**Timestamps.** `timestamp_us` is the sender's monotonic clock, and the two
+machines' clocks are never compared. With gap sizing derived from `seq`
+(§3.7), this invariant is literal, not aspirational: `timestamp_us` appears
+nowhere in the receiver's audio path and exists only for sender pacing and
+diagnostics. RTT and one-way estimates come from `Ping`/`Pong` (A stamps
+`t0_us`, B echoes, A measures; sent every 5 s as keepalive, which also makes
+ssh hangs detectable within ~10 s).
+
+**Clock authority, per direction.** The physical device is the authority
+for its own audio; the other side yields:
+
+* **Mic (A→B): B's clock wins.** B's pull thread consumes at B's rate,
+  gaps are sized in B's clock domain, and B resyncs its ring at every
+  utterance boundary (§3.7). A's ADC rate never governs how B's VAD
+  segments.
+* **TTS (B→A): A's clock wins.** `PlaybackProgress` is a real feedback
+  loop: A's DAC drains at the DAC's physical rate, and B's `WireAudioSink`
+  paces `write()` against A's watermark. The `drain()` timeout
+  (outstanding-audio-duration + 3 s, §3.7) is measured on B's clock
+  against a watermark advanced by A's clock — acceptable precisely
+  because it is a **liveness backstop**, not a correctness mechanism: it
+  fires only when the feedback loop itself has died, never to arbitrate
+  rate.
+
+**B mints every epoch in the system.** Three epochs exist — the **session
+epoch** (`HelloAck.epoch`), the **TTS utterance epoch**
+(`UtteranceStart.utterance_id`, stamped on `PcmFrame.utterance_id`), and
+the **mic utterance epoch** (`AsrEvent`'s `utterance_seq`) — and B mints
+all three; A only ever echoes. Three distinct reasons, not one blanket
+rule:
+
+* **Session epoch:** B is the accepting side; whoever accepts connections
+  owns session identity and must reject stale or duplicate sessions.
+  Minting: a CSPRNG `u64`, compared for equality only, never ordered — so
+  it needs no persistence. A counter is wrong here: it silently violates
+  "unique per accepted session" across a daemon restart.
+* **TTS utterance epoch:** B is the source of that audio; a source numbers
+  its own output.
+* **Mic utterance epoch:** B is neither source nor acceptor here — it wins
+  because it owns the VAD, and the VAD *defines* where an utterance starts
+  and stops. A cannot mint this even in principle; it doesn't know where B
+  will place the boundary until B places it.
+
+The symmetric half, so the rule isn't misread as "B owns all identity":
+**A mints `Hello.session_id`** — a per-invocation uuid saying *who is
+calling* — while **B mints `HelloAck.epoch`** — *which accepted session
+this is*. A names itself; B names the session. B-mints-epochs takes no
+identity from A; it keeps every *shared* identifier single-authority.
+
+**The stamping asymmetry that falls out.** For TTS, A stamps
+`utterance_id` on nothing — B stamps it, because B knows the epoch up
+front (it is the source). For mic, B *cannot* have A stamp it: B derives
+the epoch from the audio after the fact, so mic frames always carry
+`utterance_id: 0` and B assigns the mic utterance epoch internally,
+surfacing it via `AsrEvent.utterance_seq` on the mirrors A already
+receives. Do not "fix" this asymmetry by making A stamp mic frames — it
+is the design, not an omission.
+
+**Session-epoch enforcement is structural, not per-frame.** `PcmFrame`
+carries no session-epoch field; "frames from a previous session epoch are
+dead" (§8) holds by connection identity: the daemon accepts one connection
+at a time (§5), the bridge is a dumb byte pump (§6), and the old socket
+dies with the old session — a stale frame has no path into the new epoch.
+That is sufficient and cheaper than per-frame validation, but it is a
+*structural* invariant: a future "reconnect without teardown" change would
+break it invisibly, and must either preserve one-connection-at-a-time or
+add a per-frame epoch check at that point.
+
+**Forward-compatibility seam (split VAD — reserved, not designed here).**
+A pending change runs local onset detection on A (transmit gating with
+pre-roll) while B keeps end-of-utterance authority. When it lands, A will
+carry a **transmission span id** in its own namespace — for pre-roll
+correlation and gate open/close — while B keeps the **utterance epoch** as
+the authoritative identifier transcripts key on, and B *correlates* the
+two rather than equating them. Equating them is the mistake to refuse: it
+would force real mid-stream arbitration over a shared counter, exactly
+what single-authority minting exists to prevent.
 
 ### 3.9 Clean shutdown & half-close
 
@@ -859,7 +980,12 @@ pub struct RemoteAudioLink {
   or TUI overlay slots in later without touching the protocol. Accept or
   decline sends `AudioToRemote::ConfirmResponse { nonce, accept }`;
   `ConfirmResolved` dismisses the prompt, which covers the user answering
-  by voice while the dialog is up.
+  by voice while the dialog is up. One hard rule for every `ConfirmUi`
+  impl, the v1 terminal prompt included: **render the challenge until
+  `ConfirmResolved` arrives; never expire it on a local timer.** Gate
+  lifetime is B's clock alone (§9) — a self-expiring dialog is a real
+  hazard, not a tidy-up: A shows "expired", the user then says "yes"
+  aloud, and B — still armed — confirms.
 * **Mirrors:** `WireSttMirror` implements nothing today beyond logging
   `AsrEvent`s at info level; it is the future seam for local UI and satisfies
   "a remote `SttCallbacks` implementation on the local side" without
@@ -885,7 +1011,7 @@ pub struct WireAudioSink {
     peer_played: Arc<AtomicU64>, // updated from PlaybackProgress
     rate: u32,
     channels: u16,
-    utterance: Arc<AtomicU32>,  // current utterance epoch, stamped on every frame
+    utterance: Arc<AtomicU32>,  // current TTS utterance epoch, stamped on every frame
 }
 impl AudioSink for WireAudioSink {
     fn write(&self, samples: &[i16]) -> Result<(), SinkError>  { /* slice to 20 ms frames, throttle at 2 s lookahead */ }
@@ -899,13 +1025,17 @@ impl AudioSink for WireAudioSink {
 * **Capture source:** the connection reader converts `Pcm(STREAM_MIC)`
   payloads i16→f32 and calls `ensure_audio_ring().push_samples(&f32)` — the
   ring, pull thread, VAD, mute logic, and `skip_to_end()` flushes are used
-  *unmodified*, which is the whole point of the seam.
+  *unmodified*, which is the whole point of the seam. The utterance-boundary
+  ring resyncs that bound clock drift (§3.7) come along for free: the
+  `skip_to_end()` calls at gate arming and turn end (`src/main.rs:529`,
+  `src/main.rs:550` today) live in the shared `build_pipeline` path, so the
+  daemon inherits them — there is no drift-specific wiring to add.
 * **Pipeline wiring:** `SpeechToSpeechBuilder` exactly as `main.rs`, plus
   `.with_sink_factory(move |rate, ch| Arc::new(WireAudioSink::new(conn, rate, ch)))`
   and `.with_stt_callbacks(WireMirrorCallbacks { conn })` (forwards each
   `AsrEvent` as `AudioToLocal::Asr`); a `ManagerCallbacks` impl forwards
   Started/Finished/Cancelled as `AudioToLocal::Tts`, and on each Started it
-  bumps the utterance epoch, stamps it into `WireAudioSink.utterance`, and
+  bumps the TTS utterance epoch, stamps it into `WireAudioSink.utterance`, and
   emits `AudioToLocal::UtteranceStart` with the `SpeakRequest`'s text and
   String utterance id — attaching the pending challenge (below) if one is
   stashed. `StateSync` is emitted from a small wrapper the daemon installs
@@ -972,11 +1102,14 @@ today's optional keys.
   cancel current TTS via the manager, and return to the accept loop. The
   armed/confirmed gate state is **kept** — it's B-local and a reconnecting
   user should be able to say "yes" to the question they already heard;
-  `reset_confirmation_gate()` fires only if the disconnect outlasts 60 s.
-  The outstanding *challenge* is not kept: the nonce dies with the session
-  (§3.6 — it must not survive an epoch change), and when the reconnected
-  session's `HelloAck` lands with a still-armed gate, B mints a fresh nonce
-  and re-issues the challenge (same text, new nonce) over the new epoch, so
+  `reset_confirmation_gate()` fires only if the disconnect outlasts 60 s —
+  a timer that runs on B's clock, the sole authority for gate lifetime
+  (§9); A never expires the challenge locally (§7). The outstanding
+  *challenge* is not kept: the nonce dies with the session (§3.6 — it must
+  not survive a session-epoch change), and when the reconnected session's
+  `HelloAck` lands with a still-armed gate, B mints a fresh nonce and
+  re-issues the challenge (same text, new nonce) over the new session
+  epoch, so
   the local dialog reappears instead of holding a token from a dead
   connection. A `ConfirmResponse` quoting the pre-drop nonce is refused.
 * **Remote daemon restart.** Bridge exits (socket EOF) → same reconnect path;
@@ -985,8 +1118,11 @@ today's optional keys.
   `SessionManager` persists as it does for the local binary, so conversation
   context survives daemon restarts for free.
 * **Format renegotiation on reconnect.** Every reconnect is a fresh
-  `Hello`/`HelloAck` with a fresh epoch — formats are renegotiated by
-  construction, never mid-stream. If B's config changed under us (e.g. TTS
+  `Hello`/`HelloAck` with a fresh session epoch (§3.8) — formats are
+  renegotiated by construction, never mid-stream. The old session's frames
+  cannot leak into the new one: enforcement is by connection identity, not
+  a per-frame field (§3.8), so tearing down the old socket *is* the epoch
+  boundary. If B's config changed under us (e.g. TTS
   engine swapped to a different rate) the new `playback_format` simply
   differs and A builds a new `CpalAudioSink`.
 * **What the user hears.** Link-down: a short local earcon (two descending
@@ -1022,7 +1158,7 @@ today's optional keys.
   back is *yes or no to that question* (`ConfirmResponse`) by quoting a
   128-bit CSPRNG nonce that B minted for this arming, verifies and consumes
   under its own `Mutex<GateState>`, and destroys on any gate transition or
-  epoch change. Compare the two answer routes honestly:
+  session-epoch change. Compare the two answer routes honestly:
   * The **voice route** accepts *any audio that transcribes to an
     affirmative* — "yes", "yeah", "confirm", "do it", "proceed", … per the
     list in `src/main.rs:476–486`. No secret is involved; every sound
@@ -1032,8 +1168,8 @@ today's optional keys.
     that only ever traverses the ssh-authenticated channel and B's 0600
     UDS. Guessing is hopeless (2⁻¹²⁸ per armed window); replay fails per
     §3.6 — consumed on first use, bound to the specific armed gate, bound
-    to the epoch, and there is no store-and-forward surface to hold a
-    response for later.
+    to the session epoch, and there is no store-and-forward surface to
+    hold a response for later.
   A nonce-carrying UI response is therefore *at least as* trustworthy as
   the voice route it supplements. What is newly possible, stated plainly:
   a compromised machine A can now confirm **without producing audio**,
@@ -1048,6 +1184,15 @@ today's optional keys.
   that mutates `VoiceState` must be either capability-gated the same way
   or strictly fail-safe (e.g. mute), with the same scrutiny as a new
   `run_command` path.
+* **Gate lifetime is B's clock alone.** Every timer that can settle a
+  challenge — the 60 s outage reset (§8), session teardown — runs on B.
+  A renders a challenge until `ConfirmResolved` arrives and must never
+  expire it on a local timer (§7's `ConfirmUi` rule). A local expiry is
+  not defense in depth; it is a desynchronization bug with a concrete
+  exploit shape: A shows "expired", the user — believing the question
+  dead — says "yes" aloud to something else, and B, still armed, consumes
+  it as confirmation. One clock owns the gate's lifetime, and it is the
+  clock next to the gate.
 * **Microphone audio leaves machine A.** New for handlr and worth friction:
   remote audio activates only via explicit `--remote-audio` or a transport
   with `audio = true` — never by default, never by fallback. First activation
@@ -1112,7 +1257,7 @@ Each phase compiles, passes tests, and is independently demoable.
   immediately); `ConfirmResolved` emitted on every settlement path. Negative
   tests, each asserting the gate is unchanged and no `Confirmed` results:
   **wrong nonce** (random u128), **replayed nonce** (second response after
-  consumption), **nonce from a previous epoch** (drop and reconnect the
+  consumption), **nonce from a previous session epoch** (drop and reconnect the
   loopback pair mid-challenge, answer with the pre-drop nonce, assert the
   re-issued challenge carries a different one), **nonce for a different
   pane/command** (re-arm, answer with the superseded nonce).
@@ -1130,17 +1275,30 @@ Each phase compiles, passes tests, and is independently demoable.
 * Demo: `ssh localhost handlr audio-bridge --autostart` end-to-end on one
   machine.
 
-**Phase 5 — A-side integration** (handlr; ~350 lines)
+**Phase 5 — A-side integration** (handlr; ~380 lines)
 * `local.rs`, `--remote-audio` flag, `TransportConfig` fields +
   `config.default.toml` doc block, mutual-exclusion with `--remote`,
   earcons, the `ConfirmUi` trait + v1 terminal prompt (§7) wired to
-  `ConfirmResponse`/`ConfirmResolved`, `CpalAudioSink::len()`
+  `ConfirmResponse`/`ConfirmResolved`, a `ConfirmUi` no-local-expiry test
+  (drive the terminal impl with a challenge, assert the prompt stays
+  rendered with no local timer and is dismissed only by
+  `ConfirmResolved` — §7/§9), `CpalAudioSink::len()`
   (libconversate, ~10 lines).
 * Demo: laptop ↔ dev box over real ssh; speak, hear the remote brain answer.
 
-**Phase 6 — hardening + measurement** (~250 lines)
+**Phase 6 — hardening + measurement** (~320 lines)
 * Reconnect supervisor polish, gap concealment, `StateSync` poller,
   Ping/Pong keepalive, `Gap` accounting, 60 s gate-reset-on-outage.
+* Gap-sizing test (loopback): send mic frames with a deliberate `seq` gap
+  and wildly perturbed `timestamp_us`; assert B conceals exactly
+  gap × 20 ms of zeros and reports the matching `Gap { concealed_ms }` —
+  proving concealment is seq-derived and `timestamp_us` is never
+  consulted (§3.7/§3.8).
+* Long-run drift/resync test (loopback): pace mic frames at
+  16 kHz + 200 ppm simulated skew across many short utterances; assert
+  B's ring occupancy stays bounded (no monotonic growth) because each
+  utterance-boundary `skip_to_end()` resyncs it (§3.7) — the test that
+  would fail if anyone removes the boundary flushes.
 * **Latency methodology:** (a) `Ping`/`Pong` RTT logged continuously;
   (b) mouth-to-transcript: A logs `timestamp_us` of the frame closing an
   utterance, B's `Transcript` mirror arrives with the event — A computes
@@ -1152,7 +1310,7 @@ Each phase compiles, passes tests, and is independently demoable.
   frames). Acceptance: added mouth-to-transcript latency over local ≤ RTT +
   40 ms at p95 on a LAN.
 
-Total new code ≈ 2,200 lines across both repos, ~40 % of it tests.
+Total new code ≈ 2,300 lines across both repos, ~40 % of it tests.
 
 ---
 
@@ -1167,7 +1325,9 @@ Total new code ≈ 2,200 lines across both repos, ~40 % of it tests.
    (with 300 ms pre-roll) would cut idle traffic ~95 %, at the cost of a
    model on A and the confirmation-mode sync wrinkle. *Recommendation: build
    after v1 ships, behind `audio_tx_gate = true`; keep B's VAD authoritative
-   regardless.*
+   regardless, and follow §3.8's reserved seam — A's transmission span ids
+   stay in A's namespace, correlated with (never equated to) B's utterance
+   epochs.*
 3. **Multi-session / observer connections** (a second read-only client
    watching mirrors). *Recommendation: keep refusing; add a separate
    `observe` hello capability if a real need appears — appended variant.*
