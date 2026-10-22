@@ -133,3 +133,27 @@ Plans: [Pluggable ReasoningEngine and ToolExecutor traits](docs/design/20260831_
 In the 17:11 entry, "libgenai is pinned by git revision (`f892246`)" should
 read: libgenai is pinned at revision `57fb65dd9269b7341346a8241d9f10d7a9565266`
 of `tmzt/libgenai`, in commit `f892246`.
+
+## 2026-10-22 17:20 EDT — Confirmations: handle, token and nonce
+
+Plan: [handlr as an agent orchestration daemon](docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md)
+(`In implementation`), decision 8 as amended at 12:06 and 16:23 EDT; step 3.
+Agreed with the owner before implementation (Rule 1.7).
+
+- **Names.** The requester's descriptive label is the *confirmation handle*.
+  The secret three-word phrase is the *confirmation token*. Wire names:
+  `handle` and `token`. The format and rules of each are unchanged.
+- **The token never crosses the wire.** An approver that must prove it
+  knows the token sends a *nonce* instead:
+  `hex(BLAKE2s-256-MAC(key = token, "handlr.confirm/1" || confirm_id as
+  8 bytes big-endian || handle))`. The handle is empty when there is none.
+  The daemon computes the same value and compares it in constant time. The
+  nonce binds the approval to one confirmation and its handle, so it cannot
+  be replayed against another. The token itself is never sent in a request
+  and never logged.
+- `confirm.reply` is `{confirm_id, approve, nonce?}` in place of
+  `{confirm_id, approve, phrase?}`. A wrong nonce gets `-32008`, and five
+  wrong nonces deny the confirmation. A paired principal with `approve`
+  may omit it, as before.
+- `confirm.requested` carries `token` only to principals that can
+  approve. The broker enforces this, not the transport.
