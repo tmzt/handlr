@@ -54,3 +54,38 @@ Plan: [libconversate speech pipeline integration](docs/design/20260831_03_SPEECH
   speaking (`1a3f87d`, `2817db2`), and notifications queue behind speech
   instead of barging in (`a7769c9`).
 - Phase 4: the barge-in tests have not been written.
+
+## 2026-10-22 11:36 EDT — handlr as an agent orchestration daemon
+
+Plans: [handlr as an agent orchestration daemon](docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md),
+[handlr link pairing and the companion protocol](docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md),
+[The handlr.harness protocol, session peek and the MCP adapter](docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md)
+(all `Draft`).
+
+- handlr changes direction from a voice front end to an agent
+  orchestration daemon. The phone (a voicexn-based app) owns the voice
+  side, and talks to handlr in text turns.
+- Plan 01 replaces the process model and client side of
+  [System architecture and herdr transport](docs/design/20260831_01_ARCHITECTURE_AND_TRANSPORT_PLAN.md)
+  (Rule 1.7). `libherdr` is kept.
+- The confirmation gate moves from libconversate's `VoiceState` into a
+  broker in handlr's policy core, used by every client.
+- A new crate, `libhandlr_proto`, holds the wire types of the
+  `handlr.harness` and `handlr.companion` protocols and of handlr link. It
+  starts in the workspace and is to move out.
+- Agent supervision (plan inference, a local Qwen model, loop detection,
+  plan status by voice) is to be a later plan, once it is settled which
+  parts T3 Code owns.
+
+## 2026-10-22 16:01 EDT — The companion app in this repository
+
+Plan: [The companion app, on handlr-companion and libvoicexn](docs/design/20261022_04_COMPANION_APP_PLAN.md)
+(`Draft`).
+
+- The phone and desktop voice client is built here, on libvoicexn, as
+  logic in `crates/handlr-companion` with front ends in
+  `apps/companion-tty` and `apps/companion`.
+- `apps/` is its own workspace, excluded from the root, so a missing
+  libvoicexn checkout or the Android tooling cannot break handlr's build.
+- Agent supervision, listed as a later plan in the 11:36 entry, takes a
+  later number than 04.
