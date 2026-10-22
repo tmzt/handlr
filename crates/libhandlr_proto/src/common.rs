@@ -19,6 +19,9 @@ pub mod methods {
     pub const AGENTS_READ: &str = "agents.read";
     pub const AGENTS_SEND: &str = "agents.send";
     pub const AGENTS_FOCUS: &str = "agents.focus";
+    /// Send an agent its interrupt key (plan 20261022_02, 18:03 EDT
+    /// amendment).
+    pub const AGENTS_INTERRUPT: &str = "agents.interrupt";
     pub const WATCH_ADD: &str = "watch.add";
     pub const WATCH_REMOVE: &str = "watch.remove";
     pub const CONFIRM_REPLY: &str = "confirm.reply";
@@ -148,6 +151,24 @@ pub enum AgentsSendResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentsFocusParams {
     pub target_id: String,
+}
+
+/// `agents.interrupt`: the target is resolved like `agents.send`'s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentsInterruptParams {
+    pub target: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentsInterruptResult {
+    /// Whether the key was sent: `false` when the agent's `interrupt_key`
+    /// is empty.
+    pub interrupted: bool,
+    /// The agent's shown and spoken names.
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub spoken: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -381,6 +402,14 @@ mod tests {
         });
         round_trip(WatchParams {
             pane_id: "p1".to_string(),
+        });
+        round_trip(AgentsInterruptParams {
+            target: "hr".to_string(),
+        });
+        round_trip(AgentsInterruptResult {
+            interrupted: true,
+            name: "the handlr agent".to_string(),
+            spoken: "the handlr agent".to_string(),
         });
         round_trip(WatchResult {
             watched: vec!["w1:p1".to_string()],

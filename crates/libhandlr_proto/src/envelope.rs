@@ -159,9 +159,12 @@ pub mod codes {
     pub const HELLO_REQUIRED: i64 = -32010;
     /// The protocol or version in `hello` is not served.
     pub const UNSUPPORTED_PROTOCOL: i64 = -32011;
+    /// A companion turn is already running in this session
+    /// (plan 20261022_02, decision 9).
+    pub const BUSY: i64 = -32020;
 
     /// Every code above, for checking they are distinct.
-    pub const ALL: [i64; 14] = [
+    pub const ALL: [i64; 15] = [
         PARSE_ERROR,
         INVALID_REQUEST,
         METHOD_NOT_FOUND,
@@ -176,6 +179,7 @@ pub mod codes {
         BAD_NONCE,
         HELLO_REQUIRED,
         UNSUPPORTED_PROTOCOL,
+        BUSY,
     ];
 }
 
