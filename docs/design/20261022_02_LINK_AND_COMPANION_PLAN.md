@@ -443,3 +443,41 @@ Its tests are built from the 2026-10-22 snapshot's shape:
 live_naming -- --nocapture` prints no name containing a pane id for that
 snapshot, and `handlr ctl agents.read '{"pane_id":"hr","lines":5}'` reads
 the handlr pane.
+
+## Amendment — 2026-10-22 17:55 EDT: spelling out codes that do not read as English
+
+Agreed with the owner. This amendment adds to the spoken forms of the
+amendment before it (naming agents aloud, by project and tab), and changes
+nothing else.
+
+**Which words are spelled.** Each word of a spoken name (a tab's spoken
+form, a project, an agent name) is checked on its own. A word is spelled
+out, letter by letter, when it is at most 6 letters long and has no vowel
+(`a`, `e`, `i`, `o`, `u` or `y`), because it does not read as English.
+Digits are left as they are. Examples:
+- `hr` → "aitch ar";
+- `mb` → "em bee";
+- `kp` → "kay pee";
+- `stt` → "ess tee tee";
+- `ctrls` → "see tee ar el ess";
+- `ad`, `bubble`, `sigsp` and `libmorph` are read as written.
+
+**How letters are spelled.** By their English letter names, written so the
+TTS says the name and not a sound. These are not the military alphabet:
+
+| a | b | c | d | e | f | g | h | i | j | k | l | m |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| ay | bee | see | dee | ee | ef | jee | aitch | eye | jay | kay | el | em |
+
+| n | o | p | q | r | s | t | u | v | w | x | y | z |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| en | oh | pee | cue | ar | ess | tee | you | vee | double you | ex | why | zee |
+
+**Vocabulary.** For each spelled word, the vocabulary also gets its
+capitals (`HR`, `MB`, `CTRLS`), the form STT writes spelled letters in. A
+heard "HR" then resolves to the tab `17-hr`, like "hr" does.
+
+**Step 0** gains tests:
+- each example above, and all 26 letter names;
+- a 7-letter word with no vowel is read as written;
+- "HR" resolves to `w2:pZ`.
