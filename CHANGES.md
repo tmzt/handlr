@@ -360,3 +360,30 @@ microphone check needs the S23, or a Mac that has a microphone.
   libvoicexn's runtime vocabulary (its plan 07) is released.
 - **`morph`** compiles, wired through libvoicexn's adapters, but has not
   been run.
+
+## 2026-10-22 18:55 EDT — Plan 20261022_05, step 3, and departures
+
+Plan: [Naming agents aloud and on screen](docs/design/20261022_05_SPOKEN_NAMES_PLAN.md)
+(`In implementation`). Step 3 is in `a6c9d93` (libhandlr_proto) and
+`c0b483e` (handlr). All three steps are now implemented. The read-only check
+against the live herdr named all 21 panes, none by pane id. "hr" read the
+handlr pane, and "highbay" returned both candidates.
+
+Departures and decisions:
+- **The tests use a fake herdr socket.** It answers with a herdr-shaped
+  snapshot, because the herdr mock's typed `EnvironmentSnapshot` cannot
+  hold top-level tabs.
+- **`agents.focus`** passes a workspace or tab id through to herdr
+  unresolved, so focusing a workspace still works. Anything else is
+  resolved by name.
+- **`AgentInfo.project` is unchanged** (the workspace label, else the cwd
+  basename). Decision 3's project appears only inside `name`.
+  `ConfirmRequested.project` now carries the same value as
+  `AgentInfo.project`.
+- **`handlr ctl` still prints JSON.** It now carries the names, so scripts
+  keep working.
+- **An ambiguous target's `-32002`** also lists its candidates in
+  `data.candidates`.
+- **Each connection takes its own snapshot** to name a `confirm.requested`
+  it forwards. That is one herdr read per subscriber per request, which is
+  acceptable for now.
