@@ -352,3 +352,94 @@ disagrees with earlier text, this amendment wins.
   (plan 20261022_04, step 2), whose typed lines are utterances. "approve"
   approves, and an empty line is the tap that interrupts. No step of this
   plan needs libvoicexn or any audio model.
+
+## Amendment — 2026-10-22 17:52 EDT: naming agents aloud, by project and tab
+
+Agreed with the owner. This amendment replaces how spoken names are built
+(`notify::speakable_name`, used by decisions 11 and 12). It adds tabs to
+the agent list and to the vocabulary, and lets the common methods address
+a pane by its tab. Where it disagrees with earlier text, this amendment
+wins.
+
+**What herdr gives.** The snapshot has a top-level `tabs` list. Each tab
+has `tab_id`, `workspace_id`, `number` (unique within its workspace) and
+`label`. Panes point at their tab by `tab_id`. The owner names tabs with
+short codes, because tabs appear as tabs on a phone screen. When the
+owner types a number it becomes a prefix (`17-hr`, `16-stt`, `5-kp`);
+otherwise herdr keeps only the code (`-mb`, `-ad`, `ctrls`). An unnamed
+tab's label is just a number. handlr reads tabs only when they are nested
+under workspaces, which this herdr does not do, so today it sees none. On
+2026-10-22 all 11 Claude panes shared one workspace label (`cc-highbay`),
+and every spoken name fell through to the pane id ("pane pZ").
+
+**Agents (`core::agents::AgentRef`, `agents.list`).** Each agent gains
+`tab_label` and `tab_number`, taken from the top-level `tabs` (and still
+from nested tabs where a herdr nests them). `common::AgentInfo` gains the
+same two optional fields; adding them is backwards-compatible on the wire.
+
+**The project (replacing `project_for`).** The project is the workspace
+label, unless more than one workspace shares that label or (as here) the
+panes being compared all share it. In that case it is the basename of the
+pane's cwd. Usually one Claude instance runs per project directory, which
+this matches. Others may run several in one directory, which the tab
+covers.
+
+**The spoken tab.** A tab's spoken form is its label without a leading
+number and without leading or trailing `-`, with any remaining `-` read as
+a space: `17-hr` → "hr", `-mb` → "mb", `5-kp` → "kp", `ctrls` → "ctrls".
+A label that is only a number, or empty, is "tab <number>". The TTS
+engine decides how a code is pronounced.
+
+**The ladder (replacing `speakable_name`'s four rungs).** Each rung is
+used only when the earlier ones are not unique among the current agents:
+
+1. The agent: "Claude".
+2. The project: "the handlr agent".
+3. The agent in the project: "Claude in libmorph".
+4. The tab: "Claude in libmorph, tab mb". This is the label's spoken form,
+   or "tab <number>" when the label is only a number.
+5. The tab number, when spoken labels collide: "Claude in libmorph, tab 24".
+
+A pane id is never spoken, and never shown: it means nothing to the
+user. Everything a client presents carries a `name`, the result of this
+ladder, and clients show that instead of `pane_id`. The `pane_id` stays
+in messages only as a handle for later requests. The fields:
+
+- `common::AgentInfo.name`;
+- `ConfirmRequested.name`;
+- `notice.name`;
+- the `ran` entries of a turn's result.
+
+`handlr ctl` prints the names. The `confirm <id>` lines `serve` prints
+name the agent and its tab, not the pane.
+
+**Vocabulary (decision 8).** `vocabulary` and `vocabulary.changed` gain
+every tab label as written and its spoken form, alongside agent names,
+projects (now including cwd basenames) and workspace labels.
+
+**Addressing by tab.** Wherever a common method takes `pane_id` or
+`target_id` (`agents.read`, `agents.send`, `agents.focus`, `watch.add`
+and `watch.remove`), the value may also be a tab label as written, a
+label's spoken form, or a tab number, resolved within the snapshot in that
+order. A value that matches more than one pane gets `-32002`, and the
+error lists the candidates. This extends plan 20261022_01's resolution
+without changing it for pane ids. A companion turn's `run_command` tool
+resolves the same way, so "send continue to hr" works.
+
+**Steps.** A new step 0, before step 1, implements this:
+- tabs in `core::agents`;
+- the project rule;
+- the spoken tab and the ladder in `notify`;
+- resolution by tab, used by the daemon's methods;
+- the `AgentInfo` fields.
+
+Its tests are built from the 2026-10-22 snapshot's shape:
+- the 11 Claude panes each get a name without a pane id;
+- the two libmorph panes are named by tab ("mb", "ad");
+- "hr" and "17-hr" resolve to `w2:pZ`;
+- an ambiguous tab label gets `-32002`.
+
+**Done when:** `HANDLR_SNAPSHOT=<captured snapshot> cargo test --test
+live_naming -- --nocapture` prints no name containing a pane id for that
+snapshot, and `handlr ctl agents.read '{"pane_id":"hr","lines":5}'` reads
+the handlr pane.
