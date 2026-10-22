@@ -157,3 +157,37 @@ Agreed with the owner before implementation (Rule 1.7).
   may omit it, as before.
 - `confirm.requested` carries `token` only to principals that can
   approve. The broker enforces this, not the transport.
+
+## 2026-10-22 17:34 EDT — Plan 20261022_01, steps 1, 3, 4 and 5, and departures
+
+Plan: [handlr as an agent orchestration daemon](docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md)
+(`In implementation`). Step 1 is in `4e61db7`, step 3 in `05f59bd`, step 4
+in `6e9d876` and step 5 in `75df096`. Step 2 (`5ce0b71`) is recorded
+above, and step 6 was dropped by the 12:06 EDT amendment.
+
+Departures, all small and needed for the plan to work:
+
+- **Step 5, `ctl --client <name>`.** The step's **Done when:** sends and
+  approves with `handlr ctl`, but a requester can never approve its own
+  command, and every `ctl` was `local:ctl`. `--client` sets the label
+  (default `ctl`), so the check runs as `ctl --client mcp agents.send …`
+  followed by `ctl confirm.reply …`. A label is not a credential (decision 4).
+- **Step 5, `--show-tokens`.** This is `--show-phrases` of the 16:23 EDT
+  amendment, renamed with the phrase (now the token).
+- **Step 5, `ctl confirm.reply` takes `token` and `handle`** and sends
+  the nonce computed from them. The token stays off the socket.
+- **Step 5, checked against the mock.** `agents.list` was run against the
+  live herdr (21 panes). Sending and confirming were checked with `handlr
+  serve --mock` and `tests/daemon.rs`, so that nothing was typed into a
+  live agent session. Refusing another uid is unit-tested
+  (`server::conn::peer_allowed`); no second user was available.
+- **Step 5, closing a connection** cancels the confirmations opened on that
+  connection, not every confirmation of its principal. Several connections
+  can share a principal id (`local:ctl`), and one closing must not cancel
+  another's requests.
+- **Step 5, only `handlr.harness` is served for now.** `hello` with
+  `handlr.companion` gets `-32011` until plan 20261022_02 adds it.
+- **Step 5, `confirm.requested.project`** is left empty. The broker does
+  not look up projects. It is filled when a client needs it.
+- **Step 3, `Outcome::Approved`.** It is the state while an approved
+  command is being sent, so a second approval cannot race the first.
