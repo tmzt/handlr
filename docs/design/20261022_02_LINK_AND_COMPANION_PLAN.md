@@ -481,3 +481,17 @@ heard "HR" then resolves to the tab `17-hr`, like "hr" does.
 - each example above, and all 26 letter names;
 - a 7-letter word with no vowel is read as written;
 - "HR" resolves to `w2:pZ`.
+
+## Amendment — 2026-10-22 17:59 EDT: naming moves to its own plan
+
+Agreed with the owner. Naming is not the core of this plan, so it moves to
+[Naming agents aloud and on screen](20261022_05_SPOKEN_NAMES_PLAN.md).
+This amendment replaces the amendments of 17:52 EDT (naming agents aloud,
+by project and tab) and 17:55 EDT (spelling out codes that do not read as
+English). It also removes the step 0 they added. Their content, with
+configuration added, is in that plan.
+
+Here, decisions 8 (`vocabulary`), 11 (the question in `confirm.requested`)
+and 12 (`notice`) take names and vocabulary from plan 20261022_05. Where
+they say `speakable_name`, read that plan's spoken name. The rest of this
+plan is unchanged.
