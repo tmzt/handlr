@@ -586,3 +586,22 @@ date since the amendment "an interrupt also stops the coding agent". The
 interrupt is not merely like Esc. It ends the turn, and, through herdr,
 sends the coding agents involved their interrupt key (Esc by default).
 Read both passages that way. Nothing else changes.
+
+## Amendment — 2026-10-22 18:20 EDT: re-pairing a device with `handlr pair --replace`
+
+Agreed with the owner. This amendment adds to decision 5 (as amended at
+11:58 EDT) and to step 3. Nothing else changes.
+
+`handlr pair --name <name> --replace` pairs a device under a name that
+`auth.toml` already holds. When the pairing completes, the old entry is
+replaced, and any connection still open with the old key is closed.
+Without `--replace`, a name already in `auth.toml` is refused, as before.
+Re-pairing is for a device whose key was lost or reset. It is not a way to
+avoid storing keys: devices keep their key in secure storage (plan
+20261022_04, which waits on the secure key-storage plan in libmorph or
+libmobile), and there is no interim in-memory or file store on the device.
+
+**Step 3** gains checks:
+- `--replace` swaps the entry and closes the old key's open connection;
+- pairing a name already in use without `--replace` is refused, and
+  `auth.toml` is left unchanged.
