@@ -313,3 +313,66 @@ itself was interrupted.
 **Step 1** gains a test: a `Tap` while waiting, answered by a turn result
 with `interrupted`, gives `StopSpeaking`, `turn.interrupt`, and then
 `Say("Stopped the handlr agent.")`.
+
+## Amendment — 2026-10-22 18:10 EDT: handlr-audio, shared by both front ends
+
+Agreed with the owner. This amendment replaces decision 1 and the audio
+parts of decisions 6–8, and renumbers the steps. Where it disagrees with
+earlier text, this amendment wins.
+
+**Three parts.**
+
+| Crate | Holds | Does not hold |
+|---|---|---|
+| `crates/handlr-companion` | The client side apart from audio: connecting (the daemon socket locally, the link when paired), pairing from a `handlr1…` string, sessions (reconnecting with backoff, `session_id`), the `KeyStore` trait and `FileKeyStore`, and the companion logic of decisions 2–5 (turns, the interrupt, approving or denying from the transcribed answer, notice queueing) | Audio, UI |
+| `crates/handlr-audio` (new) | The audio both front ends share: libvoicexn's STT and TTS workers, the earshot gate, the playback ring and the vocabulary file, wired to `handlr-companion`'s `Input`s (`Utterance`, `Speaking`, `Listening`) and `Event`s (`Say`, `StopSpeaking`, `Arm`, `Vocabulary`) | Connections, UI |
+| `apps/companion`, `apps/companion-tty` | Front ends only: the screen, touch and buttons; or Enter, printing and flags | Audio setup, connections |
+
+**Devices.** libvoicexn joins devices through two callbacks, `Mic::push`
+and `Consumer::fill`, so only the code that opens devices differs.
+`handlr-audio` has two features for it:
+- `cpal` opens the default devices. It is used by `companion-tty` and
+  by the libmorph app's desktop window, both on the Mac, run locally rather
+  than over SSH.
+- `morph` uses libmorph's `Source` and `Sink` through libvoicexn's
+  `morph` adapters. It is used by the libmorph app on Android first,
+  because voicexn already runs that way on the S23.
+
+cpal also supports Android, but needs NDK configuration first. It is a
+later option, recorded as an addendum if it replaces `morph` there.
+
+**Workspaces.**
+- `handlr-companion` is a root workspace member and is in its default
+  build. It depends on `libhandlr_proto` and Tokio, not on libvoicexn or
+  any audio crate.
+- `handlr-audio` is a root workspace member, but is left out of the root
+  manifest's `default-members`, so `cargo build` and `cargo test` at the
+  root never compile xn, ptts or cpal. It is built with `-p handlr-audio`.
+  Its libvoicexn dependency is the pinned git revision, so a missing
+  checkout cannot break the workspace.
+- `apps/` stays a workspace of its own, excluded from the root, depending
+  on both crates by path.
+
+**The text example** stays in `handlr-companion`, which has no audio.
+Plan 20261022_02 step 4 is still checked with it.
+
+**Steps, replacing steps 1–4.**
+1. **`handlr-companion`: logic, keys and the local connection.** The
+   state machine (step 1's tests as written, and the 'Stopped …' test),
+   `FileKeyStore`, and connecting to the daemon socket with reconnect and
+   `session_id`.
+   **Done when:** `cargo test -p handlr-companion` passes, and `cargo
+   tree -p handlr-companion -e normal` shows no xn, ptts, libmorph or cpal.
+2. **The link and the text example.** Pairing and reconnecting over the
+   link (after plan 20261022_02 steps 1–3), and `--example text`. The
+   **Done when:** is the old step 2's.
+3. **`handlr-audio` with `cpal`, and `companion-tty`.** The **Done when:**
+   is the old step 3's, on the M4. Also, `cargo build` at the root does
+   not compile `handlr-audio`.
+4. **The libmorph app.** The desktop window with `cpal`, then Android
+   with `morph`. The Android part waits for the key-storage plan in
+   libmobile or libmorph. The **Done when:** is the old step 4's.
+
+`handlr ctl` and `handlr mcp` may later connect through
+`handlr-companion`'s connection code. That would be its own change,
+recorded when it is made.
