@@ -4,7 +4,7 @@
 //! and natural-language transcripts into tool calls and concise spoken feedback.
 
 pub use libinfer::{
-    EngineType, FunctionDeclaration, GeminiAgent, GeminiReasoningEngine, Message, ReasoningEngine,
+    EngineType, FunctionDeclaration, GeminiReasoningEngine, Message, ReasoningEngine,
     ReasoningEngineBuilder, SessionBuilder, SessionManager, Tool, ToolExecutor,
 };
 use schemars::JsonSchema;
@@ -432,14 +432,11 @@ mod tests {
                 .expect("failed to construct GeminiReasoningEngine");
 
         assert_eq!(engine.max_turns(), 5);
-        let prompt = engine
-            .agent()
-            .system_prompt()
-            .expect("system prompt should be set");
+        let prompt = engine.system_prompt().expect("system prompt should be set");
         assert!(prompt.contains("reasoning engine for `handlr`"));
-        assert_eq!(engine.agent().tools().len(), 1);
+        assert_eq!(engine.tools().len(), 1);
 
-        let decls = match &engine.agent().tools()[0] {
+        let decls = match &engine.tools()[0] {
             Tool::Function {
                 function_declarations,
             } => function_declarations,

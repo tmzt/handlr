@@ -20,28 +20,6 @@ mode = "remote"
 # Remote SSH connection string (e.g. "user@host")
 remote = "tmeade@timothys-mac-mini-1"
 
-[voice.tts]
-# TTS engine backend: "sherpa-kokoro" (neural), "system" (macOS say), "kokoro", or "sine"
-engine = "sherpa-kokoro"
-
-# Voice preset:
-# For sherpa-kokoro / kokoro: "af_bella", "af_sarah", "af_nicole", "am_adam", "bf_emma", "bm_george", etc.
-voice = "am_adam"
-
-# Playback speed multiplier (1.5x speed)
-speed = 1.5
-
-# Custom directory holding sherpa-onnx Kokoro assets (optional)
-# sherpa_model_dir = "~/.handlr/models/sherpa-kokoro"
-
-[voice.stt]
-# STT engine: "whisper"
-engine = "whisper"
-
-# Custom model paths (optional)
-# silero_model = "~/.handlr/models/silero_vad.onnx"
-# whisper_model = "~/.handlr/models/ggml-base.en.bin"
-
 [[agents]]
 name = "claude"
 allowed_commands = ["continue", "/compact"]

@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-libconversate = { path = "../libconversate/crates/libconversate", features = ["whisper", "tokio"] }
 libherdr = { path = "crates/libherdr" }
-audio_core = { path = "../libconversate/crates/audio_core" }
 smol = "2"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -18,15 +16,7 @@ schemars = "1"
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 libinfer = { path = "crates/libinfer" }
-reqwest = { version = "0.12", features = ["blocking", "stream"] }
-tar = "0.4"
-bzip2 = "0.4"
 toml = "0.8"
-
-[features]
-default = []
-kokoro = ["libconversate/kokoro"]
-sherpa-kokoro = ["libconversate/sherpa-kokoro"]
 
 [workspace]
 members = [

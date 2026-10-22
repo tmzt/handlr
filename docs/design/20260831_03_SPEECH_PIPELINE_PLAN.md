@@ -1,7 +1,7 @@
 ---
 title: libconversate speech pipeline integration
 date: 2026-08-31
-status: In implementation
+status: Retired (by 20261022_01_ORCHESTRATION_DAEMON_PLAN)
 covers: building the speech-to-speech pipeline, processor vs STT callbacks, pipeline testing
 sources:
   - PLAN.md as committed in ecaaa09 (2026-08-31 04:27 -0400)
@@ -138,3 +138,21 @@ tool declarations.
 **Learned.** Blocking on the async engine inside the processor callback had no
 reactor to run on; an async processor on Tokio removes the bridge. Without the
 hardware mute the assistant hears its own TTS.
+
+## Amendment — 2026-10-22 17:11 EDT: retired
+
+The speech pipeline this plan built is removed by
+[handlr as an agent orchestration daemon](20261022_01_ORCHESTRATION_DAEMON_PLAN.md),
+step 2 (its 16:23 EDT amendment). Its job passes to the companion apps
+([20261022_04_COMPANION_APP_PLAN.md](20261022_04_COMPANION_APP_PLAN.md)), on
+libvoicexn. Its barge-in tests (phase 4) were never written. The status is
+`Retired (by 20261022_01_ORCHESTRATION_DAEMON_PLAN)` (AGENTS.md, Rule 1.3).
+
+- **Removed in:** the commit that sets this status. Its parent is the last
+  commit with the code.
+- **Last commit with the code:** `f89224618e114a4b54e0761a7417e7f118b90eb8`.
+- **To recover:** `git checkout f892246 -- src/main.rs src/notify.rs
+  src/transport.rs src/config.rs config.default.toml build.rs Cargo.toml`.
+  It builds only against a libconversate that has `VoiceState`'s
+  confirmation gate and `with_async_processor`; no such checkout existed on
+  2026-10-22.

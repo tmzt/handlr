@@ -1,41 +1,17 @@
-//! Spoken notifications for watched panes.
+//! Notifications for watched panes.
 //!
-//! Two rules govern when an announcement is allowed to reach the speaker, both
-//! of them about not talking over the user:
-//!
-//! * **Never barge.** Announcements are submitted with `barge = false` and on
-//!   the same TTS session as the assistant's replies, so they queue behind
-//!   whatever is playing instead of preempting it.
-//! * **Never interrupt a confirmation.** While the mechanical confirmation gate
-//!   is armed or confirmed, announcements are held back entirely. Speaking
-//!   between "Should I send X?" and the user's "yes" would talk over the
-//!   exchange the gate is waiting on, and the reply that follows could be
-//!   mistaken for an answer to the announcement.
+//! An announcement is never spoken while a confirmation is pending. Speaking
+//! between "Approve sending X?" and the user's answer would talk over the
+//! exchange the confirmation is waiting on, and the reply that follows could
+//! be mistaken for an answer to the announcement. The `Announcer` holds them
+//! back until it is free; queueing behind playback is the speaking client's
+//! job.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
-use std::time::Duration;
 
-use libconversate::tts::TtsSpeaker;
-use libconversate::VoiceState;
 use libherdr::client::HerdrClient;
-use libherdr::events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
+use libherdr::events::PaneAgentStatusChanged;
 use libherdr::protocol::AgentStatus;
-use libherdr::transport::HerdrTransport;
-
-use crate::watch::WatchRegistry;
-
-/// TTS session id the s2s pipeline speaks on. Announcements must use the same
-/// one: herdr's TTS manager treats a *different* session from the same client
-/// as a topic switch and preempts what is playing, which is exactly the barge
-/// we are trying to avoid.
-const TTS_SESSION: &str = "s2s";
-
-/// How often to re-check whether held-back announcements can be released.
-const FLUSH_INTERVAL: Duration = Duration::from_millis(500);
-
-/// How long to wait before reconnecting after herdr closes the event stream.
-const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 /// Most announcements to hold while a confirmation is in flight. A confirmation
 /// exchange is short; if it somehow is not, stale "needs input" notices are
@@ -119,20 +95,11 @@ pub fn announcement(status: &AgentStatus, name: &str) -> Option<String> {
     }
 }
 
-/// Speak everything the announcer is willing to release right now.
-fn drain(announcer: &mut Announcer, voice: &VoiceState, tts: &TtsSpeaker) {
-    while let Some(sentence) = announcer.take_speakable(voice.is_confirmation_active()) {
-        log::info!("Announcing: {sentence}");
-        // barge = false: queue behind the current utterance, never preempt it.
-        tts.speak(TTS_SESSION, &sentence, false);
-    }
-}
-
 /// Name the agent in `change` as briefly as the current session allows.
 ///
 /// Falls back to the name carried on the event itself when the snapshot cannot
 /// be read — a less precise notice beats a silent one.
-async fn resolve_display_name(client: &HerdrClient, change: &PaneAgentStatusChanged) -> String {
+pub async fn resolve_display_name(client: &HerdrClient, change: &PaneAgentStatusChanged) -> String {
     let snapshot = match client.list_panes().await {
         Ok(snapshot) => snapshot,
         Err(e) => {
@@ -149,111 +116,6 @@ async fn resolve_display_name(client: &HerdrClient, change: &PaneAgentStatusChan
                 change.pane_id
             );
             change.agent_label()
-        }
-    }
-}
-
-/// Supervise the herdr event subscription and speak notifications for watched panes.
-///
-/// Runs until the process exits. Reconnects when the watch set changes (herdr
-/// closes any connection that receives a second `events.subscribe`, so the set
-/// can only be changed by opening a new one) and when herdr hangs up.
-pub async fn run_agent_watch(
-    transport: HerdrTransport,
-    client: Arc<HerdrClient>,
-    registry: Arc<WatchRegistry>,
-    voice: Arc<VoiceState>,
-    tts: Arc<TtsSpeaker>,
-) {
-    let mut changes = registry.subscribe_changes();
-    let mut announcer = Announcer::new();
-
-    loop {
-        let panes = registry.watched();
-        if panes.is_empty() {
-            log::debug!("No panes watched; event subscription idle");
-            // Still release anything queued from before the last unwatch.
-            drain(&mut announcer, &voice, &tts);
-            if changes.changed().await.is_err() {
-                return;
-            }
-            continue;
-        }
-
-        let subscriptions: Vec<Subscription> =
-            panes.iter().map(Subscription::agent_status).collect();
-        log::info!(
-            "Subscribing to agent status for {} pane(s): {:?}",
-            panes.len(),
-            panes
-        );
-
-        let mut stream = match transport.open_event_stream(&subscriptions).await {
-            Ok(stream) => stream,
-            Err(e) => {
-                log::warn!("Failed to open herdr event stream: {e}; retrying");
-                tokio::select! {
-                    _ = tokio::time::sleep(RECONNECT_DELAY) => {}
-                    changed = changes.changed() => {
-                        if changed.is_err() { return; }
-                    }
-                }
-                continue;
-            }
-        };
-
-        let mut flush = tokio::time::interval(FLUSH_INTERVAL);
-        flush.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                event = stream.next_event() => match event {
-                    Some(HerdrEvent::AgentStatusChanged(change)) => {
-                        if registry.is_watched(&change.pane_id) {
-                            log::info!(
-                                "Agent status change: pane={} agent={:?} status={:?}",
-                                change.pane_id, change.agent, change.agent_status
-                            );
-                            if let Some(status) = announcer.note(&change) {
-                                // Resolved per announcement rather than cached:
-                                // panes and projects come and go, and how much
-                                // of a name is needed depends on what else is
-                                // running right now.
-                                let name = resolve_display_name(&client, &change).await;
-                                if let Some(sentence) = announcement(&status, &name) {
-                                    announcer.queue(sentence);
-                                }
-                            }
-                            drain(&mut announcer, &voice, &tts);
-                        }
-                    }
-                    Some(HerdrEvent::SubscriptionStarted) => {
-                        log::info!("herdr event subscription is live");
-                    }
-                    Some(HerdrEvent::Error(message)) => {
-                        log::warn!("herdr rejected the event subscription: {message}");
-                    }
-                    Some(HerdrEvent::Other { event, .. }) => {
-                        log::debug!("Ignoring unsubscribed herdr event '{event}'");
-                    }
-                    None => {
-                        log::info!("herdr event stream closed; reconnecting");
-                        tokio::time::sleep(RECONNECT_DELAY).await;
-                        break;
-                    }
-                },
-                changed = changes.changed() => {
-                    if changed.is_err() {
-                        return;
-                    }
-                    log::info!("Watch set changed; reopening the event subscription");
-                    break;
-                }
-                _ = flush.tick() => {
-                    // Release anything held back while a confirmation was active.
-                    drain(&mut announcer, &voice, &tts);
-                }
-            }
         }
     }
 }

@@ -14,17 +14,15 @@ pub use libherdr::{
     },
 };
 
-use crate::commands::{confirmation_match_candidates, validate_arbitrary_command};
+use crate::commands::validate_arbitrary_command;
 use crate::config::AgentConfig;
 use crate::watch::WatchRegistry;
-use libconversate::VoiceState;
 use std::sync::Arc;
 
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
 pub struct HerdrToolExecutor {
     pub client: HerdrClient,
     pub agents: Vec<AgentConfig>,
-    pub voice_state: Option<Arc<VoiceState>>,
     pub watches: Option<Arc<WatchRegistry>>,
 }
 
@@ -33,14 +31,8 @@ impl HerdrToolExecutor {
         Self {
             client,
             agents,
-            voice_state: None,
             watches: None,
         }
-    }
-
-    pub fn with_voice_state(mut self, voice_state: Arc<VoiceState>) -> Self {
-        self.voice_state = Some(voice_state);
-        self
     }
 
     pub fn with_watches(mut self, watches: Arc<WatchRegistry>) -> Self {
@@ -284,27 +276,19 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                 ));
             };
 
-            // Mechanical confirmation gate check
+            // No confirmation path exists until the daemon's confirmation
+            // broker does (docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md,
+            // step 3). Refuse rather than send unconfirmed.
             if agent_cfg.require_confirmation {
-                if let Some(ref vs) = self.voice_state {
-                    // The gate was armed from the assistant's own phrasing, which may
-                    // differ cosmetically from the string it passes here.
-                    let confirmed = confirmation_match_candidates(&final_cmd, cmd)
-                        .iter()
-                        .any(|candidate| vs.verify_and_consume_confirmation(pane_id, candidate));
-                    if !confirmed {
-                        log::warn!("Mechanical confirmation gate blocked '{}' on pane '{}' (confirmation not armed or confirmed)", final_cmd, pane_id);
-                        return Err(format!(
-                            "Mechanical confirmation gate blocked execution: Command '{}' on pane '{}' requires vocal confirmation. You must ask the user for confirmation first.",
-                            final_cmd, pane_id
-                        ));
-                    }
-                    log::info!(
-                        "Mechanical confirmation gate validated for '{}' on pane '{}'",
-                        final_cmd,
-                        pane_id
-                    );
-                }
+                log::warn!(
+                    "Refused '{}' on pane '{}': confirmation unavailable",
+                    final_cmd,
+                    pane_id
+                );
+                return Err(format!(
+                    "Cannot send '{}' to pane '{}': confirmation unavailable (this agent requires confirmation)",
+                    final_cmd, pane_id
+                ));
             }
 
             let mut final_args = args.clone();
@@ -700,9 +684,9 @@ mod tests {
                 AgentConfig::new(
                     "claude",
                     vec!["continue".to_string(), "/compact".to_string()],
-                    true,
+                    false,
                 ),
-                AgentConfig::new("omp", vec!["continue".to_string()], true),
+                AgentConfig::new("omp", vec!["continue".to_string()], false),
             ],
         );
 
@@ -770,120 +754,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_mechanical_confirmation_gate_enforcement() {
-        let client = HerdrClient::mock();
-        let vs = Arc::new(VoiceState::default());
-        let executor = HerdrToolExecutor::new(
-            client,
-            vec![AgentConfig::new(
-                "claude",
-                vec!["continue".to_string(), "/compact".to_string()],
-                true,
-            )],
-        )
-        .with_voice_state(Arc::clone(&vs));
-
-        // 1. Initial attempt without confirmation should be blocked by the mechanical gate
-        let blocked_res = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "continue" }),
-            )
-            .await;
-        assert!(blocked_res.is_err());
-        assert!(blocked_res
-            .unwrap_err()
-            .contains("Mechanical confirmation gate blocked execution"));
-
-        // 2. Arm confirmation gate
-        vs.arm_confirmation(Some("p1".to_string()), Some("continue".to_string()));
-        assert!(vs.is_confirmation_armed());
-
-        // Still blocked while armed (not yet confirmed)
-        let blocked_armed = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "continue" }),
-            )
-            .await;
-        assert!(blocked_armed.is_err());
-
-        // 3. Confirm the gate
-        assert!(vs.confirm_gate());
-
-        // 4. Execution now succeeds and consumes the confirmation
-        let ok_res = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "continue" }),
-            )
-            .await;
-        assert!(ok_res.is_ok());
-
-        // 5. Subsequent execution without a new confirmation cycle is blocked again
-        let blocked_after = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "continue" }),
-            )
-            .await;
-        assert!(blocked_after.is_err());
-    }
-
-    /// End-to-end: the gate is armed from the assistant's own confirmation
-    /// question, so an arbitrary command only runs if it matches what the user
-    /// was actually asked about.
-    #[tokio::test]
-    async fn test_arbitrary_command_gate_bound_to_confirmation_question() {
-        use crate::commands::parse_confirmation_request;
-
+    async fn test_confirmation_required_commands_are_refused() {
         let executor = HerdrToolExecutor::new(
             HerdrClient::mock(),
-            vec![
-                AgentConfig::new("claude", vec!["continue".to_string()], true)
-                    .with_arbitrary_commands(true),
-            ],
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string()],
+                true,
+            )],
         );
-        let vs = Arc::new(VoiceState::default());
-        let executor = executor.with_voice_state(Arc::clone(&vs));
-
-        // The assistant asks, so the gate is armed with the pane and command it named.
-        let req = parse_confirmation_request(
-            "Should I send 'please run the tests' to Claude in pane w2:p1?",
-        )
-        .expect("assistant turn is a confirmation request");
-        vs.arm_confirmation(req.pane_id.clone(), req.command.clone());
-        assert!(vs.confirm_gate(), "user said yes");
-
-        // A different command than the one confirmed is refused even though the
-        // gate is in the Confirmed state.
-        let swapped = executor
+        let res = executor
             .execute_tool(
                 "run_command",
-                &json!({ "pane_id": "w2:p1", "command": "delete the repo" }),
+                &json!({ "pane_id": "p1", "command": "continue" }),
             )
             .await;
-        assert!(swapped.is_err());
-        assert!(swapped.unwrap_err().contains("requires vocal confirmation"));
-
-        // The confirmed command runs, with the model's trailing punctuation and
-        // casing normalized away.
-        let ok = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "w2:p1", "command": "Please run the tests." }),
-            )
-            .await;
-        assert!(ok.is_ok(), "expected success, got {:?}", ok);
-
-        // The confirmation is single-use.
-        let replay = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "w2:p1", "command": "Please run the tests." }),
-            )
-            .await;
-        assert!(replay.is_err());
+        assert!(res.unwrap_err().contains("confirmation unavailable"));
     }
 
     #[tokio::test]
@@ -983,23 +869,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_arbitrary_safe_commands_validation() {
-        let client = HerdrClient::mock();
-        let vs = Arc::new(VoiceState::default());
         let executor = HerdrToolExecutor::new(
-            client,
+            HerdrClient::mock(),
             vec![
-                AgentConfig::new("claude", vec!["continue".to_string()], true)
+                AgentConfig::new("claude", vec!["continue".to_string()], false)
                     .with_arbitrary_commands(true),
             ],
-        )
-        .with_voice_state(Arc::clone(&vs));
-
-        // Arm and confirm for a safe arbitrary command with periods and commas
-        vs.arm_confirmation(
-            Some("p1".to_string()),
-            Some("please run cargo test, check output.".to_string()),
         );
-        vs.confirm_gate();
+
+        // A safe arbitrary command with periods and commas
 
         let ok_res = executor
             .execute_tool(
@@ -1010,8 +888,6 @@ mod tests {
         assert!(ok_res.is_ok());
 
         // Attempting a command with slash '/' must be rejected
-        vs.arm_confirmation(Some("p1".to_string()), Some("cat /etc/passwd".to_string()));
-        vs.confirm_gate();
         let slash_res = executor
             .execute_tool(
                 "run_command",
@@ -1024,8 +900,6 @@ mod tests {
             .contains("'/' and '-' are not permitted"));
 
         // Attempting a command with hyphen '-' must be rejected
-        vs.arm_confirmation(Some("p1".to_string()), Some("cargo test --all".to_string()));
-        vs.confirm_gate();
         let dash_res = executor
             .execute_tool(
                 "run_command",
@@ -1038,8 +912,6 @@ mod tests {
             .contains("'/' and '-' are not permitted"));
 
         // Non-ASCII command must be rejected
-        vs.arm_confirmation(Some("p1".to_string()), Some("你好".to_string()));
-        vs.confirm_gate();
         let non_ascii_res = executor
             .execute_tool(
                 "run_command",

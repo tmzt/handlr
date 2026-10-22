@@ -1,8 +1,8 @@
 //! Configuration manager for `handlr`.
 //!
 //! Loads TOML settings from `~/.config/handlr/config.toml` (or custom path),
-//! covering transports (`[[transports]]`), voice configuration (TTS & STT engines,
-//! voices, speed, models), and LLM parameters.
+//! covering transports (`[[transports]]`), per-agent command permissions
+//! (`[[agents]]`), and LLM parameters.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -11,8 +11,6 @@ use std::path::{Path, PathBuf};
 pub struct AppConfig {
     #[serde(default)]
     pub transports: Vec<TransportConfig>,
-    #[serde(default)]
-    pub voice: VoiceConfig,
     #[serde(default = "default_agents")]
     pub agents: Vec<AgentConfig>,
     /// Master switch for arbitrary (non allow-listed) commands. `Some(true)`
@@ -51,7 +49,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             transports: Vec::new(),
-            voice: VoiceConfig::default(),
             agents: default_agents(),
             allow_arbitrary_commands: None,
             gemini: GeminiConfig::default(),
@@ -86,78 +83,6 @@ impl Default for TransportConfig {
             socket: None,
             remote: None,
             default: Some(true),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct VoiceConfig {
-    #[serde(default)]
-    pub tts: TtsSettings,
-    #[serde(default)]
-    pub stt: SttSettings,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TtsSettings {
-    /// TTS engine backend: "system", "sherpa-kokoro", "kokoro", or "sine"
-    #[serde(default = "default_tts_engine")]
-    pub engine: String,
-    /// Voice preset name (e.g. "Samantha" for System, "af_bella" for Kokoro)
-    pub voice: Option<String>,
-    /// Playback speed multiplier (default: 1.0)
-    #[serde(default = "default_speed")]
-    pub speed: f32,
-    /// Custom path to Kokoro ONNX model
-    pub kokoro_model: Option<String>,
-    /// Custom path to Kokoro voices.bin
-    pub kokoro_voices: Option<String>,
-    /// Custom directory holding sherpa-onnx Kokoro assets
-    pub sherpa_model_dir: Option<String>,
-}
-
-fn default_tts_engine() -> String {
-    "system".to_string()
-}
-
-fn default_speed() -> f32 {
-    1.0
-}
-
-impl Default for TtsSettings {
-    fn default() -> Self {
-        Self {
-            engine: default_tts_engine(),
-            voice: None,
-            speed: default_speed(),
-            kokoro_model: None,
-            kokoro_voices: None,
-            sherpa_model_dir: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct SttSettings {
-    /// STT engine backend: "whisper"
-    #[serde(default = "default_stt_engine")]
-    pub engine: String,
-    /// Custom path to Silero VAD ONNX model
-    pub silero_model: Option<String>,
-    /// Custom path to Whisper GGML model
-    pub whisper_model: Option<String>,
-}
-
-fn default_stt_engine() -> String {
-    "whisper".to_string()
-}
-
-impl Default for SttSettings {
-    fn default() -> Self {
-        Self {
-            engine: default_stt_engine(),
-            silero_model: None,
-            whisper_model: None,
         }
     }
 }
@@ -334,14 +259,6 @@ mode = "remote"
 remote = "tmeade@timothys-mac-mini-1"
 default = true
 
-[voice.tts]
-engine = "sherpa-kokoro"
-voice = "af_bella"
-speed = 1.1
-
-[voice.stt]
-engine = "whisper"
-
 [[agents]]
 name = "claude"
 allowed_commands = ["continue", "/compact"]
@@ -357,11 +274,6 @@ require_confirmation = true
         let local = cfg.find_transport(Some("local")).unwrap();
         assert_eq!(local.mode, "local");
         assert_eq!(local.socket.as_deref(), Some("/tmp/herdr.sock"));
-
-        assert_eq!(cfg.voice.tts.engine, "sherpa-kokoro");
-        assert_eq!(cfg.voice.tts.voice.as_deref(), Some("af_bella"));
-        assert_eq!(cfg.voice.tts.speed, 1.1);
-        assert_eq!(cfg.voice.stt.engine, "whisper");
 
         let claude_cfg = cfg.find_agent("Claude").unwrap();
         assert_eq!(claude_cfg.name, "claude");
@@ -433,9 +345,6 @@ allow_arbitrary_commands = false
         );
         let parsed = cfg.unwrap();
         assert_eq!(parsed.transports.len(), 2);
-        assert_eq!(parsed.voice.tts.engine, "sherpa-kokoro");
-        assert_eq!(parsed.voice.tts.voice.as_deref(), Some("am_adam"));
-        assert_eq!(parsed.voice.tts.speed, 1.5);
         assert_eq!(parsed.agents.len(), 3);
         let claude = parsed.find_agent("claude").unwrap();
         assert_eq!(claude.allowed_commands, vec!["continue", "/compact"]);

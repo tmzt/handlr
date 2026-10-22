@@ -1,7 +1,7 @@
 ---
 title: handlr as an agent orchestration daemon
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - handlr as a long-running daemon (`handlr serve`) that holds the herdr
     connection and serves clients over a Unix domain socket
@@ -421,3 +421,10 @@ with `--show-phrases`. This lets you approve from a local client with the
 phrase read off the daemon's terminal. Step 5's **Done when:** takes the
 phrase from there instead of from a paired subscriber, so plan 01 is
 tested without plan 02.
+
+## Amendment — 2026-10-22 17:11 EDT: implementation has started; the document is now immutable
+
+The owner asked to start. Step 2 (the speech pipeline removed, done first
+per the 16:23 EDT amendment) is the first implementing commit, which sets
+the status from `Draft` to `In implementation`. From here this document
+changes only on the owner's explicit instruction (AGENTS.md, Rule 1.5).
