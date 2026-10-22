@@ -20,6 +20,8 @@ pub struct AppConfig {
     pub allow_arbitrary_commands: Option<bool>,
     #[serde(default)]
     pub gemini: GeminiConfig,
+    #[serde(default)]
+    pub server: ServerConfig,
 }
 
 fn default_agents() -> Vec<AgentConfig> {
@@ -52,6 +54,7 @@ impl Default for AppConfig {
             agents: default_agents(),
             allow_arbitrary_commands: None,
             gemini: GeminiConfig::default(),
+            server: ServerConfig::default(),
         }
     }
 }
@@ -135,6 +138,16 @@ pub struct GeminiConfig {
     pub api_key: Option<String>,
     /// Model identifier (default: "gemini-2.5-flash")
     pub model: Option<String>,
+}
+
+/// `[server]`: the daemon (`handlr serve`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ServerConfig {
+    /// The daemon socket (default: ~/.config/handlr/handlr.sock).
+    pub socket: Option<String>,
+    /// Seconds a confirmation waits for an answer, other than one asked for
+    /// by a companion's own voice turn (default: 3600).
+    pub confirm_ttl: Option<u64>,
 }
 
 impl AppConfig {
@@ -295,6 +308,7 @@ name = "omp"
 allowed_commands = ["continue"]
 "#;
         let cfg: AppConfig = toml::from_str(sample).unwrap();
+        assert_eq!(cfg.server, ServerConfig::default());
         assert!(cfg.find_agent("claude").unwrap().allow_arbitrary_commands);
         // Defaults to off when the key is omitted.
         assert!(!cfg.find_agent("omp").unwrap().allow_arbitrary_commands);

@@ -20,10 +20,16 @@ toml = "0.8"
 # Confirmation tokens and nonces (src/core/confirm.rs).
 blake2 = "0.10"
 getrandom = "0.2"
+# The daemon (src/server/): socket lines, peer uid, wire types.
+libhandlr_proto = { path = "crates/libhandlr_proto" }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = "0.3"
+libc = "0.2"
 
 [dev-dependencies]
 # Paused time for the confirmation broker's timers.
 tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
 
 [workspace]
 members = [

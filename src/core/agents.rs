@@ -57,6 +57,15 @@ pub fn agents(snapshot: &serde_json::Value) -> Vec<AgentRef> {
     refs
 }
 
+/// The text of a `pane.read` result, wherever this transport put it.
+pub fn pane_text(read: &serde_json::Value) -> Option<&str> {
+    read.get("read")
+        .and_then(|r| r.get("text"))
+        .and_then(|t| t.as_str())
+        .or_else(|| read.get("buffer").and_then(|b| b.as_str()))
+        .or_else(|| read.get("text").and_then(|t| t.as_str()))
+}
+
 /// Workspace id -> label, for workspaces that have a non-empty label.
 pub fn workspace_labels(snapshot: &serde_json::Value) -> HashMap<String, String> {
     let root = snapshot_root(snapshot);
