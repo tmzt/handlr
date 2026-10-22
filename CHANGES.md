@@ -127,3 +127,9 @@ Plans: [Pluggable ReasoningEngine and ToolExecutor traits](docs/design/20260831_
   can be recovered. The speech pipeline is `Retired (by
   20261022_01_ORCHESTRATION_DAEMON_PLAN)`, removed in `5ce0b71`. The last
   commit with the code is `f89224618e114a4b54e0761a7417e7f118b90eb8`.
+
+## 2026-10-22 17:12 EDT — Correction to the 17:11 entry
+
+In the 17:11 entry, "libgenai is pinned by git revision (`f892246`)" should
+read: libgenai is pinned at revision `57fb65dd9269b7341346a8241d9f10d7a9565266`
+of `tmzt/libgenai`, in commit `f892246`.
