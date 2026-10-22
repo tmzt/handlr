@@ -66,3 +66,32 @@ Rule 1.2 and has no **Done when:** criteria. The date is the original one.
 
 Implementation of the traits and engines (Phase 1) started on 2026-08-31 in `a53c2a2`, so the
 status is set to `In implementation` and the document is now immutable.
+
+## Amendment — 2026-10-22 10:53 EDT: implementation record
+
+Implementation records only; the body above is not changed by this amendment.
+
+**Phase 1 (traits and mocks).** Traits, `GeminiReasoningEngine` and
+`MockReasoningEngine` first landed in `src/reasoning.rs` in `a53c2a2`. They
+were then moved to the new `libinfer` crate: traits and JSONL
+`SessionManager` in `2b85d0a`, Gemini engine in `1d3dd24`, mocks in
+`53efd11`, `EngineType` and `ReasoningEngineBuilder` in `89e11e6`.
+Credentials resolve through libgenai's service-account/OAuth handling
+(`febf29c` to `e3465a1`).
+
+**Departures from the body:**
+
+- The traits live in `crates/libinfer`, re-exported by `src/reasoning.rs`,
+  not in handlr itself.
+- Tool calling as described (`list_panes`, `inspect_pane`, …) was replaced by
+  `HerdrContextContributor`, which injects the herdr snapshot and the recent
+  50 lines of active, working or focused panes into each turn (`5af8931`,
+  `379776e`, `27ed8a0`). Declared tools are now `focus`, `run_command` and
+  `watch_pane`.
+- The system prompt comes from `PROMPT.md` (`3d0ef99`), not `AGENTS.md` (B.1).
+- `RoutingReasoningEngine` (B.3) has not been built.
+
+**Learned.** Reading panes through tool calls cost a round trip per turn;
+putting the pane state in the turn context answers most questions in one
+request. Gemini returns opaque `thought_signature`s that must be kept and
+replayed in the session (`a5546a2`).

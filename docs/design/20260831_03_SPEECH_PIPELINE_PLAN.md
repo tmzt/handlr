@@ -106,3 +106,35 @@ Rule 1.2 and has no **Done when:** criteria. The date is the original one.
 
 Implementation of the speech pipeline (Phase 3) started on 2026-08-31 in `a84d284`, so the
 status is set to `In implementation` and the document is now immutable.
+
+## Amendment — 2026-10-22 10:53 EDT: implementation record
+
+Implementation records only; the body above is not changed by this amendment.
+
+**Phase 3 (pipeline).** First built in `a84d284`, switched to
+`with_async_processor` in `28e334f` and to the builder's defaults in
+`f61030b`. Native TTS with `--tts-voice`/`--tts-speed` in `e5827b0`,
+selectable TTS backends in `ea22c60`, Sherpa Kokoro auto-download in
+`3005fea` and `cf1393a`, model symlinks in `03527b9`, sherpa-onnx rpath in
+`d9b3953`.
+
+**Phase 4 (testing).** Not done as written: there are no barge-in tests.
+`tests/live_naming.rs` and unit tests in `src/reasoning.rs` cover naming and
+tool declarations.
+
+**Departures from the body:**
+
+- The processor is `with_async_processor` (`28e334f`), not `with_processor`
+  bridged through `smol::block_on` (§3.A), and the runtime is Tokio
+  (`be9362c`).
+- Capture is muted at the CPAL stream while reasoning and speaking
+  (`1a3f87d`); the mute is released when a turn produces no reply (`2817db2`).
+- `Arc<VoiceState>` is shared by the pipeline and capture (`2ebc2a4`); it
+  carries the confirmation gate, which flushes queued audio when armed
+  (`2e713c5`).
+- Spoken notifications queue behind the current utterance instead of barging
+  in (`a7769c9`).
+
+**Learned.** Blocking on the async engine inside the processor callback had no
+reactor to run on; an async processor on Tokio removes the bridge. Without the
+hardware mute the assistant hears its own TTS.
