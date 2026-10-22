@@ -2,7 +2,9 @@
 //!
 //! herdr reports each pane twice, flat under `panes` and nested under
 //! workspaces -> tabs, so everything here works from `collect_panes` and
-//! keys on `pane_id`.
+//! keys on `pane_id`. Tabs come from the snapshot's top-level `tabs` list,
+//! and from tabs nested under workspaces where a herdr nests them
+//! (plan 20261022_05, decision 2).
 
 use std::collections::HashMap;
 
@@ -21,6 +23,10 @@ pub struct AgentRef {
     pub cwd: Option<String>,
     pub workspace_id: Option<String>,
     pub tab_id: Option<String>,
+    /// The tab's label as the user typed it (`17-hr`, `-mb`).
+    pub tab_label: Option<String>,
+    /// The tab's number, unique within its workspace.
+    pub tab_number: Option<u32>,
     pub status: AgentStatus,
     pub focused: bool,
 }
@@ -28,6 +34,8 @@ pub struct AgentRef {
 /// Every pane in the snapshot, once each, as an `AgentRef`.
 pub fn agents(snapshot: &serde_json::Value) -> Vec<AgentRef> {
     let labels = workspace_labels(snapshot);
+    let tabs = tab_infos(snapshot);
+    let nested_tab_of = nested_tab_ids(snapshot);
     let mut refs: Vec<AgentRef> = Vec::new();
     for pane in collect_panes(snapshot) {
         let Some(pane_id) = pane.get("pane_id").and_then(|v| v.as_str()) else {
@@ -37,13 +45,17 @@ pub fn agents(snapshot: &serde_json::Value) -> Vec<AgentRef> {
             continue;
         }
         let text = |key: &str| pane.get(key).and_then(|v| v.as_str()).map(str::to_string);
+        let tab_id = text("tab_id").or_else(|| nested_tab_of.get(pane_id).cloned());
+        let tab = tab_id.as_deref().and_then(|id| tabs.get(id));
         refs.push(AgentRef {
             pane_id: pane_id.to_string(),
             agent: agent_name_of(pane).unwrap_or_else(|| "shell".to_string()),
             project: project_for(pane, &labels),
             cwd: text("cwd"),
             workspace_id: text("workspace_id"),
-            tab_id: text("tab_id"),
+            tab_label: tab.and_then(|t| t.label.clone()),
+            tab_number: tab.and_then(|t| t.number),
+            tab_id,
             status: pane
                 .get("agent_status")
                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -55,6 +67,84 @@ pub fn agents(snapshot: &serde_json::Value) -> Vec<AgentRef> {
         });
     }
     refs
+}
+
+/// A tab's label and number, as the snapshot gives them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TabInfo {
+    pub label: Option<String>,
+    pub number: Option<u32>,
+}
+
+/// Tab id -> label and number, from the top-level `tabs` list and from tabs
+/// nested under workspaces. Where both describe a tab, the fields each one
+/// has are merged, the top-level list first.
+pub fn tab_infos(snapshot: &serde_json::Value) -> HashMap<String, TabInfo> {
+    let root = snapshot_root(snapshot);
+    let mut tabs: HashMap<String, TabInfo> = HashMap::new();
+    let mut add = |tab: &serde_json::Value| {
+        let Some(id) = tab.get("tab_id").and_then(|v| v.as_str()) else {
+            return;
+        };
+        let label = tab
+            .get("label")
+            .or_else(|| tab.get("name"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let number = tab
+            .get("number")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok());
+        let entry = tabs.entry(id.to_string()).or_default();
+        if entry.label.is_none() {
+            entry.label = label;
+        }
+        if entry.number.is_none() {
+            entry.number = number;
+        }
+    };
+    if let Some(top) = root.get("tabs").and_then(|t| t.as_array()) {
+        top.iter().for_each(&mut add);
+    }
+    if let Some(workspaces) = root.get("workspaces").and_then(|w| w.as_array()) {
+        for ws in workspaces {
+            if let Some(nested) = ws.get("tabs").and_then(|t| t.as_array()) {
+                nested.iter().for_each(&mut add);
+            }
+        }
+    }
+    tabs
+}
+
+/// Pane id -> the id of the nested tab it is listed under, for panes that
+/// do not carry their own `tab_id`.
+fn nested_tab_ids(snapshot: &serde_json::Value) -> HashMap<String, String> {
+    let root = snapshot_root(snapshot);
+    let mut of: HashMap<String, String> = HashMap::new();
+    let Some(workspaces) = root.get("workspaces").and_then(|w| w.as_array()) else {
+        return of;
+    };
+    for tab in workspaces
+        .iter()
+        .filter_map(|ws| ws.get("tabs").and_then(|t| t.as_array()))
+        .flatten()
+    {
+        let Some(tab_id) = tab.get("tab_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        for pane in tab
+            .get("panes")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if let Some(pane_id) = pane.get("pane_id").and_then(|v| v.as_str()) {
+                of.entry(pane_id.to_string())
+                    .or_insert_with(|| tab_id.to_string());
+            }
+        }
+    }
+    of
 }
 
 /// The text of a `pane.read` result, wherever this transport put it.
@@ -285,5 +375,43 @@ mod tests {
         assert_eq!(refs[1].agent, "shell");
         assert_eq!(refs[1].project.as_deref(), Some("highbay"));
         assert_eq!(refs[1].status, AgentStatus::Unknown);
+        assert_eq!(refs[1].tab_label, None);
+    }
+
+    #[test]
+    fn agents_read_top_level_tabs() {
+        // The 2026-10-22 shape: tabs are top level, panes point at them.
+        let snap = json!({"snapshot": {
+            "workspaces": [{"workspace_id": "w2", "label": "cc-highbay", "number": 2}],
+            "tabs": [
+                {"tab_id": "w2:t1", "workspace_id": "w2", "number": 17, "label": "17-hr"},
+                {"tab_id": "w2:t2", "workspace_id": "w2", "number": 3, "label": "-mb"}
+            ],
+            "panes": [
+                {"pane_id": "w2:pZ", "agent": "claude", "workspace_id": "w2", "tab_id": "w2:t1"},
+                {"pane_id": "w2:p4", "agent": "claude", "workspace_id": "w2", "tab_id": "w2:t2"}
+            ]
+        }});
+        let refs = agents(&snap);
+        assert_eq!(refs[0].tab_label.as_deref(), Some("17-hr"));
+        assert_eq!(refs[0].tab_number, Some(17));
+        assert_eq!(refs[1].tab_label.as_deref(), Some("-mb"));
+        assert_eq!(refs[1].tab_number, Some(3));
+    }
+
+    #[test]
+    fn agents_read_nested_tabs() {
+        // Older shape: tabs nested under workspaces, panes without a tab_id.
+        let snap = json!({"snapshot": {
+            "workspaces": [{"workspace_id": "w1", "label": "dev", "tabs": [
+                {"tab_id": "w1:t4", "number": 4, "label": "ctrls",
+                 "panes": [{"pane_id": "w1:p1", "agent": "claude"}]}
+            ]}]
+        }});
+        let refs = agents(&snap);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].tab_id.as_deref(), Some("w1:t4"));
+        assert_eq!(refs[0].tab_label.as_deref(), Some("ctrls"));
+        assert_eq!(refs[0].tab_number, Some(4));
     }
 }

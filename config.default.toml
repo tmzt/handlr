@@ -46,3 +46,21 @@ allow_arbitrary_commands = false
 # Optional Gemini API Key (defaults to GEMINI_API_KEY environment variable)
 # api_key = "..."
 # model = "gemini-2.5-flash"
+
+# How agents are named aloud and on screen. Uncomment to change the defaults.
+# [naming]
+# Words of at most this many letters with none of `vowels` are spelled out
+# letter by letter ("hr" -> "aitch ar"). 0 turns spelling off.
+# spell_max_len = 6
+# vowels = "aeiouy"
+#
+# [naming.letters]
+# Any letter's spoken name; unlisted letters keep the default English names.
+# w = "dub"
+#
+# [naming.aliases]
+# A tab label as written, a project, or an agent name (any case) -> what to
+# say and show instead. Alias values are never spelled out.
+# "ctrls" = "controls"
+# "17-hr" = "handlr"
+# "agy" = "antigravity"

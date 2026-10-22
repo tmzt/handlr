@@ -5,6 +5,7 @@
 //! (`[[agents]]`), and LLM parameters.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,6 +23,8 @@ pub struct AppConfig {
     pub gemini: GeminiConfig,
     #[serde(default)]
     pub server: ServerConfig,
+    #[serde(default)]
+    pub naming: NamingConfig,
 }
 
 fn default_agents() -> Vec<AgentConfig> {
@@ -55,6 +58,7 @@ impl Default for AppConfig {
             allow_arbitrary_commands: None,
             gemini: GeminiConfig::default(),
             server: ServerConfig::default(),
+            naming: NamingConfig::default(),
         }
     }
 }
@@ -148,6 +152,35 @@ pub struct ServerConfig {
     /// Seconds a confirmation waits for an answer, other than one asked for
     /// by a companion's own voice turn (default: 3600).
     pub confirm_ttl: Option<u64>,
+}
+
+/// `[naming]`: how agents are named aloud and on screen
+/// (docs/design/20261022_05_SPOKEN_NAMES_PLAN.md, decision 8).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NamingConfig {
+    /// Words of at most this many letters with no vowel are spelled out
+    /// letter by letter. 0 turns spelling off.
+    pub spell_max_len: usize,
+    /// The letters that make a word readable as written.
+    pub vowels: String,
+    /// Letter -> the name it is spelled with; unlisted letters keep the
+    /// default English names.
+    pub letters: BTreeMap<String, String>,
+    /// A tab label as written, a project, or an agent name (matched
+    /// case-insensitively) -> what to say and show instead.
+    pub aliases: BTreeMap<String, String>,
+}
+
+impl Default for NamingConfig {
+    fn default() -> Self {
+        Self {
+            spell_max_len: 6,
+            vowels: "aeiouy".to_string(),
+            letters: BTreeMap::new(),
+            aliases: BTreeMap::new(),
+        }
+    }
 }
 
 impl AppConfig {
@@ -349,6 +382,40 @@ allow_arbitrary_commands = false
     }
 
     #[test]
+    fn naming_defaults_when_absent() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.naming, NamingConfig::default());
+        assert_eq!(cfg.naming.spell_max_len, 6);
+        assert_eq!(cfg.naming.vowels, "aeiouy");
+    }
+
+    #[test]
+    fn naming_parses_and_ignores_unknown_keys() {
+        let sample = r#"
+[naming]
+spell_max_len = 0
+vowels = "aeiou"
+no_such_key = true
+
+[naming.letters]
+w = "dub"
+
+[naming.aliases]
+"ctrls" = "controls"
+"17-hr" = "handlr"
+"#;
+        let cfg: AppConfig = toml::from_str(sample).unwrap();
+        assert_eq!(cfg.naming.spell_max_len, 0);
+        assert_eq!(cfg.naming.vowels, "aeiou");
+        assert_eq!(cfg.naming.letters.get("w").map(String::as_str), Some("dub"));
+        assert_eq!(
+            cfg.naming.aliases.get("17-hr").map(String::as_str),
+            Some("handlr")
+        );
+        assert_eq!(cfg.naming.aliases.len(), 2);
+    }
+
+    #[test]
     fn test_default_toml_template_valid() {
         let template = AppConfig::default_toml_template();
         let cfg: Result<AppConfig, _> = toml::from_str(&template);
@@ -363,5 +430,6 @@ allow_arbitrary_commands = false
         let claude = parsed.find_agent("claude").unwrap();
         assert_eq!(claude.allowed_commands, vec!["continue", "/compact"]);
         assert!(claude.require_confirmation);
+        assert_eq!(parsed.naming, NamingConfig::default());
     }
 }

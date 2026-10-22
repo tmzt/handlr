@@ -1,7 +1,7 @@
 ---
 title: Naming agents aloud and on screen
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - What handlr calls an agent when it speaks or shows it. That is a
     ladder from the agent's name to its project and its tab, and never
@@ -237,3 +237,10 @@ settled with the default.
 
 **Step 1** gains tests. "ay dee" and "AD" resolve to the `-ad` tab, and
 "ess why" is in the vocabulary for a tab labelled `-sy`.
+
+## Amendment — 2026-10-22 18:26 EDT: implementation has started; the document is now immutable
+
+The owner approved plans 20261022_02 to 05 for building. Steps 1 and 2 (`core::naming` and `[naming]`) are is the
+first implementing commit, which sets the status from `Draft` to
+`In implementation`. From here this document changes only on the owner's
+explicit instruction (AGENTS.md, Rule 1.5).

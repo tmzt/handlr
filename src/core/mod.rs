@@ -4,5 +4,6 @@
 
 pub mod agents;
 pub mod confirm;
+pub mod naming;
 pub mod policy;
 pub mod principal;

@@ -1,9 +1,20 @@
-//! Names the agents in a captured herdr snapshot, so the disambiguation ladder
-//! can be checked against a real session shape rather than only fixtures.
+//! Names the agents in a captured herdr snapshot, so the naming ladder
+//! (plan 20261022_05) can be checked against a real session shape rather
+//! than only fixtures.
 //!
 //! Capture one with `herdr api snapshot > snap.json`, then:
 //! `HANDLR_SNAPSHOT=snap.json cargo test --test live_naming -- --nocapture`
-use handlr::notify::{agent_identities, speakable_name};
+use handlr::config::NamingConfig;
+use handlr::core::naming::Names;
+
+/// Whether `name` contains `pane_id`, fully qualified or as a short id word.
+fn contains_pane_id(name: &str, pane_id: &str) -> bool {
+    let short = pane_id.rsplit(':').next().unwrap_or(pane_id);
+    name.contains(pane_id)
+        || name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == short)
+}
 
 #[test]
 fn names_agents_in_a_captured_snapshot() {
@@ -13,15 +24,28 @@ fn names_agents_in_a_captured_snapshot() {
     };
     let text = std::fs::read_to_string(&path).expect("read snapshot");
     let snap: serde_json::Value = serde_json::from_str(&text).expect("parse snapshot");
-    let ids = agent_identities(&snap);
-    for id in &ids {
+    let names = Names::from_snapshot(&snap, &NamingConfig::default());
+    for a in &names.agents {
         println!(
-            "{:<10} agent={:<8} project={:<12} -> \"{}\"",
-            id.pane_id,
-            id.agent,
-            id.project.as_deref().unwrap_or("-"),
-            speakable_name(id, &ids)
+            "{:<10} agent={:<8} tab={:<8} shown=\"{}\" spoken=\"{}\"",
+            a.agent.pane_id,
+            a.agent.agent,
+            a.agent.tab_label.as_deref().unwrap_or("-"),
+            a.shown,
+            a.spoken
         );
     }
-    assert!(!ids.is_empty(), "snapshot contained no agents");
+    println!("vocabulary: {:?}", names.vocabulary());
+    assert!(!names.agents.is_empty(), "snapshot contained no agents");
+    for a in &names.agents {
+        for other in &names.agents {
+            for name in [&a.shown, &a.spoken] {
+                assert!(
+                    !contains_pane_id(name, &other.agent.pane_id),
+                    "{name:?} contains pane id {}",
+                    other.agent.pane_id
+                );
+            }
+        }
+    }
 }
