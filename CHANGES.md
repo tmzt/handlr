@@ -233,3 +233,47 @@ Rules for step 3 (the daemon side), found in review:
   an idle or slow peer cannot hold a connection open.
 - The daemon burns a pairing secret on first use and checks its expiry
   before looking it up.
+
+## 2026-10-22 18:26 EDT — Plans 20261022_05 (steps 1–2) and 20261022_04 (step 1), and departures
+
+Plans: [Naming agents aloud and on screen](docs/design/20261022_05_SPOKEN_NAMES_PLAN.md)
+and [The companion app](docs/design/20261022_04_COMPANION_APP_PLAN.md), both
+now `In implementation`. Naming is in `8dce2a5`, and the companion crate in
+`d838873`.
+
+**Plan 05, departures and decisions it left open:**
+- **A label that is only a number** is spoken "tab <label>", not "tab
+  <number>". The live snapshot has a tab labelled `4` whose number is 7,
+  and "tab 7" would contradict the tab bar. The number is used only when the
+  label is empty.
+- **Uniqueness compares spoken forms**, so labels that sound alike (`17-hr`
+  and `hr`) fall to the tab number.
+- **Past rung 5**, two agents in one tab end ", number K", their order in
+  the snapshot. Names never fall back to a pane id.
+- **Shells** are named too, ranked among shells ("the regraph shell"), so
+  a shell does not lengthen an agent's name. Resolution prefers agents.
+- **Rung 2 is lowercase** ("the handlr agent"), so `notify::announcement`
+  capitalises the start of its sentence.
+- **Words are split on spaces, `-` and `_`** for spelling.
+- **Known issue, raised with the owner.** The 18:15 EDT amendment's "every
+  word of at most `spell_max_len` letters" puts spelled forms of ordinary
+  words and ids into the vocabulary. Examples are `CLAUDE` / "see el ay you
+  dee ee", "bee you bee bee el ee" for `bubble`, and `1EDF0E1E987E`. That
+  is literal to the amendment, but noise for an STT booster. Narrowing it
+  needs the owner's decision.
+
+**Plan 04, step 1, departures:**
+- **Confirming takes precedence** over a running turn. A confirmation can
+  arrive mid-turn, and the user must be able to answer the question just
+  spoken. A denying utterance during a turn is held until the turn ends,
+  to avoid `-32020` (busy).
+- **Only the running, untapped turn speaks.** A `turn.say` for a turn the
+  user interrupted, or one that has ended, is dropped (the lead's fix in
+  review).
+- **`session_id` is in memory only** until the link (step 2) stores it in
+  `ServerRecord`. `Input::Pair` answers "pairing needs the link (step 2)".
+- **`FileKeyStore`** refuses any group or other access (mode & 0o077),
+  which is stricter than "readable". It also uses the `base64` and `toml`
+  crates.
+- **`wire::ConfirmRequested`** accepts both `handle`/`token` (the
+  CHANGES.md names) and `label`/`phrase` (plan 02's text).
