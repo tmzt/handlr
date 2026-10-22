@@ -1,7 +1,7 @@
 ---
 title: The companion app, on handlr-companion and libvoicexn
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - `crates/handlr-companion`: the companion client's logic, with no audio
     and no UI. It covers pairing, the link connection, turns, the Esc-like
@@ -376,3 +376,11 @@ Plan 20261022_02 step 4 is still checked with it.
 `handlr ctl` and `handlr mcp` may later connect through
 `handlr-companion`'s connection code. That would be its own change,
 recorded when it is made.
+
+## Amendment — 2026-10-22 18:26 EDT: implementation has started; the document is now immutable
+
+The owner approved plans 20261022_02 to 05 for building. Step 1 of the
+18:10 EDT amendment (`handlr-companion`'s logic, keys and the local
+connection) is the first implementing commit, which sets the status from
+`Draft` to `In implementation`. From here this document changes only on the
+owner's explicit instruction (AGENTS.md, Rule 1.5).

@@ -34,6 +34,7 @@ tempfile = "3"
 [workspace]
 members = [
     ".",
+    "crates/handlr-companion",
     "crates/libhandlr_proto",
     "crates/libherdr",
     "crates/libinfer"
