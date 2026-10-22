@@ -19,8 +19,8 @@ use crate::wire;
 /// What the app tells the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    /// A `handlr1…` pairing string. Pairing needs the link (plan
-    /// 20261022_04 step 2); until then it gives [`Event::PairFailed`].
+    /// A `handlr1…` pairing string. The `net` thread pairs with it over
+    /// the link; [`State`] itself cannot, and gives [`Event::PairFailed`].
     Pair(String),
     /// What STT heard, or a typed line.
     Utterance(String),
@@ -156,7 +156,8 @@ struct Confirmation {
 /// - `Confirming`: a confirmation is pending. It takes precedence over a
 ///   running turn, so the user can always answer the question just spoken.
 ///
-/// `Unpaired` belongs to the link (step 2).
+/// `Unpaired` is the `net` thread's: without a paired server it uses the
+/// daemon's local socket, and pairs when given [`Input::Pair`].
 #[derive(Debug)]
 pub struct State {
     client: String,
@@ -253,7 +254,7 @@ impl State {
         let mut out = Vec::new();
         match input {
             Input::Pair(_) => out.push(event(Event::PairFailed(
-                "pairing needs the link (step 2)".to_string(),
+                "pairing is done by the net thread, not the state machine".to_string(),
             ))),
             Input::Speaking(on) => {
                 self.speaking = on;
@@ -1001,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn pairing_waits_for_the_link() {
+    fn the_state_machine_does_not_pair() {
         let mut s = State::new("test");
         assert!(matches!(
             events(&s.input(Input::Pair("handlr1abc".into())))[..],

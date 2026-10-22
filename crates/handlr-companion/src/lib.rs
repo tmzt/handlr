@@ -6,9 +6,12 @@
 //! [`send`](Companion::send)s it [`Input`]s and [`poll`](Companion::poll)s
 //! its [`Event`]s.
 //!
-//! This is the plan's step 1: the logic, [`FileKeyStore`] and the local
-//! connection to the daemon's Unix socket, with reconnecting and the
-//! `session_id`. Pairing and the link are step 2.
+//! Steps 1 and 2 of the plan's 18:10 EDT amendment: the logic,
+//! [`FileKeyStore`], and the connection. With a paired server in the
+//! [`KeyStore`], the client reconnects to it over handlr link (`IK`, with
+//! `hello` and its `session_id` in the handshake); without one, it uses the
+//! daemon's Unix socket. [`Input::Pair`] pairs from a `handlr1…` string.
+//! `examples/text.rs` drives it from typed lines.
 
 pub mod client;
 pub mod keys;
@@ -31,7 +34,7 @@ pub struct CompanionConfig {
     pub client: String,
     /// The TTS voice, for the front end.
     pub voice: Option<String>,
-    /// The daemon's socket.
+    /// The daemon's socket, used while no server is paired.
     pub socket: PathBuf,
     /// The first delay before reconnecting, doubled after each failure.
     pub backoff_initial: Duration,
