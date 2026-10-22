@@ -10,8 +10,13 @@
 //!
 //! The methods both share are in [`common`]. This crate depends on serde
 //! alone, so clients can use it without handlr.
+//!
+//! The `link` feature adds [`link`], the encrypted transport (Noise over
+//! any Tokio byte stream) and the pairing string (plan 02, decisions 1–2).
 
 pub mod common;
 pub mod envelope;
+#[cfg(feature = "link")]
+pub mod link;
 
 pub use envelope::{ErrorObject, Id, Incoming, Notification, Request, Response};

@@ -1,7 +1,7 @@
 ---
 title: handlr link pairing and the companion protocol
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - handlr link: Noise over TCP, via the `snow` crate, with QR-code pairing
     and a stored key on each side
@@ -605,3 +605,10 @@ libmobile), and there is no interim in-memory or file store on the device.
 - `--replace` swaps the entry and closes the old key's open connection;
 - pairing a name already in use without `--replace` is refused, and
   `auth.toml` is left unchanged.
+
+## Amendment — 2026-10-22 18:24 EDT: implementation has started; the document is now immutable
+
+The owner approved plans 20261022_02 to 05 for building. Step 1 (the link
+layer in `libhandlr_proto`) is the first implementing commit, which sets the
+status from `Draft` to `In implementation`. From here this document changes
+only on the owner's explicit instruction (AGENTS.md, Rule 1.5).
