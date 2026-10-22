@@ -147,7 +147,7 @@ async fn agents_are_listed_read_and_watched() {
     assert!(
         agents
             .iter()
-            .any(|a| a["pane_id"] == "p1" && a["agent"] == "claude"),
+            .any(|a| a["pane_id"] == "p1" && a["agent"] == "claude" && a["name"] == "Claude"),
         "{r}"
     );
 
@@ -311,4 +311,285 @@ async fn closing_the_connection_cancels_its_confirmations() {
     }
     assert_eq!(outcome, Some(handlr::core::confirm::Outcome::Cancelled));
     assert!(sent(&daemon).await.is_empty());
+}
+
+// ── Names (plan 20261022_05, step 3) ────────────────────────────────────
+//
+// The mock's typed snapshot has no top-level `tabs`, labels or numbers, so
+// these tests run the daemon against a fake herdr on a temporary socket
+// that answers with a snapshot shaped like herdr's own.
+
+/// One workspace, `cc-highbay`, so every project is a cwd basename. Two
+/// panes share `/src/libmorph`, which names them by tab; two tabs share the
+/// label `dev`.
+fn tabbed_snapshot() -> Value {
+    let tabs = [
+        ("w1:p1", "w1:t1", "17-hr", 17, "/src/handlr"),
+        ("w1:p2", "w1:t2", "-mb", 4, "/src/libmorph"),
+        ("w1:p3", "w1:t3", "-ad", 3, "/src/libmorph"),
+        ("w1:p4", "w1:t4", "dev", 5, "/src/alpha"),
+        ("w1:p5", "w1:t5", "dev", 6, "/src/beta"),
+    ];
+    let tab_list: Vec<Value> = tabs
+        .iter()
+        .map(|(_, tab, label, number, _)| {
+            json!({"tab_id": tab, "workspace_id": "w1", "number": number, "label": label})
+        })
+        .collect();
+    let panes: Vec<Value> = tabs
+        .iter()
+        .map(|(pane, tab, _, _, cwd)| {
+            json!({
+                "pane_id": pane, "tab_id": tab, "workspace_id": "w1", "cwd": cwd,
+                "agent": "claude", "agent_status": "idle", "focused": false
+            })
+        })
+        .collect();
+    json!({"snapshot": {
+        "workspaces": [{"workspace_id": "w1", "label": "cc-highbay", "number": 1}],
+        "tabs": tab_list,
+        "panes": panes
+    }})
+}
+
+/// A fake herdr: answers `session.snapshot` with `snapshot`, `pane.read`
+/// with "text of <pane>", anything else with success, and logs every
+/// request as `(method, params)`.
+struct FakeHerdr {
+    log: Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+}
+
+impl FakeHerdr {
+    async fn start(socket: &Path, snapshot: Value) -> FakeHerdr {
+        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let task_log = Arc::clone(&log);
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let log = Arc::clone(&task_log);
+                let snapshot = snapshot.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = FramedRead::new(read, LinesCodec::new());
+                    let Some(Ok(line)) = lines.next().await else {
+                        return;
+                    };
+                    let request: Value = serde_json::from_str(&line).unwrap();
+                    let method = request["method"].as_str().unwrap_or_default().to_string();
+                    let params = request["params"].clone();
+                    let result = match method.as_str() {
+                        "session.snapshot" => snapshot,
+                        "pane.read" => json!({"read": {
+                            "text": format!("text of {}", params["pane_id"].as_str().unwrap_or("?"))
+                        }}),
+                        _ => json!({"ok": true}),
+                    };
+                    log.lock().unwrap().push((method, params));
+                    let mut reply =
+                        json!({"jsonrpc": "2.0", "id": request["id"], "result": result})
+                            .to_string();
+                    reply.push('\n');
+                    let _ = write.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+        FakeHerdr { log }
+    }
+
+    /// The `pane_id`s (or other target) of every logged `method`.
+    fn targets(&self, method: &str) -> Vec<String> {
+        self.log
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, _)| m == method)
+            .map(|(_, p)| {
+                p.get("pane_id")
+                    .or_else(|| p.get("workspace_id"))
+                    .or_else(|| p.get("tab_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+}
+
+async fn start_tabbed() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    Arc<Daemon>,
+    FakeHerdr,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let herdr = FakeHerdr::start(&dir.path().join("herdr.sock"), tabbed_snapshot()).await;
+    let socket = dir.path().join("h.sock");
+    let daemon = Daemon::new(
+        HerdrClient::local(dir.path().join("herdr.sock")),
+        &AppConfig::default(),
+    );
+    let listener = server::bind(&socket).await.unwrap();
+    let options = ServeOptions {
+        show_tokens: false,
+        event_transport: None,
+    };
+    tokio::spawn(server::run(Arc::clone(&daemon), listener, options));
+    (dir, socket, daemon, herdr)
+}
+
+#[tokio::test]
+async fn agents_are_listed_with_names_and_tabs() {
+    let (_dir, socket, _daemon, _herdr) = start_tabbed().await;
+    let mut c = Client::hello(&socket, "t").await;
+    let r = c.call("agents.list", json!({})).await;
+    let agents = r["result"]["agents"].as_array().unwrap();
+    let by_pane = |id: &str| agents.iter().find(|a| a["pane_id"] == id).unwrap();
+
+    let hr = by_pane("w1:p1");
+    assert_eq!(hr["name"], "the handlr agent", "{r}");
+    assert_eq!(hr["spoken"], "the handlr agent");
+    assert_eq!(hr["tab_label"], "17-hr");
+    assert_eq!(hr["tab_number"], 17);
+
+    let mb = by_pane("w1:p2");
+    assert_eq!(mb["name"], "Claude in libmorph, tab -mb");
+    assert_eq!(mb["spoken"], "Claude in libmorph, tab em bee");
+    assert_eq!(mb["tab_label"], "-mb");
+    assert_eq!(mb["tab_number"], 4);
+    assert_eq!(by_pane("w1:p3")["spoken"], "Claude in libmorph, tab ad");
+
+    // No name is a pane id.
+    for a in agents {
+        let id = a["pane_id"].as_str().unwrap();
+        let short = id.rsplit(':').next().unwrap();
+        for key in ["name", "spoken"] {
+            let name = a[key].as_str().unwrap();
+            assert!(
+                !name.contains(id) && !name.split([' ', ',']).any(|w| w == short),
+                "{name}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn targets_resolve_by_label_spoken_form_and_tab_number() {
+    let (_dir, socket, _daemon, herdr) = start_tabbed().await;
+    let mut c = Client::hello(&socket, "t").await;
+    for target in ["hr", "HR", "17-hr", "aitch ar", "w1:p1", "p1"] {
+        let r = c
+            .call("agents.read", json!({"pane_id": target, "lines": 5}))
+            .await;
+        assert_eq!(r["result"]["text"], "text of w1:p1", "{target}: {r}");
+    }
+    // A tab number, and a spelled form.
+    let r = c
+        .call("agents.read", json!({"pane_id": "4", "lines": 5}))
+        .await;
+    assert_eq!(r["result"]["text"], "text of w1:p2", "{r}");
+    let r = c
+        .call("agents.read", json!({"pane_id": "em bee", "lines": 5}))
+        .await;
+    assert_eq!(r["result"]["text"], "text of w1:p2", "{r}");
+    assert_eq!(herdr.targets("pane.read").len(), 8);
+
+    // watch.add and watch.remove resolve the same way.
+    let r = c.call("watch.add", json!({"pane_id": "-ad"})).await;
+    assert_eq!(r["result"]["watched"], json!(["w1:p3"]), "{r}");
+    let r = c.call("watch.remove", json!({"pane_id": "AD"})).await;
+    assert_eq!(r["result"]["watched"], json!([]), "{r}");
+
+    // agents.focus resolves names, and passes workspace and tab ids through.
+    for target in ["hr", "w1", "w1:t2"] {
+        let r = c.call("agents.focus", json!({"target_id": target})).await;
+        assert!(r.get("error").is_none(), "{target}: {r}");
+    }
+    assert_eq!(herdr.targets("pane.focus"), vec!["w1:p1"]);
+    assert_eq!(herdr.targets("workspace.focus"), vec!["w1"]);
+    assert_eq!(herdr.targets("tab.focus"), vec!["w1:t2"]);
+}
+
+#[tokio::test]
+async fn an_ambiguous_target_lists_the_candidates_by_name() {
+    let (_dir, socket, _daemon, herdr) = start_tabbed().await;
+    let mut c = Client::hello(&socket, "t").await;
+    for (method, params) in [
+        ("agents.read", json!({"pane_id": "dev", "lines": 5})),
+        (
+            "agents.send",
+            json!({"pane_id": "dev", "command": "continue", "handle": "go-on"}),
+        ),
+        ("agents.focus", json!({"target_id": "dev"})),
+        ("watch.add", json!({"pane_id": "dev"})),
+    ] {
+        let r = c.call(method, params).await;
+        assert_eq!(r["error"]["code"], -32002, "{method}: {r}");
+        let message = r["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("the alpha agent") && message.contains("the beta agent"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("w1:p4") && !message.contains("p5"),
+            "{message}"
+        );
+        assert_eq!(
+            r["error"]["data"]["candidates"],
+            json!(["the alpha agent", "the beta agent"])
+        );
+    }
+    let r = c
+        .call("agents.read", json!({"pane_id": "nothing", "lines": 5}))
+        .await;
+    assert_eq!(r["error"]["code"], -32002);
+    assert!(herdr.targets("pane.read").is_empty());
+    assert!(herdr.targets("pane.send_input").is_empty());
+    assert!(herdr.targets("pane.focus").is_empty());
+}
+
+#[tokio::test]
+async fn confirm_requested_carries_names() {
+    let (_dir, socket, daemon, herdr) = start_tabbed().await;
+    let mut terminal = daemon.broker.subscribe();
+    let mut mcp = Client::hello(&socket, "mcp").await;
+    let mut watcher = Client::hello(&socket, "watcher").await;
+    let r = watcher
+        .call("events.subscribe", json!({"topics": ["confirm"]}))
+        .await;
+    assert!(r.get("error").is_none(), "{r}");
+
+    let r = mcp
+        .call(
+            "agents.send",
+            json!({"pane_id": "em bee", "command": "continue", "handle": "keep-going"}),
+        )
+        .await;
+    assert_eq!(r["result"]["status"], "pending", "{r}");
+    let id = r["result"]["confirm_id"].as_u64().unwrap();
+
+    let requested = watcher.note("confirm.requested").await;
+    let p = &requested["params"];
+    assert_eq!(p["confirm_id"], id);
+    assert_eq!(p["pane_id"], "w1:p2");
+    assert_eq!(p["name"], "Claude in libmorph, tab -mb", "{requested}");
+    assert_eq!(p["spoken"], "Claude in libmorph, tab em bee");
+    assert_eq!(p["project"], "cc-highbay");
+
+    // Approving sends to the pane the name resolved to.
+    let token = match terminal.recv().await.unwrap() {
+        ConfirmEvent::Requested { token, .. } => token.expose_for_terminal().to_string(),
+        other => panic!("{other:?}"),
+    };
+    let mut ctl = Client::hello(&socket, "ctl").await;
+    let r = ctl
+        .call(
+            "confirm.reply",
+            json!({"confirm_id": id, "approve": true, "nonce": nonce(&token, id, Some("keep-going"))}),
+        )
+        .await;
+    assert_eq!(r["result"]["outcome"], "sent", "{r}");
+    assert_eq!(herdr.targets("pane.send_input"), vec!["w1:p2"]);
 }

@@ -20,8 +20,9 @@ use libherdr::transport::HerdrTransport;
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
 
-use crate::config::{AgentConfig, AppConfig};
-use crate::core::confirm::{Broker, ConfirmEvent, DEFAULT_TTL};
+use crate::config::{AgentConfig, AppConfig, NamingConfig};
+use crate::core::confirm::{Broker, ConfirmEvent, ConfirmView, DEFAULT_TTL};
+use crate::core::naming::{self, Names};
 use crate::watch::WatchRegistry;
 
 /// The socket `handlr serve` listens on unless `[server] socket` says otherwise.
@@ -47,6 +48,8 @@ pub enum CoreEvent {
 pub struct Daemon {
     pub client: HerdrClient,
     pub agents: Vec<AgentConfig>,
+    /// How agents are named and addressed (`[naming]`).
+    pub naming: NamingConfig,
     pub broker: Arc<Broker>,
     pub watches: Arc<WatchRegistry>,
     pub events: broadcast::Sender<CoreEvent>,
@@ -78,6 +81,7 @@ impl Daemon {
             broker: Broker::new(Arc::new(client.clone()), ttl),
             client,
             agents: config.agents.clone(),
+            naming: config.naming.clone(),
             watches: Arc::new(WatchRegistry::new()),
             events,
             // SAFETY: getuid has no preconditions and cannot fail.
@@ -85,6 +89,44 @@ impl Daemon {
             link,
         })
     }
+
+    /// Every pane in `snapshot`, named by `[naming]`.
+    pub fn names(&self, snapshot: &serde_json::Value) -> Names {
+        Names::from_snapshot(snapshot, &self.naming)
+    }
+
+    /// The names of `pane_id` from a fresh snapshot, or `None` when herdr
+    /// cannot be read within `NAME_LOOKUP_TIMEOUT` or has no such pane.
+    pub async fn names_for(&self, pane_id: &str) -> Option<PaneNames> {
+        let snapshot = tokio::time::timeout(NAME_LOOKUP_TIMEOUT, self.client.list_panes())
+            .await
+            .ok()?
+            .ok()?;
+        let names = self.names(&snapshot);
+        let named = names.get(pane_id)?;
+        Some(PaneNames {
+            name: named.shown.clone(),
+            spoken: named.spoken.clone(),
+            project: named.agent.project.clone(),
+            tab: named.tab.as_ref().map(|t| t.shown.clone()),
+        })
+    }
+}
+
+/// How long a name lookup waits for herdr before going without names.
+pub const NAME_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// One pane's names, as messages and token lines carry them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneNames {
+    /// The shown name ("Claude in libmorph, tab -mb").
+    pub name: String,
+    /// The spoken name ("Claude in libmorph, tab em bee").
+    pub spoken: String,
+    /// As `agents.list` reports it.
+    pub project: Option<String>,
+    /// The tab as shown: its label as written, an alias, or its number.
+    pub tab: Option<String>,
 }
 
 /// Bind the daemon socket at `path`.
@@ -133,7 +175,7 @@ impl Default for ServeOptions {
 /// Serve connections on `listener` until the process ends.
 pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOptions) {
     if options.show_tokens {
-        tokio::spawn(print_tokens(daemon.broker.subscribe()));
+        tokio::spawn(print_tokens(Arc::clone(&daemon), daemon.broker.subscribe()));
     }
     if let Some(transport) = options.event_transport {
         tokio::spawn(watcher::run(
@@ -156,23 +198,91 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
     }
 }
 
-/// `confirm <id> [<handle>]: <token>` on standard output, so a local client
-/// can approve with the token read off the daemon's terminal.
-async fn print_tokens(mut events: broadcast::Receiver<ConfirmEvent>) {
+/// `confirm <id> [<handle>] (<agent>, tab <tab>): <token>` on standard
+/// output, so a local client can approve with the token read off the
+/// daemon's terminal. The agent is named, never its pane.
+async fn print_tokens(daemon: Arc<Daemon>, mut events: broadcast::Receiver<ConfirmEvent>) {
     loop {
         match events.recv().await {
             Ok(ConfirmEvent::Requested { view, token, .. }) => {
-                let handle = view.handle.map(|h| format!(" {h}")).unwrap_or_default();
+                let names = daemon.names_for(&view.pane_id).await;
                 println!(
-                    "confirm {}{}: {}",
-                    view.confirm_id,
-                    handle,
-                    token.expose_for_terminal()
+                    "{}",
+                    token_line(&view, names.as_ref(), token.expose_for_terminal())
                 );
             }
             Ok(_) => {}
             Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => return,
         }
+    }
+}
+
+/// One line of `serve`'s token output. The agent is its shown name, with
+/// its tab added when the name does not already carry it; without names
+/// (herdr unreadable), the agent's own name. Never the pane id.
+pub fn token_line(view: &ConfirmView, names: Option<&PaneNames>, token: &str) -> String {
+    let handle = view
+        .handle
+        .as_deref()
+        .map(|h| format!(" {h}"))
+        .unwrap_or_default();
+    let who = match names {
+        Some(n) => match &n.tab {
+            Some(tab) if !n.name.contains(", tab ") => format!("{}, tab {tab}", n.name),
+            _ => n.name.clone(),
+        },
+        None => naming::capitalise(&view.agent),
+    };
+    format!("confirm {}{handle} ({who}): {token}", view.confirm_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn view(handle: Option<&str>) -> ConfirmView {
+        ConfirmView {
+            confirm_id: 3,
+            pane_id: "w2:pZ".to_string(),
+            agent: "claude".to_string(),
+            command: "continue".to_string(),
+            handle: handle.map(str::to_string),
+            requested_by: "local:mcp".to_string(),
+        }
+    }
+
+    fn names(name: &str, tab: Option<&str>) -> PaneNames {
+        PaneNames {
+            name: name.to_string(),
+            spoken: name.to_string(),
+            project: None,
+            tab: tab.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn token_lines_name_the_agent_and_its_tab() {
+        let hr = names("the handlr agent", Some("17-hr"));
+        assert_eq!(
+            token_line(&view(Some("keep-going")), Some(&hr), "a-b-c"),
+            "confirm 3 keep-going (the handlr agent, tab 17-hr): a-b-c"
+        );
+        // A name that already carries its tab does not repeat it.
+        let mb = names("Claude in libmorph, tab -mb", Some("-mb"));
+        assert_eq!(
+            token_line(&view(None), Some(&mb), "a-b-c"),
+            "confirm 3 (Claude in libmorph, tab -mb): a-b-c"
+        );
+        // No tab: the name alone.
+        let lone = names("Claude", None);
+        assert_eq!(
+            token_line(&view(None), Some(&lone), "a-b-c"),
+            "confirm 3 (Claude): a-b-c"
+        );
+        // herdr unreadable: the agent, never the pane.
+        let line = token_line(&view(Some("keep-going")), None, "a-b-c");
+        assert_eq!(line, "confirm 3 keep-going (Claude): a-b-c");
+        assert!(!line.contains("pZ"));
     }
 }

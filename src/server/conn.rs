@@ -20,8 +20,9 @@ use tokio_util::sync::CancellationToken;
 
 use super::link::auth::AuthEntry;
 use super::{CoreEvent, Daemon};
-use crate::core::agents::{self, extract_agent_name_for_pane, resolve_pane_id};
+use crate::core::agents::{self, extract_agent_name_for_pane};
 use crate::core::confirm::{ConfirmError, ConfirmEvent, Lifetime, Outcome, StatusKey};
+use crate::core::naming::ResolveError;
 use crate::core::policy;
 use crate::core::principal::Principal;
 
@@ -390,11 +391,39 @@ async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
         .map_err(herdr_unavailable)
 }
 
-fn unknown_pane(pane_id: &str) -> ErrorObject {
-    ErrorObject::new(
-        codes::UNKNOWN_AGENT,
-        format!("no pane matching '{pane_id}'"),
-    )
+/// `-32002` for a target that names no pane or more than one. An
+/// ambiguous target's message, and `data.candidates`, list the panes by
+/// their shown names.
+fn resolve_error(e: ResolveError) -> ErrorObject {
+    let mut error = ErrorObject::new(codes::UNKNOWN_AGENT, e.to_string());
+    if let ResolveError::Ambiguous { candidates, .. } = &e {
+        error.data = Some(serde_json::json!({ "candidates": candidates }));
+    }
+    error
+}
+
+/// Resolve a method's target to a pane id (plan 20261022_05, decision 10):
+/// a pane id, a tab label as written, an alias value, a spoken form or its
+/// capitals, or a tab number.
+fn resolve_target(daemon: &Daemon, snap: &Value, target: &str) -> Result<String, ErrorObject> {
+    daemon
+        .names(snap)
+        .resolve(target)
+        .map(|a| a.agent.pane_id.clone())
+        .map_err(resolve_error)
+}
+
+/// Whether `target` is, as written, a workspace or tab id in `snap`.
+/// `agents.focus` passes those through unresolved.
+fn is_workspace_or_tab_id(snap: &Value, target: &str) -> bool {
+    let target = target.trim();
+    agents::tab_infos(snap).contains_key(target)
+        || agents::snapshot_root(snap)
+            .get("workspaces")
+            .and_then(|w| w.as_array())
+            .into_iter()
+            .flatten()
+            .any(|ws| ws.get("workspace_id").and_then(|v| v.as_str()) == Some(target))
 }
 
 async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObject> {
@@ -407,17 +436,26 @@ async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObjec
         )),
         methods::AGENTS_LIST => {
             let snap = snapshot(conn).await?;
-            let agents = agents::agents(&snap)
+            let agents = daemon
+                .names(&snap)
+                .agents
                 .into_iter()
-                .map(|a| common::AgentInfo {
-                    status: wire_status(&a.status),
-                    pane_id: a.pane_id,
-                    agent: a.agent,
-                    project: a.project,
-                    cwd: a.cwd,
-                    workspace_id: a.workspace_id,
-                    tab_id: a.tab_id,
-                    focused: a.focused,
+                .map(|named| {
+                    let a = named.agent;
+                    common::AgentInfo {
+                        status: wire_status(&a.status),
+                        pane_id: a.pane_id,
+                        name: Some(named.shown),
+                        spoken: Some(named.spoken),
+                        agent: a.agent,
+                        project: a.project,
+                        cwd: a.cwd,
+                        workspace_id: a.workspace_id,
+                        tab_id: a.tab_id,
+                        tab_label: a.tab_label,
+                        tab_number: a.tab_number,
+                        focused: a.focused,
+                    }
                 })
                 .collect();
             ok(common::AgentsListResult { agents })
@@ -431,8 +469,7 @@ async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObjec
                 ));
             }
             let snap = snapshot(conn).await?;
-            let pane_id =
-                resolve_pane_id(&snap, &p.pane_id).ok_or_else(|| unknown_pane(&p.pane_id))?;
+            let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
             let read = daemon
                 .client
                 .inspect_pane(&pane_id, p.lines)
@@ -444,8 +481,7 @@ async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObjec
         methods::AGENTS_SEND => {
             let p: common::AgentsSendParams = params(raw)?;
             let snap = snapshot(conn).await?;
-            let pane_id =
-                resolve_pane_id(&snap, &p.pane_id).ok_or_else(|| unknown_pane(&p.pane_id))?;
+            let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
             let agent = extract_agent_name_for_pane(&snap, &pane_id);
             let principal = conn.principal();
             let checked = policy::check(principal, &daemon.agents, &agent, &pane_id, &p.command)
@@ -477,9 +513,15 @@ async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObjec
         }
         methods::AGENTS_FOCUS => {
             let p: common::AgentsFocusParams = params(raw)?;
+            let snap = snapshot(conn).await?;
+            let target = if is_workspace_or_tab_id(&snap, &p.target_id) {
+                p.target_id.trim().to_string()
+            } else {
+                resolve_target(daemon, &snap, &p.target_id)?
+            };
             daemon
                 .client
-                .focus(&p.target_id)
+                .focus(&target)
                 .await
                 .map_err(herdr_unavailable)?;
             ok(common::Empty {})
@@ -487,8 +529,7 @@ async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObjec
         methods::WATCH_ADD | methods::WATCH_REMOVE => {
             let p: common::WatchParams = params(raw)?;
             let snap = snapshot(conn).await?;
-            let pane_id =
-                resolve_pane_id(&snap, &p.pane_id).ok_or_else(|| unknown_pane(&p.pane_id))?;
+            let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
             if method == methods::WATCH_ADD {
                 daemon.watches.watch(&pane_id);
             } else {
@@ -612,13 +653,20 @@ async fn forward_events(conn: Arc<Conn>) {
             event = confirms.recv() => match event {
                 Ok(ConfirmEvent::Requested { view, token, reminder }) => {
                     if principal.can_approve || conn.subscribed(topics::CONFIRM) {
+                        let names = conn.daemon.names_for(&view.pane_id).await;
+                        let (name, spoken, project) = match names {
+                            Some(n) => (Some(n.name), Some(n.spoken), n.project),
+                            None => (None, None, None),
+                        };
                         conn.send(&Notification::new(
                             methods::CONFIRM_REQUESTED,
                             common::ConfirmRequested {
                                 confirm_id: view.confirm_id,
                                 pane_id: view.pane_id,
                                 agent: view.agent,
-                                project: None,
+                                name,
+                                spoken,
+                                project,
                                 command: view.command,
                                 requested_by: view.requested_by,
                                 handle: view.handle,
