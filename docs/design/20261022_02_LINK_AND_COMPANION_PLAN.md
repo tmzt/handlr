@@ -495,3 +495,56 @@ Here, decisions 8 (`vocabulary`), 11 (the question in `confirm.requested`)
 and 12 (`notice`) take names and vocabulary from plan 20261022_05. Where
 they say `speakable_name`, read that plan's spoken name. The rest of this
 plan is unchanged.
+
+## Amendment — 2026-10-22 18:03 EDT: an interrupt also stops the coding agent
+
+Agreed with the owner. This amendment replaces decision 10's "It never sends
+anything to a pane". It adds a per-agent interrupt key, and adds
+`agents.interrupt` to the common methods. Where it disagrees with earlier
+text, this amendment wins.
+
+**Why.** A companion session is about active coding agents. Gemini is a
+layer that turns speech into requests and the JSON results into speech.
+Interrupting a turn therefore means stopping the work the user is
+listening to, and that work is the agent's, not only Gemini's.
+
+**The current agent.** Each companion session tracks its *current agent*:
+the agent the conversation last addressed, by a tool call or by name.
+Plan 20261022_05's resolution decides which agent a name refers to.
+
+**What `turn.interrupt` does,** in addition to decision 10's ending of the
+turn:
+1. It sends the interrupt key to every pane this turn sent a command to
+   (`ran`), whatever its status. The agent may not yet report `working`
+   for a command it has just received.
+2. It sends the interrupt key to the session's current agent, if herdr
+   reports it `working` and it is not already covered by step 1. An idle
+   agent is left alone.
+
+The keys go through herdr's `pane.send_keys`. They go only to agents
+with an `[[agents]]` entry that the principal can reach. They are not
+gated by confirmation: an interrupt that waited for an approval would not
+be one, and the key only stops work. The turn's result gains
+`interrupted: [{pane_id, name, spoken}]`, so the phone can say what it
+stopped ("stopped the handlr agent").
+
+**The interrupt key.** `[[agents]]` entries gain `interrupt_key`, default
+`"escape"` (herdr's name for the key is to be checked against herdr when
+this is implemented). Other agents may use `"ctrl+c"`. An empty string
+turns interrupting off for that agent.
+
+**`agents.interrupt {target}`,** a common method in both protocols. It
+sends the target's interrupt key, under the same rules, and returns
+`{interrupted: bool, name, spoken}`. A harness, such as a T3 Code plugin
+or an MCP agent keeping agents on track, can stop an agent that is
+looping. This extends plan 20261022_01's methods without changing them.
+Its wire types go in `libhandlr_proto::common`.
+
+**Steps.** Step 4 gains these checks over the mock:
+- `turn.interrupt` after a turn sent `continue` sends the interrupt key to
+  that pane;
+- with nothing sent, it reaches the current agent only when it is working;
+- an agent with `interrupt_key = ""` gets nothing;
+- `agents.interrupt` from a harness client sends the key.
+
+These are checked by the mock's keystroke log, never against a live agent.
