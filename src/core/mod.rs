@@ -3,5 +3,6 @@
 //! who is asking, which agents exist, and what may be sent to them.
 
 pub mod agents;
+pub mod confirm;
 pub mod policy;
 pub mod principal;

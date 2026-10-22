@@ -17,6 +17,13 @@ tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
 libinfer = { path = "crates/libinfer" }
 toml = "0.8"
+# Confirmation tokens and nonces (src/core/confirm.rs).
+blake2 = "0.10"
+getrandom = "0.2"
+
+[dev-dependencies]
+# Paused time for the confirmation broker's timers.
+tokio = { version = "1", features = ["full", "test-util"] }
 
 [workspace]
 members = [
