@@ -387,3 +387,52 @@ Departures and decisions:
 - **Each connection takes its own snapshot** to name a `confirm.requested`
   it forwards. That is one herdr read per subscriber per request, which is
   acceptable for now.
+
+## 2026-10-22 19:14 EDT — Plan 20261022_02, step 4, and departures
+
+Plan: [handlr link pairing and the companion protocol](docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md)
+(`In implementation`). Step 4 is in `5ef1101` (libhandlr_proto), `382e951`
+(handlr-companion) and `7c4d650` (handlr). It was checked over the herdr mock
+with a scripted engine. Live over the link, pairing and connecting worked,
+and each turn ended in a clean spoken error, because no Gemini key is
+configured on this machine.
+
+Departures and decisions:
+- **A turn waits for its confirmations.** The tool returns
+  `awaiting_user_approval` and tells the model not to ask in words. The
+  reply is said first, then `confirm.requested`, so the question is heard
+  last. The turn ends once its confirmations resolve, which is why `ran` can
+  list an approved command. The forwarder skips a companion's own
+  voice-turn requests, which it carries itself. `ConfirmView` gained
+  `lifetime`, and the broker gained `pending` and `has_pending`.
+- **A `turn.start` while busy** first ends the session's unanswered
+  voice-turn questions. If the running turn was only waiting on them, the
+  new turn waits up to 2 s for it to end; otherwise it gets `-32020`.
+- **Sessions follow the principal**: `companion:<name>` for a paired
+  device, `companion:local:<client>` for a local client. A `session_id`
+  sent by the client is ignored.
+- **History.** A finished turn records the text and the reply. An
+  interrupted turn also records `[interrupted by user]`. A failed turn
+  records nothing.
+- **Errors.** Gemini is built on first use, from `[gemini] api_key` or
+  `GEMINI_API_KEY`. The engine call times out after 120 s.
+  `[gemini] model` is not used yet, because libinfer has no setting for it.
+- **The current agent** is the last pane a tool call addressed. It is not
+  taken from names in the text.
+- **Interrupting** sends keys within about 400 ms in all.
+  `agents.interrupt` returns `-32001` for an agent that is not
+  configured or out of reach, and `{interrupted: false}` when its key is
+  empty.
+- **The interrupt key** defaults to `esc`, herdr's canonical name for the
+  Escape key (`herdr pane send-keys --help`), not `escape`. At load it must
+  be a named key or one printable character, optionally after `ctrl+`,
+  `alt+` or `shift+`.
+- **The vocabulary** is checked after each turn and every 30 s.
+- **Names reach the model.** The tool executor resolves targets by name,
+  and the herdr context lists agents by name. Outside a companion turn, a
+  confirmation-required command is still refused.
+
+**Open, raised with the owner.** `PROMPT.md` still tells the model to ask
+for vocal confirmation before calling `run_command`. With real Gemini that
+means asking twice: once in words, and then again through the daemon. The
+prompt needs its rules rewritten for daemon-side approval.
