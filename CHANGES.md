@@ -202,3 +202,34 @@ Plan: [Naming agents aloud and on screen](docs/design/20261022_05_SPOKEN_NAMES_P
   `config.toml` for spelling, letter names and aliases. Plan 02 points to it.
 - The libinfer provider split, earlier called "plan 05", takes the next free
   number when it is written.
+
+## 2026-10-22 18:24 EDT — Plan 20261022_02, step 1, and rules for step 3
+
+Plan: [handlr link pairing and the companion protocol](docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md)
+(now `In implementation`). Step 1 is in `3fb935d`.
+
+Departures and decisions the plan left open:
+- **The pairing id.** With `XXpsk3` the PSK enters late, and the daemon may
+  have several pending pairings. After the mode byte `0x01` the client
+  therefore sends `BLAKE2s-256(secret)[..4]` in the clear, and the server
+  finds the secret by it. The id is derived from the secret, not carried in
+  the pairing string. A wrong id fails like a wrong secret.
+- **A first message when pairing.** `pair` may carry the first message in
+  the third handshake message, after the PSK, as `IK` carries it when
+  reconnecting.
+- **Split halves.** `LinkStream::into_split` has a reader and a writer, on
+  snow's stateless transport with a nonce counter each, so the daemon can
+  read and write at the same time.
+- **No built-in timeouts or expiry check.** Callers wrap handshakes in a
+  timeout and check `PairingPayload::is_expired`.
+
+Rules for step 3 (the daemon side), found in review:
+- **The first message is hello only.** An `IK` first message can be
+  replayed by anyone who captured it. They cannot finish the session, but
+  the server reads the payload. The daemon therefore accepts only `hello`
+  as a handshake's first message, never a request with effects, and treats
+  anything else as a protocol error.
+- **Handshakes time out.** The daemon wraps `accept` in a 10 s timeout, so
+  an idle or slow peer cannot hold a connection open.
+- The daemon burns a pairing secret on first use and checks its expiry
+  before looking it up.
