@@ -64,3 +64,14 @@ allow_arbitrary_commands = false
 # "ctrls" = "controls"
 # "17-hr" = "handlr"
 # "agy" = "antigravity"
+
+# The encrypted link for paired devices (`handlr pair`). By default it
+# listens only on 127.0.0.1:7347; to reach it from the tailnet, run
+#   tailscale serve --bg --tcp 7347 tcp://127.0.0.1:7347
+# An explicit list replaces the default and the Tailscale check, and is what
+# pairing strings carry. `listen = []` turns the link off.
+# [link]
+# listen = ["127.0.0.1:7347"]
+# key = "~/.config/handlr/link_key"      # the server's private key, mode 0600
+# auth = "~/.config/handlr/auth.toml"    # the paired clients
+# revoke_check_secs = 60                 # how often open connections are checked

@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub naming: NamingConfig,
+    #[serde(default)]
+    pub link: LinkConfig,
 }
 
 fn default_agents() -> Vec<AgentConfig> {
@@ -59,6 +61,7 @@ impl Default for AppConfig {
             gemini: GeminiConfig::default(),
             server: ServerConfig::default(),
             naming: NamingConfig::default(),
+            link: LinkConfig::default(),
         }
     }
 }
@@ -152,6 +155,26 @@ pub struct ServerConfig {
     /// Seconds a confirmation waits for an answer, other than one asked for
     /// by a companion's own voice turn (default: 3600).
     pub confirm_ttl: Option<u64>,
+}
+
+/// `[link]`: the encrypted link for paired devices
+/// (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, the 11:58 EDT
+/// amendment).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LinkConfig {
+    /// Addresses to listen on, `<addr>:<port>` or `<addr>` (port 7347).
+    /// Replaces the default `127.0.0.1:7347` and turns off the Tailscale
+    /// check; these are the addresses a pairing string carries. An empty
+    /// list turns the link off.
+    pub listen: Option<Vec<String>>,
+    /// The server's private key (default: ~/.config/handlr/link_key).
+    pub key: Option<String>,
+    /// The paired clients (default: ~/.config/handlr/auth.toml).
+    pub auth: Option<String>,
+    /// Seconds between checks of open link connections against
+    /// `auth.toml` (default: 60).
+    pub revoke_check_secs: Option<u64>,
 }
 
 /// `[naming]`: how agents are named aloud and on screen
@@ -379,6 +402,29 @@ allow_arbitrary_commands = false
         cfg.apply_arbitrary_commands_override(None);
         assert!(cfg.agents[0].allow_arbitrary_commands);
         assert!(!cfg.agents[1].allow_arbitrary_commands);
+    }
+
+    #[test]
+    fn link_settings_parse() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.link, LinkConfig::default());
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[link]
+listen = ["100.64.0.1", "127.0.0.1:7400"]
+key = "/tmp/k"
+auth = "/tmp/a.toml"
+revoke_check_secs = 5
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.link.listen,
+            Some(vec!["100.64.0.1".to_string(), "127.0.0.1:7400".to_string()])
+        );
+        assert_eq!(cfg.link.key.as_deref(), Some("/tmp/k"));
+        assert_eq!(cfg.link.auth.as_deref(), Some("/tmp/a.toml"));
+        assert_eq!(cfg.link.revoke_check_secs, Some(5));
     }
 
     #[test]

@@ -4,18 +4,21 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use libhandlr_proto::common::{self, methods, protocols, topics};
 use libhandlr_proto::envelope::codes;
+use libhandlr_proto::link::{LinkError, LinkStream, PairingId};
 use libhandlr_proto::{ErrorObject, Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
+use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::AbortHandle;
 use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio_util::sync::CancellationToken;
 
+use super::link::auth::AuthEntry;
 use super::{CoreEvent, Daemon};
 use crate::core::agents::{self, extract_agent_name_for_pane, resolve_pane_id};
 use crate::core::confirm::{ConfirmError, ConfirmEvent, Lifetime, Outcome, StatusKey};
@@ -33,14 +36,29 @@ pub fn peer_allowed(peer_uid: u32, own_uid: u32) -> bool {
     peer_uid == own_uid
 }
 
+/// Where a connection comes from, which decides who it is at `hello`.
+enum Origin {
+    /// The daemon socket: a peer with the daemon's uid, `local:<client>`.
+    Local,
+    /// A link connection, with its `auth.toml` entry: `paired:<name>`.
+    Link {
+        entry: AuthEntry,
+        /// It paired on this connection; `hello` answers `paired: true`.
+        paired_now: bool,
+    },
+}
+
 struct Conn {
     daemon: Arc<Daemon>,
+    origin: Origin,
     out: mpsc::UnboundedSender<String>,
     principal: OnceLock<Principal>,
     topics: Mutex<HashSet<String>>,
     inflight: Mutex<HashMap<Id, AbortHandle>>,
     /// Confirmations opened on this connection, cancelled when it closes.
     opened: Mutex<HashSet<u64>>,
+    /// Pairings begun on this connection, withdrawn when it closes.
+    pairings: Mutex<Vec<PairingId>>,
 }
 
 impl Conn {
@@ -82,25 +100,92 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
             }
         }
     });
+    let lines = FramedRead::new(read, LinesCodec::new_with_max_length(MAX_LINE))
+        .map(|line| line.map_err(|e| format!("unreadable line: {e}")));
+    serve(daemon, Origin::Local, lines, out, CancellationToken::new()).await;
+    let _ = writer.await;
+}
 
+/// A link connection that finished its handshake as `entry`. `first` is
+/// the message carried in the handshake, already checked to be `hello`.
+/// Each link message is one JSON-RPC object; `close` ends the connection
+/// (its entry was revoked or replaced).
+pub(crate) async fn handle_link(
+    daemon: Arc<Daemon>,
+    stream: LinkStream<TcpStream>,
+    first: Option<Vec<u8>>,
+    entry: AuthEntry,
+    paired_now: bool,
+    close: CancellationToken,
+) {
+    let (reader, mut writer) = stream.into_split();
+    let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let write_task = tokio::spawn(async move {
+        while let Some(message) = out_rx.recv().await {
+            if writer.send_message(message.as_bytes()).await.is_err() {
+                return;
+            }
+        }
+        let _ = writer.shutdown().await;
+    });
+    let first = futures_util::stream::iter(first.map(decode_message));
+    let rest = futures_util::stream::unfold(Some(reader), |reader| async move {
+        let mut reader = reader?;
+        match reader.recv_message().await {
+            Ok(message) => Some((decode_message(message), Some(reader))),
+            Err(LinkError::Closed) => None,
+            Err(e) => Some((Err(e.to_string()), None)),
+        }
+    });
+    serve(
+        daemon,
+        Origin::Link { entry, paired_now },
+        Box::pin(first.chain(rest)),
+        out,
+        close,
+    )
+    .await;
+    let _ = write_task.await;
+}
+
+fn decode_message(message: Vec<u8>) -> Result<String, String> {
+    String::from_utf8(message).map_err(|_| "a message that is not UTF-8".to_string())
+}
+
+/// Serve one connection's messages until it closes or `close` fires.
+async fn serve<S>(
+    daemon: Arc<Daemon>,
+    origin: Origin,
+    mut lines: S,
+    out: mpsc::UnboundedSender<String>,
+    close: CancellationToken,
+) where
+    S: Stream<Item = Result<String, String>> + Unpin,
+{
     let conn = Arc::new(Conn {
         daemon,
+        origin,
         out,
         principal: OnceLock::new(),
         topics: Mutex::new(HashSet::new()),
         inflight: Mutex::new(HashMap::new()),
         opened: Mutex::new(HashSet::new()),
+        pairings: Mutex::new(Vec::new()),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
-    let mut lines = FramedRead::new(read, LinesCodec::new_with_max_length(MAX_LINE));
 
-    while let Some(line) = lines.next().await {
+    loop {
+        let line = tokio::select! {
+            _ = close.cancelled() => break,
+            line = lines.next() => line,
+        };
+        let Some(line) = line else { break };
         let line = match line {
             Ok(line) => line,
             Err(e) => {
                 conn.send(&Response::err(
                     None,
-                    ErrorObject::new(codes::INVALID_REQUEST, format!("unreadable line: {e}")),
+                    ErrorObject::new(codes::INVALID_REQUEST, e),
                 ));
                 break;
             }
@@ -128,7 +213,7 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
                 ));
                 break;
             }
-            match hello(&request) {
+            match hello(&request, &conn.origin) {
                 Ok((principal, result)) => {
                     log::info!("Connection says hello as {}", principal.id);
                     let _ = conn.principal.set(principal);
@@ -177,15 +262,28 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
         }
         log::info!("Connection from {} closed", principal.id);
     }
+    if let Some(link) = &conn.daemon.link {
+        let pairings: Vec<PairingId> = conn.pairings.lock().unwrap().drain(..).collect();
+        link.withdraw(&pairings);
+    }
     if let Some(forwarder) = forwarder {
         forwarder.abort();
     }
-    drop(conn);
-    let _ = writer.await;
 }
 
-fn hello(request: &Request) -> Result<(Principal, common::HelloResult), ErrorObject> {
+fn hello(request: &Request, origin: &Origin) -> Result<(Principal, Value), ErrorObject> {
     let params: common::HelloParams = params(request.params.clone())?;
+    if let Origin::Link { entry, .. } = origin {
+        if !entry.allows(&params.protocol) {
+            return Err(ErrorObject::new(
+                codes::NOT_PERMITTED,
+                format!(
+                    "'{}' is not paired for {}; it may use {:?}",
+                    entry.name, params.protocol, entry.protocols
+                ),
+            ));
+        }
+    }
     if params.protocol != protocols::HARNESS || params.version != HARNESS_VERSION {
         return Err(ErrorObject::new(
             codes::UNSUPPORTED_PROTOCOL,
@@ -205,14 +303,22 @@ fn hello(request: &Request) -> Result<(Principal, common::HelloResult), ErrorObj
             "hello needs a client name",
         ));
     }
-    Ok((
-        Principal::local(client),
-        common::HelloResult {
-            server: "handlr".to_string(),
-            server_version: env!("CARGO_PKG_VERSION").to_string(),
-            protocol_version: HARNESS_VERSION,
-        },
-    ))
+    let (principal, paired_now) = match origin {
+        Origin::Local => (Principal::local(client), false),
+        Origin::Link { entry, paired_now } => (entry.principal(&params.protocol), *paired_now),
+    };
+    let mut result = ok(common::HelloResult {
+        server: "handlr".to_string(),
+        server_version: env!("CARGO_PKG_VERSION").to_string(),
+        protocol_version: HARNESS_VERSION,
+    })?;
+    if paired_now {
+        // Plan 20261022_02, decision 5: the first hello after pairing.
+        if let Value::Object(map) = &mut result {
+            map.insert("paired".to_string(), Value::Bool(true));
+        }
+    }
+    Ok((principal, result))
 }
 
 fn cancel(conn: &Conn, request: &Request) -> Response {
@@ -455,6 +561,38 @@ async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObjec
             }
             conn.topics.lock().unwrap().extend(p.topics);
             ok(common::Empty {})
+        }
+        methods::LINK_PAIR_BEGIN => {
+            if !matches!(conn.origin, Origin::Local) {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "link.pair_begin is served only on the daemon socket",
+                ));
+            }
+            let Some(link) = &daemon.link else {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "the link is off ([link] listen = [])",
+                ));
+            };
+            let p: common::LinkPairBeginParams = params(raw)?;
+            let begun = link
+                .pair_begin(p)
+                .await
+                .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
+            conn.pairings.lock().unwrap().push(begun.id);
+            let out = conn.out.clone();
+            let done = begun.done;
+            tokio::spawn(async move {
+                if let Ok(done) = done.await {
+                    if let Ok(line) =
+                        serde_json::to_string(&Notification::new(methods::LINK_PAIR_DONE, done))
+                    {
+                        let _ = out.send(line);
+                    }
+                }
+            });
+            ok(begun.result)
         }
         other => Err(ErrorObject::new(
             codes::METHOD_NOT_FOUND,

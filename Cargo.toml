@@ -21,10 +21,15 @@ toml = "0.8"
 blake2 = "0.10"
 getrandom = "0.2"
 # The daemon (src/server/): socket lines, peer uid, wire types.
-libhandlr_proto = { path = "crates/libhandlr_proto" }
+libhandlr_proto = { path = "crates/libhandlr_proto", features = ["link"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 libc = "0.2"
+# The link (src/server/link/): link_key and auth.toml keys are base64,
+# `handlr pair` prints a QR code, link sockets get SO_KEEPALIVE.
+base64 = "0.22"
+qrcode = { version = "0.14", default-features = false }
+socket2 = "0.6"
 
 [dev-dependencies]
 # Paused time for the confirmation broker's timers.

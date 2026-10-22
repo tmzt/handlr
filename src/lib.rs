@@ -5,6 +5,7 @@ pub mod config;
 pub mod core;
 pub mod ctl;
 pub mod notify;
+pub mod pair;
 pub mod reasoning;
 pub mod server;
 pub mod transport;

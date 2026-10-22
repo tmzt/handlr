@@ -5,6 +5,7 @@
 //! requests on a connection run concurrently and `cancel` aborts one.
 
 pub mod conn;
+pub mod link;
 mod watcher;
 
 use std::io::IsTerminal;
@@ -51,10 +52,22 @@ pub struct Daemon {
     pub events: broadcast::Sender<CoreEvent>,
     /// The daemon's own uid. A connecting peer must have the same one.
     pub uid: u32,
+    /// The link for paired devices, when it is on.
+    pub link: Option<Arc<link::Link>>,
 }
 
 impl Daemon {
+    /// A daemon without the link.
     pub fn new(client: HerdrClient, config: &AppConfig) -> Arc<Self> {
+        Self::with_link(client, config, None)
+    }
+
+    /// A daemon serving `link` too (see `link::spawn`).
+    pub fn with_link(
+        client: HerdrClient,
+        config: &AppConfig,
+        link: Option<Arc<link::Link>>,
+    ) -> Arc<Self> {
         let ttl = config
             .server
             .confirm_ttl
@@ -69,6 +82,7 @@ impl Daemon {
             events,
             // SAFETY: getuid has no preconditions and cannot fail.
             uid: unsafe { libc::getuid() },
+            link,
         })
     }
 }

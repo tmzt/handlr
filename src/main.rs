@@ -6,6 +6,8 @@
 //! handlr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
 //!                 --socket <herdr.sock> | --mock] [--listen <handlr.sock>] [--show-tokens]
 //! handlr ctl [--listen <handlr.sock>] [--client <name>] [--follow] <method> [<params as JSON>]
+//! handlr pair [--listen <handlr.sock>] --name <name> [--protocols companion,harness]
+//!             [--ttl 300] [--replace]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -26,6 +28,11 @@ struct AppArgs {
     client: Option<String>,
     /// `ctl`'s method and params, in order.
     positional: Vec<String>,
+    /// `pair`'s options.
+    name: Option<String>,
+    protocols: Vec<String>,
+    ttl: Option<String>,
+    replace: bool,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
@@ -41,6 +48,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         follow: false,
         client: None,
         positional: Vec::new(),
+        name: None,
+        protocols: Vec::new(),
+        ttl: None,
+        replace: false,
     };
 
     while let Some(arg) = args.next() {
@@ -54,6 +65,19 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--show-tokens" => parsed.show_tokens = true,
             "--follow" => parsed.follow = true,
             "--client" => parsed.client = args.next(),
+            "--name" => parsed.name = args.next(),
+            "--protocols" => {
+                if let Some(list) = args.next() {
+                    parsed.protocols.extend(
+                        list.split(',')
+                            .map(str::trim)
+                            .filter(|p| !p.is_empty())
+                            .map(str::to_string),
+                    );
+                }
+            }
+            "--ttl" => parsed.ttl = args.next(),
+            "--replace" => parsed.replace = true,
             _ if !arg.starts_with("--") => parsed.positional.push(arg),
             _ => {
                 eprintln!("Unknown argument: {}", arg);
@@ -149,21 +173,57 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => log::warn!("herdr is not answering yet: {e}"),
     }
 
+    // The link: its key is checked (and created) before anything listens.
+    let settings = handlr::server::link::LinkSettings::from_config(&config.link);
+    let link = if settings.enabled() {
+        Some(handlr::server::link::Link::open(settings)?)
+    } else {
+        log::info!("The link is off ([link] listen = [])");
+        None
+    };
+
     let socket = daemon_socket(&args, &config);
     let listener = handlr::server::bind(&socket).await?;
+    let link_listeners = match &link {
+        Some(link) => link.bind().await?,
+        None => Vec::new(),
+    };
     log::info!("handlr serve listening on {}", socket.display());
     let mut options = handlr::server::ServeOptions {
         event_transport,
         ..Default::default()
     };
     options.show_tokens |= args.show_tokens;
-    handlr::server::run(
-        handlr::server::Daemon::new(client, &config),
-        listener,
-        options,
-    )
-    .await;
+    let daemon = handlr::server::Daemon::with_link(client, &config, link);
+    handlr::server::link::spawn(std::sync::Arc::clone(&daemon), link_listeners);
+    handlr::server::run(daemon, listener, options).await;
     Ok(())
+}
+
+async fn pair(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let socket = daemon_socket(&args, &config);
+    let usage = "usage: handlr pair [--listen <socket>] --name <name> [--protocols companion,harness] [--ttl <seconds>] [--replace]";
+    let Some(name) = args.name.clone() else {
+        return Err(usage.into());
+    };
+    if !args.positional.is_empty() {
+        return Err(usage.into());
+    }
+    let ttl = match &args.ttl {
+        Some(ttl) => Some(
+            ttl.parse::<u64>()
+                .map_err(|_| format!("--ttl {ttl}: not a number of seconds"))?,
+        ),
+        None => None,
+    };
+    let params = libhandlr_proto::common::LinkPairBeginParams {
+        name,
+        protocols: (!args.protocols.is_empty()).then(|| args.protocols.clone()),
+        ttl,
+        replace: args.replace,
+    };
+    Ok(handlr::pair::run(&socket, params).await?)
 }
 
 async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
@@ -198,12 +258,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     let command = match argv.first().map(String::as_str) {
-        Some("serve") | Some("ctl") => argv.remove(0),
+        Some("serve") | Some("ctl") | Some("pair") => argv.remove(0),
         _ => "serve".to_string(),
     };
     let args = parse_args(argv.into_iter());
     if command == "ctl" {
         std::process::exit(ctl(args).await?);
+    }
+    if command == "pair" {
+        std::process::exit(pair(args).await?);
     }
     if !args.positional.is_empty() {
         return Err(format!("unexpected arguments: {:?}", args.positional).into());
