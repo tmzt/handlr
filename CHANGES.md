@@ -191,3 +191,14 @@ Departures, all small and needed for the plan to work:
   not look up projects. It is filled when a client needs it.
 - **Step 3, `Outcome::Approved`.** It is the state while an approved
   command is being sent, so a second approval cannot race the first.
+
+## 2026-10-22 17:59 EDT — Naming agents gets its own plan
+
+Plan: [Naming agents aloud and on screen](docs/design/20261022_05_SPOKEN_NAMES_PLAN.md)
+(`Draft`).
+
+- The naming rules first written as two amendments to plan 20261022_02 (17:52
+  and 17:55 EDT) move to their own plan, with a `[naming]` section in
+  `config.toml` for spelling, letter names and aliases. Plan 02 points to it.
+- The libinfer provider split, earlier called "plan 05", takes the next free
+  number when it is written.
