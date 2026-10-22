@@ -1,0 +1,35 @@
+[package]
+name = "handlr-audio"
+version = "0.1.0"
+edition = "2021"
+description = "Audio for the companion front ends: libvoicexn speech in and out, joined to handlr-companion"
+
+# Built with `-p handlr-audio` only: the root manifest leaves it out of
+# `default-members`, so the root build never compiles xn, ptts or cpal
+# (docs/design/20261022_04_COMPANION_APP_PLAN.md, 18:10 EDT amendment).
+
+[dependencies]
+handlr-companion = { path = "../handlr-companion" }
+# libvoicexn v0.2.0: Phonon TTS, Kyutai STT, the earshot gate and the boost.
+libvoicexn = { git = "https://github.com/tmzt/libvoicexn", rev = "32b8032082997a34190b458f79716d998a0d850a", features = ["stt-moshi-xn", "vad-earshot", "stt-moshi-xn-boost"] }
+log = "0.4"
+# `cpal`: the default input and output devices; the version voicexn-tty and
+# libmobile use.
+cpal = { version = "0.18.2", optional = true }
+# `morph`: libmorph's Sink and Source, at the revision libvoicexn pins.
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "bb0174d14f77e4b54a250e78293b3a9cb4a6617a", default-features = false, optional = true }
+
+[features]
+default = []
+# Opens the default devices (companion-tty, and the libmorph desktop window).
+cpal = ["dep:cpal"]
+# libmorph's Source and Sink through libvoicexn's morph adapters (Android).
+morph = ["dep:libmorph", "libvoicexn/morph"]
+
+[dev-dependencies]
+env_logger = "0.11"
+tempfile = "3"
+
+[[example]]
+name = "echo"
+required-features = ["cpal"]
