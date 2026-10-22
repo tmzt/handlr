@@ -548,3 +548,32 @@ Its wire types go in `libhandlr_proto::common`.
 - `agents.interrupt` from a harness client sends the key.
 
 These are checked by the mock's keystroke log, never against a live agent.
+
+## Amendment — 2026-10-22 18:05 EDT: the interrupt key is a keystroke, not text
+
+This clarifies the previous amendment ("an interrupt also stops the coding
+agent"), raised by the owner. It replaces that amendment's paragraph "The
+interrupt key". Nothing else changes.
+
+**The interrupt key.** `[[agents]]` entries gain `interrupt_key`. It is
+the name of one key, in herdr's key-name vocabulary, sent as a keystroke
+with herdr's `pane.send_keys`, as if the key were pressed in that pane.
+herdr is the multiplexer, which delivers the key to the pane's terminal;
+the agent running in the pane is what reads it and stops.
+
+- It is never typed as text: that is `pane.send_input`, which carries
+  commands such as `continue`.
+- It is never spoken, and is not a command a user says.
+
+The default is herdr's name for the Esc key. That is expected to be
+`escape`, and the name is checked against herdr when this is implemented.
+When `[[agents]]` is loaded, a value that is not a single key name herdr
+accepts is rejected. An empty string turns interrupting off for that
+agent.
+
+The previous amendment offered `"ctrl+c"` as an alternative, and that
+suggestion is withdrawn. In Claude Code, Ctrl+C clears the input or
+cancels, and pressed twice it exits the session, so two interrupts in a row
+could close it. It is not an equivalent of Esc. `interrupt_key` is for an
+agent whose interrupt key really is a different key, and is set only when
+that is known.
