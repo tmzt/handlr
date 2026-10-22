@@ -299,3 +299,64 @@ Decisions the plan left open:
   trailing newline. The Unix socket keeps newline-delimited lines.
 - **There is no `Unpaired` state of its own.** Without a server record the
   client uses the local socket.
+
+## 2026-10-22 18:44 EDT — Plan 20261022_02 steps 2–3, plan 20261022_04 step 3 (crate), and departures
+
+Plans: [handlr link pairing and the companion protocol](docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md)
+and [The companion app](docs/design/20261022_04_COMPANION_APP_PLAN.md), both
+`In implementation`. The link's daemon side is in `0fc9886` (handlr) and
+`219fb35` (libhandlr_proto: `link.pair_*` types and the `link_client`
+example). `handlr-audio` is in `2fd5256`.
+
+**Plan 02, steps 2–3, not yet checked:** pairing from a second machine on the
+tailnet, which step 3's **Done when:** requires. It needs the `tailscale
+serve` forward, which handlr never sets up itself. Everything else was
+checked end to end over the mock, and by hand with `serve --mock`, `handlr
+pair` and `link_client`: pairing, refusing a reused secret, reconnecting,
+and revocation closing the connection.
+
+**Plan 02, departures and decisions:**
+- **`hello` after a pairing** returns `paired: true` as an extra field.
+  `HelloResult` is unchanged.
+- **`handlr pair` waits** for a `link.pair_done` notification on its own
+  connection. If it exits, its pending pairing is withdrawn. A name can have
+  one pending pairing at a time.
+- **Defaults:** `--protocols` is companion; the TTL is 1–3600 s; names are
+  1–64 of `[A-Za-z0-9._-]`.
+- **`approve` defaults by the protocol of the connection's `hello`.**
+- **Error codes.** A `hello` protocol not in the entry gets `-32001`;
+  `link.pair_begin` over the link, or with the link off, gets `-32001`;
+  `pair_begin` refusals get `-32602`.
+- **`auth.toml` is stricter than the plan.** Group or other write access, a
+  repeated name or key, or a malformed key authorizes nobody. A failed
+  periodic read closes every link connection. A key already paired under
+  another name is refused.
+- **`--replace`** keeps the old entry's `agents` and `approve`, so
+  re-pairing never widens what a device may do. It rewrites the file
+  atomically, which drops comments.
+- **`[link]`:** `listen = []` turns the link off, and `revoke_check_secs`
+  sets the interval.
+- **A handshake that fails after the secret is taken** still burns it.
+
+**Plan 04, step 3 (the crate), not yet checked:** `companion-tty` and the
+spoken **Done when:** wait for the companion protocol (plan 02, step 4). The
+Mac this is built on, a Mac mini, has no microphone. CoreAudio has no input
+device, and libvoicexn's `voicexn-tty` fails the same way. The echo example
+was therefore checked with `--input-wav`. With that, both models loaded, a
+WAV was heard as an `Utterance`, `Say` gave `Speaking`, and a stop
+silenced playback within 22–26 ms. STT stepped in 61.9 ms of 80. A live
+microphone check needs the S23, or a Mac that has a microphone.
+
+**Plan 04, departures and decisions:**
+- **A playback flush of its own.** libvoicexn flushes only when `Stop`
+  arrives while synthesis is still running. A finished reply can leave about
+  2 s queued, so `handlr-audio` drains the ring itself on `StopSpeaking`.
+- **`Speaking`** lasts until the ring has run dry, not just until synthesis
+  finishes, so notices wait for the end of the audio.
+- **`Listening`** runs from `Armed` to `Idle`, as libvoicexn's
+  `Gate::listening` does.
+- **The companion's `vocab.txt`** (next to its keys) wins over
+  `VOICEXN_VOCAB` when both exist. It takes effect at the next start, until
+  libvoicexn's runtime vocabulary (its plan 07) is released.
+- **`morph`** compiles, wired through libvoicexn's adapters, but has not
+  been run.
