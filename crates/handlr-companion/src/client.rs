@@ -394,7 +394,7 @@ impl State {
             Sent::Turn(id) => match parse::<wire::TurnResult>(result) {
                 Ok(r) => {
                     let stopped = r.interrupted.into_iter().map(|i| i.spoken).collect();
-                    self.end_turn(id, r.outcome, stopped, out);
+                    self.end_turn(id, r.outcome.as_str().to_string(), stopped, out);
                 }
                 Err(e) => {
                     out.push(event(Event::Error(format!("a bad turn result: {e}"))));
@@ -473,8 +473,8 @@ impl State {
         self.confirms.push_back(Confirmation {
             id: c.confirm_id,
             text: c.text,
-            label: c.label,
-            phrase: c.phrase.unwrap_or_default(),
+            label: c.handle,
+            phrase: c.token.unwrap_or_default(),
         });
         if self.confirms.len() == 1 {
             self.ask_next(out);
