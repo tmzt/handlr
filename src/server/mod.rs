@@ -4,6 +4,7 @@
 //! connection says `hello` first, then sends any of the common methods;
 //! requests on a connection run concurrently and `cancel` aborts one.
 
+pub mod companion;
 pub mod conn;
 pub mod link;
 mod watcher;
@@ -57,6 +58,8 @@ pub struct Daemon {
     pub uid: u32,
     /// The link for paired devices, when it is on.
     pub link: Option<Arc<link::Link>>,
+    /// Companion sessions and their turns (plan 20261022_02, decisions 9–13).
+    pub turns: companion::TurnService,
 }
 
 impl Daemon {
@@ -70,6 +73,17 @@ impl Daemon {
         client: HerdrClient,
         config: &AppConfig,
         link: Option<Arc<link::Link>>,
+    ) -> Arc<Self> {
+        Self::with_turns(client, config, link, companion::TurnOptions::default())
+    }
+
+    /// A daemon whose companion turns use `turns` (an engine other than
+    /// Gemini, or another history directory).
+    pub fn with_turns(
+        client: HerdrClient,
+        config: &AppConfig,
+        link: Option<Arc<link::Link>>,
+        turns: companion::TurnOptions,
     ) -> Arc<Self> {
         let ttl = config
             .server
@@ -87,6 +101,7 @@ impl Daemon {
             // SAFETY: getuid has no preconditions and cannot fail.
             uid: unsafe { libc::getuid() },
             link,
+            turns: companion::TurnService::new(config, turns),
         })
     }
 
@@ -249,6 +264,7 @@ mod tests {
             command: "continue".to_string(),
             handle: handle.map(str::to_string),
             requested_by: "local:mcp".to_string(),
+            lifetime: crate::core::confirm::Lifetime::Standing,
         }
     }
 

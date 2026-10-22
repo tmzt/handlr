@@ -36,18 +36,21 @@ fn default_agents() -> Vec<AgentConfig> {
             allowed_commands: vec!["continue".to_string(), "/compact".to_string()],
             require_confirmation: true,
             allow_arbitrary_commands: false,
+            interrupt_key: default_interrupt_key(),
         },
         AgentConfig {
             name: "omp".to_string(),
             allowed_commands: vec!["continue".to_string()],
             require_confirmation: true,
             allow_arbitrary_commands: false,
+            interrupt_key: default_interrupt_key(),
         },
         AgentConfig {
             name: "agy".to_string(),
             allowed_commands: vec!["continue".to_string()],
             require_confirmation: true,
             allow_arbitrary_commands: false,
+            interrupt_key: default_interrupt_key(),
         },
     ]
 }
@@ -113,10 +116,84 @@ pub struct AgentConfig {
     /// Whether arbitrary safe commands are allowed (must be ASCII, no '/' or '-', '.' and ',' allowed)
     #[serde(default)]
     pub allow_arbitrary_commands: bool,
+    /// The one key, in herdr's key names, that stops this agent's work
+    /// when a companion turn is interrupted or `agents.interrupt` is
+    /// called. Sent as a keystroke (`pane.send_keys`), never typed as text.
+    /// Empty turns interrupting off (plan 20261022_02, 18:05 EDT amendment).
+    #[serde(
+        default = "default_interrupt_key",
+        deserialize_with = "deserialize_interrupt_key"
+    )]
+    pub interrupt_key: String,
 }
 
 fn default_require_confirmation() -> bool {
     true
+}
+
+/// herdr's canonical name for the Escape key (`herdr pane send-keys
+/// --help`: "Use esc as the canonical Escape key name; escape is also
+/// accepted").
+pub const DEFAULT_INTERRUPT_KEY: &str = "esc";
+
+fn default_interrupt_key() -> String {
+    DEFAULT_INTERRUPT_KEY.to_string()
+}
+
+/// herdr's named keys (its keybinding parser: `enter`, `esc`, `tab`,
+/// `backspace`, `space`, `f1`–`f12`; `escape` is also accepted).
+const NAMED_KEYS: [&str; 6] = ["esc", "escape", "enter", "tab", "backspace", "space"];
+/// Modifiers in a herdr key combo such as `ctrl+c`.
+const KEY_MODIFIERS: [&str; 3] = ["ctrl", "alt", "shift"];
+
+/// Whether `key` is one key in herdr's vocabulary: a named key, a function
+/// key, or one printable ASCII character, optionally after `ctrl+`, `alt+`
+/// or `shift+`. The empty string (interrupting off) is accepted.
+pub fn validate_interrupt_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Ok(());
+    }
+    let bad = || {
+        format!(
+            "interrupt_key {key:?} is not a single herdr key name (such as \"esc\", \"enter\", \"f2\" or \"ctrl+c\"); use \"\" to turn interrupting off"
+        )
+    };
+    if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(bad());
+    }
+    let lower = key.to_ascii_lowercase();
+    // The last part is the key; "+" itself is a key ("+", "ctrl++").
+    let (mods, base) = if lower == "+" {
+        ("", "+")
+    } else if let Some(mods) = lower.strip_suffix("++") {
+        (mods, "+")
+    } else {
+        match lower.rsplit_once('+') {
+            Some((_, "")) | Some(("", _)) => return Err(bad()),
+            Some((mods, base)) => (mods, base),
+            None => ("", lower.as_str()),
+        }
+    };
+    if !mods.is_empty() && !mods.split('+').all(|m| KEY_MODIFIERS.contains(&m)) {
+        return Err(bad());
+    }
+    let function_key = base
+        .strip_prefix('f')
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=12).contains(&n));
+    let single = base.chars().count() == 1 && base.chars().all(|c| c.is_ascii_graphic());
+    if NAMED_KEYS.contains(&base) || function_key || single {
+        Ok(())
+    } else {
+        Err(bad())
+    }
+}
+
+fn deserialize_interrupt_key<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    let key = String::deserialize(d)?;
+    let key = key.trim().to_string();
+    validate_interrupt_key(&key).map_err(serde::de::Error::custom)?;
+    Ok(key)
 }
 
 impl AgentConfig {
@@ -130,11 +207,18 @@ impl AgentConfig {
             allowed_commands,
             require_confirmation,
             allow_arbitrary_commands: false,
+            interrupt_key: default_interrupt_key(),
         }
     }
 
     pub fn with_arbitrary_commands(mut self, allow: bool) -> Self {
         self.allow_arbitrary_commands = allow;
+        self
+    }
+
+    /// Set the interrupt key; `""` turns interrupting off.
+    pub fn with_interrupt_key(mut self, key: impl Into<String>) -> Self {
+        self.interrupt_key = key.into();
         self
     }
 }
@@ -402,6 +486,69 @@ allow_arbitrary_commands = false
         cfg.apply_arbitrary_commands_override(None);
         assert!(cfg.agents[0].allow_arbitrary_commands);
         assert!(!cfg.agents[1].allow_arbitrary_commands);
+    }
+
+    #[test]
+    fn interrupt_keys_default_to_esc_and_are_validated() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[[agents]]
+name = "claude"
+
+[[agents]]
+name = "omp"
+interrupt_key = ""
+
+[[agents]]
+name = "codex"
+interrupt_key = "ctrl+c"
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.find_agent("claude").unwrap().interrupt_key, "esc");
+        assert_eq!(cfg.find_agent("omp").unwrap().interrupt_key, "");
+        assert_eq!(cfg.find_agent("codex").unwrap().interrupt_key, "ctrl+c");
+        assert!(AppConfig::default()
+            .agents
+            .iter()
+            .all(|a| a.interrupt_key == DEFAULT_INTERRUPT_KEY));
+
+        for good in [
+            "esc",
+            "Escape",
+            "enter",
+            "f12",
+            "q",
+            "ctrl+c",
+            "alt+shift+x",
+            "+",
+        ] {
+            assert!(validate_interrupt_key(good).is_ok(), "{good}");
+        }
+        for bad in [
+            "esc enter",
+            "continue",
+            "f13",
+            "ctrl+",
+            "hyper+c",
+            "ctrl+cc",
+            "\u{1b}",
+        ] {
+            assert!(validate_interrupt_key(bad).is_err(), "{bad}");
+        }
+        // A bad key fails the whole entry at load.
+        let err = toml::from_str::<AppConfig>(
+            r#"
+[[agents]]
+name = "claude"
+interrupt_key = "esc enter"
+"#,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not a single herdr key name"),
+            "{err}"
+        );
     }
 
     #[test]

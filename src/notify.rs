@@ -24,18 +24,31 @@ const MAX_PENDING: usize = 4;
 /// Decides what to say about agent status changes, and when.
 ///
 /// Kept free of TTS and socket types so the announcement rules can be tested
-/// directly.
-#[derive(Debug, Default)]
-pub struct Announcer {
+/// directly. What it holds is a sentence by default; the daemon holds whole
+/// `notice` messages.
+#[derive(Debug)]
+pub struct Announcer<T = String> {
     last_status: HashMap<String, AgentStatus>,
-    pending: VecDeque<String>,
+    pending: VecDeque<T>,
+}
+
+impl<T> Default for Announcer<T> {
+    fn default() -> Self {
+        Announcer {
+            last_status: HashMap::new(),
+            pending: VecDeque::new(),
+        }
+    }
 }
 
 impl Announcer {
+    /// An announcer of sentences; `Announcer::default()` holds anything.
     pub fn new() -> Self {
         Self::default()
     }
+}
 
+impl<T: std::fmt::Debug> Announcer<T> {
     /// Record a status change and report whether it is worth announcing.
     ///
     /// Only transitions *into* `blocked` or `done` qualify, and only when the
@@ -59,7 +72,7 @@ impl Announcer {
     }
 
     /// Queue a sentence to be spoken when the voice channel is free.
-    pub fn queue(&mut self, sentence: String) {
+    pub fn queue(&mut self, sentence: T) {
         if self.pending.len() >= MAX_PENDING {
             let dropped = self.pending.pop_front();
             log::warn!("Announcement backlog full; dropping oldest: {dropped:?}");
@@ -71,7 +84,7 @@ impl Announcer {
     ///
     /// Returns `None` while a confirmation exchange is in flight, leaving the
     /// backlog intact for the next call.
-    pub fn take_speakable(&mut self, confirmation_active: bool) -> Option<String> {
+    pub fn take_speakable(&mut self, confirmation_active: bool) -> Option<T> {
         if confirmation_active {
             return None;
         }

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_util::{Stream, StreamExt};
 use libhandlr_proto::common::{self, methods, protocols, topics};
+use libhandlr_proto::companion;
 use libhandlr_proto::envelope::codes;
 use libhandlr_proto::link::{LinkError, LinkStream, PairingId};
 use libhandlr_proto::{ErrorObject, Id, Incoming, Notification, Request, Response};
@@ -18,6 +19,7 @@ use tokio::task::AbortHandle;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::sync::CancellationToken;
 
+use super::companion::{self as turns, Session};
 use super::link::auth::AuthEntry;
 use super::{CoreEvent, Daemon};
 use crate::core::agents::{self, extract_agent_name_for_pane};
@@ -25,12 +27,17 @@ use crate::core::confirm::{ConfirmError, ConfirmEvent, Lifetime, Outcome, Status
 use crate::core::naming::ResolveError;
 use crate::core::policy;
 use crate::core::principal::Principal;
+use crate::notify::Announcer;
 
 /// The longest line a client may send: 1 MiB.
 pub const MAX_LINE: usize = 1 << 20;
 
 /// The protocol versions served.
 const HARNESS_VERSION: u32 = 1;
+const COMPANION_VERSION: u32 = companion::VERSION;
+
+/// Connection ids, for logs.
+static NEXT_CONN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Whether a peer with `peer_uid` may connect to a daemon running as `own_uid`.
 pub fn peer_allowed(peer_uid: u32, own_uid: u32) -> bool {
@@ -49,28 +56,53 @@ enum Origin {
     },
 }
 
-struct Conn {
-    daemon: Arc<Daemon>,
+pub(super) struct Conn {
+    pub(super) daemon: Arc<Daemon>,
+    id: u64,
     origin: Origin,
     out: mpsc::UnboundedSender<String>,
     principal: OnceLock<Principal>,
+    /// Set at `hello` for `handlr.companion`: its session.
+    session: OnceLock<Arc<Session>>,
     topics: Mutex<HashSet<String>>,
     inflight: Mutex<HashMap<Id, AbortHandle>>,
     /// Confirmations opened on this connection, cancelled when it closes.
     opened: Mutex<HashSet<u64>>,
     /// Pairings begun on this connection, withdrawn when it closes.
     pairings: Mutex<Vec<PairingId>>,
+    /// A companion's vocabulary as last sent.
+    pub(super) vocabulary: Mutex<Vec<String>>,
+    /// A companion's notices, held while a confirmation is pending.
+    pub(super) notices: Mutex<Announcer<companion::Notice>>,
+    pub(super) next_notice: std::sync::atomic::AtomicU64,
 }
 
 impl Conn {
-    fn send(&self, value: &impl serde::Serialize) {
+    pub(super) fn send(&self, value: &impl serde::Serialize) {
         if let Ok(line) = serde_json::to_string(value) {
             let _ = self.out.send(line);
         }
     }
 
-    fn principal(&self) -> &Principal {
+    pub(super) fn principal(&self) -> &Principal {
         self.principal.get().expect("only called after hello")
+    }
+
+    /// The companion session; only called on a companion connection.
+    pub(super) fn session(&self) -> &Arc<Session> {
+        self.session
+            .get()
+            .expect("only called after a companion hello")
+    }
+
+    /// Confirmations a turn opened on this connection: cancelled if it
+    /// closes, and their resolution is sent to it.
+    pub(super) fn opened(&self, ids: &[u64]) {
+        self.opened.lock().unwrap().extend(ids.iter().copied());
+    }
+
+    fn is_companion(&self) -> bool {
+        self.session.get().is_some()
     }
 
     fn subscribed(&self, topic: &str) -> bool {
@@ -165,13 +197,18 @@ async fn serve<S>(
 {
     let conn = Arc::new(Conn {
         daemon,
+        id: NEXT_CONN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         origin,
         out,
         principal: OnceLock::new(),
+        session: OnceLock::new(),
         topics: Mutex::new(HashSet::new()),
         inflight: Mutex::new(HashMap::new()),
         opened: Mutex::new(HashSet::new()),
         pairings: Mutex::new(Vec::new()),
+        vocabulary: Mutex::new(Vec::new()),
+        notices: Mutex::new(Announcer::default()),
+        next_notice: std::sync::atomic::AtomicU64::new(0),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -214,9 +251,9 @@ async fn serve<S>(
                 ));
                 break;
             }
-            match hello(&request, &conn.origin) {
+            match hello(&conn, &request).await {
                 Ok((principal, result)) => {
-                    log::info!("Connection says hello as {}", principal.id);
+                    log::info!("Connection {} says hello as {}", conn.id, principal.id);
                     let _ = conn.principal.set(principal);
                     forwarder = Some(tokio::spawn(forward_events(Arc::clone(&conn))));
                     conn.send(&Response::ok(request.id, result));
@@ -238,10 +275,11 @@ async fn serve<S>(
         let id = request.id.clone();
         let task_conn = Arc::clone(&conn);
         let task = tokio::spawn(async move {
-            let response = match call(&task_conn, &request.method, request.params).await {
-                Ok(result) => Response::ok(request.id.clone(), result),
-                Err(error) => Response::err(Some(request.id.clone()), error),
-            };
+            let response =
+                match call(&task_conn, &request.id, &request.method, request.params).await {
+                    Ok(result) => Response::ok(request.id.clone(), result),
+                    Err(error) => Response::err(Some(request.id.clone()), error),
+                };
             task_conn.inflight.lock().unwrap().remove(&request.id);
             task_conn.send(&response);
         });
@@ -272,7 +310,8 @@ async fn serve<S>(
     }
 }
 
-fn hello(request: &Request, origin: &Origin) -> Result<(Principal, Value), ErrorObject> {
+async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), ErrorObject> {
+    let origin = &conn.origin;
     let params: common::HelloParams = params(request.params.clone())?;
     if let Origin::Link { entry, .. } = origin {
         if !entry.allows(&params.protocol) {
@@ -285,15 +324,19 @@ fn hello(request: &Request, origin: &Origin) -> Result<(Principal, Value), Error
             ));
         }
     }
-    if params.protocol != protocols::HARNESS || params.version != HARNESS_VERSION {
+    let served = (params.protocol == protocols::HARNESS && params.version == HARNESS_VERSION)
+        || (params.protocol == protocols::COMPANION && params.version == COMPANION_VERSION);
+    if !served {
         return Err(ErrorObject::new(
             codes::UNSUPPORTED_PROTOCOL,
             format!(
-                "unsupported protocol {} version {}; this daemon serves {} version {}",
+                "unsupported protocol {} version {}; this daemon serves {} version {} and {} version {}",
                 params.protocol,
                 params.version,
                 protocols::HARNESS,
-                HARNESS_VERSION
+                HARNESS_VERSION,
+                protocols::COMPANION,
+                COMPANION_VERSION
             ),
         ));
     }
@@ -308,6 +351,31 @@ fn hello(request: &Request, origin: &Origin) -> Result<(Principal, Value), Error
         Origin::Local => (Principal::local(client), false),
         Origin::Link { entry, paired_now } => (entry.principal(&params.protocol), *paired_now),
     };
+    if params.protocol == protocols::COMPANION {
+        // Plan 20261022_02, decisions 8 and 13: the session follows the
+        // principal, whatever session_id the client remembered.
+        let asked: companion::HelloParams = self::params(request.params.clone())?;
+        let session_id = turns::session_id(&principal);
+        if asked.session_id.as_deref().is_some_and(|s| s != session_id) {
+            log::info!(
+                "{} asked for session {:?}; it continues {session_id}",
+                principal.id,
+                asked.session_id
+            );
+        }
+        let vocabulary = turns::vocabulary(&conn.daemon).await;
+        *conn.vocabulary.lock().unwrap() = vocabulary.clone();
+        let _ = conn.session.set(conn.daemon.turns.session(&session_id));
+        let result = ok(companion::HelloResult {
+            server: "handlr".to_string(),
+            server_version: env!("CARGO_PKG_VERSION").to_string(),
+            protocol_version: COMPANION_VERSION,
+            session_id: Some(session_id),
+            vocabulary,
+            paired: paired_now.then_some(true),
+        })?;
+        return Ok((principal, result));
+    }
     let mut result = ok(common::HelloResult {
         server: "handlr".to_string(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -327,6 +395,11 @@ fn cancel(conn: &Conn, request: &Request) -> Response {
         Ok(target) => target,
         Err(error) => return Response::err(Some(request.id.clone()), error),
     };
+    // `cancel` on a turn.start id interrupts the turn, which answers it
+    // with `outcome: "interrupted"` (decision 10).
+    if conn.is_companion() && conn.session().interrupt_request(&target.id) {
+        return Response::ok(request.id.clone(), common::CancelResult { cancelled: true });
+    }
     let task = conn.inflight.lock().unwrap().remove(&target.id);
     let cancelled = match task {
         Some(task) => {
@@ -352,7 +425,7 @@ fn params<T: DeserializeOwned>(value: Value) -> Result<T, ErrorObject> {
         .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, format!("invalid params: {e}")))
 }
 
-fn ok(value: impl serde::Serialize) -> Result<Value, ErrorObject> {
+pub(super) fn ok(value: impl serde::Serialize) -> Result<Value, ErrorObject> {
     serde_json::to_value(value).map_err(|e| ErrorObject::new(codes::INTERNAL_ERROR, e.to_string()))
 }
 
@@ -394,7 +467,7 @@ async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
 /// `-32002` for a target that names no pane or more than one. An
 /// ambiguous target's message, and `data.candidates`, list the panes by
 /// their shown names.
-fn resolve_error(e: ResolveError) -> ErrorObject {
+pub(super) fn resolve_error(e: ResolveError) -> ErrorObject {
     let mut error = ErrorObject::new(codes::UNKNOWN_AGENT, e.to_string());
     if let ResolveError::Ambiguous { candidates, .. } = &e {
         error.data = Some(serde_json::json!({ "candidates": candidates }));
@@ -413,22 +486,33 @@ fn resolve_target(daemon: &Daemon, snap: &Value, target: &str) -> Result<String,
         .map_err(resolve_error)
 }
 
-/// Whether `target` is, as written, a workspace or tab id in `snap`.
-/// `agents.focus` passes those through unresolved.
-fn is_workspace_or_tab_id(snap: &Value, target: &str) -> bool {
-    let target = target.trim();
-    agents::tab_infos(snap).contains_key(target)
-        || agents::snapshot_root(snap)
-            .get("workspaces")
-            .and_then(|w| w.as_array())
-            .into_iter()
-            .flatten()
-            .any(|ws| ws.get("workspace_id").and_then(|v| v.as_str()) == Some(target))
-}
-
-async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObject> {
+async fn call(
+    conn: &Arc<Conn>,
+    request_id: &Id,
+    method: &str,
+    raw: Value,
+) -> Result<Value, ErrorObject> {
     let daemon = &conn.daemon;
     match method {
+        companion::methods::TURN_START if conn.is_companion() => {
+            let p: companion::TurnStartParams = params(raw)?;
+            turns::turn_start(conn, request_id, p).await
+        }
+        companion::methods::TURN_INTERRUPT if conn.is_companion() => {
+            let p: companion::TurnInterruptParams = params(raw)?;
+            if !conn.session().interrupt(p.turn_id) {
+                log::debug!(
+                    "turn.interrupt for turn {}, which is not running",
+                    p.turn_id
+                );
+            }
+            ok(common::Empty {})
+        }
+        methods::AGENTS_INTERRUPT => {
+            let p: common::AgentsInterruptParams = params(raw)?;
+            let snap = snapshot(conn).await?;
+            ok(turns::agents_interrupt(daemon, conn.principal(), &snap, &p.target).await?)
+        }
         methods::PING => ok(common::Empty {}),
         methods::HELLO => Err(ErrorObject::new(
             codes::INVALID_REQUEST,
@@ -514,7 +598,7 @@ async fn call(conn: &Conn, method: &str, raw: Value) -> Result<Value, ErrorObjec
         methods::AGENTS_FOCUS => {
             let p: common::AgentsFocusParams = params(raw)?;
             let snap = snapshot(conn).await?;
-            let target = if is_workspace_or_tab_id(&snap, &p.target_id) {
+            let target = if agents::is_workspace_or_tab_id(&snap, &p.target_id) {
                 p.target_id.trim().to_string()
             } else {
                 resolve_target(daemon, &snap, &p.target_id)?
@@ -648,9 +732,29 @@ async fn forward_events(conn: Arc<Conn>) {
     let mut confirms = conn.daemon.broker.subscribe();
     let mut core = conn.daemon.events.subscribe();
     let principal = conn.principal().clone();
+    let companion = conn.is_companion();
+    let mut vocabulary_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + turns::VOCABULARY_INTERVAL,
+        turns::VOCABULARY_INTERVAL,
+    );
     loop {
         tokio::select! {
+            _ = vocabulary_check.tick(), if companion => {
+                turns::check_vocabulary(Arc::clone(&conn)).await;
+            }
             event = confirms.recv() => match event {
+                // A companion's own voice-turn question is sent by its turn,
+                // after the reply.
+                Ok(ref e) if companion && turns::is_own_voice_turn(e, &principal) => {}
+                Ok(ConfirmEvent::Requested { view, token, reminder }) if companion => {
+                    if principal.can_approve || conn.subscribed(topics::CONFIRM) {
+                        let names = conn.daemon.names_for(&view.pane_id).await;
+                        conn.send(&Notification::new(
+                            methods::CONFIRM_REQUESTED,
+                            turns::confirm_requested(&view, &token, &principal, reminder, names),
+                        ));
+                    }
+                }
                 Ok(ConfirmEvent::Requested { view, token, reminder }) => {
                     if principal.can_approve || conn.subscribed(topics::CONFIRM) {
                         let names = conn.daemon.names_for(&view.pane_id).await;
@@ -689,6 +793,9 @@ async fn forward_events(conn: Arc<Conn>) {
                             },
                         ));
                     }
+                    if companion {
+                        turns::flush_notices(&conn);
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     log::warn!("{} missed {n} confirmation event(s)", principal.id);
@@ -696,6 +803,11 @@ async fn forward_events(conn: Arc<Conn>) {
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             event = core.recv() => match event {
+                Ok(CoreEvent::AgentStatus { pane_id, agent, status }) if companion => {
+                    if conn.daemon.watches.is_watched(&pane_id) {
+                        turns::agent_status(&conn, &pane_id, &agent, &status).await;
+                    }
+                }
                 Ok(CoreEvent::AgentStatus { pane_id, agent, status }) => {
                     if conn.subscribed(topics::AGENT_STATUS) {
                         conn.send(&Notification::new(

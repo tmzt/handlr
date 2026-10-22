@@ -197,6 +197,8 @@ pub struct ConfirmView {
     pub command: String,
     pub handle: Option<String>,
     pub requested_by: String,
+    /// A companion's own voice turn, or standing.
+    pub lifetime: Lifetime,
 }
 
 #[derive(Debug, Clone)]
@@ -343,6 +345,7 @@ impl Broker {
                 command: command.to_string(),
                 handle: handle.map(str::to_string),
                 requested_by: requester.id.clone(),
+                lifetime,
             };
             let token = Token::generate();
             state.entries.insert(
@@ -528,6 +531,24 @@ impl Broker {
                 Some("the next turn started".to_string()),
             );
         }
+    }
+
+    /// A pending confirmation's view and token, so it can be announced
+    /// later than when it was opened (a companion's voice turn asks its
+    /// question after the reply). Show the token only through
+    /// `Token::reveal_to`.
+    pub fn pending(&self, confirm_id: u64) -> Option<(ConfirmView, Token)> {
+        let state = self.state.lock().unwrap();
+        state
+            .entries
+            .get(&confirm_id)
+            .filter(|e| e.outcome.is_open())
+            .map(|e| (e.view.clone(), e.token.clone()))
+    }
+
+    /// Whether `principal_id` is waiting on any confirmation it asked for.
+    pub fn has_pending(&self, principal_id: &str) -> bool {
+        !self.pending_of(principal_id, None).is_empty()
     }
 
     /// Find one of `requester`'s own confirmations, pending or resolved

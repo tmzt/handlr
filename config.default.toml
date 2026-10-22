@@ -29,6 +29,10 @@ require_confirmation = true
 # ASCII letters, digits, spaces and the punctuation . , ' ? : ; no '/' (slash
 # commands, paths), no '-' (CLI flags), no control characters, 256 chars max.
 allow_arbitrary_commands = false
+# The key that stops this agent's work when a companion turn is interrupted
+# or `agents.interrupt` is called, in herdr's key names. Sent as a keystroke,
+# never typed. Default "esc"; "" turns interrupting off.
+# interrupt_key = "esc"
 
 [[agents]]
 name = "omp"

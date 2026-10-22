@@ -14,13 +14,36 @@ pub use libherdr::{
     },
 };
 
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, NamingConfig};
+use crate::core::agents;
+use crate::core::confirm::{Broker, Lifetime};
+use crate::core::naming::Names;
 use crate::core::policy;
 use crate::core::principal::Principal;
 use crate::watch::WatchRegistry;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub use crate::core::agents::{extract_agent_name_for_pane, resolve_pane_id};
+
+/// What one companion turn's tool calls did, read by the turn service
+/// (plan 20261022_02, decisions 9–10).
+#[derive(Debug, Default)]
+pub struct TurnLog {
+    /// Commands sent to panes, in order: `(pane_id, command)`.
+    pub ran: Mutex<Vec<(String, String)>>,
+    /// The voice-turn confirmations this turn opened, in order.
+    pub confirmations: Mutex<Vec<u64>>,
+    /// The pane the turn last addressed: the session's current agent.
+    pub addressed: Mutex<Option<String>>,
+}
+
+/// A companion turn: confirmation-required commands open a
+/// `Lifetime::VoiceTurn` confirmation, and what happened goes to `log`.
+#[derive(Clone)]
+pub struct VoiceTurn {
+    pub broker: Arc<Broker>,
+    pub log: Arc<TurnLog>,
+}
 
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
 pub struct HerdrToolExecutor {
@@ -29,6 +52,12 @@ pub struct HerdrToolExecutor {
     pub watches: Option<Arc<WatchRegistry>>,
     /// Who the commands are sent as.
     pub principal: Principal,
+    /// When set, targets are resolved by name (plan 20261022_05,
+    /// decision 10); otherwise a pane id is used as given.
+    pub naming: Option<NamingConfig>,
+    /// When set, a confirmation-required command opens a voice-turn
+    /// confirmation; otherwise it is refused.
+    pub voice_turn: Option<VoiceTurn>,
 }
 
 impl HerdrToolExecutor {
@@ -38,6 +67,8 @@ impl HerdrToolExecutor {
             agents,
             watches: None,
             principal: Principal::local("handlr"),
+            naming: None,
+            voice_turn: None,
         }
     }
 
@@ -49,6 +80,36 @@ impl HerdrToolExecutor {
     pub fn with_watches(mut self, watches: Arc<WatchRegistry>) -> Self {
         self.watches = Some(watches);
         self
+    }
+
+    pub fn with_naming(mut self, naming: NamingConfig) -> Self {
+        self.naming = Some(naming);
+        self
+    }
+
+    pub fn with_voice_turn(mut self, voice_turn: VoiceTurn) -> Self {
+        self.voice_turn = Some(voice_turn);
+        self
+    }
+
+    /// Resolve `target` in `snapshot`: by name when naming is set, else as
+    /// a pane id.
+    fn resolve(&self, snapshot: &serde_json::Value, target: &str) -> Result<String, String> {
+        match &self.naming {
+            Some(naming) => Names::from_snapshot(snapshot, naming)
+                .resolve(target)
+                .map(|a| a.agent.pane_id.clone())
+                .map_err(|e| e.to_string()),
+            None => resolve_pane_id(snapshot, target).ok_or_else(|| {
+                format!("No pane matching '{target}' exists in the current herdr session.")
+            }),
+        }
+    }
+
+    fn addressed(&self, pane_id: &str) {
+        if let Some(turn) = &self.voice_turn {
+            *turn.log.addressed.lock().unwrap() = Some(pane_id.to_string());
+        }
     }
 
     /// Handle the local `watch_pane` / `unwatch_pane` tools.
@@ -75,18 +136,12 @@ impl HerdrToolExecutor {
             return Err(format!("'{name}' requires a 'pane_id'."));
         }
 
-        let resolved = match self.client.list_panes().await {
-            Ok(snapshot) => resolve_pane_id(&snapshot, requested),
-            Err(e) => {
-                log::warn!("Could not resolve pane '{requested}' for {name}: {e}");
-                None
-            }
-        };
-        let Some(pane_id) = resolved else {
-            return Err(format!(
-                "No pane matching '{requested}' exists in the current herdr session."
-            ));
-        };
+        let snapshot = self.client.list_panes().await.map_err(|e| {
+            log::warn!("Could not resolve pane '{requested}' for {name}: {e}");
+            format!("No pane matching '{requested}' exists in the current herdr session.")
+        })?;
+        let pane_id = self.resolve(&snapshot, requested)?;
+        self.addressed(&pane_id);
 
         if name == "watch_pane" {
             let added = watches.watch(&pane_id);
@@ -108,70 +163,72 @@ impl HerdrToolExecutor {
             }))
         }
     }
-}
 
-#[async_trait]
-impl libinfer::ToolExecutor for HerdrToolExecutor {
-    async fn execute_tool(
+    /// `run_command`: the policy check as `principal`, then a send, a
+    /// voice-turn confirmation, or a refusal.
+    async fn execute_run_command(
         &self,
         name: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        if name == "watch_pane" || name == "unwatch_pane" {
-            return self.execute_watch_tool(name, args).await;
-        }
-        if name == "run_command" || name == "send_command" {
-            let cmd = args
-                .get("command")
-                .or_else(|| args.get("cmd"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let pane_id = args
-                .get("pane_id")
-                .or_else(|| args.get("target_id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+        let cmd = args
+            .get("command")
+            .or_else(|| args.get("cmd"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let requested = args
+            .get("pane_id")
+            .or_else(|| args.get("target_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
 
-            // Determine agent name from herdr session snapshot (lowercased)
-            let agent_name = match self.client.list_panes().await {
-                Ok(snap_val) => extract_agent_name_for_pane(&snap_val, pane_id),
-                Err(e) => {
-                    log::warn!(
-                        "Failed to query snapshot to determine agent for pane {}: {}",
-                        pane_id,
-                        e
-                    );
-                    "shell".to_string()
-                }
-            };
+        let snapshot = match self.client.list_panes().await {
+            Ok(snapshot) => Some(snapshot),
+            Err(e) => {
+                log::warn!("Failed to read the herdr snapshot for pane {requested}: {e}");
+                None
+            }
+        };
+        // With naming on, the target must resolve; without it, a pane id is
+        // used as given, as before.
+        let pane_id = match (&snapshot, &self.naming) {
+            (Some(snap), Some(_)) => self.resolve(snap, requested)?,
+            (None, Some(_)) => return Err("herdr is not answering; nothing was sent.".to_string()),
+            (_, None) => requested.to_string(),
+        };
+        let agent_name = match &snapshot {
+            Some(snap) => extract_agent_name_for_pane(snap, &pane_id),
+            None => "shell".to_string(),
+        };
+        self.addressed(&pane_id);
 
-            log::info!(
-                "Permission check: agent='{}' pane='{}' command='{}'",
-                agent_name,
-                pane_id,
-                cmd
-            );
+        log::info!(
+            "Permission check: agent='{}' pane='{}' command='{}'",
+            agent_name,
+            pane_id,
+            cmd
+        );
 
-            let checked =
-                match policy::check(&self.principal, &self.agents, &agent_name, pane_id, cmd) {
-                    Ok(checked) => checked,
-                    Err(denied) => {
-                        log::warn!(
-                            "Refused '{}' for agent '{}' on pane '{}': {}",
-                            cmd,
-                            agent_name,
-                            pane_id,
-                            denied
-                        );
-                        return Err(denied.to_string());
-                    }
-                };
-            let final_cmd = checked.command;
+        let checked = match policy::check(&self.principal, &self.agents, &agent_name, &pane_id, cmd)
+        {
+            Ok(checked) => checked,
+            Err(denied) => {
+                log::warn!(
+                    "Refused '{}' for agent '{}' on pane '{}': {}",
+                    cmd,
+                    agent_name,
+                    pane_id,
+                    denied
+                );
+                return Err(denied.to_string());
+            }
+        };
+        let final_cmd = checked.command;
 
-            // No confirmation path exists until the daemon's confirmation
-            // broker does (docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md,
-            // step 3). Refuse rather than send unconfirmed.
-            if checked.require_confirmation {
+        if checked.require_confirmation {
+            let Some(turn) = &self.voice_turn else {
+                // No confirmation path outside a companion turn: refuse
+                // rather than send unconfirmed.
                 log::warn!(
                     "Refused '{}' on pane '{}': confirmation unavailable",
                     final_cmd,
@@ -181,22 +238,107 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                     "Cannot send '{}' to pane '{}': confirmation unavailable (this agent requires confirmation)",
                     final_cmd, pane_id
                 ));
-            }
+            };
+            let confirm_id = turn
+                .broker
+                .request(
+                    &self.principal,
+                    &pane_id,
+                    &agent_name,
+                    &final_cmd,
+                    None,
+                    Lifetime::VoiceTurn,
+                )
+                .map_err(|e| e.to_string())?;
+            turn.log.confirmations.lock().unwrap().push(confirm_id);
+            let spoken = snapshot
+                .as_ref()
+                .zip(self.naming.as_ref())
+                .and_then(|(snap, naming)| {
+                    Names::from_snapshot(snap, naming)
+                        .get(&pane_id)
+                        .map(|a| a.spoken.clone())
+                })
+                .unwrap_or_else(|| crate::core::naming::capitalise(&agent_name));
+            return Ok(serde_json::json!({
+                "status": "awaiting_user_approval",
+                "command": final_cmd,
+                "agent": spoken,
+                "note": format!(
+                    "Not sent yet. Right after your reply, handlr itself asks the user to approve sending '{final_cmd}' to {spoken}, and sends it only if they approve. Do not ask for confirmation yourself and do not call run_command again for this; say in a few words that it is waiting for their approval."
+                ),
+            }));
+        }
 
-            let mut final_args = args.clone();
-            if let Some(obj) = final_args.as_object_mut() {
-                obj.insert("command".to_string(), serde_json::Value::String(final_cmd));
+        let mut final_args = args.clone();
+        if let Some(obj) = final_args.as_object_mut() {
+            obj.insert(
+                "command".to_string(),
+                serde_json::Value::String(final_cmd.clone()),
+            );
+            obj.insert(
+                "pane_id".to_string(),
+                serde_json::Value::String(pane_id.clone()),
+            );
+        }
+        let result = self
+            .client
+            .execute_tool_call(name, &final_args)
+            .await
+            .map_err(|e| e.to_string())?;
+        if let Some(turn) = &self.voice_turn {
+            turn.log.ran.lock().unwrap().push((pane_id, final_cmd));
+        }
+        Ok(result)
+    }
+
+    /// `focus`: by name when naming is set, a workspace or tab id as given.
+    async fn execute_focus(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let mut args = args.clone();
+        if self.naming.is_some() {
+            let requested = args
+                .get("target_id")
+                .or_else(|| args.get("pane_id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snapshot = self.client.list_panes().await.map_err(|e| e.to_string())?;
+            if !agents::is_workspace_or_tab_id(&snapshot, &requested) {
+                let pane_id = self.resolve(&snapshot, &requested)?;
+                self.addressed(&pane_id);
+                if let Some(obj) = args.as_object_mut() {
+                    obj.insert("target_id".to_string(), serde_json::Value::String(pane_id));
+                }
             }
-            return self
-                .client
-                .execute_tool_call(name, &final_args)
-                .await
-                .map_err(|e| e.to_string());
         }
         self.client
-            .execute_tool_call(name, args)
+            .execute_tool_call(name, &args)
             .await
             .map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait]
+impl libinfer::ToolExecutor for HerdrToolExecutor {
+    async fn execute_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        match name {
+            "watch_pane" | "unwatch_pane" => self.execute_watch_tool(name, args).await,
+            "run_command" | "send_command" => self.execute_run_command(name, args).await,
+            "focus" => self.execute_focus(name, args).await,
+            _ => self
+                .client
+                .execute_tool_call(name, args)
+                .await
+                .map_err(|e| e.to_string()),
+        }
     }
 }
 
@@ -206,6 +348,9 @@ pub struct HerdrContextContributor {
     pub client: HerdrClient,
     pub agents: Vec<AgentConfig>,
     pub watches: Option<Arc<WatchRegistry>>,
+    /// When set, the context lists each pane's names (plan 20261022_05),
+    /// which tools accept as targets and replies should say.
+    pub naming: Option<NamingConfig>,
 }
 
 impl HerdrContextContributor {
@@ -214,11 +359,17 @@ impl HerdrContextContributor {
             client,
             agents,
             watches: None,
+            naming: None,
         }
     }
 
     pub fn with_watches(mut self, watches: Arc<WatchRegistry>) -> Self {
         self.watches = Some(watches);
+        self
+    }
+
+    pub fn with_naming(mut self, naming: NamingConfig) -> Self {
+        self.naming = Some(naming);
         self
     }
 }
@@ -445,7 +596,7 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                     crate::commands::MAX_ARBITRARY_COMMAND_LEN
                 ));
             }
-            content.push_str("\n");
+            content.push('\n');
         }
 
         if let Some(ref watches) = self.watches {
@@ -464,6 +615,23 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         }
 
+        if let Some(ref naming) = self.naming {
+            let names = Names::from_snapshot(&snapshot, naming);
+            if !names.agents.is_empty() {
+                content.push_str("### Agent Names\n");
+                content.push_str(
+                    "Say these names, never pane ids. Tools accept a name, a tab label or a pane id as the target.\n",
+                );
+                for named in &names.agents {
+                    content.push_str(&format!(
+                        "- Pane {}: \"{}\" (say \"{}\")\n",
+                        named.agent.pane_id, named.shown, named.spoken
+                    ));
+                }
+                content.push('\n');
+            }
+        }
+
         // 4. Inject as a system instruction/turn
         messages.push(libinfer::Message {
             role: "system".to_string(),
@@ -477,6 +645,7 @@ impl libinfer::TurnContributor for HerdrContextContributor {
 }
 
 /// Determines whether a pane's 50-line buffer should be fetched and injected into the turn RAG context.
+#[allow(clippy::too_many_arguments)]
 fn should_include_pane_buffer(
     pane_idx: usize,
     pane_id: &str,

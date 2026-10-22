@@ -237,6 +237,19 @@ fn pane_matches(pane: &serde_json::Value, target: &str) -> bool {
         .is_some_and(|pid| crate::watch::pane_ids_match(pid, target))
 }
 
+/// Whether `target` is, as written, a workspace or tab id in `snap`.
+/// `agents.focus` and the `focus` tool pass those through unresolved.
+pub fn is_workspace_or_tab_id(snap: &serde_json::Value, target: &str) -> bool {
+    let target = target.trim();
+    tab_infos(snap).contains_key(target)
+        || snapshot_root(snap)
+            .get("workspaces")
+            .and_then(|w| w.as_array())
+            .into_iter()
+            .flatten()
+            .any(|ws| ws.get("workspace_id").and_then(|v| v.as_str()) == Some(target))
+}
+
 /// Resolve a pane id to the fully-qualified form herdr uses (`w1:p6`).
 ///
 /// Event subscriptions are matched by exact pane id server-side, so a watch

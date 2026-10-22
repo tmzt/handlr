@@ -397,7 +397,8 @@ async fn hello_is_limited_to_the_entrys_protocols() {
         vec!["companion"]
     );
 
-    // handlr.companion is not served yet (plan 02, step 4).
+    // handlr.companion is served (plan 02, step 4), with the session of
+    // the paired name.
     let companion = serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "id": 0, "method": "hello",
         "params": {"protocol": "handlr.companion", "version": 1, "client": "phone"}
@@ -406,5 +407,7 @@ async fn hello_is_limited_to_the_entrys_protocols() {
     let mut stream = reconnect_with(&env, &keypair.private, &companion)
         .await
         .unwrap();
-    assert_eq!(recv(&mut stream).await["error"]["code"], -32011);
+    let r = recv(&mut stream).await;
+    assert_eq!(r["result"]["session_id"], "companion:phone", "{r}");
+    assert!(r["result"]["vocabulary"].is_array(), "{r}");
 }
