@@ -61,9 +61,21 @@ pub struct HelloResult {
 }
 
 /// An agent, as `agents.list` reports it.
+///
+/// `pane_id` is a handle for later requests and is never shown or spoken;
+/// a client presents `name` and says `spoken` (plan 20261022_05,
+/// decision 7).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentInfo {
     pub pane_id: String,
+    /// The shown name: the shortest unique name with labels as written,
+    /// such as "Claude in libmorph, tab -mb".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The spoken form of the same name, such as "Claude in libmorph, tab
+    /// em bee".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<String>,
     /// Lowercased; `shell` when the pane runs no known agent.
     pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -74,6 +86,12 @@ pub struct AgentInfo {
     pub workspace_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tab_id: Option<String>,
+    /// The tab's label as the user typed it (`17-hr`, `-mb`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_label: Option<String>,
+    /// The tab's number, unique within its workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_number: Option<u32>,
     /// herdr's `agent_status`: `working`, `idle`, `blocked`, `done`,
     /// `unknown`, or a runner's own word.
     pub status: String,
@@ -224,8 +242,16 @@ pub struct AgentStatusChanged {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfirmRequested {
     pub confirm_id: u64,
+    /// A handle only; present `name` instead.
     pub pane_id: String,
     pub agent: String,
+    /// The agent's shown name (see `AgentInfo::name`). Absent when herdr
+    /// could not be read as the request was forwarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The agent's spoken name (see `AgentInfo::spoken`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     pub command: String,
@@ -320,11 +346,15 @@ mod tests {
         round_trip(AgentsListResult {
             agents: vec![AgentInfo {
                 pane_id: "w2:pZ".to_string(),
+                name: Some("the handlr agent".to_string()),
+                spoken: Some("the handlr agent".to_string()),
                 agent: "claude".to_string(),
                 project: Some("handlr".to_string()),
                 cwd: Some("/src/handlr".to_string()),
                 workspace_id: Some("w2".to_string()),
-                tab_id: None,
+                tab_id: Some("w2:t1".to_string()),
+                tab_label: Some("17-hr".to_string()),
+                tab_number: Some(17),
                 status: "working".to_string(),
                 focused: true,
             }],
@@ -390,6 +420,8 @@ mod tests {
             confirm_id: 3,
             pane_id: "p1".to_string(),
             agent: "claude".to_string(),
+            name: Some("Claude in libmorph, tab -mb".to_string()),
+            spoken: Some("Claude in libmorph, tab em bee".to_string()),
             project: None,
             command: "continue".to_string(),
             requested_by: "local:mcp".to_string(),
@@ -447,6 +479,36 @@ mod tests {
         .unwrap();
         assert_eq!(requested.token, None);
         assert!(!requested.reminder);
+        // Names are additive: older JSON without them still parses, and
+        // they are left out when absent.
+        assert_eq!((requested.name, requested.spoken), (None, None));
+        let agent: AgentInfo = serde_json::from_value(json!({
+            "pane_id": "p1", "agent": "claude", "status": "idle", "focused": false
+        }))
+        .unwrap();
+        assert_eq!(
+            (
+                agent.name.as_deref(),
+                agent.tab_label.as_deref(),
+                agent.tab_number
+            ),
+            (None, None, None)
+        );
+        let shown = serde_json::to_value(&agent).unwrap();
+        for key in ["name", "spoken", "tab_label", "tab_number"] {
+            assert!(shown.get(key).is_none(), "{key} in {shown}");
+        }
+        let named = serde_json::to_value(AgentInfo {
+            name: Some("Claude".to_string()),
+            spoken: Some("Claude".to_string()),
+            tab_label: Some("-mb".to_string()),
+            tab_number: Some(4),
+            ..agent
+        })
+        .unwrap();
+        assert_eq!(named["name"], "Claude");
+        assert_eq!(named["tab_label"], "-mb");
+        assert_eq!(named["tab_number"], 4);
         assert_eq!(serde_json::to_value(Empty {}).unwrap(), json!({}));
     }
 }
