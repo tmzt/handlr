@@ -1,17 +1,23 @@
+use async_compat::CompatExt;
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-use async_compat::CompatExt;
 
 #[async_trait]
 pub trait ToolExecutor: Send + Sync {
-    async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String>;
+    async fn execute_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String>;
 }
 
 // Re-export key libgenai types
-pub use libgenai::{GeminiAgent, Tool, FunctionDeclaration, Model, Role, Message as GenaiMessage, Content};
+pub use libgenai::{
+    Content, FunctionDeclaration, GeminiAgent, Message as GenaiMessage, Model, Role, Tool,
+};
 
 /// Supported reasoning engine types.
 pub enum EngineType {
@@ -77,7 +83,11 @@ pub struct GeminiReasoningEngine {
 
 impl GeminiReasoningEngine {
     /// Create a new `GeminiReasoningEngine` with the given API key.
-    pub fn new(api_key: String, system_prompt: Option<String>, tools: Vec<Tool>) -> Result<Self, String> {
+    pub fn new(
+        api_key: String,
+        system_prompt: Option<String>,
+        tools: Vec<Tool>,
+    ) -> Result<Self, String> {
         let mut agent = GeminiAgent::new(api_key)?;
         if let Some(prompt) = system_prompt {
             agent = agent.with_system_prompt(prompt);
@@ -177,9 +187,18 @@ impl ReasoningEngine for GeminiReasoningEngine {
         }
 
         // Add all historical messages to the builder
-        log::info!("libinfer: Compiling {} messages into Gemini request context (tools: {})", turns.len(), self.agent.tools().len());
+        log::info!(
+            "libinfer: Compiling {} messages into Gemini request context (tools: {})",
+            turns.len(),
+            self.agent.tools().len()
+        );
         for (i, turn) in turns.iter().enumerate() {
-            log::debug!("libinfer: Context msg [{}][role={}]: {}", i + 1, turn.role, turn.content);
+            log::debug!(
+                "libinfer: Context msg [{}][role={}]: {}",
+                i + 1,
+                turn.role,
+                turn.content
+            );
             let role = match turn.role.as_str() {
                 "model" => libgenai::Role::Model,
                 _ => libgenai::Role::User,
@@ -191,23 +210,30 @@ impl ReasoningEngine for GeminiReasoningEngine {
 
         // Loop for tool execution within the current turn
         for turn_idx in 0..self.max_turns {
-            log::info!("libinfer: Dispatching Gemini API request (turn {}/{})", turn_idx + 1, self.max_turns);
-            let response = builder
-                .clone()
-                .execute()
-                .compat()
-                .await
-                .map_err(|e| {
-                    log::error!("libinfer: Gemini API request failed: {}", e);
-                    format!("gemini generate: {e}")
-                })?;
+            log::info!(
+                "libinfer: Dispatching Gemini API request (turn {}/{})",
+                turn_idx + 1,
+                self.max_turns
+            );
+            let response = builder.clone().execute().compat().await.map_err(|e| {
+                log::error!("libinfer: Gemini API request failed: {}", e);
+                format!("gemini generate: {e}")
+            })?;
 
             let calls = response.function_calls_with_thoughts();
             if let Some((fc, thought_signature)) = calls.first() {
-                log::info!("libinfer: Gemini requested tool call '{}' with arguments: {}", fc.name, fc.args);
+                log::info!(
+                    "libinfer: Gemini requested tool call '{}' with arguments: {}",
+                    fc.name,
+                    fc.args
+                );
                 let args_val = &fc.args;
                 let exec_result = executor.execute_tool(&fc.name, args_val).await?;
-                log::info!("libinfer: Tool '{}' returned output: {}", fc.name, exec_result);
+                log::info!(
+                    "libinfer: Tool '{}' returned output: {}",
+                    fc.name,
+                    exec_result
+                );
 
                 // Construct model message with thought signature if present
                 let model_content = if let Some(sig) = thought_signature {
@@ -234,20 +260,31 @@ impl ReasoningEngine for GeminiReasoningEngine {
             }
         }
 
-        Err(format!("exceeded maximum multi-turn tool steps ({})", self.max_turns))
+        Err(format!(
+            "exceeded maximum multi-turn tool steps ({})",
+            self.max_turns
+        ))
     }
 }
 
 #[async_trait]
 impl<T: ToolExecutor + ?Sized> ToolExecutor for std::sync::Arc<T> {
-    async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    async fn execute_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         (**self).execute_tool(name, args).await
     }
 }
 
 #[async_trait]
 impl<T: ToolExecutor + ?Sized> ToolExecutor for Box<T> {
-    async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    async fn execute_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         (**self).execute_tool(name, args).await
     }
 }
@@ -372,13 +409,12 @@ impl SessionManager {
 
     pub fn save_session(&self, session_id: &str, messages: &[Message]) -> Result<(), String> {
         let path = self.session_path(session_id);
-        let mut file = File::create(&path)
-            .map_err(|e| format!("failed to create session file: {e}"))?;
+        let mut file =
+            File::create(&path).map_err(|e| format!("failed to create session file: {e}"))?;
         for msg in messages {
             let line = serde_json::to_string(msg)
                 .map_err(|e| format!("failed to serialize message: {e}"))?;
-            writeln!(file, "{}", line)
-                .map_err(|e| format!("failed to write message: {e}"))?;
+            writeln!(file, "{}", line).map_err(|e| format!("failed to write message: {e}"))?;
         }
         Ok(())
     }
@@ -543,7 +579,7 @@ impl ReasoningEngine for MockReasoningEngine {
         executor: &dyn ToolExecutor,
     ) -> Result<Option<String>, String> {
         let last_content = turns.last().map(|m| m.content.as_str()).unwrap_or("");
-        
+
         self.transcripts
             .lock()
             .unwrap()
@@ -570,7 +606,8 @@ impl ReasoningEngine for MockReasoningEngine {
 #[derive(Default, Clone)]
 pub struct MockToolExecutor {
     calls: std::sync::Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
-    canned_responses: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
+    canned_responses:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, serde_json::Value>>>,
 }
 
 impl MockToolExecutor {
@@ -578,7 +615,11 @@ impl MockToolExecutor {
         Self::default()
     }
 
-    pub fn with_canned_response(self, tool_name: impl Into<String>, response: serde_json::Value) -> Self {
+    pub fn with_canned_response(
+        self,
+        tool_name: impl Into<String>,
+        response: serde_json::Value,
+    ) -> Self {
         self.canned_responses
             .lock()
             .unwrap()
@@ -593,7 +634,11 @@ impl MockToolExecutor {
 
 #[async_trait]
 impl ToolExecutor for MockToolExecutor {
-    async fn execute_tool(&self, name: &str, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    async fn execute_tool(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
         self.calls
             .lock()
             .unwrap()
@@ -622,7 +667,7 @@ mod tests {
         let manager = SessionManager::with_dir(dir.path().to_path_buf()).unwrap();
         let session_id = "test_session";
 
-         let messages = vec![
+        let messages = vec![
             Message {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
@@ -683,8 +728,8 @@ mod tests {
         }];
         manager.save_session(session_id, &initial_msgs).unwrap();
 
-        let builder = SessionBuilder::new(session_id, manager)
-            .with_contributor(Box::new(MockContributor));
+        let builder =
+            SessionBuilder::new(session_id, manager).with_contributor(Box::new(MockContributor));
 
         let built = builder.build().await.unwrap();
         assert_eq!(built.len(), 2);
