@@ -16,7 +16,7 @@ pub trait ToolExecutor: Send + Sync {
 
 // Re-export key libgenai types
 pub use libgenai::{
-    Content, FunctionDeclaration, GeminiAgent, Message as GenaiMessage, Model, Role, Tool,
+    Content, FunctionDeclaration, Gemini, Message as GenaiMessage, Model, Role, Tool,
 };
 
 /// Supported reasoning engine types.
@@ -76,8 +76,13 @@ impl ReasoningEngineBuilder {
 }
 
 /// A reasoning engine powered by Google Gemini, implementing `ReasoningEngine`.
+///
+/// It holds the system prompt and tools itself and builds each request from
+/// them, rather than reading them back out of a `libgenai::GeminiAgent`.
 pub struct GeminiReasoningEngine {
-    agent: GeminiAgent,
+    client: Gemini,
+    system_prompt: Option<String>,
+    tools: Vec<Tool>,
     max_turns: usize,
 }
 
@@ -88,40 +93,20 @@ impl GeminiReasoningEngine {
         system_prompt: Option<String>,
         tools: Vec<Tool>,
     ) -> Result<Self, String> {
-        let mut agent = GeminiAgent::new(api_key)?;
-        if let Some(prompt) = system_prompt {
-            agent = agent.with_system_prompt(prompt);
-        }
-        for tool in tools {
-            agent = agent.with_tool(tool);
-        }
+        let client = Gemini::new(api_key).map_err(|e| format!("gemini client init: {e}"))?;
         Ok(Self {
-            agent,
+            client,
+            system_prompt,
+            tools,
             max_turns: 5,
         })
     }
 
-    /// Create from the environment (resolving either `GEMINI_API_KEY` or Google credentials).
+    /// Create from the `GEMINI_API_KEY` environment variable.
     pub fn from_env(system_prompt: Option<String>, tools: Vec<Tool>) -> Result<Self, String> {
-        let mut agent = GeminiAgent::from_env()?;
-        if let Some(prompt) = system_prompt {
-            agent = agent.with_system_prompt(prompt);
-        }
-        for tool in tools {
-            agent = agent.with_tool(tool);
-        }
-        Ok(Self {
-            agent,
-            max_turns: 5,
-        })
-    }
-
-    /// Construct with a pre-configured `GeminiAgent`.
-    pub fn from_agent(agent: GeminiAgent) -> Self {
-        Self {
-            agent,
-            max_turns: 5,
-        }
+        let key =
+            std::env::var("GEMINI_API_KEY").map_err(|_| "GEMINI_API_KEY not set".to_string())?;
+        Self::new(key, system_prompt, tools)
     }
 
     /// Set the maximum multi-turn tool calling steps allowed per query.
@@ -130,15 +115,20 @@ impl GeminiReasoningEngine {
         self
     }
 
-    /// Override the system prompt for the agent.
+    /// Override the system prompt.
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        self.agent = self.agent.with_system_prompt(prompt);
+        self.system_prompt = Some(prompt.into());
         self
     }
 
-    /// Reference to the underlying `GeminiAgent`.
-    pub fn agent(&self) -> &GeminiAgent {
-        &self.agent
+    /// The system prompt sent with every request, if any.
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
+    }
+
+    /// The tools declared with every request.
+    pub fn tools(&self) -> &[Tool] {
+        &self.tools
     }
 
     /// Get the maximum multi-turn tool calling steps allowed per query.
@@ -172,17 +162,17 @@ impl ReasoningEngine for GeminiReasoningEngine {
             return Ok(None);
         }
 
-        let mut builder = self.agent.client().generate_content();
+        let mut builder = self.client.generate_content();
 
-        if let Some(ref prompt) = self.agent.system_prompt() {
-            builder = builder.with_system_prompt(*prompt);
+        if let Some(prompt) = self.system_prompt() {
+            builder = builder.with_system_prompt(prompt);
         }
 
-        for tool in self.agent.tools() {
+        for tool in self.tools() {
             builder = builder.with_tool(tool.clone());
         }
 
-        if !self.agent.tools().is_empty() {
+        if !self.tools().is_empty() {
             builder = builder.with_function_calling_mode(libgenai::FunctionCallingMode::Auto);
         }
 
@@ -190,7 +180,7 @@ impl ReasoningEngine for GeminiReasoningEngine {
         log::info!(
             "libinfer: Compiling {} messages into Gemini request context (tools: {})",
             turns.len(),
-            self.agent.tools().len()
+            self.tools().len()
         );
         for (i, turn) in turns.iter().enumerate() {
             log::debug!(

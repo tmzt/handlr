@@ -7,7 +7,9 @@ edition = "2021"
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-libgenai = { path = "../../../libgenai", features = ["tokio"] }
+# Pinned by revision, not a sibling path: the sibling checkout drifted once
+# (CHANGES.md, 2026-10-22). Goes away with the provider split (plan 05).
+libgenai = { git = "https://github.com/tmzt/libgenai", rev = "57fb65dd9269b7341346a8241d9f10d7a9565266" }
 async-compat = "0.2"
 log = "0.4"
 
