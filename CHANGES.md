@@ -89,3 +89,41 @@ Plan: [The companion app, on handlr-companion and libvoicexn](docs/design/202610
   libvoicexn checkout or the Android tooling cannot break handlr's build.
 - Agent supervision, listed as a later plan in the 11:36 entry, takes a
   later number than 04.
+
+## 2026-10-22 17:11 EDT — Unblocking the build: the libinfer interim fix, rustfmt, and a retired plan
+
+Plans: [Pluggable ReasoningEngine and ToolExecutor traits](docs/design/20260831_02_REASONING_ENGINE_PLAN.md)
+(`In implementation`), [handlr as an agent orchestration daemon](docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md)
+(now `In implementation`), [libconversate speech pipeline integration](docs/design/20260831_03_SPEECH_PIPELINE_PLAN.md)
+(now `Retired`).
+
+- **20260831_02, departure.** libinfer was written against a libgenai with
+  a `tokio` feature and `GeminiAgent::client()`, `system_prompt()` and
+  `tools()`. The only libgenai that exists (`tmzt/libgenai`, `57fb65d`) has
+  none of these. With libconversate gone, this was the next thing stopping
+  the workspace from building. `GeminiReasoningEngine` now holds its own
+  `gemini_rust::Gemini` client, system prompt and tools. `from_agent()` and
+  `agent()` are removed, and `system_prompt()` and `tools()` are on the
+  engine. libgenai is pinned by git revision (`f892246`). libinfer has
+  never been released on its own (VERSIONS.md), so its version is
+  unchanged. This is interim: a libinfer provider split (a neutral core,
+  then `libinfer-gemini` and later `libinfer-openai`, under
+  `crates/libinfer/`) is to be plan 05, and libgenai is to be retired by it.
+- **rustfmt.** libinfer and handlr had never been formatted, so Rule 3.4's
+  `cargo fmt --check` could not pass. Each got a formatting-only commit
+  first (`7ef43e8`, `9cc4fec`). libherdr is still unformatted, and gets the
+  same when it is next changed.
+- **20261022_01, step 2.** The speech pipeline is removed (`5ce0b71`), and
+  the plan is `In implementation`. Departure from the step's **Done when:**
+  `cargo tree -p handlr` still shows `reqwest`, but only through
+  gemini-rust (Gemini is HTTP). handlr's own dependency on it, for the
+  model downloads, is gone, which is what the step meant. clippy reports
+  two warnings in handlr (`src/transport.rs`, `HerdrContextContributor`)
+  and three in libherdr. All five are in code this work did not touch, and
+  none is new.
+- **20260831_03, retired.** A new plan status, `Retired (by <plan>)`
+  (AGENTS.md, `27346b9`), is for a plan whose code was implemented and
+  then removed. Its amendment names the last commit with the code, so it
+  can be recovered. The speech pipeline is `Retired (by
+  20261022_01_ORCHESTRATION_DAEMON_PLAN)`, removed in `5ce0b71`. The last
+  commit with the code is `f89224618e114a4b54e0761a7417e7f118b90eb8`.
