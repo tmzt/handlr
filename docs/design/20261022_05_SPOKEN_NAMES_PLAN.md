@@ -215,3 +215,25 @@ for, so "send continue to aitch ar" reaches the agent in tab `17-hr`.
    word.
 2. Should the phone be able to change an alias by voice ("call ctrls
    controls")? This plan keeps aliases in `config.toml` only.
+
+## Amendment — 2026-10-22 18:15 EDT: spelled forms always in the vocabulary
+
+Agreed with the owner. This amendment adds to decision 9 and settles open
+question 1. Where it disagrees with earlier text, this amendment wins.
+
+**Vocabulary (decision 9).** For every word of a name that is at most
+`spell_max_len` letters long, whether or not it is spelled when spoken,
+the vocabulary also gets:
+- its capitals, such as `HR`, `AD` or `SY`;
+- its spelled form, such as "aitch ar", "ay dee" or "ess why".
+
+Resolution (decision 10) accepts either form. So whether the user says a
+short code as a word or spells it, it reaches the agent.
+
+**Voicing.** How handlr *says* a word is unchanged: decision 5's vowel
+rule, with `y` counted as a vowel, and aliases (decision 8) overriding
+it. Recognition no longer depends on that choice, so open question 1 is
+settled with the default.
+
+**Step 1** gains tests. "ay dee" and "AD" resolve to the `-ad` tab, and
+"ess why" is in the vocabulary for a tab labelled `-sy`.
