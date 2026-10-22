@@ -277,3 +277,25 @@ now `In implementation`. Naming is in `8dce2a5`, and the companion crate in
   crates.
 - **`wire::ConfirmRequested`** accepts both `handle`/`token` (the
   CHANGES.md names) and `label`/`phrase` (plan 02's text).
+
+## 2026-10-22 18:34 EDT — Plan 20261022_04, step 2, client side
+
+Plan: [The companion app](docs/design/20261022_04_COMPANION_APP_PLAN.md)
+(`In implementation`). The client side of step 2 is in `548447b`. The step's
+**Done when:** is checked once the daemon's side of the link (plan 02, step 3)
+is in.
+
+Decisions the plan left open:
+- **Failing over** during pairing moves to the next address only if the TCP
+  connect fails. A handshake failure at a reachable address ends the attempt:
+  the secret is single use, and a key mismatch is a security signal.
+  Reconnecting tries the next address on any failure.
+- **Pairing while connected** closes the current connection first. If
+  pairing fails, the client returns to its previous server, or to the local
+  socket, and to the previous session.
+- **Timeouts** are 10 s for the TCP connect and 10 s for the handshake,
+  matching the daemon's handshake timeout.
+- **Link messages are whole JSON objects**, one per Noise message, with no
+  trailing newline. The Unix socket keeps newline-delimited lines.
+- **There is no `Unpaired` state of its own.** Without a server record the
+  client uses the local socket.
