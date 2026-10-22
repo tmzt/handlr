@@ -40,6 +40,12 @@ Before writing, modifying or deleting code for a new planned work item:
    - `Superseded (by <plan>)`: replaced before implementation by the named
      plan, which carries its content forward. Nothing in it is implemented.
      It is set with an amendment naming the replacement and what moved where.
+   - `Retired (by <plan>)`: implemented, in whole or in part, and then
+     removed by the named plan; its code no longer exists. It is set with an
+     amendment naming that plan, the commit that removed the code, and the
+     last commit that still has it, so the code can be recovered from
+     history (for example `git checkout <commit> -- <paths>`). It stays
+     frozen.
 
    The front-matter `status` is the only part of a document edited in place,
    and every status change gets its own amendment.
@@ -101,7 +107,8 @@ Before writing, modifying or deleting code for a new planned work item:
 2. Columns: **Document** (the title, as a relative link such as
    `[Camera view and capture](docs/design/20261014_01_CAMERA_VIEW_AND_CAPTURE_PLAN.md)`;
    no absolute or GitHub URLs), **Date** (from its front matter), **Status**
-   (exactly its front-matter `status`, including `Superseded (by <link>)`),
+   (exactly its front-matter `status`, including `Superseded (by <link>)`
+   and `Retired (by <link>)`),
    and **Decision** (one line: what it decides, and why it is at that status).
 3. A row is added in the commit that adds the document, and updated in the
    same commit as every status-change amendment. This is an exception to
