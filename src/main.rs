@@ -4,14 +4,18 @@ use std::time::Duration;
 
 use audio_core::cpal_capture::CpalCapture;
 use audio_core::ensure_audio_ring;
-use handlr::reasoning::{ReasoningEngine, EngineType, ReasoningEngineBuilder, Message, SessionManager, SessionBuilder};
 use handlr::commands::parse_confirmation_request;
 use handlr::notify::run_agent_watch;
+use handlr::reasoning::{
+    EngineType, Message, ReasoningEngine, ReasoningEngineBuilder, SessionBuilder, SessionManager,
+};
+use handlr::transport::{
+    HerdrClient, HerdrContextContributor, HerdrToolExecutor, HerdrTransport, RemoteSshConfig,
+};
 use handlr::watch::WatchRegistry;
-use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig, HerdrToolExecutor, HerdrContextContributor};
-use libconversate::stt::{SttBackend, SttConfig, SttMode};
-use libconversate::tts::{TtsConfig, TtsBackend};
 use libconversate::s2s::SpeechToSpeechBuilder;
+use libconversate::stt::{SttBackend, SttConfig, SttMode};
+use libconversate::tts::{TtsBackend, TtsConfig};
 use libconversate::VoiceState;
 
 #[allow(dead_code)]
@@ -106,7 +110,11 @@ fn parse_args() -> AppArgs {
     }
 }
 
-fn download_model(repo_id: &str, repo_filename: &str, dest_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn download_model(
+    repo_id: &str,
+    repo_filename: &str,
+    dest_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let dest_dir = dest_path.parent().ok_or("No parent dir for dest path")?;
     std::fs::create_dir_all(dest_dir)?;
 
@@ -132,7 +140,10 @@ fn download_sherpa_bundle(dest_dir: &Path) -> Result<(), Box<dyn std::error::Err
     std::fs::create_dir_all(dest_dir)?;
 
     let url = "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-en-v0_19.tar.bz2";
-    log::info!("Downloading Sherpa Kokoro bundle from {} via reqwest...", url);
+    log::info!(
+        "Downloading Sherpa Kokoro bundle from {} via reqwest...",
+        url
+    );
 
     let client = reqwest::blocking::Client::builder()
         .user_agent("handlr/0.1.0")
@@ -165,7 +176,10 @@ fn download_sherpa_bundle(dest_dir: &Path) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    log::info!("Successfully unpacked Sherpa Kokoro bundle to {}", dest_dir.display());
+    log::info!(
+        "Successfully unpacked Sherpa Kokoro bundle to {}",
+        dest_dir.display()
+    );
     Ok(())
 }
 
@@ -186,7 +200,11 @@ fn resolve_model_path(
 
     if !exists {
         if auto_download {
-            log::info!("Model {} not found. Auto-downloading to {}...", default_filename, target_path.display());
+            log::info!(
+                "Model {} not found. Auto-downloading to {}...",
+                default_filename,
+                target_path.display()
+            );
             download_model(repo_id, repo_filename, &target_path)?;
         } else {
             log::warn!(
@@ -196,7 +214,11 @@ fn resolve_model_path(
             );
         }
     } else {
-        log::info!("Model {} found at {} (symlink or file)", default_filename, target_path.display());
+        log::info!(
+            "Model {} found at {} (symlink or file)",
+            default_filename,
+            target_path.display()
+        );
     }
 
     Ok(target_path)
@@ -218,7 +240,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = parse_args();
-    let mut config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let mut config =
+        handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     // CLI master switch wins over both the global and per-agent config settings.
     config.apply_arbitrary_commands_override(args.allow_arbitrary_commands);
 
@@ -239,10 +262,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     } else {
         log::info!("Initializing Gemini Reasoning Engine...");
-        EngineType::Gemini {
-            api_key,
-            tools,
-        }
+        EngineType::Gemini { api_key, tools }
     };
 
     let reasoning_engine = ReasoningEngineBuilder::new(engine_type)
@@ -250,7 +270,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build()?;
 
     // 2. Initialize Transport / Herdr Client
-    let target_transport = config.find_transport(args.transport_name.as_deref()).cloned();
+    let target_transport = config
+        .find_transport(args.transport_name.as_deref())
+        .cloned();
 
     let transport = if args.mock_mode {
         log::info!("Using Mock Transport");
@@ -267,7 +289,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let transport_name = t.name.as_deref().unwrap_or("unnamed");
         if t.mode.eq_ignore_ascii_case("remote") {
             if let Some(ref remote_target) = t.remote {
-                log::info!("Connecting via SSH (from config transport '{}') to: {}", transport_name, remote_target);
+                log::info!(
+                    "Connecting via SSH (from config transport '{}') to: {}",
+                    transport_name,
+                    remote_target
+                );
                 let ssh_config = RemoteSshConfig::new(remote_target.clone());
                 HerdrTransport::remote_ssh_with_config(ssh_config)
             } else {
@@ -281,12 +307,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .as_ref()
                 .map(expand_tilde)
                 .unwrap_or_else(handlr::transport::default_local_socket_path);
-            log::info!("Connecting via UNIX domain socket (from config transport '{}'): {:?}", transport_name, socket_path);
+            log::info!(
+                "Connecting via UNIX domain socket (from config transport '{}'): {:?}",
+                transport_name,
+                socket_path
+            );
             HerdrTransport::local(socket_path)
         }
     } else {
         let socket_path = handlr::transport::default_local_socket_path();
-        log::info!("Connecting via default UNIX domain socket: {:?}", socket_path);
+        log::info!(
+            "Connecting via default UNIX domain socket: {:?}",
+            socket_path
+        );
         HerdrTransport::local(socket_path)
     };
 
@@ -333,7 +366,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let tts_engine_choice = args
         .tts_engine
-        .or_else(|| if args.use_sine_tts { Some("sine".to_string()) } else { None })
+        .or_else(|| {
+            if args.use_sine_tts {
+                Some("sine".to_string())
+            } else {
+                None
+            }
+        })
         .unwrap_or(config.voice.tts.engine);
 
     let backend = match tts_engine_choice.to_lowercase().as_str() {
@@ -379,14 +418,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         #[cfg(feature = "sherpa-kokoro")]
         "sherpa-kokoro" | "sherpa" => {
-            let model_dir = if let Some(dir) = args.sherpa_model_dir.or(config.voice.tts.sherpa_model_dir) {
-                PathBuf::from(dir)
-            } else {
-                models_dir.join("sherpa-kokoro")
-            };
+            let model_dir =
+                if let Some(dir) = args.sherpa_model_dir.or(config.voice.tts.sherpa_model_dir) {
+                    PathBuf::from(dir)
+                } else {
+                    models_dir.join("sherpa-kokoro")
+                };
             if !model_dir.exists() || !model_dir.join("model.onnx").exists() {
                 if args.auto_download {
-                    log::info!("Sherpa Kokoro bundle not found. Auto-downloading to {}...", model_dir.display());
+                    log::info!(
+                        "Sherpa Kokoro bundle not found. Auto-downloading to {}...",
+                        model_dir.display()
+                    );
                     download_sherpa_bundle(&model_dir)?;
                 } else {
                     log::warn!(
@@ -401,16 +444,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "TTS backend: Sherpa Kokoro (model_dir={})",
                 model_dir.display()
             );
-            TtsBackend::SherpaKokoro {
-                model_dir,
-            }
+            TtsBackend::SherpaKokoro { model_dir }
         }
         #[cfg(not(feature = "sherpa-kokoro"))]
         "sherpa-kokoro" | "sherpa" => {
             return Err("Sherpa Kokoro TTS requested, but handlr was built without '--features sherpa-kokoro'. Recompile with --features sherpa-kokoro.".into());
         }
         unknown => {
-            return Err(format!("Unknown TTS engine: '{}'. Valid options: system, sine, kokoro, sherpa-kokoro", unknown).into());
+            return Err(format!(
+                "Unknown TTS engine: '{}'. Valid options: system, sine, kokoro, sherpa-kokoro",
+                unknown
+            )
+            .into());
         }
     };
 
@@ -420,13 +465,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let speed = args.tts_speed.unwrap_or(config.voice.tts.speed);
     tts_config.speed = speed;
-    log::info!("TTS configured with voice='{}' speed={}", tts_config.voice, tts_config.speed);
+    log::info!(
+        "TTS configured with voice='{}' speed={}",
+        tts_config.voice,
+        tts_config.speed
+    );
     builder = builder.with_tts_config(tts_config);
     let voice_state = Arc::new(VoiceState::default());
     builder = builder.with_voice_state(Arc::clone(&voice_state));
 
     // Initialize Session Manager
-    let session_manager = SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
+    let session_manager =
+        SessionManager::new().map_err(|e| format!("session manager error: {e}"))?;
     let session_id = "default_session".to_string();
     let agents_config = config.agents.clone();
     let watches = Arc::new(WatchRegistry::new());
@@ -592,7 +642,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
         ensure_audio_ring().push_samples(samples);
-    }).map_err(|e| format!("Capture error: {}", e))?;
+    })
+    .map_err(|e| format!("Capture error: {}", e))?;
 
     log::info!("handlr is running. Speak into your microphone...");
 

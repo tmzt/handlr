@@ -170,7 +170,10 @@ pub struct AgentConfig {
     #[serde(default)]
     pub allowed_commands: Vec<String>,
     /// Whether vocal confirmation is required before executing a command
-    #[serde(default = "default_require_confirmation", alias = "required_confirmation")]
+    #[serde(
+        default = "default_require_confirmation",
+        alias = "required_confirmation"
+    )]
     pub require_confirmation: bool,
     /// Whether arbitrary safe commands are allowed (must be ASCII, no '/' or '-', '.' and ',' allowed)
     #[serde(default)]
@@ -182,7 +185,11 @@ fn default_require_confirmation() -> bool {
 }
 
 impl AgentConfig {
-    pub fn new(name: impl Into<String>, allowed_commands: Vec<String>, require_confirmation: bool) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        allowed_commands: Vec<String>,
+        require_confirmation: bool,
+    ) -> Self {
         Self {
             name: name.into(),
             allowed_commands,
@@ -209,7 +216,10 @@ impl AppConfig {
     /// Resolve default config location: `~/.config/handlr/config.toml`
     pub fn default_config_path() -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
-            PathBuf::from(home).join(".config").join("handlr").join("config.toml")
+            PathBuf::from(home)
+                .join(".config")
+                .join("handlr")
+                .join("config.toml")
         } else {
             PathBuf::from("config.toml")
         }
@@ -217,9 +227,14 @@ impl AppConfig {
 
     /// Load config from file if present, or return defaults.
     pub fn load_or_default(custom_path: Option<&Path>) -> Self {
-        let path = custom_path.map(PathBuf::from).unwrap_or_else(Self::default_config_path);
+        let path = custom_path
+            .map(PathBuf::from)
+            .unwrap_or_else(Self::default_config_path);
         if !path.exists() {
-            log::debug!("Config file not found at {}, using defaults", path.display());
+            log::debug!(
+                "Config file not found at {}, using defaults",
+                path.display()
+            );
             return Self::default();
         }
 
@@ -232,12 +247,20 @@ impl AppConfig {
                     config
                 }
                 Err(e) => {
-                    log::warn!("Failed to parse config at {}: {}, using defaults", path.display(), e);
+                    log::warn!(
+                        "Failed to parse config at {}: {}, using defaults",
+                        path.display(),
+                        e
+                    );
                     Self::default()
                 }
             },
             Err(e) => {
-                log::warn!("Failed to read config file {}: {}, using defaults", path.display(), e);
+                log::warn!(
+                    "Failed to read config file {}: {}, using defaults",
+                    path.display(),
+                    e
+                );
                 Self::default()
             }
         }
@@ -263,9 +286,11 @@ impl AppConfig {
     /// Find an active transport by name/remote string or default flag.
     pub fn find_transport(&self, name_or_target: Option<&str>) -> Option<&TransportConfig> {
         if let Some(target) = name_or_target {
-            if let Some(t) = self.transports.iter().find(|t| {
-                t.name.as_deref() == Some(target) || t.remote.as_deref() == Some(target)
-            }) {
+            if let Some(t) = self
+                .transports
+                .iter()
+                .find(|t| t.name.as_deref() == Some(target) || t.remote.as_deref() == Some(target))
+            {
                 return Some(t);
             }
         }
@@ -401,7 +426,11 @@ allow_arbitrary_commands = false
     fn test_default_toml_template_valid() {
         let template = AppConfig::default_toml_template();
         let cfg: Result<AppConfig, _> = toml::from_str(&template);
-        assert!(cfg.is_ok(), "Template should be valid TOML: {:?}", cfg.err());
+        assert!(
+            cfg.is_ok(),
+            "Template should be valid TOML: {:?}",
+            cfg.err()
+        );
         let parsed = cfg.unwrap();
         assert_eq!(parsed.transports.len(), 2);
         assert_eq!(parsed.voice.tts.engine, "sherpa-kokoro");

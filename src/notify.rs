@@ -18,10 +18,10 @@ use std::time::Duration;
 
 use libconversate::tts::TtsSpeaker;
 use libconversate::VoiceState;
+use libherdr::client::HerdrClient;
 use libherdr::events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
 use libherdr::protocol::AgentStatus;
 use libherdr::transport::HerdrTransport;
-use libherdr::client::HerdrClient;
 
 use crate::watch::WatchRegistry;
 
@@ -144,7 +144,10 @@ async fn resolve_display_name(client: &HerdrClient, change: &PaneAgentStatusChan
     match peers.iter().find(|p| p.pane_id == change.pane_id) {
         Some(target) => speakable_name(target, &peers),
         None => {
-            log::debug!("Pane {} not in snapshot; naming from the event", change.pane_id);
+            log::debug!(
+                "Pane {} not in snapshot; naming from the event",
+                change.pane_id
+            );
             change.agent_label()
         }
     }
@@ -179,7 +182,11 @@ pub async fn run_agent_watch(
 
         let subscriptions: Vec<Subscription> =
             panes.iter().map(Subscription::agent_status).collect();
-        log::info!("Subscribing to agent status for {} pane(s): {:?}", panes.len(), panes);
+        log::info!(
+            "Subscribing to agent status for {} pane(s): {:?}",
+            panes.len(),
+            panes
+        );
 
         let mut stream = match transport.open_event_stream(&subscriptions).await {
             Ok(stream) => stream,
@@ -269,7 +276,9 @@ fn speech_case(raw: &str) -> String {
     let trimmed = raw.trim();
     let mut chars = trimmed.chars();
     match chars.next() {
-        Some(first) if first.is_lowercase() => first.to_uppercase().collect::<String>() + chars.as_str(),
+        Some(first) if first.is_lowercase() => {
+            first.to_uppercase().collect::<String>() + chars.as_str()
+        }
         _ => trimmed.to_string(),
     }
 }
@@ -325,7 +334,10 @@ pub fn agent_identities(snapshot: &serde_json::Value) -> Vec<AgentIdentity> {
         // Keyed on pane_id, not the whole record: the two copies can carry
         // different detail, and a pane counted twice would look like a peer of
         // itself and push every name to its most verbose form.
-        if identities.iter().any(|i: &AgentIdentity| i.pane_id == pane_id) {
+        if identities
+            .iter()
+            .any(|i: &AgentIdentity| i.pane_id == pane_id)
+        {
             continue;
         }
         identities.push(AgentIdentity {
@@ -430,7 +442,10 @@ mod tests {
     #[test]
     fn test_notes_blocked_and_done_only() {
         let mut a = Announcer::new();
-        assert_eq!(a.note(&change("w1:p6", "claude", AgentStatus::Working)), None);
+        assert_eq!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Working)),
+            None
+        );
         assert_eq!(a.note(&change("w1:p6", "claude", AgentStatus::Idle)), None);
         assert_eq!(
             a.note(&change("w1:p6", "claude", AgentStatus::Blocked)),
@@ -445,18 +460,28 @@ mod tests {
     #[test]
     fn test_repeated_status_is_noted_once() {
         let mut a = Announcer::new();
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_none());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
+            .is_some());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
+            .is_none());
 
         // Leaving and re-entering the state does qualify again.
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Working)).is_none());
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Working))
+            .is_none());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
+            .is_some());
     }
 
     #[test]
     fn test_panes_are_tracked_independently() {
         let mut a = Announcer::new();
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Done)).is_some());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Done))
+            .is_some());
         assert!(a.note(&change("w1:p1", "agy", AgentStatus::Done)).is_some());
     }
 
@@ -503,11 +528,17 @@ mod tests {
     #[test]
     fn test_forget_allows_reannouncing() {
         let mut a = Announcer::new();
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_none());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
+            .is_some());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
+            .is_none());
 
         a.forget("w1:p6");
-        assert!(a.note(&change("w1:p6", "claude", AgentStatus::Blocked)).is_some());
+        assert!(a
+            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
+            .is_some());
     }
 
     // ── naming an agent out loud ──
@@ -554,8 +585,14 @@ mod tests {
             identity("w1:p6", "Claude", Some("Handlr")),
             identity("w1:p9", "Claude", Some("Handlr")),
         ];
-        assert_eq!(speakable_name(&peers[0], &peers), "Claude in Handlr, pane 6");
-        assert_eq!(speakable_name(&peers[1], &peers), "Claude in Handlr, pane 9");
+        assert_eq!(
+            speakable_name(&peers[0], &peers),
+            "Claude in Handlr, pane 6"
+        );
+        assert_eq!(
+            speakable_name(&peers[1], &peers),
+            "Claude in Handlr, pane 9"
+        );
     }
 
     #[test]

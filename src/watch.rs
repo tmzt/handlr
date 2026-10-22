@@ -128,8 +128,10 @@ pub fn pane_ids_match(a: &str, b: &str) -> bool {
         return false;
     }
     a.eq_ignore_ascii_case(b)
-        || a.to_lowercase().ends_with(&format!(":{}", b.to_lowercase()))
-        || b.to_lowercase().ends_with(&format!(":{}", a.to_lowercase()))
+        || a.to_lowercase()
+            .ends_with(&format!(":{}", b.to_lowercase()))
+        || b.to_lowercase()
+            .ends_with(&format!(":{}", a.to_lowercase()))
 }
 
 #[cfg(test)]

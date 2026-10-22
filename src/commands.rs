@@ -97,7 +97,11 @@ pub fn normalize_command_for_match(cmd: &str) -> String {
 /// without blocking a command the user really did confirm.
 pub fn confirmation_match_candidates(final_cmd: &str, raw_cmd: &str) -> Vec<String> {
     let mut candidates = Vec::new();
-    for base in [normalize_command_for_match(final_cmd), final_cmd.to_string(), raw_cmd.to_string()] {
+    for base in [
+        normalize_command_for_match(final_cmd),
+        final_cmd.to_string(),
+        raw_cmd.to_string(),
+    ] {
         let normalized = normalize_command_for_match(&base);
         let unslashed = normalized.trim_start_matches('/').to_string();
         let slashed = format!("/{unslashed}");
@@ -292,8 +296,7 @@ mod tests {
             "run tests \\ more",
             "run tests \"quoted\"",
         ] {
-            let err = validate_arbitrary_command(injection)
-                .unwrap_err_or_panic(injection);
+            let err = validate_arbitrary_command(injection).unwrap_err_or_panic(injection);
             assert!(
                 err.contains("is not permitted"),
                 "expected rejection for {injection:?}, got: {err}"
@@ -303,15 +306,24 @@ mod tests {
 
     #[test]
     fn test_validate_arbitrary_command_rejects_empty_and_overlong() {
-        assert!(validate_arbitrary_command("   ").unwrap_err().contains("empty"));
-        assert!(validate_arbitrary_command(" . , ").unwrap_err().contains("empty"));
+        assert!(validate_arbitrary_command("   ")
+            .unwrap_err()
+            .contains("empty"));
+        assert!(validate_arbitrary_command(" . , ")
+            .unwrap_err()
+            .contains("empty"));
         let long = "a ".repeat(MAX_ARBITRARY_COMMAND_LEN);
-        assert!(validate_arbitrary_command(&long).unwrap_err().contains("exceeds"));
+        assert!(validate_arbitrary_command(&long)
+            .unwrap_err()
+            .contains("exceeds"));
     }
 
     #[test]
     fn test_normalize_command_for_match() {
-        assert_eq!(normalize_command_for_match("  Run   The Tests.  "), "run the tests");
+        assert_eq!(
+            normalize_command_for_match("  Run   The Tests.  "),
+            "run the tests"
+        );
         assert_eq!(normalize_command_for_match("/Usage"), "/usage");
         assert_eq!(normalize_command_for_match("continue?"), "continue");
     }
@@ -334,9 +346,10 @@ mod tests {
 
     #[test]
     fn test_parse_confirmation_request_quoted_command_with_pane() {
-        let req =
-            parse_confirmation_request("Should I send 'please check test results' to Claude in pane w2:p1?")
-                .expect("should parse as a confirmation request");
+        let req = parse_confirmation_request(
+            "Should I send 'please check test results' to Claude in pane w2:p1?",
+        )
+        .expect("should parse as a confirmation request");
         assert_eq!(req.command.as_deref(), Some("please check test results"));
         assert_eq!(req.pane_id.as_deref(), Some("w2:p1"));
     }
@@ -358,8 +371,9 @@ mod tests {
 
     #[test]
     fn test_parse_confirmation_request_ignores_possessive_apostrophe() {
-        let req = parse_confirmation_request("Should I send /compact to Claude's session in Highbay?")
-            .expect("should parse as a confirmation request");
+        let req =
+            parse_confirmation_request("Should I send /compact to Claude's session in Highbay?")
+                .expect("should parse as a confirmation request");
         assert_eq!(req.command.as_deref(), Some("/compact"));
     }
 

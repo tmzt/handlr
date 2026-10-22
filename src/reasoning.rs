@@ -3,8 +3,10 @@
 //! Grounded in the `herdr` terminal multiplexer architecture, converting spoken intent
 //! and natural-language transcripts into tool calls and concise spoken feedback.
 
-
-pub use libinfer::{ReasoningEngine, ToolExecutor, GeminiAgent, Tool, FunctionDeclaration, GeminiReasoningEngine, EngineType, ReasoningEngineBuilder, Message, SessionManager, SessionBuilder};
+pub use libinfer::{
+    EngineType, FunctionDeclaration, GeminiAgent, GeminiReasoningEngine, Message, ReasoningEngine,
+    ReasoningEngineBuilder, SessionBuilder, SessionManager, Tool, ToolExecutor,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -51,8 +53,9 @@ pub fn load_system_prompt_from_file(path: impl AsRef<std::path::Path>) -> Result
         parse_system_prompt(&content)
             .ok_or_else(|| format!("failed to parse system prompt from {}", p.display()))
     } else {
-        default_system_prompt()
-            .ok_or_else(|| "failed to load default system prompt from embedded PROMPT.md".to_string())
+        default_system_prompt().ok_or_else(|| {
+            "failed to load default system prompt from embedded PROMPT.md".to_string()
+        })
     }
 }
 
@@ -227,7 +230,6 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
 //  GeminiReasoningEngine
 // -------------------------------------------------------------------
 
-
 // -------------------------------------------------------------------
 //  MockReasoningEngine
 // -------------------------------------------------------------------
@@ -281,12 +283,7 @@ mod tests {
         let names: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            vec![
-                "focus",
-                "run_command",
-                "watch_pane",
-                "unwatch_pane"
-            ]
+            vec!["focus", "run_command", "watch_pane", "unwatch_pane"]
         );
     }
 
@@ -430,8 +427,9 @@ mod tests {
         // Verify constructor builds agent with prompt and all 6 tools
         let system_prompt = default_system_prompt().unwrap();
         let tools = declare_gemini_tools();
-        let engine = GeminiReasoningEngine::new("test_api_key".to_string(), Some(system_prompt), tools)
-            .expect("failed to construct GeminiReasoningEngine");
+        let engine =
+            GeminiReasoningEngine::new("test_api_key".to_string(), Some(system_prompt), tools)
+                .expect("failed to construct GeminiReasoningEngine");
 
         assert_eq!(engine.max_turns(), 5);
         let prompt = engine

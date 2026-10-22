@@ -10,7 +10,7 @@ pub use libherdr::{
         TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
     },
     transport::{
-        HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod, default_local_socket_path,
+        default_local_socket_path, HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod,
     },
 };
 
@@ -228,14 +228,26 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
             let agent_name = match self.client.list_panes().await {
                 Ok(snap_val) => extract_agent_name_for_pane(&snap_val, pane_id),
                 Err(e) => {
-                    log::warn!("Failed to query snapshot to determine agent for pane {}: {}", pane_id, e);
+                    log::warn!(
+                        "Failed to query snapshot to determine agent for pane {}: {}",
+                        pane_id,
+                        e
+                    );
                     "shell".to_string()
                 }
             };
 
-            log::info!("Permission check: agent='{}' pane='{}' command='{}'", agent_name, pane_id, cmd);
+            log::info!(
+                "Permission check: agent='{}' pane='{}' command='{}'",
+                agent_name,
+                pane_id,
+                cmd
+            );
 
-            let agent_config = self.agents.iter().find(|a| a.name.to_lowercase() == agent_name);
+            let agent_config = self
+                .agents
+                .iter()
+                .find(|a| a.name.to_lowercase() == agent_name);
             let Some(agent_cfg) = agent_config else {
                 return Err(format!(
                     "Agent '{}' (in pane '{}') is not configured in [[agents]]. Permitted agents: {:?}",
@@ -245,9 +257,10 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                 ));
             };
 
-            let is_explicitly_allowed = agent_cfg.allowed_commands.iter().any(|allowed| {
-                allowed.trim().eq_ignore_ascii_case(cmd.trim())
-            });
+            let is_explicitly_allowed = agent_cfg
+                .allowed_commands
+                .iter()
+                .any(|allowed| allowed.trim().eq_ignore_ascii_case(cmd.trim()));
 
             let final_cmd = if is_explicitly_allowed {
                 cmd.trim().to_string()
@@ -257,7 +270,9 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                     Err(reason) => {
                         log::warn!(
                             "Rejected arbitrary command for agent '{}' on pane '{}': {}",
-                            agent_name, pane_id, reason
+                            agent_name,
+                            pane_id,
+                            reason
                         );
                         return Err(reason);
                     }
@@ -284,7 +299,11 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                             final_cmd, pane_id
                         ));
                     }
-                    log::info!("Mechanical confirmation gate validated for '{}' on pane '{}'", final_cmd, pane_id);
+                    log::info!(
+                        "Mechanical confirmation gate validated for '{}' on pane '{}'",
+                        final_cmd,
+                        pane_id
+                    );
                 }
             }
 
@@ -292,9 +311,16 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
             if let Some(obj) = final_args.as_object_mut() {
                 obj.insert("command".to_string(), serde_json::Value::String(final_cmd));
             }
-            return self.client.execute_tool_call(name, &final_args).await.map_err(|e| e.to_string());
+            return self
+                .client
+                .execute_tool_call(name, &final_args)
+                .await
+                .map_err(|e| e.to_string());
         }
-        self.client.execute_tool_call(name, args).await.map_err(|e| e.to_string())
+        self.client
+            .execute_tool_call(name, args)
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 
@@ -366,11 +392,23 @@ impl libinfer::TurnContributor for HerdrContextContributor {
         if let Some(panes) = snap_obj.get("panes").and_then(|p| p.as_array()) {
             for (idx, pane) in panes.iter().enumerate() {
                 let pane_id = pane.get("pane_id").and_then(|id| id.as_str()).unwrap_or("");
-                let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
-                let agent = pane.get("agent").and_then(|a| a.as_str()).unwrap_or("shell");
+                let status = pane
+                    .get("agent_status")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("unknown");
+                let focused = pane
+                    .get("focused")
+                    .and_then(|f| f.as_bool())
+                    .unwrap_or(false);
+                let agent = pane
+                    .get("agent")
+                    .and_then(|a| a.as_str())
+                    .unwrap_or("shell");
                 let cwd = pane.get("cwd").and_then(|c| c.as_str()).unwrap_or("");
-                let ws_id = pane.get("workspace_id").and_then(|w| w.as_str()).unwrap_or("");
+                let ws_id = pane
+                    .get("workspace_id")
+                    .and_then(|w| w.as_str())
+                    .unwrap_or("");
                 let tab_id = pane.get("tab_id").and_then(|t| t.as_str()).unwrap_or("");
 
                 pane_summaries.push(format!(
@@ -419,7 +457,10 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             // Fallback for nested workspace/tab structure
             let mut global_idx = 1;
             for ws in workspaces {
-                let ws_id = ws.get("workspace_id").and_then(|i| i.as_str()).unwrap_or("");
+                let ws_id = ws
+                    .get("workspace_id")
+                    .and_then(|i| i.as_str())
+                    .unwrap_or("");
                 let ws_name = ws.get("name").and_then(|n| n.as_str()).unwrap_or(ws_id);
 
                 if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
@@ -427,10 +468,21 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                         let tab_title = tab.get("title").and_then(|t| t.as_str()).unwrap_or("");
                         if let Some(panes) = tab.get("panes").and_then(|p| p.as_array()) {
                             for pane in panes {
-                                if let Some(pane_id) = pane.get("pane_id").and_then(|id| id.as_str()) {
-                                    let status = pane.get("agent_status").and_then(|s| s.as_str()).unwrap_or("unknown");
-                                    let focused = pane.get("focused").and_then(|f| f.as_bool()).unwrap_or(false);
-                                    let title = pane.get("terminal_title").and_then(|t| t.as_str()).unwrap_or("untitled");
+                                if let Some(pane_id) =
+                                    pane.get("pane_id").and_then(|id| id.as_str())
+                                {
+                                    let status = pane
+                                        .get("agent_status")
+                                        .and_then(|s| s.as_str())
+                                        .unwrap_or("unknown");
+                                    let focused = pane
+                                        .get("focused")
+                                        .and_then(|f| f.as_bool())
+                                        .unwrap_or(false);
+                                    let title = pane
+                                        .get("terminal_title")
+                                        .and_then(|t| t.as_str())
+                                        .unwrap_or("untitled");
 
                                     pane_summaries.push(format!(
                                         "- Pane {} (ID: {}) [Workspace: {}, Tab: {}, Title: '{}', Status: {}, Focused: {}]",
@@ -449,13 +501,21 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                     );
 
                                     if should_include {
-                                        if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
+                                        if let Ok(inspect_res) =
+                                            self.client.inspect_pane(pane_id, 50).await
+                                        {
                                             let buffer_opt = inspect_res
                                                 .get("read")
                                                 .and_then(|r| r.get("text"))
                                                 .and_then(|t| t.as_str())
-                                                .or_else(|| inspect_res.get("buffer").and_then(|b| b.as_str()))
-                                                .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
+                                                .or_else(|| {
+                                                    inspect_res
+                                                        .get("buffer")
+                                                        .and_then(|b| b.as_str())
+                                                })
+                                                .or_else(|| {
+                                                    inspect_res.get("text").and_then(|t| t.as_str())
+                                                });
 
                                             if let Some(buffer) = buffer_opt {
                                                 let trimmed = buffer.trim();
@@ -561,7 +621,11 @@ fn should_include_pane_buffer(
         let q = query.to_lowercase();
 
         // Did user ask for all panes?
-        if q.contains("all pane") || q.contains("all buffer") || q.contains("every pane") || q.contains("everything") {
+        if q.contains("all pane")
+            || q.contains("all buffer")
+            || q.contains("every pane")
+            || q.contains("everything")
+        {
             return true;
         }
 
@@ -602,7 +666,10 @@ fn should_include_pane_buffer(
 
         // Check directory name if user mentioned it
         if !cwd.is_empty() {
-            if let Some(dir_name) = std::path::Path::new(cwd).file_name().and_then(|f| f.to_str()) {
+            if let Some(dir_name) = std::path::Path::new(cwd)
+                .file_name()
+                .and_then(|f| f.to_str())
+            {
                 if q.contains(&dir_name.to_lowercase()) {
                     return true;
                 }
@@ -630,28 +697,43 @@ mod tests {
         let executor = HerdrToolExecutor::new(
             client,
             vec![
-                AgentConfig::new("claude", vec!["continue".to_string(), "/compact".to_string()], true),
+                AgentConfig::new(
+                    "claude",
+                    vec!["continue".to_string(), "/compact".to_string()],
+                    true,
+                ),
                 AgentConfig::new("omp", vec!["continue".to_string()], true),
             ],
         );
 
         // Allowed command for claude (mock pane p1 defaults to agent 'claude') should execute
         let ok_res = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "continue" }),
+            )
             .await;
         assert!(ok_res.is_ok());
 
         let ok_res2 = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "/compact" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "/compact" }),
+            )
             .await;
         assert!(ok_res2.is_ok());
 
         // Disallowed command for claude should be rejected
         let err_res = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "rm -rf /" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "rm -rf /" }),
+            )
             .await;
         assert!(err_res.is_err());
-        assert!(err_res.unwrap_err().contains("not permitted for agent 'claude'"));
+        assert!(err_res
+            .unwrap_err()
+            .contains("not permitted for agent 'claude'"));
     }
 
     #[test]
@@ -681,7 +763,10 @@ mod tests {
         assert_eq!(extract_agent_name_for_pane(&nested_snap, "w2:p1"), "claude");
         assert_eq!(extract_agent_name_for_pane(&nested_snap, "p1"), "claude");
         assert_eq!(extract_agent_name_for_pane(&nested_snap, "w2:pA"), "agy");
-        assert_eq!(extract_agent_name_for_pane(&nested_snap, "unknown"), "shell");
+        assert_eq!(
+            extract_agent_name_for_pane(&nested_snap, "unknown"),
+            "shell"
+        );
     }
 
     #[tokio::test]
@@ -690,18 +775,25 @@ mod tests {
         let vs = Arc::new(VoiceState::default());
         let executor = HerdrToolExecutor::new(
             client,
-            vec![
-                AgentConfig::new("claude", vec!["continue".to_string(), "/compact".to_string()], true),
-            ],
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string(), "/compact".to_string()],
+                true,
+            )],
         )
         .with_voice_state(Arc::clone(&vs));
 
         // 1. Initial attempt without confirmation should be blocked by the mechanical gate
         let blocked_res = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "continue" }),
+            )
             .await;
         assert!(blocked_res.is_err());
-        assert!(blocked_res.unwrap_err().contains("Mechanical confirmation gate blocked execution"));
+        assert!(blocked_res
+            .unwrap_err()
+            .contains("Mechanical confirmation gate blocked execution"));
 
         // 2. Arm confirmation gate
         vs.arm_confirmation(Some("p1".to_string()), Some("continue".to_string()));
@@ -709,7 +801,10 @@ mod tests {
 
         // Still blocked while armed (not yet confirmed)
         let blocked_armed = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "continue" }),
+            )
             .await;
         assert!(blocked_armed.is_err());
 
@@ -718,13 +813,19 @@ mod tests {
 
         // 4. Execution now succeeds and consumes the confirmation
         let ok_res = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "continue" }),
+            )
             .await;
         assert!(ok_res.is_ok());
 
         // 5. Subsequent execution without a new confirmation cycle is blocked again
         let blocked_after = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "continue" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "continue" }),
+            )
             .await;
         assert!(blocked_after.is_err());
     }
@@ -738,8 +839,10 @@ mod tests {
 
         let executor = HerdrToolExecutor::new(
             HerdrClient::mock(),
-            vec![AgentConfig::new("claude", vec!["continue".to_string()], true)
-                .with_arbitrary_commands(true)],
+            vec![
+                AgentConfig::new("claude", vec!["continue".to_string()], true)
+                    .with_arbitrary_commands(true),
+            ],
         );
         let vs = Arc::new(VoiceState::default());
         let executor = executor.with_voice_state(Arc::clone(&vs));
@@ -786,8 +889,8 @@ mod tests {
     #[tokio::test]
     async fn test_watch_and_unwatch_pane_tools() {
         let watches = Arc::new(WatchRegistry::new());
-        let executor = HerdrToolExecutor::new(HerdrClient::mock(), vec![])
-            .with_watches(Arc::clone(&watches));
+        let executor =
+            HerdrToolExecutor::new(HerdrClient::mock(), vec![]).with_watches(Arc::clone(&watches));
 
         let res = executor
             .execute_tool("watch_pane", &json!({ "pane_id": "p1" }))
@@ -817,8 +920,8 @@ mod tests {
     #[tokio::test]
     async fn test_watch_pane_rejects_unknown_and_missing_panes() {
         let watches = Arc::new(WatchRegistry::new());
-        let executor = HerdrToolExecutor::new(HerdrClient::mock(), vec![])
-            .with_watches(Arc::clone(&watches));
+        let executor =
+            HerdrToolExecutor::new(HerdrClient::mock(), vec![]).with_watches(Arc::clone(&watches));
 
         // A pane herdr does not know about would subscribe to nothing.
         let err = executor
@@ -862,7 +965,11 @@ mod tests {
     async fn test_arbitrary_commands_disabled_by_default() {
         let executor = HerdrToolExecutor::new(
             HerdrClient::mock(),
-            vec![AgentConfig::new("claude", vec!["continue".to_string()], false)],
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string()],
+                false,
+            )],
         );
         let res = executor
             .execute_tool(
@@ -888,7 +995,10 @@ mod tests {
         .with_voice_state(Arc::clone(&vs));
 
         // Arm and confirm for a safe arbitrary command with periods and commas
-        vs.arm_confirmation(Some("p1".to_string()), Some("please run cargo test, check output.".to_string()));
+        vs.arm_confirmation(
+            Some("p1".to_string()),
+            Some("please run cargo test, check output.".to_string()),
+        );
         vs.confirm_gate();
 
         let ok_res = executor
@@ -903,25 +1013,38 @@ mod tests {
         vs.arm_confirmation(Some("p1".to_string()), Some("cat /etc/passwd".to_string()));
         vs.confirm_gate();
         let slash_res = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "cat /etc/passwd" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "cat /etc/passwd" }),
+            )
             .await;
         assert!(slash_res.is_err());
-        assert!(slash_res.unwrap_err().contains("'/' and '-' are not permitted"));
+        assert!(slash_res
+            .unwrap_err()
+            .contains("'/' and '-' are not permitted"));
 
         // Attempting a command with hyphen '-' must be rejected
         vs.arm_confirmation(Some("p1".to_string()), Some("cargo test --all".to_string()));
         vs.confirm_gate();
         let dash_res = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "cargo test --all" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "cargo test --all" }),
+            )
             .await;
         assert!(dash_res.is_err());
-        assert!(dash_res.unwrap_err().contains("'/' and '-' are not permitted"));
+        assert!(dash_res
+            .unwrap_err()
+            .contains("'/' and '-' are not permitted"));
 
         // Non-ASCII command must be rejected
         vs.arm_confirmation(Some("p1".to_string()), Some("你好".to_string()));
         vs.confirm_gate();
         let non_ascii_res = executor
-            .execute_tool("run_command", &json!({ "pane_id": "p1", "command": "你好" }))
+            .execute_tool(
+                "run_command",
+                &json!({ "pane_id": "p1", "command": "你好" }),
+            )
             .await;
         assert!(non_ascii_res.is_err());
         assert!(non_ascii_res.unwrap_err().contains("must be ASCII only"));
