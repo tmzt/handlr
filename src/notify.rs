@@ -148,26 +148,10 @@ fn speech_case(raw: &str) -> String {
 /// Read every agent-bearing pane out of a session snapshot, resolving each
 /// pane's project from its workspace label (falling back to the cwd basename).
 pub fn agent_identities(snapshot: &serde_json::Value) -> Vec<AgentIdentity> {
-    let root = crate::transport::snapshot_root(snapshot);
-
-    let mut labels: HashMap<String, String> = HashMap::new();
-    if let Some(workspaces) = root.get("workspaces").and_then(|w| w.as_array()) {
-        for ws in workspaces {
-            let id = ws.get("workspace_id").and_then(|v| v.as_str());
-            let label = ws
-                .get("label")
-                .or_else(|| ws.get("name"))
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
-            if let (Some(id), Some(label)) = (id, label) {
-                labels.insert(id.to_string(), label.to_string());
-            }
-        }
-    }
+    let labels = crate::core::agents::workspace_labels(snapshot);
 
     let mut identities = Vec::new();
-    for pane in crate::transport::collect_panes(snapshot) {
+    for pane in crate::core::agents::collect_panes(snapshot) {
         let Some(pane_id) = pane.get("pane_id").and_then(|v| v.as_str()) else {
             continue;
         };
@@ -178,19 +162,7 @@ pub fn agent_identities(snapshot: &serde_json::Value) -> Vec<AgentIdentity> {
             .filter(|s| !s.is_empty());
         let Some(agent) = agent else { continue };
 
-        let project = pane
-            .get("workspace_id")
-            .and_then(|v| v.as_str())
-            .and_then(|ws| labels.get(ws).cloned())
-            .or_else(|| {
-                // Unlabelled workspace: the repo directory names it well enough.
-                pane.get("cwd")
-                    .and_then(|v| v.as_str())
-                    .and_then(|cwd| cwd.trim_end_matches('/').rsplit('/').next())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_string)
-            });
+        let project = crate::core::agents::project_for(pane, &labels);
 
         // herdr reports panes both flat and nested under workspaces -> tabs.
         // Keyed on pane_id, not the whole record: the two copies can carry

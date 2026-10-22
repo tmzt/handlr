@@ -2,6 +2,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod core;
 pub mod notify;
 pub mod reasoning;
 pub mod transport;

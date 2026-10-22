@@ -14,16 +14,21 @@ pub use libherdr::{
     },
 };
 
-use crate::commands::validate_arbitrary_command;
 use crate::config::AgentConfig;
+use crate::core::policy;
+use crate::core::principal::Principal;
 use crate::watch::WatchRegistry;
 use std::sync::Arc;
+
+pub use crate::core::agents::{extract_agent_name_for_pane, resolve_pane_id};
 
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
 pub struct HerdrToolExecutor {
     pub client: HerdrClient,
     pub agents: Vec<AgentConfig>,
     pub watches: Option<Arc<WatchRegistry>>,
+    /// Who the commands are sent as.
+    pub principal: Principal,
 }
 
 impl HerdrToolExecutor {
@@ -32,7 +37,13 @@ impl HerdrToolExecutor {
             client,
             agents,
             watches: None,
+            principal: Principal::local("handlr"),
         }
+    }
+
+    pub fn with_principal(mut self, principal: Principal) -> Self {
+        self.principal = principal;
+        self
     }
 
     pub fn with_watches(mut self, watches: Arc<WatchRegistry>) -> Self {
@@ -99,101 +110,6 @@ impl HerdrToolExecutor {
     }
 }
 
-/// Unwrap the session snapshot from whatever envelope it arrived in.
-pub(crate) fn snapshot_root(snapshot: &serde_json::Value) -> &serde_json::Value {
-    snapshot
-        .get("result")
-        .and_then(|r| r.get("snapshot").or(Some(r)))
-        .or_else(|| snapshot.get("snapshot"))
-        .unwrap_or(snapshot)
-}
-
-/// Collect every pane object in a session snapshot, from both the flat `panes`
-/// list and the nested workspaces -> tabs -> panes hierarchy.
-pub(crate) fn collect_panes(snapshot: &serde_json::Value) -> Vec<&serde_json::Value> {
-    let root = snapshot_root(snapshot);
-    let mut panes = Vec::new();
-
-    if let Some(flat) = root.get("panes").and_then(|p| p.as_array()) {
-        panes.extend(flat.iter());
-    }
-    if let Some(workspaces) = root.get("workspaces").and_then(|w| w.as_array()) {
-        for ws in workspaces {
-            if let Some(tabs) = ws.get("tabs").and_then(|t| t.as_array()) {
-                for tab in tabs {
-                    if let Some(tab_panes) = tab.get("panes").and_then(|p| p.as_array()) {
-                        panes.extend(tab_panes.iter());
-                    }
-                }
-            }
-            if let Some(ws_panes) = ws.get("panes").and_then(|p| p.as_array()) {
-                panes.extend(ws_panes.iter());
-            }
-        }
-    }
-    panes
-}
-
-/// Whether a pane object is the one the caller meant, tolerating the short
-/// (`p6`) and fully-qualified (`w1:p6`) spellings of an id.
-fn pane_matches(pane: &serde_json::Value, target: &str) -> bool {
-    pane.get("pane_id")
-        .and_then(|id| id.as_str())
-        .is_some_and(|pid| crate::watch::pane_ids_match(pid, target))
-}
-
-/// Resolve a pane id to the fully-qualified form herdr uses (`w1:p6`).
-///
-/// Event subscriptions are matched by exact pane id server-side, so a watch
-/// registered as "p6" would silently never fire.
-pub fn resolve_pane_id(snapshot: &serde_json::Value, target: &str) -> Option<String> {
-    let clean = target.trim();
-    if clean.is_empty() {
-        return None;
-    }
-    collect_panes(snapshot)
-        .into_iter()
-        .find(|pane| pane_matches(pane, clean))
-        .and_then(|pane| pane.get("pane_id"))
-        .and_then(|id| id.as_str())
-        .map(|id| id.to_string())
-}
-
-/// Extracts the lowercased agent name for a target pane from Herdr's session snapshot.
-pub fn extract_agent_name_for_pane(snapshot: &serde_json::Value, target_pane_id: &str) -> String {
-    let clean_target = target_pane_id.trim();
-
-    for pane in collect_panes(snapshot) {
-        if !pane_matches(pane, clean_target) {
-            continue;
-        }
-        if let Some(agent) = pane.get("agent").and_then(|a| a.as_str()) {
-            let lower = agent.trim().to_lowercase();
-            if !lower.is_empty() {
-                return lower;
-            }
-        }
-        if let Some(extra) = pane.get("extra").and_then(|e| e.as_object()) {
-            if let Some(agent) = extra.get("agent").and_then(|a| a.as_str()) {
-                let lower = agent.trim().to_lowercase();
-                if !lower.is_empty() {
-                    return lower;
-                }
-            }
-        }
-        if let Some(title) = pane.get("terminal_title").and_then(|t| t.as_str()) {
-            let lower_title = title.to_lowercase();
-            for known in ["claude", "omp", "agy"] {
-                if lower_title.contains(known) {
-                    return known.to_string();
-                }
-            }
-        }
-    }
-
-    "shell".to_string()
-}
-
 #[async_trait]
 impl libinfer::ToolExecutor for HerdrToolExecutor {
     async fn execute_tool(
@@ -236,50 +152,26 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                 cmd
             );
 
-            let agent_config = self
-                .agents
-                .iter()
-                .find(|a| a.name.to_lowercase() == agent_name);
-            let Some(agent_cfg) = agent_config else {
-                return Err(format!(
-                    "Agent '{}' (in pane '{}') is not configured in [[agents]]. Permitted agents: {:?}",
-                    agent_name,
-                    pane_id,
-                    self.agents.iter().map(|a| &a.name).collect::<Vec<_>>()
-                ));
-            };
-
-            let is_explicitly_allowed = agent_cfg
-                .allowed_commands
-                .iter()
-                .any(|allowed| allowed.trim().eq_ignore_ascii_case(cmd.trim()));
-
-            let final_cmd = if is_explicitly_allowed {
-                cmd.trim().to_string()
-            } else if agent_cfg.allow_arbitrary_commands {
-                match validate_arbitrary_command(cmd) {
-                    Ok(cleaned) => cleaned,
-                    Err(reason) => {
+            let checked =
+                match policy::check(&self.principal, &self.agents, &agent_name, pane_id, cmd) {
+                    Ok(checked) => checked,
+                    Err(denied) => {
                         log::warn!(
-                            "Rejected arbitrary command for agent '{}' on pane '{}': {}",
+                            "Refused '{}' for agent '{}' on pane '{}': {}",
+                            cmd,
                             agent_name,
                             pane_id,
-                            reason
+                            denied
                         );
-                        return Err(reason);
+                        return Err(denied.to_string());
                     }
-                }
-            } else {
-                return Err(format!(
-                    "Command '{}' is not permitted for agent '{}'. Allowed commands for {}: {:?}",
-                    cmd, agent_name, agent_name, agent_cfg.allowed_commands
-                ));
-            };
+                };
+            let final_cmd = checked.command;
 
             // No confirmation path exists until the daemon's confirmation
             // broker does (docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md,
             // step 3). Refuse rather than send unconfirmed.
-            if agent_cfg.require_confirmation {
+            if checked.require_confirmation {
                 log::warn!(
                     "Refused '{}' on pane '{}': confirmation unavailable",
                     final_cmd,
@@ -720,39 +612,6 @@ mod tests {
             .contains("not permitted for agent 'claude'"));
     }
 
-    #[test]
-    fn test_extract_agent_name_for_pane() {
-        let nested_snap = json!({
-            "snapshot": {
-                "panes": [
-                    { "pane_id": "w2:p1", "agent": "claude", "cwd": "/Users/tmeade/src/highbay" },
-                    { "pane_id": "w2:pA", "agent": "agy", "cwd": "/Users/tmeade/src/highbay" }
-                ],
-                "workspaces": [
-                    {
-                        "workspace_id": "w2",
-                        "tabs": [
-                            {
-                                "tab_id": "w2:t1",
-                                "panes": [
-                                    { "pane_id": "w2:p1", "agent": "claude" }
-                                ]
-                            }
-                        ]
-                    }
-                ]
-            }
-        });
-
-        assert_eq!(extract_agent_name_for_pane(&nested_snap, "w2:p1"), "claude");
-        assert_eq!(extract_agent_name_for_pane(&nested_snap, "p1"), "claude");
-        assert_eq!(extract_agent_name_for_pane(&nested_snap, "w2:pA"), "agy");
-        assert_eq!(
-            extract_agent_name_for_pane(&nested_snap, "unknown"),
-            "shell"
-        );
-    }
-
     #[tokio::test]
     async fn test_confirmation_required_commands_are_refused() {
         let executor = HerdrToolExecutor::new(
@@ -832,19 +691,6 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not available"), "got: {err}");
-    }
-
-    #[test]
-    fn test_resolve_pane_id_canonicalizes() {
-        let snap = json!({"snapshot": {"panes": [
-            {"pane_id": "w1:p6", "agent": "claude"},
-            {"pane_id": "w1:p1", "agent": "agy"}
-        ]}});
-        assert_eq!(resolve_pane_id(&snap, "p6").as_deref(), Some("w1:p6"));
-        assert_eq!(resolve_pane_id(&snap, "w1:p6").as_deref(), Some("w1:p6"));
-        assert_eq!(resolve_pane_id(&snap, "  P1 ").as_deref(), Some("w1:p1"));
-        assert_eq!(resolve_pane_id(&snap, "p9"), None);
-        assert_eq!(resolve_pane_id(&snap, ""), None);
     }
 
     #[tokio::test]
