@@ -20,3 +20,7 @@ blake2 = { version = "0.10", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt"] }
+
+[[example]]
+name = "link_client"
+required-features = ["link"]

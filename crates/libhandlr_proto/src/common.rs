@@ -30,6 +30,12 @@ pub mod methods {
     pub const AGENT_STATUS_CHANGED: &str = "agent.status_changed";
     pub const CONFIRM_REQUESTED: &str = "confirm.requested";
     pub const CONFIRM_RESOLVED: &str = "confirm.resolved";
+
+    /// Local only (the daemon socket): begin a pending link pairing
+    /// (plan 20261022_02, decision 5, as amended).
+    pub const LINK_PAIR_BEGIN: &str = "link.pair_begin";
+    /// Notification, to the connection that began the pairing: it ended.
+    pub const LINK_PAIR_DONE: &str = "link.pair_done";
 }
 
 /// Topics for `events.subscribe`.
@@ -245,6 +251,48 @@ pub struct ConfirmResolved {
     pub detail: Option<String>,
 }
 
+/// `link.pair_begin`: a pending pairing for a device to be named `name`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkPairBeginParams {
+    pub name: String,
+    /// What the device may say `hello` with: `companion`, `harness`.
+    /// Defaults to `["companion"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocols: Option<Vec<String>>,
+    /// Seconds until the secret expires. Defaults to 300.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<u64>,
+    /// Replace an `auth.toml` entry of the same name when the pairing
+    /// completes, and close the old key's connections.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkPairBeginResult {
+    /// The pairing string, `handlr1…`, also shown as the QR code.
+    pub pairing: String,
+    pub name: String,
+    /// When the secret expires, in unix seconds.
+    pub expiry: u64,
+    /// The addresses the pairing string carries.
+    pub addresses: Vec<String>,
+    /// Things the person pairing should know, such as a missing
+    /// `tailscale serve` forward and the command that adds it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// `link.pair_done`: how a pending pairing ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkPairDone {
+    pub name: String,
+    pub paired: bool,
+    /// Why it did not pair: expired, refused, or a failed handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,6 +402,24 @@ mod tests {
             handle: None,
             outcome: Outcome::Denied,
             detail: Some("too many wrong nonces".to_string()),
+        });
+        round_trip(LinkPairBeginParams {
+            name: "s23".to_string(),
+            protocols: Some(vec!["harness".to_string()]),
+            ttl: Some(60),
+            replace: true,
+        });
+        round_trip(LinkPairBeginResult {
+            pairing: "handlr1abc".to_string(),
+            name: "s23".to_string(),
+            expiry: 1_800_000_000,
+            addresses: vec!["127.0.0.1:7347".to_string()],
+            warnings: vec![],
+        });
+        round_trip(LinkPairDone {
+            name: "s23".to_string(),
+            paired: false,
+            error: Some("expired".to_string()),
         });
     }
 
