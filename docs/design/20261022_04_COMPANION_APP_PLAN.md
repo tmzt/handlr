@@ -276,3 +276,40 @@ earlier text, this amendment wins.
 - **Open questions.** Question 1 is settled by plan 02's 16:23 EDT
   amendment: the text example stays in this crate, and plan 02 is tested
   with it. Question 4 is settled by the pin above.
+
+## Amendment — 2026-10-22 18:07 EDT: what the interrupt stops, and approving from the transcribed answer
+
+Raised by the owner. This corrects the front matter's description of
+`crates/handlr-companion` and the goal's "a tap … interrupts it". It
+follows plan 20261022_02's amendments on the interrupt ("an interrupt also
+stops the coding agent" and "the interrupt key is a keystroke, not text").
+Where this disagrees with earlier text, it wins.
+
+**Corrected description.** `crates/handlr-companion` is the companion
+client's logic, with no audio and no UI. It covers:
+- pairing and the link connection;
+- turns;
+- the interrupt: a tap that ends the current turn, and, through handlr and
+  herdr, sends the coding agents involved their interrupt key (Esc);
+- approving or denying a confirmation from the transcribed text of the
+  user's answer;
+- notice queueing;
+- key storage behind a trait.
+
+**Corrected goal.** A tap while handlr is thinking or speaking ends the
+turn, and stops the coding agent the turn is about, if it is working. The
+client sends `turn.interrupt` and stops its own playback. The daemon
+sends the agent's interrupt key through herdr, which delivers it to the
+agent's pane. The client never talks to herdr or to an agent directly.
+
+**Decision 2.** `Event::TurnEnded` gains `stopped: Vec<String>`: the
+spoken names from the turn result's `interrupted` list.
+
+**Decision 3, `Waiting`.** After `Tap`, when the turn ends with a
+non-empty `stopped`, the client gives `Say("Stopped <names>.")`, for
+example "Stopped the handlr agent.", so the user hears that the agent
+itself was interrupted.
+
+**Step 1** gains a test: a `Tap` while waiting, answered by a turn result
+with `interrupted`, gives `StopSpeaking`, `turn.interrupt`, and then
+`Say("Stopped the handlr agent.")`.

@@ -577,3 +577,12 @@ cancels, and pressed twice it exits the session, so two interrupts in a row
 could close it. It is not an equivalent of Esc. `interrupt_key` is for an
 agent whose interrupt key really is a different key, and is set only when
 that is known.
+
+## Amendment — 2026-10-22 18:07 EDT: "Esc-like" corrected
+
+Raised by the owner. The front matter's "with an Esc-like interrupt" and
+the goal's "interrupts the turn, as Esc does in a coding agent" are out of
+date since the amendment "an interrupt also stops the coding agent". The
+interrupt is not merely like Esc. It ends the turn, and, through herdr,
+sends the coding agents involved their interrupt key (Esc by default).
+Read both passages that way. Nothing else changes.
