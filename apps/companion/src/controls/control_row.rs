@@ -1,4 +1,5 @@
-//! The agent view's bottom row, which controls the audio (owner,
+//! The bottom row, which controls the audio, on the agent view and the
+//! overview (owner,
 //! 2026-10-23: "the bottom row to control the audio, with the left having
 //! a square play button, the right a square record button … with an X
 //! button in the middle to cancel"; "play doesn't become send, record
@@ -6,7 +7,7 @@
 
 use libcontrols::Rect;
 
-use super::{APPROVE_BG, AgentHit, BACK_BG, BUTTON_H, FlowButton, MESSAGE_BG};
+use crate::agent::{APPROVE_BG, AgentHit, BACK_BG, BUTTON_H, FlowButton, MESSAGE_BG};
 
 /// The control row between `x0` and `x1`, its bottom at `bottom`: play and
 /// record, or, while `dictating`, play, cancel and send. All square.

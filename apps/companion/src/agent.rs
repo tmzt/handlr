@@ -35,16 +35,13 @@ use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 use libmsdf::font::TerminalSource;
 use libmsdf::font::{GlyphStyle, TerminalShaper};
 
+use crate::controls::{ControlRow, SquareButton};
 use crate::ui::{Layout, Line};
 
-mod control_row;
 mod dictation_card;
 mod input_box;
-mod square_button;
-use control_row::ControlRow;
 use dictation_card::DictationCard;
 use input_box::InputBox;
-use square_button::SquareButton;
 
 pub const BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
 pub const FG: [f32; 4] = [0.94, 0.95, 0.96, 1.0];
@@ -56,10 +53,10 @@ pub const BAND: [f32; 4] = [0.18, 0.19, 0.21, 1.0];
 const CARD_BG: [f32; 4] = [0.11, 0.12, 0.17, 1.0];
 const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
 const HEADER_BG: [f32; 4] = [0.07, 0.07, 0.09, 1.0];
-const APPROVE_BG: [f32; 4] = [0.16, 0.45, 0.25, 1.0];
+pub(crate) const APPROVE_BG: [f32; 4] = [0.16, 0.45, 0.25, 1.0];
 const DENY_BG: [f32; 4] = [0.55, 0.18, 0.18, 1.0];
-const MESSAGE_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
-const BACK_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
+pub(crate) const MESSAGE_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
+pub(crate) const BACK_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 const DICTATION_BG: [f32; 4] = [0.09, 0.10, 0.13, 1.0];
 
 /// A card kind's accent colour.
@@ -84,7 +81,7 @@ const PAD: f32 = 12.0;
 const EDGE: f32 = 6.0;
 const CARD_PAD: f32 = 12.0;
 const ACTION_H: f32 = 44.0;
-const BUTTON_H: f32 = 52.0;
+pub(crate) const BUTTON_H: f32 = 52.0;
 const HEADER_H: f32 = 64.0;
 const BAR_H: f32 = 40.0;
 /// The suggestion row's height and type size, and the back glyph's tap
@@ -95,17 +92,17 @@ const BACK_W: f32 = 44.0;
 /// The record dot: white on blue, red while recording, centred in place of
 /// a microphone glyph, which no bundled atlas has yet (a microphone icon
 /// is for later).
-const DOT: f32 = 18.0;
-const RECORDING: [f32; 4] = [1.0, 0.35, 0.35, 1.0];
+pub(crate) const DOT: f32 = 18.0;
+pub(crate) const RECORDING: [f32; 4] = [1.0, 0.35, 0.35, 1.0];
 /// Send and cancel, from the terminal face's symbol page.
-const SEND_GLYPH: &str = "\u{27A4}";
-const CANCEL_GLYPH: &str = "\u{2715}";
+pub(crate) const SEND_GLYPH: &str = "\u{27A4}";
+pub(crate) const CANCEL_GLYPH: &str = "\u{2715}";
 /// The back glyph, from the terminal face (Roboto here is ASCII only).
 const BACK_GLYPH: &str = "\u{2039}";
 /// The play button's glyph, from the terminal face, and the skip glyph it
 /// shows while a reply is being read (no ⏭ in the face: play and a bar).
-const PLAY_GLYPH: &str = "\u{25B6}";
-const SKIP_GLYPH: &str = "\u{25B6}\u{2502}";
+pub(crate) const PLAY_GLYPH: &str = "\u{25B6}";
+pub(crate) const SKIP_GLYPH: &str = "\u{25B6}\u{2502}";
 /// Lines of a tool result shown: one, or a diff's or an error's first few.
 const RESULT_LINES: usize = 12;
 const ERROR_LINES: usize = 4;
@@ -122,11 +119,11 @@ fn line_h(px: f32) -> f32 {
 /// The terminal face's cell and line pitch, in em: Noto Sans Mono's 0.6,
 /// and the 1.3 em at which the symbol page's box drawing joins (libmsdf's
 /// `TerminalShaper::cell_em` and `line_pitch_em`).
-const CELL_EM: f32 = 0.6;
+pub(crate) const CELL_EM: f32 = 0.6;
 const PITCH_EM: f32 = 1.3;
 
 /// A scrollback line's height for type of `px` pixels.
-fn term_h(px: f32) -> f32 {
+pub(crate) fn term_h(px: f32) -> f32 {
     px * PITCH_EM
 }
 
@@ -622,7 +619,7 @@ pub struct Terminal<'a> {
 
 /// Draws `row` at `pos`: on the terminal grid when it is scrollback and
 /// the face is there, otherwise in the context's font.
-fn draw_row(
+pub(crate) fn draw_row(
     list: &mut DrawList,
     ctx: &DrawContext,
     term: Option<&Terminal>,
@@ -1403,7 +1400,7 @@ impl AgentScreen {
     }
 }
 
-fn fill(list: &mut DrawList, rect: Rect, color: [f32; 4], radius: f32) {
+pub(crate) fn fill(list: &mut DrawList, rect: Rect, color: [f32; 4], radius: f32) {
     let kind = if radius > 0.0 {
         SdfKind::RoundedBox { radius }
     } else {
@@ -1418,7 +1415,14 @@ fn fill(list: &mut DrawList, rect: Rect, color: [f32; 4], radius: f32) {
     });
 }
 
-fn button(list: &mut DrawList, ctx: &DrawContext, label: &str, rect: Rect, bg: [f32; 4], s: f32) {
+pub(crate) fn button(
+    list: &mut DrawList,
+    ctx: &DrawContext,
+    label: &str,
+    rect: Rect,
+    bg: [f32; 4],
+    s: f32,
+) {
     let mut b = Button::new(label, rect)
         .with_bg(bg)
         .with_text_color(FG)

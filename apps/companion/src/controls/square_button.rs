@@ -1,10 +1,11 @@
-//! The agent view's buttons as drawn: the square audio controls (play,
-//! send, cancel, record) by glyph, and the rest with their labels.
+//! The bottom row's buttons and the agent view's as drawn: the square
+//! audio controls (play, send, cancel, record) by glyph, and the rest with
+//! their labels.
 
 use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 
-use super::{
+use crate::agent::{
     AgentHit, CANCEL_GLYPH, CELL_EM, DIM, DOT, FG, FlowButton, PLAY_GLYPH, RECORDING, Row,
     SEND_GLYPH, SKIP_GLYPH, Terminal, button, draw_row, fill, term_h,
 };

@@ -7,11 +7,11 @@
 
 use libcontrols::Rect;
 
-use super::control_row::ControlRow;
 use super::{
     AgentCard, BUTTON_H, CARD_BG, CARD_PT, DICTATION_BG, DICTATION_LINES, EDGE, FG, Fill, Flow,
     PAD, PIN_LINES, Row, SHADOW, TITLE_PT, accent, columns, line_h, wrap_hard,
 };
+use crate::controls::ControlRow;
 use crate::ui::Line;
 
 /// The message being taken, as a block whose bottom is at `bottom`: its

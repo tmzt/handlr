@@ -32,6 +32,7 @@
 //! there dictates to that agent, with its card in the view.
 
 pub mod agent;
+pub mod controls;
 pub mod keys;
 pub mod ui;
 
