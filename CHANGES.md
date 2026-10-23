@@ -997,3 +997,16 @@ Decision 6's refreshes (on `focus.changed`, and every 15 s) are asked only
 while no agent view is open, as step 2's **Done when:** says, and closing
 the view asks for one; `Event::Agents` is given on the first answer of
 each connection, then when the list changes.
+
+## 2026-10-23 17:34 EDT — plan 20261023_04, A4: the agent view's turn is listed while herdr says working
+
+A4 has the agent view give the Finished card for a stopped turn when herdr
+still says working. The turn comes with `agents.list`, which the view asks
+only when it opens, so a turn that stops while the view is open would not
+be seen. The client therefore also asks `agents.list` when a peek of the
+open view ends on a reply while herdr says working and the turn it knows
+is not stopped, at most once in 5 s and never with a list on its way.
+The card itself needs the reply to be the view's newest entry, so a turn
+the view has seen go on (a tool call after the reply) is not finished on
+an older list. This is the only list asked while a view is open besides
+the one on opening it.
