@@ -81,14 +81,16 @@ const BAR_H: f32 = 40.0;
 const SUGGEST_H: f32 = 36.0;
 const SUGGEST_PT: f32 = 18.0;
 const BACK_W: f32 = 44.0;
-/// The take-a-message button's width at the bottom right, and its record
-/// dot. A centred dot stands in for a microphone glyph, which no bundled
-/// atlas has yet (a microphone icon is for later).
+/// The width of the take-a-message button at the bottom right and the play
+/// button at the bottom left, and the record dot: white on blue, centred,
+/// in place of a microphone glyph, which no bundled atlas has yet (a
+/// microphone icon is for later).
 const MIC_W: f32 = 96.0;
 const DOT: f32 = 18.0;
-const DOT_RED: [f32; 4] = [0.95, 0.25, 0.25, 1.0];
 /// The back glyph, from the terminal face (Roboto here is ASCII only).
 const BACK_GLYPH: &str = "\u{2039}";
+/// The play button's glyph, from the terminal face.
+const PLAY_GLYPH: &str = "\u{25B6}";
 /// Lines of a tool result shown: one, or a diff's or an error's first few.
 const RESULT_LINES: usize = 12;
 const ERROR_LINES: usize = 4;
@@ -208,6 +210,8 @@ pub enum AgentHit {
     Deny(u64),
     /// A suggested response, in the row above the buttons or a card.
     Suggest(Suggestion),
+    /// The play button: read the agent's replies aloud, or stop.
+    ReadAloud,
     /// The pinned bar: jump to its card.
     Pin,
     /// The dictation buttons, while a message is taken from the view.
@@ -634,6 +638,8 @@ pub struct AgentScreen {
     /// The dictation card's lines (as the main screen gives them), while a
     /// message is taken.
     dictation: Option<Vec<Line>>,
+    /// The play button is on: replies are read aloud.
+    read_aloud: bool,
     dirty: bool,
 }
 
@@ -727,6 +733,18 @@ impl AgentScreen {
         self.settle();
     }
 
+    /// The play button's state: bright when on, dull when off.
+    pub fn set_read_aloud(&mut self, on: bool) {
+        if on != self.read_aloud {
+            self.read_aloud = on;
+            self.dirty = true;
+        }
+    }
+
+    pub fn read_aloud(&self) -> bool {
+        self.read_aloud
+    }
+
     pub fn set_layout(&mut self, layout: Layout) {
         if layout == self.layout {
             return;
@@ -795,15 +813,24 @@ impl AgentScreen {
         let header = Rect::new(0.0, 0.0, l.w, l.top + HEADER_H * s);
         let buttons_top = l.h - l.bottom - 16.0 * s - BUTTON_H * s;
         let gap = 12.0 * s;
-        // The take-a-message button, always at the bottom right; while
-        // dictating, Submit, Scratch and Clear share the rest of the row.
+        // The play button, always at the bottom left, and the
+        // take-a-message button, always at the bottom right; while
+        // dictating, Submit, Scratch and Clear share the row between them.
         let mic_w = MIC_W * s;
-        let mut buttons = vec![FlowButton {
-            hit: AgentHit::Message,
-            rect: Rect::new(l.w - pad - mic_w, buttons_top, mic_w, BUTTON_H * s),
-            label: "",
-            bg: MESSAGE_BG,
-        }];
+        let mut buttons = vec![
+            FlowButton {
+                hit: AgentHit::ReadAloud,
+                rect: Rect::new(pad, buttons_top, mic_w, BUTTON_H * s),
+                label: "",
+                bg: BACK_BG,
+            },
+            FlowButton {
+                hit: AgentHit::Message,
+                rect: Rect::new(l.w - pad - mic_w, buttons_top, mic_w, BUTTON_H * s),
+                label: "",
+                bg: MESSAGE_BG,
+            },
+        ];
         if self.dictation.is_some() {
             let row = [
                 (AgentHit::Submit, "Submit", APPROVE_BG),
@@ -811,11 +838,12 @@ impl AgentScreen {
                 (AgentHit::Clear, "Clear", DENY_BG),
             ];
             let n = row.len() as f32;
-            let w = (l.w - 2.0 * pad - mic_w - gap * n) / n;
+            let left = pad + mic_w + gap;
+            let w = (l.w - 2.0 * left - gap * (n - 1.0)) / n;
             for (i, (hit, label, bg)) in row.into_iter().enumerate() {
                 buttons.push(FlowButton {
                     hit,
-                    rect: Rect::new(pad + i as f32 * (w + gap), buttons_top, w, BUTTON_H * s),
+                    rect: Rect::new(left + i as f32 * (w + gap), buttons_top, w, BUTTON_H * s),
                     label,
                     bg,
                 });
@@ -1171,7 +1199,7 @@ impl AgentScreen {
         for b in &self.flow.buttons {
             if visible(b.rect.y, b.rect.h) {
                 let rect = Rect::new(b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
-                button(list, ctx, b.label, rect, b.bg, s);
+                draw_button(list, ctx, term, b, rect, s, self.read_aloud);
             }
         }
         if self.entries.is_empty() && self.cards.is_empty() {
@@ -1227,7 +1255,7 @@ impl AgentScreen {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
             for b in &p.flow.buttons {
-                button(list, ctx, b.label, b.rect, b.bg, s);
+                draw_button(list, ctx, term, b, b.rect, s, self.read_aloud);
             }
         }
         let sg_px = SUGGEST_PT * s;
@@ -1236,7 +1264,7 @@ impl AgentScreen {
             ctx.draw_text(list, g.label, [g.rect.x + 4.0 * s, y], sg_px, g.color);
         }
         for b in &self.frame.buttons {
-            button(list, ctx, b.label, b.rect, b.bg, s);
+            draw_button(list, ctx, term, b, b.rect, s, self.read_aloud);
         }
         self.dirty = false;
         true
@@ -1263,20 +1291,52 @@ fn fill(list: &mut DrawList, rect: Rect, color: [f32; 4], radius: f32) {
     });
 }
 
-fn button(list: &mut DrawList, ctx: &DrawContext, label: &str, rect: Rect, bg: [f32; 4], s: f32) {
-    if label.is_empty() {
-        // The take-a-message button: its shape, and the record dot centred.
-        fill(list, rect, bg, 10.0 * s);
-        let d = DOT * s;
-        let dot = Rect::new(
-            rect.x + (rect.w - d) * 0.5,
-            rect.y + (rect.h - d) * 0.5,
-            d,
-            d,
-        );
-        fill(list, dot, DOT_RED, d * 0.5);
-        return;
+/// Draws `b` at `rect`: the take-a-message button as a white record dot on
+/// blue, the play button as its glyph (bright when `read_aloud`), and the
+/// rest as labelled buttons.
+fn draw_button(
+    list: &mut DrawList,
+    ctx: &DrawContext,
+    term: Option<&Terminal>,
+    b: &FlowButton,
+    rect: Rect,
+    s: f32,
+    read_aloud: bool,
+) {
+    match b.hit {
+        AgentHit::Message => {
+            fill(list, rect, b.bg, 10.0 * s);
+            let d = DOT * s;
+            let dot = Rect::new(
+                rect.x + (rect.w - d) * 0.5,
+                rect.y + (rect.h - d) * 0.5,
+                d,
+                d,
+            );
+            fill(list, dot, FG, d * 0.5);
+        }
+        AgentHit::ReadAloud => {
+            fill(list, rect, b.bg, 10.0 * s);
+            let px = 26.0 * s;
+            let glyph = Row {
+                text: if term.is_some() { PLAY_GLYPH } else { ">" }.to_string(),
+                x: 0.0,
+                y: 0.0,
+                px,
+                color: if read_aloud { FG } else { DIM },
+                mono: true,
+            };
+            let pos = [
+                rect.x + (rect.w - CELL_EM * px) * 0.5,
+                rect.y + (rect.h - term_h(px)) * 0.5,
+            ];
+            draw_row(list, ctx, term, &glyph, pos);
+        }
+        _ => button(list, ctx, b.label, rect, b.bg, s),
     }
+}
+
+fn button(list: &mut DrawList, ctx: &DrawContext, label: &str, rect: Rect, bg: [f32; 4], s: f32) {
     let mut b = Button::new(label, rect)
         .with_bg(bg)
         .with_text_color(FG)
@@ -1744,6 +1804,7 @@ mod tests {
         assert_eq!(
             hits,
             [
+                AgentHit::ReadAloud,
                 AgentHit::Message,
                 AgentHit::Submit,
                 AgentHit::Scratch,
@@ -1840,9 +1901,14 @@ mod tests {
             a.hit(f.back.x + 10.0, f.back.y + 10.0),
             Some(AgentHit::Back)
         );
-        assert_eq!(f.buttons.len(), 1);
-        let mic = f.buttons[0].rect;
-        assert_eq!(f.buttons[0].hit, AgentHit::Message);
+        assert_eq!(f.buttons.len(), 2);
+        // Play at the bottom left, the message button at the bottom right.
+        let play = f.buttons[0].rect;
+        assert_eq!(f.buttons[0].hit, AgentHit::ReadAloud);
+        assert!((play.x - PAD * PHONE.scale).abs() < 0.5);
+        let mic = f.buttons[1].rect;
+        assert_eq!(f.buttons[1].hit, AgentHit::Message);
+        assert!((mic.y - play.y).abs() < 0.5);
         assert!((mic.x + mic.w - (PHONE.w - PAD * PHONE.scale)).abs() < 0.5);
         assert!(mic.y + mic.h <= PHONE.h - PHONE.bottom);
     }
@@ -1857,11 +1923,16 @@ mod tests {
         );
         a.status = "idle".into();
         a.settle();
-        let row = &a.frame().suggestions;
+        let row = a.frame().suggestions.clone();
         assert_eq!(row.len(), 1);
         assert_eq!(row[0].hit, AgentHit::Suggest(Suggestion::Continue));
         assert_eq!((row[0].label, row[0].color), ("cont", YELLOW));
         assert!(row[0].rect.y + row[0].rect.h <= a.frame().buttons[0].rect.y);
+        // The play button redraws when it changes, and keeps its place.
+        a.draw(&mut DrawList::new(), &DrawContext::default(), None);
+        a.set_read_aloud(true);
+        assert!(a.draw(&mut DrawList::new(), &DrawContext::default(), None));
+        assert!(a.read_aloud());
         let r = row[0].rect;
         assert_eq!(
             a.hit(r.x + 5.0, r.y + 5.0),
@@ -1893,9 +1964,18 @@ mod tests {
         let text = FontAtlas::from_bytes(NOTO_SANS_MONO_ATLAS).expect("parses");
         let page = FontAtlas::from_bytes(TERMINAL_SYMBOLS_ATLAS).expect("parses");
         let shaper = TerminalShaper::new(&text, &page).expect("the atlases agree");
-        let line = shaper.line(BACK_GLYPH, GlyphStyle::Regular);
-        assert_eq!(line.columns, 1);
-        assert!(!line.segments.is_empty(), "{BACK_GLYPH} has a glyph");
+        for (name, glyph) in [("back", BACK_GLYPH), ("play", PLAY_GLYPH)] {
+            let line = shaper.line(glyph, GlyphStyle::Regular);
+            let found = line
+                .segments
+                .iter()
+                .flat_map(|g| &g.run.glyphs)
+                .all(|g| g.glyph_id != 0);
+            assert!(
+                found && !line.segments.is_empty(),
+                "{name} {glyph} has a glyph"
+            );
+        }
     }
 
     #[test]

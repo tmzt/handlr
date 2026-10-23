@@ -185,6 +185,9 @@ pub struct App {
     dictation: Option<Dictation>,
     /// The agent view, while it is open.
     agent: Option<AgentScreen>,
+    /// The agent view's play button: replies are read aloud. Kept while
+    /// the view is closed.
+    read_aloud: bool,
     /// The clock touches and flings are timed by.
     started: Instant,
     /// When the last frame was updated, for a fling's step.
@@ -451,6 +454,7 @@ impl App {
         self.send(Input::OpenAgent(focus.pane_id.clone()));
         let mut agent = AgentScreen::new();
         agent.name = focus.name.clone();
+        agent.set_read_aloud(self.read_aloud);
         self.agent = Some(agent);
     }
 
@@ -482,6 +486,17 @@ impl App {
                 }
             }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
+            AgentHit::ReadAloud => {
+                self.read_aloud = !self.read_aloud;
+                log::info!(
+                    "agent view: read aloud {}",
+                    if self.read_aloud { "on" } else { "off" }
+                );
+                self.send(Input::ReadAloud(self.read_aloud));
+                if let Some(agent) = &mut self.agent {
+                    agent.set_read_aloud(self.read_aloud);
+                }
+            }
             AgentHit::Submit => self.send(Input::Submit),
             AgentHit::Scratch => self.send(Input::Scratch),
             AgentHit::Clear => self.send(Input::Clear),
@@ -745,6 +760,7 @@ impl MorphApp for App {
             focus: None,
             dictation: None,
             agent: None,
+            read_aloud: false,
             started: Instant::now(),
             last_update: Instant::now(),
         };
