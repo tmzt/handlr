@@ -202,3 +202,76 @@ Items 2 and 3 are unchanged.
 
 **Step 2's live turn** also checks that the spoken question ends with "For
 <the model's handle, read as words>".
+
+## Amendment — 2026-10-22 23:44 EDT: the handle comes from the user's words, is not spoken, and is matched loosely on its way back from Gemini
+
+On the owner's instruction. This replaces three parts of the 23:40 EDT
+amendment:
+- the spoken "For <handle>" in the approval question;
+- the rules for when a handle is invalid;
+- step 2's check of the spoken ending.
+
+Everything else in that amendment stands: the required `handle`
+argument, the normalising, `-2` for a handle already pending, and the
+handle returned to the model.
+
+**Written from the user's words.**
+- Gemini writes the handle from what the user said in the turn. For
+  example, "send usage to claude in highbay" becomes
+  `send-usage-claude-highbay`.
+- The daemon checks the handle against the turn's utterance. At least
+  two-thirds of the handle's words must match words of the utterance, by
+  the word rule below.
+- A handle that fails this check, or is missing, is replaced. The daemon
+  builds one from the utterance's words, normalised, after dropping
+  articles ("a", "an", "the", "to", "in", "on").
+- This ties the confirmation to the request the user made.
+
+**Not spoken.**
+- The approval question is `Approve sending "<command>" to <agent>?`, with
+  no "For …" ending. For voice confirmations, `confirm_text` omits the
+  handle.
+- The handle still goes to the companion in `confirm.requested`, which
+  may show it on screen, and the nonce is computed over it.
+
+**Matched loosely on the way back.**
+- The tool result gives Gemini the stored handle. When Gemini later
+  returns a handle (in a tool call, or in `confirm.status` by handle),
+  the daemon matches it against the requester's **pending** handles.
+- **Normalising:** lowercase, split on `-`, spaces and punctuation, and
+  write digits as words.
+- **Word rule:** two words match when either:
+  - their edit distance is at most 1, or 2 for words of 6 letters or more;
+    or
+  - a word matches two adjacent words joined ("highbay" and "high bay").
+- **Score:** the share of the stored handle's words that the returned
+  string matches, in any order.
+- **Accepted:** only a best match scoring at least 2/3 that also matches at
+  least one more word than the second best. Otherwise nothing matches, and
+  the tool says which handles are pending.
+
+**The exact string is what is checked.** The nonce is always computed over
+the stored handle, never the returned one. Loose matching only chooses
+which pending confirmation is meant, and the approval itself still needs
+the token.
+
+**Entropy.**
+- A handle has at least 3 words. A shorter one is replaced, as above.
+- A new handle that would match a pending one under the rule above gets
+  a distinguishing word appended: the agent's tab code spelled out, or
+  else a word from the BIP-39 list.
+- So any two pending handles stay far enough apart that a returned
+  handle cannot match both.
+
+**Step 1's tests** gain:
+- a handle not drawn from the utterance is replaced;
+- "send usage claude high bay" and "usage-claude-highbay" match
+  `send-usage-claude-highbay`;
+- with `send-usage-claude-highbay` and `send-continue-claude-highbay`
+  pending, "send claude highbay" matches neither;
+- a new handle too close to a pending one gets a distinguishing word;
+- the nonce over the stored handle approves after a loose match.
+
+**Step 2's live turn** checks:
+- the question has no "For …" ending;
+- the `handle` in `confirm.requested` uses the user's words.
