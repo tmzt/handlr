@@ -22,7 +22,8 @@ use tokio::net::UnixListener;
 use tokio::sync::broadcast;
 
 use crate::config::{AgentConfig, AppConfig, NamingConfig};
-use crate::core::confirm::{Broker, ConfirmEvent, ConfirmView, DEFAULT_TTL};
+use crate::core::agents;
+use crate::core::confirm::{Broker, ConfirmEvent, ConfirmView, WordPriors, DEFAULT_TTL};
 use crate::core::naming::{self, Names};
 use crate::watch::WatchRegistry;
 
@@ -91,8 +92,10 @@ impl Daemon {
             .map(Duration::from_secs)
             .unwrap_or(DEFAULT_TTL);
         let (events, _) = broadcast::channel(256);
+        let broker = Broker::new(Arc::new(client.clone()), ttl);
+        broker.set_word_priors(word_priors(&config.agents, &config.naming, None));
         Arc::new(Daemon {
-            broker: Broker::new(Arc::new(client.clone()), ttl),
+            broker,
             client,
             agents: config.agents.clone(),
             naming: config.naming.clone(),
@@ -105,9 +108,16 @@ impl Daemon {
         })
     }
 
-    /// Every pane in `snapshot`, named by `[naming]`.
+    /// Every pane in `snapshot`, named by `[naming]`. The broker's word
+    /// priors are refreshed from it on the way.
     pub fn names(&self, snapshot: &serde_json::Value) -> Names {
-        Names::from_snapshot(snapshot, &self.naming)
+        let names = Names::from_snapshot(snapshot, &self.naming);
+        self.broker.set_word_priors(word_priors(
+            &self.agents,
+            &self.naming,
+            Some((snapshot, &names)),
+        ));
+        names
     }
 
     /// The names of `pane_id` from a fresh snapshot, or `None` when herdr
@@ -126,6 +136,37 @@ impl Daemon {
             tab: named.tab.as_ref().map(|t| t.shown.clone()),
         })
     }
+}
+
+/// What confirmation handle words are worth (plan 20261023_01, section
+/// 3.2): the words of every allowed command, every agent's `[[agents]]`
+/// name, `[naming]` alias and (from `snapshot`) shown and spoken name, the
+/// snapshot's project and workspace names, and the names letters are
+/// spelled with.
+pub fn word_priors(
+    agents: &[AgentConfig],
+    naming: &NamingConfig,
+    snapshot: Option<(&serde_json::Value, &Names)>,
+) -> WordPriors {
+    let mut agent_words: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
+    agent_words.extend(naming.aliases.values().cloned());
+    let mut projects: Vec<String> = Vec::new();
+    if let Some((snap, names)) = snapshot {
+        for named in &names.agents {
+            agent_words.push(named.agent_part.shown.clone());
+            agent_words.push(named.agent_part.spoken.clone());
+            if let Some(project) = &named.project {
+                projects.push(project.shown.clone());
+                projects.push(project.spoken.clone());
+            }
+        }
+        projects.extend(agents::workspace_labels(snap).into_values());
+    }
+    WordPriors::new()
+        .with_commands(agents.iter().flat_map(|a| a.allowed_commands.iter()))
+        .with_agents(agent_words)
+        .with_projects(projects)
+        .with_letter_names(('a'..='z').filter_map(|c| naming::letter_name(c, naming)))
 }
 
 /// How long a name lookup waits for herdr before going without names.
@@ -191,6 +232,17 @@ impl Default for ServeOptions {
 pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOptions) {
     if options.show_tokens {
         tokio::spawn(print_tokens(Arc::clone(&daemon), daemon.broker.subscribe()));
+    }
+    // The word priors from the first snapshot; later ones refresh them.
+    {
+        let daemon = Arc::clone(&daemon);
+        tokio::spawn(async move {
+            if let Ok(Ok(snap)) =
+                tokio::time::timeout(NAME_LOOKUP_TIMEOUT, daemon.client.list_panes()).await
+            {
+                daemon.names(&snap);
+            }
+        });
     }
     if let Some(transport) = options.event_transport {
         tokio::spawn(watcher::run(
@@ -275,6 +327,28 @@ mod tests {
             project: None,
             tab: tab.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn word_priors_come_from_the_config_and_the_snapshot() {
+        let agents = vec![AgentConfig::new(
+            "claude",
+            vec!["continue".to_string(), "/usage".to_string()],
+            true,
+        )];
+        let naming = NamingConfig::default();
+        let p = word_priors(&agents, &naming, None);
+        assert_eq!(p.prior("usage", None), 0.25);
+        assert_eq!(p.prior("claude", None), 0.25);
+        assert_eq!(p.prior("aitch", None), 1.0 / 26.0);
+        assert_eq!(p.prior("highbay", None), 1.0 / 64.0);
+        let snap = serde_json::json!({
+            "workspaces": [{"workspace_id": "w1", "label": "highbay"}],
+            "panes": [{"pane_id": "p1", "workspace_id": "w1", "agent": "claude"}]
+        });
+        let names = Names::from_snapshot(&snap, &naming);
+        let p = word_priors(&agents, &naming, Some((&snap, &names)));
+        assert_eq!(p.prior("highbay", None), 0.25);
     }
 
     #[test]

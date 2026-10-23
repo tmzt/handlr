@@ -362,9 +362,11 @@ async fn approve_sends_once_and_ran_lists_it() {
         "{asked}"
     );
     assert_eq!(asked["params"]["spoken"], "Claude");
-    // With no handle from the model, one is made from the user's words; it
-    // is not spoken.
-    assert_eq!(asked["params"]["handle"], "send-continue-claude", "{asked}");
+    // With no handle from the model, one is made from the command and the
+    // agent, padded to three words with a BIP-39 word; it is not spoken.
+    let handle = asked["params"]["handle"].as_str().unwrap();
+    assert!(handle.starts_with("continue-claude-"), "{asked}");
+    assert_eq!(handle.split('-').count(), 3, "{asked}");
     assert!(
         c.position(|m| m["method"] == "turn.say")
             < c.position(|m| m["method"] == "confirm.requested")

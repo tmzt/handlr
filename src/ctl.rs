@@ -9,6 +9,11 @@
 //! `handlr serve`'s terminal. They are turned into the `nonce` here and
 //! never sent.
 //!
+//! `--handle <text>` adds a `handle` param. For `confirm.status` the
+//! result says how it matched (`matched`: `id`, `exact`, `coverage` or
+//! `entropy`, with `bits`); an ambiguous handle (`-32009`) and a miss
+//! print the pending handles (`data.pending`, newest first).
+//!
 //! `--client <name>` sets the client label (default `ctl`), and so the
 //! principal, `local:<name>`. A requester cannot approve its own command,
 //! so trying the confirmation flow by hand takes two names.

@@ -113,8 +113,8 @@ pub struct RunCommandParams {
     /// The shell command string to execute.
     pub command: String,
     /// Required. A short name for this action in lowercase words joined by
-    /// '-', from the user's own words, naming the command and the agent
-    /// (e.g. send-usage-claude-highbay).
+    /// '-', naming the command and the agent (and its project) as the user
+    /// meant them (e.g. send-continue-claude-highbay).
     pub handle: String,
 }
 
@@ -217,7 +217,7 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
         .with_parameters::<FocusParams>(),
         FunctionDeclaration::new(
             "run_command",
-            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. handlr asks the user to approve it when that agent requires approval.",
+            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. handlr asks the user to approve it when that agent requires approval. Use the command's and agent's real names; the returned `handle` is the name handlr kept.",
             None,
         )
         .with_parameters::<RunCommandParams>(),
@@ -288,6 +288,10 @@ mod tests {
         assert!(prompt.contains("RAG-Based Environment Context"));
         assert!(prompt.contains("Action Tools (`focus`, `run_command`"));
         assert!(prompt.contains("`watch_pane(pane_id)`"));
+        assert!(prompt.contains("`run_command(pane_id, command, handle)`"));
+        assert!(prompt.contains("There are no inspection tools"));
+        assert!(prompt.contains("as the user meant them"));
+        assert!(!prompt.contains("taken from the user's own words"));
         assert!(prompt.contains("Rules for Commands & Vocal Confirmation"));
         assert!(prompt.contains("Voice Output Guidelines"));
         assert!(!prompt.contains("<system_prompt>"));

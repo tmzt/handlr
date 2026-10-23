@@ -612,3 +612,83 @@ async fn confirm_requested_carries_names() {
     assert_eq!(r["result"]["outcome"], "sent", "{r}");
     assert_eq!(herdr.targets("pane.send_input"), vec!["w1:p2"]);
 }
+
+#[tokio::test]
+async fn status_by_handle_lists_pending_when_ambiguous() {
+    // Plan 20261023_01, section 3.3 and step 3.
+    let (_dir, socket, _daemon) = start().await;
+    let mut mcp = Client::hello(&socket, "mcp").await;
+    for (command, handle) in [
+        ("continue", "send-continue-claude-highbay"),
+        ("/compact", "send-compact-claude-highbay"),
+    ] {
+        let r = mcp
+            .call(
+                "agents.send",
+                json!({"pane_id": "p1", "command": command, "handle": handle}),
+            )
+            .await;
+        assert_eq!(r["result"]["status"], "pending", "{r}");
+    }
+
+    // 3 bits for the first, 1 for the second: neither is taken, and the
+    // pending handles are listed, newest first.
+    let r = mcp
+        .call("confirm.status", json!({"handle": "continue claude"}))
+        .await;
+    assert_eq!(r["error"]["code"], -32009, "{r}");
+    assert_eq!(
+        r["error"]["data"]["pending"],
+        json!([
+            "send-compact-claude-highbay",
+            "send-continue-claude-highbay"
+        ]),
+        "{r}"
+    );
+    assert_eq!(
+        r["error"]["data"]["candidates"],
+        json!(["send-continue-claude-highbay"])
+    );
+    // A miss lists them too.
+    let r = mcp
+        .call("confirm.status", json!({"handle": "send claude highbay"}))
+        .await;
+    assert_eq!(r["error"]["code"], -32006, "{r}");
+    assert_eq!(r["error"]["data"]["pending"].as_array().unwrap().len(), 2);
+
+    // Every word of one: coverage; equal once normalised: exact.
+    let r = mcp
+        .call(
+            "confirm.status",
+            json!({"handle": "compact claude high bay"}),
+        )
+        .await;
+    assert_eq!(r["result"]["handle"], "send-compact-claude-highbay", "{r}");
+    assert_eq!(r["result"]["matched"], "coverage");
+    let r = mcp
+        .call(
+            "confirm.status",
+            json!({"handle": "Send Continue Claude Highbay"}),
+        )
+        .await;
+    assert_eq!(r["result"]["matched"], "exact", "{r}");
+    assert!(r["result"].get("bits").is_none());
+
+    // The distinguished one, by its distinctive word alone.
+    let r = mcp
+        .call(
+            "agents.send",
+            json!({"pane_id": "p1", "command": "continue", "handle": "continue-claude-highbay-ripple"}),
+        )
+        .await;
+    assert_eq!(r["result"]["status"], "pending", "{r}");
+    let r = mcp
+        .call("confirm.status", json!({"handle": "the ripple one"}))
+        .await;
+    assert_eq!(
+        r["result"]["handle"], "continue-claude-highbay-ripple",
+        "{r}"
+    );
+    assert_eq!(r["result"]["matched"], "entropy");
+    assert!(r["result"]["bits"].as_f64().unwrap() >= 6.0, "{r}");
+}

@@ -663,28 +663,45 @@ async fn call(
                     ))
                 }
             };
-            let (view, outcome) =
-                daemon
-                    .broker
-                    .status(conn.principal(), &key)
-                    .ok_or_else(|| {
-                        let not_found = ConfirmError::NotFound;
-                        let pending = daemon.broker.pending_handles(&conn.principal().id);
-                        match key {
-                            // Say which handles are pending (plan 20261022_08,
-                            // 23:44 EDT amendment).
-                            StatusKey::Handle(_) if !pending.is_empty() => ErrorObject::new(
-                                not_found.code(),
-                                format!("{not_found}; pending: {}", pending.join(", ")),
-                            ),
-                            _ => confirm_error(not_found),
-                        }
-                    })?;
-            ok(common::ConfirmStatusResult {
-                confirm_id: view.confirm_id,
-                handle: view.handle,
-                outcome: wire_outcome(outcome),
-            })
+            let found = daemon.broker.find(conn.principal(), &key).map_err(|e| {
+                // Say which handles are pending, newest first (plan
+                // 20261022_08, 23:44 EDT amendment; plan 20261023_01,
+                // section 3.3).
+                let mut pending = daemon.broker.pending_handles(&conn.principal().id);
+                let by_handle = matches!(key, StatusKey::Handle(_));
+                let mut error = match (&e, by_handle) {
+                    (ConfirmError::NotFound, true) if !pending.is_empty() => {
+                        ErrorObject::new(e.code(), format!("{e}; pending: {}", pending.join(", ")))
+                    }
+                    _ => confirm_error(e.clone()),
+                };
+                if by_handle {
+                    pending.reverse();
+                    let mut data = serde_json::Map::new();
+                    data.insert("pending".to_string(), serde_json::json!(pending));
+                    if let ConfirmError::AmbiguousHandle(candidates) = &e {
+                        data.insert("candidates".to_string(), serde_json::json!(candidates));
+                    }
+                    error.data = Some(Value::Object(data));
+                }
+                error
+            })?;
+            // How it was found, for `handlr ctl` (plan 20261023_01, section 4).
+            let mut result = ok(common::ConfirmStatusResult {
+                confirm_id: found.view.confirm_id,
+                handle: found.view.handle,
+                outcome: wire_outcome(found.outcome),
+            })?;
+            if let Value::Object(obj) = &mut result {
+                obj.insert(
+                    "matched".to_string(),
+                    Value::String(found.matched.as_str().to_string()),
+                );
+                if let Some(bits) = found.matched.bits() {
+                    obj.insert("bits".to_string(), serde_json::json!(bits));
+                }
+            }
+            Ok(result)
         }
         methods::EVENTS_SUBSCRIBE => {
             let p: common::EventsSubscribeParams = params(raw)?;

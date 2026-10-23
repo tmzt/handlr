@@ -43,8 +43,8 @@ pub struct TurnLog {
 pub struct VoiceTurn {
     pub broker: Arc<Broker>,
     pub log: Arc<TurnLog>,
-    /// What the user said in this turn: a confirmation's handle must come
-    /// from it (plan 20261022_08, 23:44 EDT amendment).
+    /// What the user said in this turn, for the log only: the model's
+    /// handle is kept as given (plan 20261022_08, 01:26 EDT amendment).
     pub utterance: Option<String>,
 }
 
@@ -267,29 +267,37 @@ impl HerdrToolExecutor {
                 });
             let request = HandleRequest {
                 given: args.get("handle").and_then(|v| v.as_str()),
-                utterance: turn.utterance.as_deref(),
                 command: &final_cmd,
                 agent: &spoken,
                 tab_code: tab_code.as_deref(),
             };
             // A handle taken between settling it and asking is settled again.
             let mut attempt = 0;
+            let priors = turn.broker.word_priors();
             let (confirm_id, handle) = loop {
-                let pending = turn.broker.pending_handles(&self.principal.id);
-                let handle = confirm::settle_handle(&request, &pending, confirm::random_word);
-                match turn.broker.request(
+                let pending = turn.broker.pending_handle_infos(&self.principal.id);
+                let settled =
+                    confirm::settle_handle(&request, &pending, &priors, confirm::random_word);
+                match turn.broker.request_with(
                     &self.principal,
                     &pane_id,
                     &agent_name,
                     &final_cmd,
-                    Some(&handle),
+                    Some(&settled),
                     Lifetime::VoiceTurn,
                 ) {
-                    Ok(id) => break (id, handle),
+                    Ok(id) => break (id, settled.handle),
                     Err(ConfirmError::DuplicateHandle(_)) if attempt < 3 => attempt += 1,
                     Err(e) => return Err(e.to_string()),
                 }
             };
+            log::info!(
+                "Confirmation {} handle '{}' (given {:?}; heard {:?})",
+                confirm_id,
+                handle,
+                request.given,
+                turn.utterance
+            );
             turn.log.confirmations.lock().unwrap().push(confirm_id);
             return Ok(serde_json::json!({
                 "status": "awaiting_user_approval",
@@ -855,7 +863,7 @@ mod tests {
         };
         let run = |handle: &'static str, command: &'static str| json!({ "pane_id": "p1", "command": command, "handle": handle });
 
-        // The model's handle, from the user's words, normalised.
+        // The model's handle, normalised.
         let said = "send usage to claude in high bay";
         let res = executor(said)
             .execute_tool("run_command", &run("Send-Usage-Claude-Highbay", "/usage"))
@@ -869,19 +877,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(res["handle"], "send-usage-claude-highbay-2");
-        // A handle not drawn from what the user said is replaced.
-        let res = executor("continue claude please")
-            .execute_tool("run_command", &run("restart-everything-now", "continue"))
+        // A garbled transcript does not replace the model's handle.
+        let res = executor("sin did again")
+            .execute_tool(
+                "run_command",
+                &run("send-continue-again-claude", "continue"),
+            )
             .await
             .unwrap();
-        assert_eq!(res["handle"], "continue-claude-please");
+        assert_eq!(res["handle"], "send-continue-again-claude");
 
         assert_eq!(log.confirmations.lock().unwrap().len(), 3);
         let principal = Principal::local("handlr");
         let (view, _) = broker
             .status(
                 &principal,
-                &StatusKey::Handle("continue-claude-please".to_string()),
+                &StatusKey::Handle("send-continue-again-claude".to_string()),
             )
             .unwrap();
         assert_eq!(view.command, "continue");
@@ -890,7 +901,7 @@ mod tests {
             [
                 "send-usage-claude-highbay",
                 "send-usage-claude-highbay-2",
-                "continue-claude-please"
+                "send-continue-again-claude"
             ]
         );
         assert!(match &client.transport() {

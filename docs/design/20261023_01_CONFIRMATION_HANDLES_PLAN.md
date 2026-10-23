@@ -1,7 +1,7 @@
 ---
 title: Confirmation handles, in-turn and out of sequence
 date: 2026-10-23
-status: Draft
+status: In implementation
 covers:
   - "The two paths a confirmation handle takes: within the turn that made
     it, and out of sequence (a later turn, `confirm.status`, another
@@ -426,3 +426,45 @@ carries the rules, not the prompt.
    should the priors be fixed from the config only?
 5. **The optional prompt items** (section 6, 4 to 7): which, if any, go in
    with step 5?
+
+## Amendment — 2026-10-23 01:48 EDT: implementation started; steps 1, 2, 3, 5 and 6 done
+
+The owner approved this plan, with the must-fix prompt lines and the
+in-turn trust first. The status is now `In implementation`, and the
+document is immutable (AGENTS.md, Rule 1.5).
+
+**Not done yet:**
+- **Step 4** (reply by handle) waits on its open question.
+- **Step 7** is the live check on the S23.
+
+**Decided where the plan was open:**
+- **The thresholds:** a 6-bit floor and a 3-bit margin, and candidates
+  scoring 3 bits or more are listed in `-32009`'s data. Exact duplicates
+  still get `-2`.
+- **When a handle stands apart.** The check skips the exact-match step,
+  since a handle always matches itself exactly.
+- **Priors:**
+  - a word in several classes takes the most common class's prior;
+  - stop words are 0 bits;
+  - a recorded BIP-39 distinguisher is 11 bits;
+  - a spelled tab code keeps its letter prior.
+- **When priors are built:** from the config at start, from a first herdr
+  snapshot, and again on every snapshot the daemon takes. They are only
+  swapped when they change.
+- **Ambiguous or a miss.** It is ambiguous (`-32009`) only when some
+  candidate reaches 3 bits; otherwise it is a miss (`-32006`). Both carry
+  `data.pending`.
+- **What `confirm.status` returns** for a handle: `matched` (`id`,
+  `exact`, `coverage` or `entropy`), and `bits` for an entropy match.
+- **The `handle` field's schema text** in the `run_command` declaration
+  now says "as the user meant them", the same correction as prompt line 35.
+- **Consequences of the measure,** with the tests changed to match:
+  - `send-usage-claude` stands apart from `send-usage-claude-highbay`;
+  - a third exact duplicate gets `-3` and a word;
+  - two copies of the same request, X and X-2: "continue claude bubble"
+    is a coverage match to X, not `-32009` as step 7's text expected.
+    Step 7's check follows section 3.4's rules.
+
+**Follow-up:** `libhandlr_proto` still needs an `AMBIGUOUS_HANDLE =
+-32009` constant and the `matched` and `bits` result fields. handlr adds
+them on top of the serialised result for now.

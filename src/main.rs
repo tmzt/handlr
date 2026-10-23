@@ -5,7 +5,8 @@
 //! ```text
 //! handlr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
 //!                 --socket <herdr.sock> | --mock] [--listen <handlr.sock>] [--show-tokens]
-//! handlr ctl [--listen <handlr.sock>] [--client <name>] [--follow] <method> [<params as JSON>]
+//! handlr ctl [--listen <handlr.sock>] [--client <name>] [--follow] [--handle <text>]
+//!            <method> [<params as JSON>]
 //! handlr pair [--listen <handlr.sock>] [--name <name>] [--protocols companion,harness]
 //!             [--replace] [--code <code>] [--qr-png <file>]
 //! ```
@@ -26,6 +27,8 @@ struct AppArgs {
     follow: bool,
     /// `ctl`'s client label.
     client: Option<String>,
+    /// `ctl`'s `handle` param (`confirm.status --handle "…"`).
+    handle: Option<String>,
     /// `ctl`'s method and params, in order.
     positional: Vec<String>,
     /// `pair`'s options.
@@ -49,6 +52,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         show_tokens: false,
         follow: false,
         client: None,
+        handle: None,
         positional: Vec::new(),
         name: None,
         protocols: Vec::new(),
@@ -68,6 +72,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--show-tokens" => parsed.show_tokens = true,
             "--follow" => parsed.follow = true,
             "--client" => parsed.client = args.next(),
+            "--handle" => parsed.handle = args.next(),
             "--name" => parsed.name = args.next(),
             "--protocols" => {
                 if let Some(list) = args.next() {
@@ -227,15 +232,21 @@ async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let mut positional = args.positional.iter();
     let Some(method) = positional.next() else {
         return Err(
-            "usage: handlr ctl [--listen <socket>] [--client <name>] [--follow] <method> [<params as JSON>]".into(),
+            "usage: handlr ctl [--listen <socket>] [--client <name>] [--follow] [--handle <text>] <method> [<params as JSON>]".into(),
         );
     };
-    let params = match positional.next() {
+    let mut params: serde_json::Value = match positional.next() {
         Some(json) => {
             serde_json::from_str(json).map_err(|e| format!("params are not JSON: {e}"))?
         }
         None => serde_json::json!({}),
     };
+    if let Some(handle) = &args.handle {
+        let obj = params
+            .as_object_mut()
+            .ok_or("--handle needs params that are a JSON object")?;
+        obj.insert("handle".to_string(), serde_json::json!(handle));
+    }
     Ok(handlr::ctl::run(
         &socket,
         args.client.as_deref().unwrap_or("ctl"),
