@@ -322,6 +322,31 @@ impl Sessions {
     }
 }
 
+impl Sessions {
+    /// The whole text of the agent's reply at `ts` in `pane`'s session,
+    /// redacted, for `speech.summarize` (plan 20261023_05, decision 3).
+    /// The text entries of one reply share its time and are joined. Reads
+    /// back until the reply is found, within `read_tail`'s limits; `None`
+    /// when it is not there.
+    pub fn reply_text(&self, pane: &AgentRef, ts: &str) -> Option<String> {
+        let is_reply = |i: &Item| i.is_text() && i.role == Role::Assistant && i.ts == ts;
+        if ts.is_empty() {
+            return None;
+        }
+        let read = self.read(pane, |items| items.iter().any(is_reply))?;
+        let parts: Vec<&str> = read
+            .items
+            .iter()
+            .filter(|i| is_reply(i))
+            .map(|i| i.text.as_str())
+            .collect();
+        if parts.is_empty() {
+            return None;
+        }
+        Some(cut(&redact::redact(&parts.join("\n\n")), TAIL_MAX as usize))
+    }
+}
+
 impl From<Matched> for libhandlr_proto::common::SessionMatched {
     fn from(m: Matched) -> Self {
         match m {

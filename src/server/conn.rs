@@ -79,6 +79,9 @@ pub(super) struct Conn {
     /// A companion's notices, held while a confirmation is pending.
     pub(super) notices: Mutex<Announcer<companion::Notice>>,
     pub(super) next_notice: std::sync::atomic::AtomicU64,
+    /// Held while a `speech.summarize` runs: one at a time per connection
+    /// (plan 20261023_05, decision 5).
+    pub(super) speech: tokio::sync::Mutex<()>,
 }
 
 impl Conn {
@@ -105,7 +108,7 @@ impl Conn {
         self.opened.lock().unwrap().extend(ids.iter().copied());
     }
 
-    fn is_companion(&self) -> bool {
+    pub(super) fn is_companion(&self) -> bool {
         self.session.get().is_some()
     }
 
@@ -214,6 +217,7 @@ async fn serve<S>(
         focus: Mutex::new(None),
         notices: Mutex::new(Announcer::default()),
         next_notice: std::sync::atomic::AtomicU64::new(0),
+        speech: tokio::sync::Mutex::new(()),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -466,7 +470,7 @@ fn wire_status(status: &libherdr::protocol::AgentStatus) -> String {
 
 /// Whether session files are on this machine: not for a remote herdr
 /// (plan 20261022_03, decision 4).
-fn sessions_here(daemon: &Daemon) -> bool {
+pub(super) fn sessions_here(daemon: &Daemon) -> bool {
     !matches!(
         daemon.client.transport(),
         libherdr::transport::HerdrTransport::RemoteSsh { .. }
@@ -486,7 +490,7 @@ fn agent_session(daemon: &Daemon, pane: &agents::AgentRef) -> Option<common::Age
     })
 }
 
-async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
+pub(super) async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
     conn.daemon
         .client
         .list_panes()
@@ -508,7 +512,11 @@ pub(super) fn resolve_error(e: ResolveError) -> ErrorObject {
 /// Resolve a method's target to a pane id (plan 20261022_05, decision 10):
 /// a pane id, a tab label as written, an alias value, a spoken form or its
 /// capitals, or a tab number.
-fn resolve_target(daemon: &Daemon, snap: &Value, target: &str) -> Result<String, ErrorObject> {
+pub(super) fn resolve_target(
+    daemon: &Daemon,
+    snap: &Value,
+    target: &str,
+) -> Result<String, ErrorObject> {
     daemon
         .names(snap)
         .resolve(target)
@@ -643,6 +651,18 @@ async fn call(
                 session,
                 status: wire_status(&pane.status),
             })
+        }
+        methods::SPEECH_SUMMARIZE => {
+            // Plan 20261023_05, decision 4: companions only, with
+            // session.peek's permission for the pane.
+            if !conn.is_companion() {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "speech.summarize is served to companions",
+                ));
+            }
+            let p: common::SpeechSummarizeParams = params(raw)?;
+            super::speech::speech_summarize(conn, p).await
         }
         methods::AGENTS_SEND => {
             let p: common::AgentsSendParams = params(raw)?;

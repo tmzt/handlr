@@ -13,6 +13,7 @@ use handlr::config::{AgentConfig, AppConfig};
 use handlr::reasoning::{MockHandler, MockReasoningEngine, ReasoningEngine, ToolExecutor};
 use handlr::server::companion::{INTERRUPTED_ENTRY, TurnOptions};
 use handlr::server::link::{Link, LinkSettings};
+use handlr::server::speech::SpeechOptions;
 use handlr::server::{self, CoreEvent, Daemon, ServeOptions};
 use handlr::sessions::Sessions;
 use handlr::transport::{AgentSession, AgentStatus, HerdrClient, HerdrTransport};
@@ -110,6 +111,17 @@ async fn start_home(
     with_link: bool,
     home: &Path,
 ) -> Env {
+    start_speech(config, engine, with_link, home, SpeechOptions::default()).await
+}
+
+/// As `start_home`, with `speech.summarize` set up by `speech`.
+async fn start_speech(
+    config: AppConfig,
+    engine: Arc<dyn ReasoningEngine>,
+    with_link: bool,
+    home: &Path,
+    speech: SpeechOptions,
+) -> Env {
     let dir = tempfile::Builder::new()
         .prefix("hc")
         .tempdir_in("/tmp")
@@ -139,6 +151,7 @@ async fn start_home(
             session_dir: Some(sessions.clone()),
             // The synthetic fixtures, never this machine's own sessions.
             agent_sessions: Some(Arc::new(Sessions::with_home(home))),
+            speech,
         },
     );
     let listener = server::bind(&socket).await.unwrap();
@@ -1270,4 +1283,232 @@ async fn peeked_entries_are_redacted() {
     assert!(!text.contains("not-a-real-secret-value"), "{text}");
     assert!(!text.contains("not-a-real-token"), "{text}");
     assert!(text.contains("[redacted]"), "{text}");
+}
+
+// speech.summarize (plan 20261023_05, step 3, as amended at 15:45 EDT).
+
+/// The time of the reply `speech_home` writes.
+const REPLY_TS: &str = "2026-01-02T12:00:05.000Z";
+
+/// A home whose session for p1 (see `give_session`) ends in an assistant
+/// reply of `text`, at `REPLY_TS`.
+fn speech_home(text: &str) -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join(".claude/projects/-work-example");
+    std::fs::create_dir_all(&project).unwrap();
+    let user = json!({
+        "type": "user", "cwd": "/work/example", "timestamp": "2026-01-02T12:00:00.000Z",
+        "message": {"role": "user", "content": "What changed?"}
+    });
+    let reply = json!({
+        "type": "assistant", "cwd": "/work/example", "timestamp": REPLY_TS,
+        "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}
+    });
+    std::fs::write(
+        project.join("00000000-0000-4000-8000-0000000000a1.jsonl"),
+        format!("{user}\n{reply}\n"),
+    )
+    .unwrap();
+    home
+}
+
+/// A daemon reading `home`, whose summaries come from `engine` within
+/// `timeout`.
+async fn start_summaries(home: &Path, engine: Arc<dyn ReasoningEngine>, timeout: Duration) -> Env {
+    let env = start_speech(
+        confirming(),
+        Arc::new(MockReasoningEngine::with_handler(Script)),
+        false,
+        home,
+        SpeechOptions {
+            engine: Some(engine),
+            timeout: Some(timeout),
+            ..SpeechOptions::default()
+        },
+    )
+    .await;
+    give_session(&env.daemon).await;
+    env
+}
+
+/// Synthetic: the right shape for a Google key, made-up characters.
+const FAKE_KEY: &str = "AIzaSyD0nTuSeTh1sFakeKeyAbCdEfGhIjKlMn";
+
+#[tokio::test]
+async fn the_whole_reply_reaches_the_engine_redacted_and_is_summarised_once() {
+    // Past 500 characters, with backquotes, a key and a closing sentence
+    // that the client's 500-character summary would not have.
+    let reply = format!(
+        "I changed `src/server/speech.rs` and set the key to {FAKE_KEY}. {} The very last sentence.",
+        "The rest of the change keeps every reply in order. ".repeat(12)
+    );
+    assert!(reply.chars().count() > 600);
+    let home = speech_home(&reply);
+    let mock = Arc::new(MockReasoningEngine::with_response(
+        "The speech module changed.",
+    ));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let (mut c, _) = Client::companion(&env).await;
+
+    let params = json!({"pane_id": "p1", "ts": REPLY_TS, "text": "cut off…"});
+    let r = c.call("speech.summarize", params.clone()).await;
+    assert_eq!(r["result"]["complex"], true, "{r}");
+    assert_eq!(r["result"]["spoken"], "The speech module changed.");
+    let sent = mock.recorded_transcripts();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].starts_with("The Claude agent in "), "{}", sent[0]);
+    assert!(sent[0].ends_with("The very last sentence."), "{}", sent[0]);
+    assert!(!sent[0].contains(FAKE_KEY), "{}", sent[0]);
+    assert!(sent[0].contains("[redacted]"));
+    assert!(!sent[0].contains("cut off"));
+
+    // The same reply again: the kept answer, and no second call.
+    let again = c.call("speech.summarize", params).await;
+    assert_eq!(again["result"], r["result"]);
+    assert_eq!(mock.recorded_transcripts().len(), 1);
+}
+
+#[tokio::test]
+async fn a_plain_reply_is_not_summarised() {
+    let home = speech_home("I ran the tests and they all pass. Shall I go on?");
+    let mock = Arc::new(MockReasoningEngine::with_response("unused"));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c
+        .call(
+            "speech.summarize",
+            json!({"pane_id": "p1", "ts": REPLY_TS, "text": "I ran the tests"}),
+        )
+        .await;
+    assert_eq!(r["result"], json!({"complex": false}), "{r}");
+    assert!(mock.recorded_transcripts().is_empty());
+}
+
+#[tokio::test]
+async fn a_reply_not_found_is_measured_from_the_clients_text() {
+    let home = speech_home("Plain.");
+    let mock = Arc::new(MockReasoningEngine::with_response("Summary."));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c
+        .call(
+            "speech.summarize",
+            json!({"pane_id": "p1", "ts": "2026-01-02T13:00:00.000Z", "text": "See `a.rs`."}),
+        )
+        .await;
+    assert_eq!(r["result"]["spoken"], "Summary.", "{r}");
+    assert!(mock.recorded_transcripts()[0].ends_with("See `a.rs`."));
+}
+
+/// A summary that never comes in time.
+struct Never;
+
+#[async_trait]
+impl MockHandler for Never {
+    async fn handle(&self, _: &str, _: &dyn ToolExecutor) -> Result<Option<String>, String> {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Ok(Some("too late".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn a_summary_that_times_out_is_unavailable() {
+    let home = speech_home("Changed `x`.");
+    let env = start_summaries(
+        home.path(),
+        Arc::new(MockReasoningEngine::with_handler(Never)),
+        Duration::from_millis(200),
+    )
+    .await;
+    let (mut c, _) = Client::companion(&env).await;
+    let started = Instant::now();
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(r["error"]["code"], -32015, "{r}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // An engine error is unavailable too.
+    let env = start_summaries(
+        home.path(),
+        Arc::new(MockReasoningEngine::with_error("no key")),
+        WAIT,
+    )
+    .await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(r["error"]["code"], -32015, "{r}");
+}
+
+#[tokio::test]
+async fn summaries_are_for_companions_and_agent_panes_only() {
+    let home = speech_home("Changed `x`.");
+    let env = start_summaries(
+        home.path(),
+        Arc::new(MockReasoningEngine::with_response("Summary.")),
+        WAIT,
+    )
+    .await;
+    // A shell pane: no agent.
+    match env.daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let mut shell = state.snapshot.workspaces[0].tabs[0].panes[0].clone();
+            shell.pane_id = "p2".to_string();
+            shell.extra.clear();
+            shell.terminal_title = None;
+            shell.agent_session = None;
+            shell.focused = false;
+            state.snapshot.workspaces[0].tabs[0].panes.push(shell);
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p2", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(r["error"]["code"], -32002, "{r}");
+    let r = c
+        .call(
+            "speech.summarize",
+            json!({"pane_id": "nowhere", "ts": REPLY_TS}),
+        )
+        .await;
+    assert_eq!(r["error"]["code"], -32002, "{r}");
+    // A harness client may not.
+    let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "ctl").await;
+    let r = local
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+}
+
+/// A summary that takes a moment.
+struct Slow;
+
+#[async_trait]
+impl MockHandler for Slow {
+    async fn handle(&self, _: &str, _: &dyn ToolExecutor) -> Result<Option<String>, String> {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        Ok(Some("Summary.".to_string()))
+    }
+}
+
+#[tokio::test]
+async fn a_second_summary_on_a_connection_waits_for_the_first() {
+    let home = speech_home("Changed `x`.");
+    let mock = Arc::new(MockReasoningEngine::with_handler(Slow));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let (mut c, _) = Client::companion(&env).await;
+    // Both at once, for the same reply: the second waits, then finds the
+    // first's answer kept.
+    let params = json!({"pane_id": "p1", "ts": REPLY_TS});
+    let first = c.request("speech.summarize", params.clone()).await;
+    let second = c.request("speech.summarize", params).await;
+    let a = c.response(first).await;
+    let b = c.response(second).await;
+    assert_eq!(a["result"]["spoken"], "Summary.", "{a}");
+    assert_eq!(b["result"], a["result"]);
+    assert_eq!(mock.recorded_transcripts().len(), 1);
 }

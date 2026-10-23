@@ -71,6 +71,8 @@ pub struct TurnOptions {
     /// The agents' own session readers, instead of those under `$HOME`
     /// (plan 20261022_03).
     pub agent_sessions: Option<Arc<crate::sessions::Sessions>>,
+    /// `speech.summarize`'s engine, prompts and timeout (plan 20261023_05).
+    pub speech: super::speech::SpeechOptions,
 }
 
 /// The engine, the session histories, and who is in a turn.
@@ -335,7 +337,7 @@ const GEMINI_KEY_FILE: &str = ".private/gemini_api_key";
 
 /// `[gemini] api_key_file`, or [`GEMINI_KEY_FILE`], made absolute against
 /// the working directory at startup.
-fn gemini_key_file(config: &AppConfig) -> PathBuf {
+pub(super) fn gemini_key_file(config: &AppConfig) -> PathBuf {
     let path = PathBuf::from(
         config
             .gemini
@@ -352,7 +354,7 @@ fn gemini_key_file(config: &AppConfig) -> PathBuf {
 /// The key in `path`, trimmed; `None` when the file does not exist or is
 /// empty, which leaves `GEMINI_API_KEY` to libinfer. A file anyone but its
 /// owner may access is refused. Errors name the file, never its contents.
-fn read_key_file(path: &Path) -> Result<Option<String>, String> {
+pub(super) fn read_key_file(path: &Path) -> Result<Option<String>, String> {
     use std::os::unix::fs::PermissionsExt;
     let meta = match std::fs::metadata(path) {
         Ok(meta) => meta,

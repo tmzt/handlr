@@ -7,6 +7,7 @@
 pub mod companion;
 pub mod conn;
 pub mod link;
+pub mod speech;
 mod watcher;
 
 use std::io::IsTerminal;
@@ -64,6 +65,9 @@ pub struct Daemon {
     pub turns: companion::TurnService,
     /// The agents' own session transcripts (plan 20261022_03).
     pub sessions: Arc<Sessions>,
+    /// `speech.summarize`: the summary prompt and its kept answers (plan
+    /// 20261023_05).
+    pub speech: speech::SpeechService,
 }
 
 impl Daemon {
@@ -101,8 +105,10 @@ impl Daemon {
             .agent_sessions
             .clone()
             .unwrap_or_else(|| Arc::new(Sessions::new()));
+        let speech = speech::SpeechService::new(config, turns.speech.clone());
         Arc::new(Daemon {
             sessions,
+            speech,
             broker,
             client,
             agents: config.agents.clone(),

@@ -5,6 +5,7 @@
 //! ```text
 //! handlr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
 //!                 --socket <herdr.sock> | --mock] [--listen <handlr.sock>] [--show-tokens]
+//!                [--prompts <ADDITIONAL_PROMPTS.md>]
 //! handlr ctl [--listen <handlr.sock>] [--client <name>] [--follow] [--handle <text>]
 //!            <method> [<params as JSON>]
 //! handlr pair [--listen <handlr.sock>] [--name <name>] [--protocols companion,harness]
@@ -24,6 +25,9 @@ struct AppArgs {
     /// The daemon socket, for `serve` and `ctl`.
     listen: Option<String>,
     show_tokens: bool,
+    /// `serve`'s prompts file, in place of the shipped
+    /// `ADDITIONAL_PROMPTS.md` (plan 20261023_05, decision 7).
+    prompts: Option<String>,
     follow: bool,
     /// `ctl`'s client label.
     client: Option<String>,
@@ -50,6 +54,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         mock_mode: false,
         listen: None,
         show_tokens: false,
+        prompts: None,
         follow: false,
         client: None,
         handle: None,
@@ -70,6 +75,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--mock" => parsed.mock_mode = true,
             "--listen" => parsed.listen = args.next(),
             "--show-tokens" => parsed.show_tokens = true,
+            "--prompts" => parsed.prompts = args.next(),
             "--follow" => parsed.follow = true,
             "--client" => parsed.client = args.next(),
             "--handle" => parsed.handle = args.next(),
@@ -207,7 +213,14 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     options.show_tokens |= args.show_tokens;
-    let daemon = handlr::server::Daemon::with_link(client, &config, link);
+    let turns = handlr::server::companion::TurnOptions {
+        speech: handlr::server::speech::SpeechOptions {
+            prompts_file: args.prompts.as_ref().map(expand_tilde),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let daemon = handlr::server::Daemon::with_turns(client, &config, link, turns);
     handlr::server::link::spawn(std::sync::Arc::clone(&daemon), link_listeners);
     handlr::server::run(daemon, listener, options).await;
     Ok(())
