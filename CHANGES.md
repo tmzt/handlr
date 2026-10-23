@@ -975,3 +975,25 @@ it needs the agy reader of step 4 and a SQLite dependency, so that test is
 written in step 4, as `#[ignore]` unless `HANDLR_AGY_EXAMPLE` names the
 copy. Step 1's mapping was checked instead with a throwaway decoder outside
 the repository, against the example and the synthetic fixtures alike.
+
+## 2026-10-23 17:31 EDT — plan 20261023_04, step 2: the pending panes and the Gemini turns as events
+
+Two small departures in `handlr-companion`, needed because the app sees
+the client's `State` only through its events (the `net` thread owns it):
+
+* **`Event::PendingPanes(Vec<String>)`.** Section 4 gives
+  `State::pending_panes()`, which is there, but the app cannot call it.
+  The same list is also given as an event whenever it changes, for the
+  cards' approval outline (A3).
+* **`Event::Conversation { speaker, text }`.** A5 moves the main screen's
+  conversation to the overview's lower half as a log. The main screen
+  kept only the last utterance heard and the last thing said, and
+  `Event::Say` also carries notices and replies read aloud. The client now
+  gives the user's words as a turn starts and each `turn.say` of the
+  running turn as `Conversation` lines (Gemini's are still given as
+  `Say`), so the log holds the Gemini turns only.
+
+Decision 6's refreshes (on `focus.changed`, and every 15 s) are asked only
+while no agent view is open, as step 2's **Done when:** says, and closing
+the view asks for one; `Event::Agents` is given on the first answer of
+each connection, then when the list changes.
