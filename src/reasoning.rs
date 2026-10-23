@@ -4,9 +4,10 @@
 //! and natural-language transcripts into tool calls and concise spoken feedback.
 
 pub use libinfer::{
-    EngineType, FunctionDeclaration, GeminiReasoningEngine, Message, ReasoningEngine,
-    ReasoningEngineBuilder, SessionBuilder, SessionManager, Tool, ToolExecutor,
+    Message, ReasoningEngine, Route, RoutingReasoningEngine, SessionBuilder, SessionManager,
+    ToolExecutor,
 };
+pub use libinfer_gemini::{FunctionDeclaration, GeminiReasoningEngine, Tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -229,6 +230,31 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
 // -------------------------------------------------------------------
 //  GeminiReasoningEngine
 // -------------------------------------------------------------------
+
+// -------------------------------------------------------------------
+//  Routes
+// -------------------------------------------------------------------
+
+/// What a routed turn answers.
+pub const ROUTED_REPLY: &str = "Okay.";
+
+/// The utterances handlr answers without asking Gemini
+/// (docs/design/20261022_07_LIBINFER_PROVIDERS_PLAN.md, decision 4): the
+/// most common non-requests. Routes never call tools; approving and
+/// denying are the companion's own.
+pub fn handlr_routes() -> Vec<Route> {
+    vec![Route::new(
+        &["never mind", "cancel", "forget it", "nothing"],
+        ROUTED_REPLY,
+    )]
+}
+
+/// `inner` behind [`handlr_routes`].
+pub fn with_handlr_routes(
+    inner: std::sync::Arc<dyn ReasoningEngine>,
+) -> std::sync::Arc<dyn ReasoningEngine> {
+    std::sync::Arc::new(RoutingReasoningEngine::new(inner, handlr_routes()))
+}
 
 // -------------------------------------------------------------------
 //  MockReasoningEngine

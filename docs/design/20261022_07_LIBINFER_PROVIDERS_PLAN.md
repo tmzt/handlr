@@ -1,7 +1,7 @@
 ---
 title: libinfer providers, the routing engine and the Gemini model setting
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - "Splitting `crates/libinfer` into a provider-neutral core (`libinfer`)
     and a Gemini provider (`libinfer-gemini`), and dropping libgenai"
@@ -233,3 +233,37 @@ is copied into `libinfer-gemini` at that point, with its licence notice
    there is a need? This plan keeps them in code.
 2. Should step 4 come before the OpenAI plan, so that handlr stops naming
    Gemini types sooner? This plan leaves it until that plan starts.
+
+## Amendment — 2026-10-22 23:46 EDT: implementation started; steps 1 to 3 done
+
+The owner approved starting this plan. Its status is `In implementation`
+and the document is now immutable (AGENTS.md, Rule 1.5). The status change
+belongs to the first implementing commit, `0d02526`. That commit was
+limited to `crates/libinfer/`, so the change is made here, in the handlr
+commit that completes steps 1 to 3.
+
+**Commits:**
+- **Step 1:** `0d02526` (`libinfer-gemini`).
+- **Step 2:** `83d0747` (the core moved to `crates/libinfer/libinfer`) and
+  `98a1ac2` (`libinfer-gemini`'s path to it).
+- **Step 3:** `938e90c` (`RoutingReasoningEngine`) and `5e5da36` (the
+  model setting).
+- **Outside `crates/libinfer/`:** the workspace manifest and lock, then
+  handlr, in this batch.
+
+**Decided where this plan was open:**
+- **Custom model names.** gemini-rust 1.7 builds the request URL from the
+  model's name, so an unknown model is passed as `Model::Custom("models/<name>")`.
+  A leading `models/` in the configured name is accepted, and an empty
+  name means `gemini-2.5-flash`.
+- **Saving a routed reply.** Engines never write the session. The turn
+  service saves the user's text and the reply, so a routed "Okay." is kept
+  exactly as a real reply is.
+- **Which message is matched.** The last message with role `user`, so
+  pane context added after it does not hide it.
+- **What is wrapped.** Only handlr's own Gemini engine. An engine injected
+  for tests is not.
+
+**Still to check live**, with the owner's Gemini key:
+- "never mind" makes no Gemini call;
+- a real request reaches Gemini with the configured model.

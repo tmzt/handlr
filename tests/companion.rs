@@ -674,6 +674,41 @@ async fn an_engine_error_is_a_spoken_error_outcome() {
 }
 
 #[tokio::test]
+async fn never_mind_is_answered_without_the_engine_and_kept_in_the_history() {
+    // handlr's Gemini engine is wrapped the same way (plan 20261022_07,
+    // decision 4); the mock stands in for Gemini.
+    let inner = Arc::new(MockReasoningEngine::with_handler(Script));
+    let engine = handlr::reasoning::with_handlr_routes(inner.clone());
+    let env = start_with(confirming(), engine, false).await;
+    let (mut c, _) = Client::companion(&env).await;
+
+    let r = c.call("turn.start", turn(1, "Never mind.")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    assert_eq!(r["result"]["ran"], json!([]), "{r}");
+    let say = c.note("turn.say").await;
+    assert_eq!(say["params"]["text"], "Okay.");
+    assert!(inner.recorded_transcripts().is_empty());
+    assert!(mock_logs(&env.daemon).await.0.is_empty());
+
+    // The routed reply is persisted like any other.
+    let h = history(&env, "companion:local:t");
+    assert_eq!(h.len(), 2, "{h:?}");
+    assert_eq!(
+        (&h[0]["role"], &h[0]["content"]),
+        (&json!("user"), &json!("Never mind."))
+    );
+    assert_eq!(
+        (&h[1]["role"], &h[1]["content"]),
+        (&json!("model"), &json!("Okay."))
+    );
+
+    // Anything longer still reaches the engine.
+    let r = c.call("turn.start", turn(2, "never mind the build")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    assert_eq!(inner.recorded_transcripts(), vec!["never mind the build"]);
+}
+
+#[tokio::test]
 async fn the_vocabulary_is_sent_again_when_it_changes() {
     let env = start(confirming()).await;
     let (mut c, _) = Client::companion(&env).await;

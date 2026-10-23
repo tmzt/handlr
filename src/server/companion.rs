@@ -36,8 +36,8 @@ use crate::core::naming::{self, Names};
 use crate::core::policy::Denied;
 use crate::core::principal::Principal;
 use crate::reasoning::{
-    declare_gemini_tools, default_system_prompt, EngineType, Message, ReasoningEngine,
-    ReasoningEngineBuilder, SessionManager,
+    declare_gemini_tools, default_system_prompt, with_handlr_routes, GeminiReasoningEngine,
+    Message, ReasoningEngine, SessionManager,
 };
 use crate::transport::{HerdrContextContributor, HerdrToolExecutor, TurnLog, VoiceTurn};
 
@@ -74,6 +74,8 @@ pub struct TurnOptions {
 pub struct TurnService {
     given: Option<Arc<dyn ReasoningEngine>>,
     gemini_key_file: PathBuf,
+    /// `[gemini] model`; `None` or empty is libinfer-gemini's default.
+    gemini_model: Option<String>,
     gemini: OnceLock<Arc<dyn ReasoningEngine>>,
     session_dir: Option<PathBuf>,
     manager: OnceLock<SessionManager>,
@@ -85,6 +87,7 @@ impl TurnService {
         TurnService {
             given: options.engine,
             gemini_key_file: gemini_key_file(config),
+            gemini_model: config.gemini.model.clone(),
             gemini: OnceLock::new(),
             session_dir: options.session_dir,
             manager: OnceLock::new(),
@@ -94,6 +97,7 @@ impl TurnService {
 
     /// The engine. Gemini is built on first use, so a daemon without a key
     /// still serves everything else, and a turn says why it cannot think.
+    /// It is wrapped in handlr's routes, so "never mind" needs no request.
     fn engine(&self) -> Result<Arc<dyn ReasoningEngine>, String> {
         if let Some(engine) = &self.given {
             return Ok(Arc::clone(engine));
@@ -103,14 +107,18 @@ impl TurnService {
         }
         // Read on first use, so a key added later needs no restart.
         let api_key = read_key_file(&self.gemini_key_file)?;
-        let mut builder = ReasoningEngineBuilder::new(EngineType::Gemini {
-            api_key,
-            tools: declare_gemini_tools(),
-        });
-        if let Some(prompt) = default_system_prompt() {
-            builder = builder.with_system_prompt(prompt);
+        let mut builder = GeminiReasoningEngine::builder()
+            .api_key(api_key)
+            .tools(declare_gemini_tools());
+        if let Some(model) = &self.gemini_model {
+            builder = builder.model(model.clone());
         }
-        let engine = builder.build()?;
+        if let Some(prompt) = default_system_prompt() {
+            builder = builder.system_prompt(prompt);
+        }
+        let gemini = builder.build()?;
+        log::info!("The reasoning engine is Gemini, model {}", gemini.model());
+        let engine = with_handlr_routes(Arc::new(gemini));
         Ok(Arc::clone(self.gemini.get_or_init(|| engine)))
     }
 
