@@ -116,6 +116,9 @@ pub const DICTATION_SILENCE: Duration = Duration::from_secs(8);
 pub const MESSAGE_CAP: usize = 4000;
 /// The countdown shown before a silence submits, in seconds.
 pub const COUNTDOWN_SECS: u64 = 3;
+/// How long a Submit waits, after the voice ends, for what was said to
+/// come back from STT.
+pub const HEARD_WAIT: Duration = Duration::from_secs(3);
 
 /// The least time between two peeks of the open agent view (plan
 /// 20261022_03, step 4), and how often it is peeked while the agent works
@@ -435,6 +438,14 @@ struct Dictating {
     /// Started from the agent view of this pane: the target is that agent,
     /// whatever the focus does.
     fixed_pane: Option<String>,
+    /// A Submit (by the button when `true`) waiting for speech that STT has
+    /// not given back yet.
+    submit_waiting: Option<bool>,
+}
+
+/// The waiting Submit, if any.
+fn d_waiting(d: &Option<Dictating>) -> Option<bool> {
+    d.as_ref().and_then(|d| d.submit_waiting)
 }
 
 impl Dictating {
@@ -474,6 +485,9 @@ pub struct State {
     /// Voice heard right now, and whether the front end reports it at all.
     voice: bool,
     voice_reported: bool,
+    /// When the voice last ended with no utterance since: STT may still be
+    /// working on it.
+    voice_ended: Option<Duration>,
     notices: VecDeque<String>,
     /// The driver's clock, as last ticked.
     now: Duration,
@@ -525,6 +539,7 @@ impl State {
             listening: false,
             voice: false,
             voice_reported: false,
+            voice_ended: None,
             notices: VecDeque::new(),
             now: Duration::ZERO,
             focus: None,
@@ -640,6 +655,9 @@ impl State {
             }
             Input::Voice(on) => {
                 self.voice_reported = true;
+                if self.voice && !on {
+                    self.voice_ended = Some(self.now);
+                }
                 self.voice = on;
                 let now = self.now;
                 if let Some(d) = self.dictation.as_mut() {
@@ -873,6 +891,14 @@ impl State {
         }
     }
 
+    /// Whether speech may not have reached STT's result yet: the voice is
+    /// on, or ended less than [`HEARD_WAIT`] ago with no utterance since.
+    /// Only front ends with a VAD can tell.
+    fn unheard(&self) -> bool {
+        self.voice_reported
+            && (self.voice || self.voice_ended.is_some_and(|t| self.now < t + HEARD_WAIT))
+    }
+
     /// Whether no one is speaking: no voice when the front end reports it,
     /// else the gate idle.
     fn quiet(&self) -> bool {
@@ -896,6 +922,9 @@ impl State {
 
     fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
         self.now = self.now.max(now);
+        if let Some(by_button) = d_waiting(&self.dictation).filter(|_| !self.unheard()) {
+            self.submit(by_button, out);
+        }
         if self.deadline().is_some_and(|deadline| self.now >= deadline) {
             log::info!(
                 "dictation: {} s of silence; submitting",
@@ -927,6 +956,7 @@ impl State {
             by_button: false,
             quiet_from: None,
             read_back: ReadBack::No,
+            submit_waiting: None,
         });
         if self.online() {
             out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
@@ -990,12 +1020,20 @@ impl State {
     /// `message`, which the daemon confirms.
     fn submit(&mut self, by_button: bool, out: &mut Vec<Output>) {
         let online = self.online();
+        let unheard = self.unheard();
         let Some(d) = self.dictation.as_mut() else {
             return;
         };
         if d.phase != DictationPhase::Collecting {
             return;
         }
+        // Speech still on its way from STT: submit once it lands.
+        if unheard {
+            log::info!("dictation: submit waits for what was said");
+            d.submit_waiting = Some(by_button);
+            return;
+        }
+        d.submit_waiting = None;
         // A refused submit waits for the next change before the silence
         // tries again.
         d.quiet_from = None;
@@ -1120,6 +1158,10 @@ impl State {
             d.quiet_from = Some(now);
         }
         self.show_dictation(out);
+        // A Submit that waited for this sentence goes now.
+        if let Some(by_button) = d_waiting(&self.dictation).filter(|_| !self.unheard()) {
+            return self.submit(by_button, out);
+        }
         // Hands free: listen for the next sentence.
         out.push(event(Event::Arm));
     }
@@ -1187,6 +1229,7 @@ impl State {
     }
 
     fn utterance(&mut self, text: String, out: &mut Vec<Output>) {
+        self.voice_ended = None;
         let text = text.trim().to_string();
         if text.is_empty() {
             return;
@@ -3043,5 +3086,36 @@ mod tests {
     fn no_view_no_suggestion() {
         let mut s = online();
         assert!(s.input(Input::Respond(Suggestion::Yes)).is_empty());
+    }
+
+    #[test]
+    fn a_submit_waits_for_speech_still_in_stt() {
+        let mut s = dictating();
+        s.input(Input::Tick(secs(20.0)));
+        s.input(Input::Voice(true));
+        s.input(Input::Tick(secs(21.0)));
+        s.input(Input::Voice(false));
+        // Submitted before STT gives the sentence back: no "empty".
+        let out = s.input(Input::Submit);
+        assert!(message_send(&out).is_none(), "{out:?}");
+        assert!(!events(&out).iter().any(|e| matches!(e, Event::Say(_))));
+        let out = s.input(Input::Utterance("yes, go ahead".into()));
+        let send = message_send(&out).expect("sent once heard");
+        assert_eq!(send.params["text"], "yes, go ahead");
+    }
+
+    #[test]
+    fn a_waiting_submit_with_nothing_heard_is_refused_after_the_wait() {
+        let mut s = dictating();
+        s.input(Input::Tick(secs(20.0)));
+        s.input(Input::Voice(true));
+        s.input(Input::Voice(false));
+        assert!(message_send(&s.input(Input::Submit)).is_none());
+        assert!(events(&s.input(Input::Tick(secs(22.0)))).is_empty());
+        let out = s.input(Input::Tick(secs(23.5)));
+        assert!(message_send(&out).is_none());
+        assert!(events(&out)
+            .iter()
+            .any(|e| matches!(e, Event::Say(t) if t == "The message is empty.")));
     }
 }
