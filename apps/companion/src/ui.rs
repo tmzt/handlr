@@ -66,6 +66,93 @@ pub fn chunk(text: &str, max: usize) -> Vec<String> {
         .collect()
 }
 
+/// Where a confirmation's card is (plan 20261023_01, section 4).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardState {
+    /// Waiting for the user: Approve and Deny are shown.
+    Waiting,
+    /// Answered; the reply is on its way.
+    Answering { approve: bool },
+    /// The daemon refused the answer.
+    Refused(String),
+    /// Resolved, with plan 01's outcome (`sent`, `denied` …).
+    Done(String),
+}
+
+/// A confirmation, as its card shows it: the command, the agent and its
+/// project, and the handle as words with the id. The token is never shown
+/// and the handle never spoken.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Card {
+    pub confirm_id: u64,
+    pub command: String,
+    /// The agent's shown name.
+    pub agent: String,
+    pub project: Option<String>,
+    pub handle: Option<String>,
+    pub state: CardState,
+}
+
+/// "Sent", "Denied", "Expired", "Cancelled", "Failed": an outcome as the
+/// card shows it.
+pub fn outcome_label(outcome: &str) -> String {
+    let mut chars = outcome.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => "Ended".to_string(),
+    }
+}
+
+impl Card {
+    /// Whether Approve and Deny are shown.
+    pub fn asks(&self) -> bool {
+        self.state == CardState::Waiting
+    }
+
+    /// The agent, with its project unless its shown name already says it.
+    pub fn target(&self) -> String {
+        match &self.project {
+            Some(p) if !p.is_empty() && !self.agent.to_lowercase().contains(&p.to_lowercase()) => {
+                format!("{} in {p}", self.agent)
+            }
+            _ => self.agent.clone(),
+        }
+    }
+
+    /// The card's lines, unwrapped: its state, the command and the agent,
+    /// then the handle's words and the id in smaller type.
+    pub fn lines(&self) -> Vec<Line> {
+        let line = |text: String, size: f32, color, gap| Line {
+            text,
+            size,
+            color,
+            gap,
+        };
+        let (state, color) = match &self.state {
+            CardState::Waiting => ("Approve?".to_string(), MUTED),
+            CardState::Answering { approve: true } => ("Approving\u{2026}".to_string(), MUTED),
+            CardState::Answering { approve: false } => ("Denying\u{2026}".to_string(), MUTED),
+            CardState::Refused(why) => (format!("Not answered: {why}"), WARN),
+            CardState::Done(outcome) => (outcome_label(outcome), SPOKEN),
+        };
+        let words = self
+            .handle
+            .as_deref()
+            .map(|h| format!("{} \u{b7} ", h.replace('-', " ")))
+            .unwrap_or_default();
+        vec![
+            line(state, 15.0, color, 28.0),
+            line(
+                format!("\"{}\" to {}", self.command, self.target()),
+                22.0,
+                TEXT,
+                4.0,
+            ),
+            line(format!("{words}#{}", self.confirm_id), 14.0, MUTED, 4.0),
+        ]
+    }
+}
+
 /// What the screen shows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct View {
@@ -467,6 +554,71 @@ mod tests {
         );
         assert_eq!(screen.hit(deny.x + 1.0, deny.y + 1.0), Some(Hit::Deny));
         assert!(approve.y + approve.h < pair.y, "above the pairing row");
+    }
+
+    fn card(state: CardState) -> Card {
+        Card {
+            confirm_id: 12,
+            command: "continue".into(),
+            agent: "Claude".into(),
+            project: Some("highbay".into()),
+            handle: Some("send-continue-claude-highbay".into()),
+            state,
+        }
+    }
+
+    #[test]
+    fn a_card_shows_the_command_agent_project_and_handle_words() {
+        let c = card(CardState::Waiting);
+        let texts: Vec<String> = c.lines().into_iter().map(|l| l.text).collect();
+        assert_eq!(
+            texts,
+            [
+                "Approve?",
+                "\"continue\" to Claude in highbay",
+                "send continue claude highbay \u{b7} #12"
+            ]
+        );
+        assert!(c.asks());
+        // A shown name that already names the project does not repeat it.
+        let named = Card {
+            agent: "Claude in highbay, tab -mb".into(),
+            ..card(CardState::Waiting)
+        };
+        assert_eq!(named.target(), "Claude in highbay, tab -mb");
+        let bare = Card {
+            handle: None,
+            project: None,
+            ..card(CardState::Waiting)
+        };
+        assert_eq!(bare.lines()[2].text, "#12");
+    }
+
+    #[test]
+    fn a_card_shows_the_answer_then_the_outcome() {
+        let first = |state| card(state).lines()[0].text.clone();
+        assert_eq!(
+            first(CardState::Answering { approve: true }),
+            "Approving\u{2026}"
+        );
+        assert_eq!(
+            first(CardState::Answering { approve: false }),
+            "Denying\u{2026}"
+        );
+        for (outcome, shown) in [
+            ("sent", "Sent"),
+            ("denied", "Denied"),
+            ("expired", "Expired"),
+            ("cancelled", "Cancelled"),
+        ] {
+            assert_eq!(first(CardState::Done(outcome.into())), shown);
+        }
+        let refused = first(CardState::Refused(
+            "wrong nonce; 4 attempt(s) left (-32008)".into(),
+        ));
+        assert!(refused.contains("4 attempt(s) left"), "{refused}");
+        assert!(!card(CardState::Done("sent".into())).asks());
+        assert!(!card(CardState::Answering { approve: true }).asks());
     }
 
     #[test]

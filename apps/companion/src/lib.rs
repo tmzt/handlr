@@ -41,7 +41,9 @@ use libmsdf::font::{
 };
 
 use crate::keys::VaultKeyStore;
-use crate::ui::{CODE, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN, chunk, wrap};
+use crate::ui::{
+    CODE, Card, CardState, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN, chunk, wrap,
+};
 
 /// The frame rate: enough for text, and far less heat than the display's
 /// 120 Hz while STT listens.
@@ -118,8 +120,9 @@ pub struct App {
     heard: String,
     partial: String,
     said: String,
-    /// The waiting confirmation's text and label.
-    confirm: Option<(String, Option<String>)>,
+    /// The confirmation being asked, or the last one, with its outcome,
+    /// until the next utterance (plan 20261023_01, section 4).
+    card: Option<Card>,
     /// The device code to paste into `handlr pair`, and the server's name.
     code: Option<(String, String)>,
     /// A pairing note or an error, and its colour.
@@ -298,10 +301,41 @@ impl App {
                 self.note = Some((format!("pairing failed: {why}"), WARN));
             }
             Event::Say(text) => self.said = text,
-            Event::Confirm { text, label, .. } => self.confirm = Some((text, label)),
-            Event::Resolved { outcome } => {
-                log::info!("confirmation: {outcome}");
-                self.confirm = None;
+            // The card shows the handle; only `text` is spoken.
+            Event::Confirm {
+                confirm_id,
+                label,
+                command,
+                agent,
+                project,
+                ..
+            } => {
+                self.card = Some(Card {
+                    confirm_id,
+                    command,
+                    agent,
+                    project,
+                    handle: label,
+                    state: CardState::Waiting,
+                })
+            }
+            Event::Answered {
+                confirm_id,
+                approve,
+            } => self.set_card(confirm_id, CardState::Answering { approve }),
+            Event::ReplyFailed {
+                confirm_id,
+                message,
+            } => {
+                log::warn!("confirmation {confirm_id}: {message}");
+                self.set_card(confirm_id, CardState::Refused(message));
+            }
+            Event::Resolved {
+                confirm_id,
+                outcome,
+            } => {
+                log::info!("confirmation {confirm_id}: {outcome}");
+                self.set_card(confirm_id, CardState::Done(outcome));
             }
             Event::TurnEnded { outcome, .. } => log::info!("turn: {outcome}"),
             Event::Error(e) => {
@@ -312,6 +346,13 @@ impl App {
         }
     }
 
+    /// Moves the card for `confirm_id` to `state`; another's is left alone.
+    fn set_card(&mut self, confirm_id: u64, state: CardState) {
+        if let Some(card) = self.card.as_mut().filter(|c| c.confirm_id == confirm_id) {
+            card.state = state;
+        }
+    }
+
     fn on_audio(&mut self, event: AudioEvent) {
         match event {
             AudioEvent::Input(input) => {
@@ -319,6 +360,14 @@ impl App {
                     Input::Utterance(text) => {
                         self.heard = text.clone();
                         self.partial.clear();
+                        // A new utterance: an answered card has had its say.
+                        if self
+                            .card
+                            .as_ref()
+                            .is_some_and(|c| matches!(c.state, CardState::Done(_)))
+                        {
+                            self.card = None;
+                        }
                     }
                     Input::Listening(false) => self.partial.clear(),
                     _ => {}
@@ -401,10 +450,10 @@ impl App {
         if !self.said.is_empty() {
             push(&format!("< {}", self.said), 19.0, SPOKEN, 18.0);
         }
-        if let Some((text, label)) = &self.confirm {
-            let label = label.as_deref().unwrap_or("confirm");
-            push(&format!("? {label}"), 15.0, MUTED, 28.0);
-            push(text, 22.0, TEXT, 4.0);
+        if let Some(card) = &self.card {
+            for l in card.lines() {
+                push(&l.text, l.size, l.color, l.gap);
+            }
         }
 
         let mut code = Vec::new();
@@ -430,7 +479,7 @@ impl App {
         let view = View {
             status: vec![self.link.clone(), self.sound.clone()],
             body,
-            confirm: self.confirm.is_some(),
+            confirm: self.card.as_ref().is_some_and(Card::asks),
             code,
             field: self.field.clone(),
             field_focused: self.field_focused,
@@ -507,7 +556,7 @@ impl MorphApp for App {
             heard: String::new(),
             partial: String::new(),
             said: String::new(),
-            confirm: None,
+            card: None,
             code: None,
             note: None,
             field: String::new(),
