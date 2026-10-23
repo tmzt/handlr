@@ -1,7 +1,7 @@
 ---
 title: Spoken summaries of complex replies, from structured prompts
 date: 2026-10-23
-status: Implemented
+status: In implementation
 covers:
   - "Read aloud (the agent view's play button) sends a reply that is
     complex, by a basic coding measure or because it has backquotes, to
@@ -388,3 +388,40 @@ summarised by Gemini only with spoken output on. The commits:
 Still open from section 6 and the amendments: the prompt's temperature is
 not applied (libinfer-gemini has no setting yet); the thresholds and a cap
 on Gemini calls are the owner's to revisit.
+
+## Amendment — 2026-10-23 16:56 EDT: both versions in the answer
+
+On the owner's instruction (2026-10-23): "the protocol doesn't include both
+versions?", then "add both versions to the protocol as an amendment and
+build it". This replaces A3's `{spoken, complex}` and the 16:38 EDT
+CHANGES.md departure "A failed summary is still `UNAVAILABLE`".
+
+- `speech.summarize` answers `{read, summary, complex}`:
+  - `read`: the reply under the reading rules, always;
+  - `summary`: Gemini's, present only when the reply is complex and
+    spoken output is on, and the summary was made;
+  - `complex`: as measured.
+- A summary that fails (no key, no prompt, an error, a timeout) no longer
+  makes the answer an error: the answer has `read` and no `summary`, and
+  the failure is logged. `UNAVAILABLE` stays in the protocol, unused by
+  this method.
+- The client says `summary` when there is one, else `read`; its own copy
+  of the rules is only for when the daemon cannot be reached or does not
+  answer in time. Both versions reaching the phone leaves room to read
+  the full version on request later.
+- `SpeechSummarizeResult` loses `spoken` and gains `read` and `summary`:
+  not strictly additive, so libhandlr_proto 0.2.0 (Rule 5.4), its
+  VERSIONS.md entry marked **Breaking**, tag `libhandlr_proto-v0.2.0`.
+
+**Step 10.** libhandlr_proto 0.2.0, then the daemon, then the client, one
+crate per commit. **Done when:** the result round-trips with and without a
+summary; daemon tests show a complex reply with spoken output on answered
+with both, a failed summary answered with `read` alone, and spoken output
+off answered with `read` alone; and client tests show `summary` said
+when present and `read` otherwise.
+
+## Amendment — 2026-10-23 16:56 EDT: back in implementation for step 10
+
+The status returns from `Implemented` to `In implementation` for step
+10 of the previous amendment. The document stays immutable; it returns to
+`Implemented` when step 10 is done.
