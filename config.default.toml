@@ -53,6 +53,11 @@ allow_arbitrary_commands = false
 
 # How agents are named aloud and on screen. Uncomment to change the defaults.
 # [naming]
+# Where an agent's project name comes from: "directory" (its cwd's last
+# part, the default) or "workspace" (herdr's workspace label, or the cwd's
+# last part when agents share a label).
+# project_from = "directory"
+#
 # Words of at most this many letters with none of `vowels` are spelled out
 # letter by letter ("hr" -> "aitch ar"). 0 turns spelling off.
 # spell_max_len = 6

@@ -298,6 +298,24 @@ pub struct NamingConfig {
     /// A tab label as written, a project, or an agent name (matched
     /// case-insensitively) -> what to say and show instead.
     pub aliases: BTreeMap<String, String>,
+    /// Where an agent's project name comes from: its directory (the
+    /// default), or herdr's workspace label for those who name workspaces.
+    pub project_from: ProjectFrom,
+}
+
+/// `[naming] project_from` (owner, 2026-10-23: "the herdr session name
+/// isn't useful compared to the agent/dir name, it could be an option for
+/// others that use them properly but I just use the tabs").
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectFrom {
+    /// The pane's cwd's last part; the workspace label when there is no
+    /// cwd.
+    #[default]
+    Directory,
+    /// The workspace label, or the cwd's basename when another agent
+    /// shares that label (plan 20261022_05, decision 3).
+    Workspace,
 }
 
 impl Default for NamingConfig {
@@ -307,6 +325,7 @@ impl Default for NamingConfig {
             vowels: "aeiouy".to_string(),
             letters: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            project_from: ProjectFrom::default(),
         }
     }
 }

@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::config::NamingConfig;
+use crate::config::{NamingConfig, ProjectFrom};
 use crate::core::agents::{self, AgentRef};
 
 /// The English names of the letters `a` to `z`, written so a TTS says the
@@ -335,10 +335,12 @@ impl Names {
                         > 1
                 });
                 let basename = r.cwd.as_deref().and_then(cwd_basename);
-                let project = match (label, basename) {
-                    (Some(_), Some(base)) if shared => Some(base),
-                    (Some(l), _) => Some(l.to_string()),
-                    (None, base) => base,
+                let project = match (config.project_from, label, basename) {
+                    (ProjectFrom::Directory, l, None) => l.map(str::to_string),
+                    (ProjectFrom::Directory, _, base) => base,
+                    (ProjectFrom::Workspace, Some(_), Some(base)) if shared => Some(base),
+                    (ProjectFrom::Workspace, Some(l), _) => Some(l.to_string()),
+                    (ProjectFrom::Workspace, None, base) => base,
                 };
                 NamedAgent {
                     agent_part: agent_part(&r.agent, config),
@@ -871,9 +873,50 @@ mod tests {
                 {"pane_id": "w2:p1", "agent": "claude", "workspace_id": "w2", "cwd": "/src/x"}
             ]
         }});
-        let n = names(&snap);
+        let workspace = NamingConfig {
+            project_from: ProjectFrom::Workspace,
+            ..NamingConfig::default()
+        };
+        let n = Names::from_snapshot(&snap, &workspace);
         assert_eq!(n.get("w1:p6").unwrap().shown, "the handlr agent");
         assert_eq!(n.get("w2:p1").unwrap().shown, "the highbay agent");
+    }
+
+    #[test]
+    fn the_directory_is_the_project_by_default() {
+        // One workspace for everything, as the owner uses herdr: its label
+        // says nothing, the directories do.
+        let snap = json!({"snapshot": {
+            "workspaces": [{"workspace_id": "w2", "label": "cc-highbay"}],
+            "panes": [
+                {"pane_id": "w2:pZ", "agent": "claude", "workspace_id": "w2", "cwd": "/src/handlr"},
+                {"pane_id": "w2:pR", "agent": "claude", "workspace_id": "w2", "cwd": "/src/libmorph"}
+            ]
+        }});
+        let n = names(&snap);
+        assert_eq!(
+            n.get("w2:pZ").unwrap().project.as_ref().unwrap().shown,
+            "handlr"
+        );
+        assert_eq!(
+            n.get("w2:pR").unwrap().project.as_ref().unwrap().shown,
+            "libmorph"
+        );
+        // No cwd: the label, rather than nothing.
+        let lone = json!({"snapshot": {
+            "workspaces": [{"workspace_id": "w1", "label": "docs"}],
+            "panes": [{"pane_id": "w1:p1", "agent": "claude", "workspace_id": "w1"}]
+        }});
+        assert_eq!(
+            names(&lone)
+                .get("w1:p1")
+                .unwrap()
+                .project
+                .as_ref()
+                .unwrap()
+                .shown,
+            "docs"
+        );
     }
 
     #[test]
