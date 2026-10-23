@@ -10,7 +10,9 @@
 //! 3. **Something broke:** an error result, or failing tests, as the last
 //!    tool result of the last turn; or the pane `blocked`;
 //! 4. **Finished:** the agent is idle after a turn that ended with a reply,
-//!    shown with the reply's first paragraph.
+//!    shown with the reply's first paragraph; or the daemon's turn says
+//!    stopped and the reply is the newest entry, whatever herdr says (plan
+//!    20261023_04, A4: herdr says working while a background agent runs).
 //!
 //! A card is live until it is resolved: the confirmation resolves, a user
 //! entry follows the question, a later tool result succeeds (or the pane
@@ -19,7 +21,7 @@
 //! the flow, faded, instead of vanishing. The pinned card is the highest
 //! live one.
 
-use libhandlr_proto::common::{Entry, EntryKind, PendingQuestion, Role};
+use libhandlr_proto::common::{Entry, EntryKind, PendingQuestion, Role, Turn};
 
 /// The kinds of card, highest priority first (the order compares so).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -68,6 +70,8 @@ pub struct Facts<'a> {
     pub pending_question: Option<&'a PendingQuestion>,
     /// Confirmations pending for this pane, oldest first.
     pub confirms: &'a [PendingConfirm],
+    /// The turn `agents.list` last gave for the pane, from its session.
+    pub turn: Option<&'a Turn>,
 }
 
 /// Where a found card goes.
@@ -159,9 +163,12 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
             confirm_id: None,
         });
     }
-    // 4. Finished: idle after a turn that ended with a reply. The question
-    // card already stands for a reply that asks.
-    if matches!(f.status, "idle" | "done") {
+    // 4. Finished: idle after a turn that ended with a reply, or the turn
+    // stopped on the newest entry. The question card already stands for a
+    // reply that asks.
+    let stopped =
+        matches!(f.turn, Some(Turn::Stopped { .. })) && f.entries.last().is_some_and(is_reply);
+    if matches!(f.status, "idle" | "done") || stopped {
         let last_text = f.entries.iter().rposition(|e| e.kind == EntryKind::Text);
         if let Some(i) = last_text.filter(|&i| is_reply(&f.entries[i]))
             && question_at != Some(i)
@@ -415,6 +422,7 @@ mod tests {
             entries,
             pending_question,
             confirms,
+            turn: None,
         }
     }
 
@@ -531,6 +539,31 @@ mod tests {
         assert!(live_cards(&facts("working", &entries, None, &[])).is_empty());
         let unanswered = [reply("1", "Hi."), user("2", "go")];
         assert!(live_cards(&facts("idle", &unanswered, None, &[])).is_empty());
+    }
+
+    #[test]
+    fn rule_4_a_stopped_turn_is_finished_while_herdr_says_working() {
+        let entries = [user("1", "go"), reply("2", "All 12 tests pass.")];
+        let stopped = Turn::Stopped {
+            line: "All 12 tests pass.".to_string(),
+        };
+        let with = |turn, entries| Facts {
+            turn: Some(turn),
+            ..facts("working", entries, None, &[])
+        };
+        assert_eq!(
+            kinds(&live_cards(&with(&stopped, &entries))),
+            [CardKind::Finished]
+        );
+        // Working, by the session: no card.
+        let working = Turn::Working {
+            line: "All 12 tests pass.".to_string(),
+        };
+        assert!(live_cards(&with(&working, &entries)).is_empty());
+        // A stopped turn the view has seen go on (a tool call after the
+        // reply): the list is older than the session.
+        let went_on = [entries[0].clone(), entries[1].clone(), call("3")];
+        assert!(live_cards(&with(&stopped, &went_on)).is_empty());
     }
 
     #[test]

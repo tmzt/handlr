@@ -1059,6 +1059,11 @@ impl State {
                 text: c.text.clone(),
             })
             .collect();
+        let turn = self
+            .agents
+            .iter()
+            .find(|a| a.pane_id == v.pane_id)
+            .and_then(|a| a.turn.clone());
         let v = self.view.as_mut().expect("checked above");
         // A question answered from the view is no longer asked.
         let pending_question = v
@@ -1071,6 +1076,7 @@ impl State {
             entries: &v.entries,
             pending_question,
             confirms: &confirms,
+            turn: turn.as_ref(),
         };
         v.cards.update(&facts);
         self.show_view(out);
@@ -1950,8 +1956,23 @@ impl State {
         if newest.is_some() {
             v.read_upto = newest;
         }
+        let ends_on_reply = v.status == "working" && v.entries.last().is_some_and(is_reply);
         for (ts, text) in replies {
             self.read_reply(pane_id, ts, text, out);
+        }
+        // herdr says working but the session ends on a reply: the daemon's
+        // turn says whether it stopped (plan 20261023_04, A4), so the list
+        // is asked again, at most once in `LIST_MIN_INTERVAL`.
+        let stopped = self
+            .agents
+            .iter()
+            .find(|a| a.pane_id == pane_id)
+            .is_some_and(|a| matches!(a.turn, Some(common::Turn::Stopped { .. })));
+        let listed_since = self
+            .listed_at
+            .map_or(LIST_MIN_INTERVAL, |at| self.now.saturating_sub(at));
+        if ends_on_reply && !stopped && !self.listing && listed_since >= LIST_MIN_INTERVAL {
+            self.ask_list(out);
         }
         self.read_in_order();
         self.recompute_view(out);
@@ -4267,13 +4288,26 @@ mod tests {
         assert_eq!(requests(&out, "agents.list").len(), 1);
     }
 
+    /// A session whose turn goes on: a tool call after the reply.
+    fn running() -> Value {
+        json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text", "summary": "Testing."},
+                {"ts": "3", "role": "assistant", "kind": "tool_use", "tool": "Bash",
+                 "summary": "Bash cargo test"}
+            ]
+        })
+    }
+
     #[test]
     fn no_list_is_asked_while_the_agent_view_is_open() {
         let mut s = overview();
         let out = s.input(Input::OpenAgent("w2:pZ".into()));
         // Opening the view lists, as before, for its name.
         answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
-        peek_answer(&mut s, &out, "working", asking());
+        peek_answer(&mut s, &out, "working", running());
         let mut asked = 0;
         for t in 1..=60 {
             let out = s.input(Input::Tick(secs(f64::from(t))));
@@ -4281,7 +4315,7 @@ mod tests {
             for peek in requests(&out, "session.peek") {
                 s.incoming(response(
                     peek.id.clone(),
-                    json!({"session": asking(), "status": "working"}),
+                    json!({"session": running(), "status": "working"}),
                 ));
             }
         }
@@ -4290,6 +4324,39 @@ mod tests {
         // Back on the overview: listed at once.
         let out = s.input(Input::CloseAgent);
         assert_eq!(requests(&out, "agents.list").len(), 1);
+    }
+
+    #[test]
+    fn a_stopped_turn_finishes_the_view_while_herdr_says_working() {
+        // Plan 20261023_04, A4: the view's session ends on a reply while
+        // herdr says working; the list's turn says it stopped.
+        let ended = json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text", "summary": "All 12 tests pass."}
+            ]
+        });
+        let mut s = viewing("working", ended.clone());
+        // herdr says working and the list's turn is not known: no card.
+        assert!(matches!(
+            s.agent_view(),
+            Some(Event::AgentView { cards, .. }) if cards.is_empty()
+        ));
+        // The next peek, 5 s on, asks the list for the turn.
+        let out = s.input(Input::Tick(secs(105.0)));
+        let out = peek_answer(&mut s, &out, "working", ended.clone());
+        let mut stopped = agent_info("w2:pZ", "working");
+        stopped["turn"] = json!({"state": "stopped", "line": "All 12 tests pass."});
+        let out = answer_list(&mut s, &out, json!([stopped]));
+        let (_, cards, pinned) = view_of(&out).expect("the view again");
+        assert_eq!(cards.len(), 1, "{out:?}");
+        assert_eq!(cards[0].kind, crate::view::CardKind::Finished);
+        assert_eq!(pinned, Some(0));
+        // Known stopped: the next peeks ask no more lists.
+        let out = s.input(Input::Tick(secs(110.0)));
+        let out = peek_answer(&mut s, &out, "working", ended);
+        assert!(requests(&out, "agents.list").is_empty());
     }
 
     #[test]
