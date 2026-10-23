@@ -331,3 +331,9 @@ with herdr saying working), working (a file just written) and no session
 (a shell). Step 4 builds `AgentCard`, `CardGrid`, `TurnLog` and
 `OutlineButton`, with tests of the order never changing as turns change,
 the needing-input marks, and the two halves scrolling apart.
+
+## Amendment — 2026-10-23 17:04 EDT: a correction to the previous amendment's reference
+
+A4 of the previous amendment cites "the 16:28 EDT L3 amendment of plan
+20261022_03"; the amendment it means, "a question ending a quiet turn is
+pending whatever herdr says", is at 16:32 EDT.
