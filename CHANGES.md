@@ -480,3 +480,21 @@ history, in shell history or in an LLM session.
   server can't read its Gemini key".
 - With no file, or an empty one, libinfer still falls back to
   `GEMINI_API_KEY`.
+
+## 2026-10-22 22:59 EDT — plan 20261022_06: qrcodeurl and pairing by a scanned URL
+
+New plan, agreed with the owner:
+`docs/design/20261022_06_QRCODEURL_PLAN.md`, with the amendments of 22:43
+and 22:55 EDT. Steps 1 to 3 are done:
+
+- `crates/qrcodeurl` (`7c39d51`);
+- the pairing URL in `libhandlr_proto` (`e5771f0`);
+- `handlr pair` (this batch).
+
+`handlr pair` now prints `handlr://<host>:<port>/pair#handlr1…` and the
+QR code of that URL as a `data:` URL. The host is the first address that
+isn't loopback, which is the Tailscale name when `tailscale serve` is
+detected.
+
+Step 4, the phone's scan and deep link, is plan 04's. The deep link was
+requested from libmorph, for its own plan.
