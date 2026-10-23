@@ -845,3 +845,41 @@ attempt to speak the terminal output from Claude (bash tool etc.)".
   closed, not across restarts.
 * **The record button** is a white dot on blue, at the bottom right. While
   dictating, Submit, Scratch and Clear sit between the two buttons.
+
+## 2026-10-23 15:26 EDT — plans 20261022_03 step 4 and 20261023_02: the audio controls, the message card, own approvals
+
+Asked by the owner on 2026-10-23: "the new UI is confusing. it should have
+the bottom row to control the audio, with the left having a square play
+button, the right a square record button, the play button should be the
+submit button (android send button or similar) with an X button in the
+middle to cancel. the entered text should be on a pinned card with the
+scrolling pane pushed up and out of the way. the same applied to an inline
+message, it expands the card being responded to with the same buttons in
+place, hiding the global ones"; "a separate approval isn't needed for UI
+entered buttons or when text has been buffered for review first"; "one
+control per file with the restructuring".
+
+This replaces the 15:01 and 15:11 entries' layout of the agent view:
+
+* **The bottom row controls the audio**, all square: play (`▶`, dull or
+  bright) at the left and record (a white dot on blue) at the right.
+  While a message is taken, play becomes send (`➤`, on green), a cancel
+  (`✕`) sits in the middle, and the record dot turns red. Scratch has no
+  button any more; "scratch that" still works by voice.
+* **The message being taken is a pinned card** above the row; the agent's
+  pinned card makes way for it and the flow ends above it.
+* **Replying to a card**: a Question card's record button (`AgentHit::Reply`)
+  takes a message in reply to it. The card is pinned above the bottom
+  edge, expanded with the message under its title and text, with send,
+  cancel and record inside it; the screen's row is hidden.
+* **Own approvals** (`handlr_companion`, departing from plan 20261023_02's
+  amendment on button submits, under which "a silence submit still
+  asks"): every submit of dictated text, by the button or the silence, is
+  its own approval, since the text was shown for review; and a tapped
+  suggestion is its own approval. The daemon still makes the
+  confirmation; the phone approves it without asking. A message denied by
+  another client still returns to the dictation with its text kept.
+* **One control per file**: the new controls live in
+  `apps/companion/src/agent/` (`control_row.rs`, `dictation_card.rs`,
+  `square_button.rs`). The rest of `agent.rs` moves the same way as it
+  is next touched, not all at once.
