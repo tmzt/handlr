@@ -883,3 +883,13 @@ This replaces the 15:01 and 15:11 entries' layout of the agent view:
   `apps/companion/src/agent/` (`control_row.rs`, `dictation_card.rs`,
   `square_button.rs`). The rest of `agent.rs` moves the same way as it
   is next touched, not all at once.
+
+## 2026-10-23 15:29 EDT — a correction to the previous entry: record becomes send
+
+The owner, on the build of the previous entry: "play doesn't become send,
+record becomes send"; "the record/send action should always be in the
+bottom right per Fitz". While a message is taken, the row is now play at
+the left, cancel in the middle and send in record's place at the bottom
+right, in the screen's row and inside a card being replied to. This
+replaces the previous entry's "play becomes send … and the record dot turns
+red": record is not shown while a message is taken.
