@@ -51,12 +51,13 @@ use libmorph::{
     wgpu,
 };
 use libmsdf::GpuSdfRenderer;
-use libmsdf::drawlist::DrawList;
+use libmsdf::drawlist::{AtlasId, AtlasSet, DrawList};
 use libmsdf::font::{
-    BUNDLED_ATLAS_PX_RANGE, FontAtlas, ROBOTO_REGULAR_ASCII, ROBOTO_REGULAR_ATLAS, TextShaper,
+    BUNDLED_ATLAS_PX_RANGE, FontAtlas, NOTO_SANS_MONO_ATLAS, ROBOTO_REGULAR_ASCII,
+    ROBOTO_REGULAR_ATLAS, TERMINAL_SYMBOLS_ATLAS, TerminalShaper, TextShaper,
 };
 
-use crate::agent::{AgentHit, AgentScreen};
+use crate::agent::{AgentHit, AgentScreen, Terminal};
 use crate::keys::VaultKeyStore;
 use crate::ui::{
     Buttons, CODE, Card, CardState, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN,
@@ -137,8 +138,14 @@ impl Args {
 }
 
 pub struct App {
-    atlas: FontAtlas,
+    /// Roboto first, so text pushed with a plain atlas (libcontrols') draws
+    /// from it; then the terminal face and its symbol page.
+    fonts: AtlasSet,
+    roboto: AtlasId,
+    mono: AtlasId,
+    symbols: AtlasId,
     shaper: TextShaper,
+    terminal: TerminalShaper,
     sdf: GpuSdfRenderer,
     list: DrawList,
     screen: Screen,
@@ -694,28 +701,25 @@ impl MorphApp for App {
     }
 
     fn init(ctx: &mut MorphContext) -> Self {
-        let atlas = FontAtlas::from_bytes(ROBOTO_REGULAR_ATLAS).expect("bundled atlas parses");
+        let parse = |bytes| FontAtlas::from_bytes(bytes).expect("bundled atlas parses");
+        let (text, page) = (parse(NOTO_SANS_MONO_ATLAS), parse(TERMINAL_SYMBOLS_ATLAS));
+        let terminal = TerminalShaper::new(&text, &page).expect("bundled terminal atlases agree");
+        let mut fonts = AtlasSet::new();
+        let mut add = |atlas| fonts.register(atlas).expect("bundled atlases fit one set");
+        let (roboto, mono, symbols) = (add(parse(ROBOTO_REGULAR_ATLAS)), add(text), add(page));
         let shaper = TextShaper::new(ROBOTO_REGULAR_ASCII.to_vec()).expect("bundled face parses");
-        let sdf = GpuSdfRenderer::new_with_msdf_layers(
-            ctx.device(),
-            ctx.surface_format(),
-            atlas.width,
-            atlas.height,
-            atlas.layer_count(),
-        );
-        sdf.upload_msdf_atlas(
-            ctx.queue(),
-            atlas.width,
-            atlas.height,
-            &atlas.to_rgba_bytes(),
-        );
-        sdf.upload_glyph_table(ctx.queue(), &atlas.glyph_table_u32s());
+        let sdf = GpuSdfRenderer::new_with_atlas_set(ctx.device(), ctx.surface_format(), &fonts);
+        sdf.upload_atlas_set(ctx.queue(), &fonts);
 
         let args = Args::parse(ctx.args());
         let audio_config = audio_config(ctx, &args);
         let mut app = Self {
-            atlas,
+            fonts,
+            roboto,
+            mono,
+            symbols,
             shaper,
+            terminal,
             sdf,
             list: DrawList::new(),
             screen: Screen::new(),
@@ -920,16 +924,23 @@ impl MorphApp for App {
     }
 
     fn render(&mut self, ctx: &mut MorphContext, frame: &Frame<'_>) {
+        let font = |id| self.fonts.atlas(id).expect("registered in this set");
         let draw = DrawContext {
             px_range: BUNDLED_ATLAS_PX_RANGE,
-            ..DrawContext::new(Some(&self.atlas), Some(&self.shaper))
+            ..DrawContext::new(Some(font(self.roboto).atlas), Some(&self.shaper))
+        };
+        let term = Terminal {
+            shaper: &self.terminal,
+            text: font(self.mono),
+            symbols: font(self.symbols),
+            px_range: BUNDLED_ATLAS_PX_RANGE,
         };
         match &mut self.agent {
-            Some(agent) => agent.draw(&mut self.list, &draw),
+            Some(agent) => agent.draw(&mut self.list, &draw, Some(&term)),
             None => self.screen.draw(&mut self.list, &draw),
         };
         let (w, h) = frame.size;
-        self.sdf.render_draw_list(
+        self.sdf.render_draw_list_in(
             ctx.device(),
             ctx.queue(),
             frame.view,
@@ -937,6 +948,7 @@ impl MorphApp for App {
             h,
             1.0,
             &self.list,
+            &self.fonts,
             0.0,
         );
     }

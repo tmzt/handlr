@@ -28,7 +28,10 @@ use handlr_companion::{AgentCard, CardKind};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
 use libhandlr_proto::common::{Entry, EntryKind, Role};
 use libmorph::TouchPhase;
-use libmsdf::drawlist::{DrawList, SdfInstance, SdfKind};
+use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
+#[cfg(test)]
+use libmsdf::font::TerminalSource;
+use libmsdf::font::{GlyphStyle, TerminalShaper};
 
 use crate::ui::{Layout, Line};
 
@@ -83,6 +86,22 @@ const DICTATION_LINES: usize = 6;
 /// A line height for type of `px` pixels.
 fn line_h(px: f32) -> f32 {
     px * 1.35
+}
+
+/// The terminal face's cell and line pitch, in em: Noto Sans Mono's 0.6,
+/// and the 1.3 em at which the symbol page's box drawing joins (libmsdf's
+/// `TerminalShaper::cell_em` and `line_pitch_em`).
+const CELL_EM: f32 = 0.6;
+const PITCH_EM: f32 = 1.3;
+
+/// A scrollback line's height for type of `px` pixels.
+fn term_h(px: f32) -> f32 {
+    px * PITCH_EM
+}
+
+/// How many cells of `px`-pixel terminal type fit in `width`.
+fn term_columns(width: f32, px: f32) -> usize {
+    (width / (px * CELL_EM)).max(8.0) as usize
 }
 
 /// How many characters of `px`-pixel type fit in `width`: roughly half an
@@ -152,6 +171,9 @@ pub struct Row {
     /// Type size in pixels.
     pub px: f32,
     pub color: [f32; 4],
+    /// Scrollback, on the terminal grid; otherwise a card's or the
+    /// screen's text, in Roboto.
+    pub mono: bool,
 }
 
 /// A filled rectangle: a band, a card's panel, its shadow or its edge.
@@ -354,6 +376,7 @@ fn card_block(
         y: ty,
         px: title_px,
         color: accent(card.kind),
+        mono: false,
     });
     ty += line_h(title_px) + 4.0 * s;
     for l in lines {
@@ -363,6 +386,7 @@ fn card_block(
             y: ty,
             px: text_px,
             color: FG,
+            mono: false,
         });
         ty += line_h(text_px);
     }
@@ -393,7 +417,7 @@ pub fn lay_out_flow(entries: &[Entry], cards: &[AgentCard], width: f32, s: f32) 
     let mut flow = Flow::default();
     let pad = PAD * s;
     let text_w = width - 2.0 * pad;
-    let cols = |pt: f32| columns(text_w - 8.0 * s, pt * s);
+    let cols = |pt: f32| term_columns(text_w - 8.0 * s, pt * s);
     let mut y = 8.0 * s;
     let mut next_card = 0;
     for i in 0..=entries.len() {
@@ -412,8 +436,9 @@ pub fn lay_out_flow(entries: &[Entry], cards: &[AgentCard], width: f32, s: f32) 
                     y,
                     px: TOOL_PT * s,
                     color: DIM,
+                    mono: true,
                 });
-                y += line_h(TOOL_PT * s) + 4.0 * s;
+                y += term_h(TOOL_PT * s) + 4.0 * s;
             }
             next_card += 1;
         }
@@ -428,7 +453,7 @@ pub fn lay_out_flow(entries: &[Entry], cards: &[AgentCard], width: f32, s: f32) 
         let h: f32 = lines
             .iter()
             .map(|(text, pt, _)| {
-                let lh = line_h(pt * s);
+                let lh = term_h(pt * s);
                 if text.is_empty() { lh * 0.5 } else { lh }
             })
             .sum();
@@ -442,7 +467,7 @@ pub fn lay_out_flow(entries: &[Entry], cards: &[AgentCard], width: f32, s: f32) 
         let mut ly = y;
         for (text, pt, color) in lines {
             let px = pt * s;
-            let lh = line_h(px);
+            let lh = term_h(px);
             if text.is_empty() {
                 ly += lh * 0.5;
                 continue;
@@ -453,6 +478,7 @@ pub fn lay_out_flow(entries: &[Entry], cards: &[AgentCard], width: f32, s: f32) 
                 y: ly,
                 px,
                 color,
+                mono: true,
             });
             ly += lh;
         }
@@ -505,6 +531,35 @@ pub struct Pinned {
     pub rect: Rect,
     /// Laid out at the screen's coordinates.
     pub flow: Flow,
+}
+
+/// The terminal face for the scrollback: the shaper and its two atlases,
+/// in the renderer's atlas set.
+pub struct Terminal<'a> {
+    pub shaper: &'a TerminalShaper,
+    pub text: AtlasRef<'a>,
+    pub symbols: AtlasRef<'a>,
+    pub px_range: f32,
+}
+
+/// Draws `row` at `pos`: on the terminal grid when it is scrollback and
+/// the face is there, otherwise in the context's font.
+fn draw_row(
+    list: &mut DrawList,
+    ctx: &DrawContext,
+    term: Option<&Terminal>,
+    row: &Row,
+    pos: [f32; 2],
+) {
+    match term {
+        Some(t) if row.mono => {
+            let line = t.shaper.line(&row.text, GlyphStyle::Regular);
+            list.push_terminal_line(&line, t.text, t.symbols, pos, row.px, t.px_range, row.color);
+        }
+        _ => {
+            ctx.draw_text(list, &row.text, pos, row.px, row.color);
+        }
+    }
 }
 
 /// The agent view's screen: content, scroll state and layout.
@@ -724,6 +779,7 @@ impl AgentScreen {
                     y,
                     px: *px,
                     color: *color,
+                    mono: false,
                 });
                 y += line_h(*px);
             }
@@ -759,6 +815,7 @@ impl AgentScreen {
                     y: bar.y + (bar.h - line_h(px)) * 0.5,
                     px,
                     color: FG,
+                    mono: false,
                 });
                 pin = Some(Pinned {
                     compact: true,
@@ -961,8 +1018,14 @@ impl AgentScreen {
         self.offset != before
     }
 
-    /// Rebuilds `list` if anything changed. Returns whether it did.
-    pub fn draw(&mut self, list: &mut DrawList, ctx: &DrawContext) -> bool {
+    /// Rebuilds `list` if anything changed. Returns whether it did. The
+    /// scrollback is drawn with `term` when given, otherwise in `ctx`'s font.
+    pub fn draw(
+        &mut self,
+        list: &mut DrawList,
+        ctx: &DrawContext,
+        term: Option<&Terminal>,
+    ) -> bool {
         if !self.dirty {
             return false;
         }
@@ -983,8 +1046,9 @@ impl AgentScreen {
             }
         }
         for r in &self.flow.rows {
-            if visible(r.y, line_h(r.px)) {
-                ctx.draw_text(list, &r.text, [r.x, r.y + dy], r.px, r.color);
+            let h = if r.mono { term_h(r.px) } else { line_h(r.px) };
+            if visible(r.y, h) {
+                draw_row(list, ctx, term, r, [r.x, r.y + dy]);
             }
         }
         for b in &self.flow.buttons {
@@ -1208,7 +1272,8 @@ mod tests {
         assert_eq!(colour("```diff"), DIM);
         // Nothing runs past the phone's width.
         for r in &flow.rows {
-            let cols = columns(1080.0 - 2.0 * PAD * 2.0 - 16.0, r.px);
+            assert!(r.mono, "{r:?}");
+            let cols = term_columns(1080.0 - 2.0 * PAD * 2.0 - 16.0, r.px);
             assert!(r.text.chars().count() <= cols + 1, "{r:?}");
         }
     }
@@ -1535,12 +1600,57 @@ mod tests {
     }
 
     #[test]
+    fn the_scrollback_grid_is_the_terminal_face_s() {
+        use libmsdf::drawlist::AtlasSet;
+        use libmsdf::font::{FontAtlas, NOTO_SANS_MONO_ATLAS, TERMINAL_SYMBOLS_ATLAS};
+        let text = FontAtlas::from_bytes(NOTO_SANS_MONO_ATLAS).expect("parses");
+        let page = FontAtlas::from_bytes(TERMINAL_SYMBOLS_ATLAS).expect("parses");
+        let shaper = TerminalShaper::new(&text, &page).expect("the atlases agree");
+        assert!((shaper.cell_em() - CELL_EM).abs() < 1e-4);
+        assert!((shaper.line_pitch_em() - PITCH_EM).abs() < 1e-6);
+
+        // Box drawing and Braille come from the symbol page, on the grid.
+        let mut set = AtlasSet::new();
+        let (t, p) = (set.register(text).unwrap(), set.register(page).unwrap());
+        let term = Terminal {
+            shaper: &shaper,
+            text: set.atlas(t).unwrap(),
+            symbols: set.atlas(p).unwrap(),
+            px_range: 4.0,
+        };
+        let line = shaper.line("\u{256d}\u{2500} ok \u{280b}", GlyphStyle::Regular);
+        assert!(
+            line.segments
+                .iter()
+                .any(|g| g.source == TerminalSource::Symbols)
+        );
+        assert_eq!(line.columns, 7);
+        let row = Row {
+            text: "\u{256d}\u{2500} ok \u{280b}".into(),
+            x: 0.0,
+            y: 0.0,
+            px: 30.0,
+            color: FG,
+            mono: true,
+        };
+        let mut list = DrawList::new();
+        draw_row(
+            &mut list,
+            &DrawContext::default(),
+            Some(&term),
+            &row,
+            [0.0, 0.0],
+        );
+        assert!(!list.lower_with(&set).draws.is_empty());
+    }
+
+    #[test]
     fn drawing_rebuilds_only_on_change() {
         let mut a = screen(conversation(3), vec![], None);
         let mut list = DrawList::new();
         let ctx = DrawContext::default();
-        assert!(a.draw(&mut list, &ctx));
-        assert!(!a.draw(&mut list, &ctx));
+        assert!(a.draw(&mut list, &ctx, None));
+        assert!(!a.draw(&mut list, &ctx, None));
         a.set_content(
             "Claude".into(),
             "idle".into(),
@@ -1548,7 +1658,7 @@ mod tests {
             vec![],
             None,
         );
-        assert!(!a.draw(&mut list, &ctx), "the same content");
+        assert!(!a.draw(&mut list, &ctx, None), "the same content");
         a.set_content(
             "Claude".into(),
             "working".into(),
@@ -1556,6 +1666,6 @@ mod tests {
             vec![],
             None,
         );
-        assert!(a.draw(&mut list, &ctx));
+        assert!(a.draw(&mut list, &ctx, None));
     }
 }

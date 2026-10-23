@@ -1039,7 +1039,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1559,8 +1559,8 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libcontrols"
-version = "0.5.0"
-source = "git+https://github.com/tmzt/libcontrols?rev=ccb783dd64b88d3d7ad20d07b7919a5177ab332d#ccb783dd64b88d3d7ad20d07b7919a5177ab332d"
+version = "0.6.0"
+source = "git+https://github.com/tmzt/libcontrols?rev=45f5cddd7605975aab7e2009163ccf1a5809cea6#45f5cddd7605975aab7e2009163ccf1a5809cea6"
 dependencies = [
  "libmsdf",
 ]
@@ -1651,8 +1651,8 @@ dependencies = [
 
 [[package]]
 name = "libmsdf"
-version = "0.4.0"
-source = "git+https://github.com/tmzt/libmsdf?rev=b48d0664a4222ffd1fe505962d13459fbadb5034#b48d0664a4222ffd1fe505962d13459fbadb5034"
+version = "0.5.0"
+source = "git+https://github.com/tmzt/libmsdf?rev=c3cf5112b5ef11f9d01dec37f66a2a651ac03c4a#c3cf5112b5ef11f9d01dec37f66a2a651ac03c4a"
 dependencies = [
  "bytemuck",
  "libmsdf-font",
@@ -1664,8 +1664,8 @@ dependencies = [
 
 [[package]]
 name = "libmsdf-font"
-version = "0.4.0"
-source = "git+https://github.com/tmzt/libmsdf?rev=b48d0664a4222ffd1fe505962d13459fbadb5034#b48d0664a4222ffd1fe505962d13459fbadb5034"
+version = "0.5.0"
+source = "git+https://github.com/tmzt/libmsdf?rev=c3cf5112b5ef11f9d01dec37f66a2a651ac03c4a#c3cf5112b5ef11f9d01dec37f66a2a651ac03c4a"
 dependencies = [
  "rustybuzz",
  "ttf-parser",
@@ -1929,7 +1929,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2876,7 +2876,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4074,7 +4074,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
