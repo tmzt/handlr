@@ -52,9 +52,53 @@ pub struct PaneInfo {
     /// The primary foreground command or process name if available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The session herdr detected for the pane's agent, where it detects
+    /// one (Claude Code and the Antigravity CLI as of 2026-10-22).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<AgentSession>,
     /// Additional metadata fields forwarded from `herdr`.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
+}
+
+/// The session herdr reports for a pane's agent, such as
+/// `{"source": "herdr:claude", "agent": "claude", "kind": "id", "value": "<uuid>"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSession {
+    /// The detector that found it (`herdr:claude`).
+    #[serde(default)]
+    pub source: String,
+    /// The agent it belongs to (`claude`, `agy`).
+    #[serde(default)]
+    pub agent: String,
+    /// What `value` is: `id` (a session id) or `path` (a session file).
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+impl AgentSession {
+    /// The session id, when `kind` is `id` and the value is not empty.
+    pub fn id(&self) -> Option<&str> {
+        let value = self.value.trim();
+        (self.kind == "id" && !value.is_empty()).then_some(value)
+    }
+}
+
+/// Which of a pane's terminal snapshots `pane.read` returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadSource {
+    /// The visible frame only.
+    Visible,
+    /// The recent lines, as the terminal wrapped them (herdr's default).
+    #[default]
+    Recent,
+    /// The recent lines with soft wraps joined back into logical lines.
+    RecentUnwrapped,
+    /// What herdr's agent detection reads.
+    Detection,
 }
 
 /// Information describing a tab within a workspace.
@@ -191,6 +235,9 @@ pub enum HerdrRequest {
         pane_id: String,
         #[serde(default = "default_inspect_lines_val")]
         lines: usize,
+        /// Which snapshot to read; herdr's default, `recent`, when absent.
+        #[serde(default)]
+        source: ReadSource,
     },
     /// Executes a command in the target pane.
     RunCommand {
@@ -249,10 +296,16 @@ impl HerdrRequest {
 
     /// Create an `inspect_pane` request with the given number of buffer lines.
     pub fn inspect_pane(pane_id: impl Into<String>, lines: usize) -> Self {
+        Self::inspect_pane_from(pane_id, lines, ReadSource::Recent)
+    }
+
+    /// Create an `inspect_pane` request reading `source`.
+    pub fn inspect_pane_from(pane_id: impl Into<String>, lines: usize, source: ReadSource) -> Self {
         Self::InspectPane {
             id: generate_request_id(),
             pane_id: pane_id.into(),
             lines,
+            source,
         }
     }
 
@@ -396,16 +449,26 @@ impl HerdrRequest {
                     params,
                 }
             }
-            HerdrRequest::InspectPane { id, pane_id, lines } => HerdrJsonRpcRequest {
-                jsonrpc: "2.0".to_string(),
-                id: id.clone(),
-                method: "pane.read".to_string(),
-                params: serde_json::json!({
-                    "pane_id": pane_id,
-                    "source": "recent",
-                    "count": lines,
-                }),
-            },
+            HerdrRequest::InspectPane {
+                id,
+                pane_id,
+                lines,
+                source,
+            } => {
+                // herdr's schema names the line count `lines`; `count` is
+                // kept for herdr versions that read it.
+                HerdrJsonRpcRequest {
+                    jsonrpc: "2.0".to_string(),
+                    id: id.clone(),
+                    method: "pane.read".to_string(),
+                    params: serde_json::json!({
+                        "pane_id": pane_id,
+                        "source": source,
+                        "lines": lines,
+                        "count": lines,
+                    }),
+                }
+            }
             HerdrRequest::RunCommand {
                 id,
                 pane_id,

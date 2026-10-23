@@ -14,8 +14,8 @@ pub use client::HerdrClient;
 pub use error::{HerdrError, HerdrResult};
 pub use events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
 pub use protocol::{
-    AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction, PaneInfo, TabInfo,
-    WorkspaceInfo, DEFAULT_INSPECT_LINES,
+    AgentSession, AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction,
+    PaneInfo, ReadSource, TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
 };
 pub use transport::{
     default_local_socket_path, HerdrEventStream, HerdrTransport, MockState, RemoteSshConfig,
@@ -141,6 +141,12 @@ mod tests {
         assert_eq!(rpc.params["pane_id"], "pane_9");
         assert_eq!(rpc.params["count"], 100);
         assert_eq!(rpc.params["source"], "recent");
+        assert_eq!(rpc.params["lines"], 100);
+
+        let unwrapped =
+            HerdrRequest::inspect_pane_from("pane_9", 80, ReadSource::RecentUnwrapped).to_jsonrpc();
+        assert_eq!(unwrapped.params["source"], "recent_unwrapped");
+        assert_eq!(unwrapped.params["lines"], 80);
 
         let cmd_req = HerdrRequest::run_command("w2:p1", "/compact");
         let cmd_rpc = cmd_req.to_jsonrpc();
@@ -338,5 +344,52 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("requires 'pane_id'"));
+    }
+
+    #[test]
+    fn test_pane_agent_session_is_typed() {
+        // The shape of `herdr pane list` on 2026-10-23.
+        let pane: PaneInfo = serde_json::from_value(json!({
+            "pane_id": "w2:pZ",
+            "agent": "claude",
+            "agent_session": {"agent": "claude", "kind": "id", "source": "herdr:claude",
+                              "value": "00000000-0000-4000-8000-000000000001"},
+            "agent_status": "idle",
+            "cwd": "/work/example"
+        }))
+        .unwrap();
+        let session = pane.agent_session.as_ref().unwrap();
+        assert_eq!(session.source, "herdr:claude");
+        assert_eq!(session.id(), Some("00000000-0000-4000-8000-000000000001"));
+        assert!(!pane.extra.contains_key("agent_session"));
+        assert_eq!(pane.extra["agent"], "claude");
+        // A path, or no session at all.
+        let path = AgentSession {
+            source: "x".into(),
+            agent: "x".into(),
+            kind: "path".into(),
+            value: "/tmp/s.jsonl".into(),
+        };
+        assert_eq!(path.id(), None);
+        let bare: PaneInfo = serde_json::from_value(json!({"pane_id": "w1:p1"})).unwrap();
+        assert_eq!(bare.agent_session, None);
+        let wire = serde_json::to_value(&bare).unwrap();
+        assert!(wire.get("agent_session").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mock_logs_the_read_source() {
+        let client = HerdrClient::mock();
+        client
+            .inspect_pane_from("p1", 80, ReadSource::RecentUnwrapped)
+            .await
+            .unwrap();
+        match client.transport() {
+            HerdrTransport::Mock { state } => assert_eq!(
+                state.read().await.read_log,
+                [("p1".to_string(), ReadSource::RecentUnwrapped, 80)]
+            ),
+            _ => unreachable!(),
+        }
     }
 }

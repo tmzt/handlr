@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, RwLock};
 use crate::error::{HerdrError, HerdrResult};
 use crate::events::{HerdrEvent, Subscription};
 use crate::protocol::{
-    AgentStatus, EnvironmentSnapshot, HerdrRequest, PaneInfo, TabInfo, WorkspaceInfo,
+    AgentStatus, EnvironmentSnapshot, HerdrRequest, PaneInfo, ReadSource, TabInfo, WorkspaceInfo,
 };
 
 /// Default socket path on local Unix systems.
@@ -150,6 +150,8 @@ pub struct MockState {
     pub command_log: Vec<(String, String)>,
     pub keystroke_log: Vec<(String, String)>,
     pub focused_target: Option<String>,
+    /// Every pane read, in order: `(pane_id, source, lines)`.
+    pub read_log: Vec<(String, ReadSource, usize)>,
 }
 
 impl Default for MockState {
@@ -166,6 +168,7 @@ impl Default for MockState {
             agent_status: Some(AgentStatus::Working),
             focused: true,
             command: Some("cargo build".to_string()),
+            agent_session: None,
             extra,
         };
 
@@ -203,6 +206,7 @@ impl Default for MockState {
             command_log: Vec::new(),
             keystroke_log: Vec::new(),
             focused_target: Some("p1".to_string()),
+            read_log: Vec::new(),
         }
     }
 }
@@ -617,7 +621,13 @@ impl HerdrTransport {
                 let snapshot = &state.snapshot;
                 serde_json::to_value(snapshot).map_err(HerdrError::from)
             }
-            HerdrRequest::InspectPane { pane_id, lines, .. } => {
+            HerdrRequest::InspectPane {
+                pane_id,
+                lines,
+                source,
+                ..
+            } => {
+                state.read_log.push((pane_id.clone(), *source, *lines));
                 let buffer = state
                     .pane_buffers
                     .get(pane_id)

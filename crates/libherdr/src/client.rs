@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::error::{HerdrError, HerdrResult};
-use crate::protocol::{EnvironmentSnapshot, HerdrRequest, DEFAULT_INSPECT_LINES};
+use crate::protocol::{EnvironmentSnapshot, HerdrRequest, ReadSource, DEFAULT_INSPECT_LINES};
 use crate::transport::{HerdrTransport, MockState, RemoteSshConfig};
 
 /// High-level client providing structured and ergonomic access to `herdr`.
@@ -102,6 +102,17 @@ impl HerdrClient {
     /// Read the tail buffer of a terminal pane.
     pub async fn inspect_pane(&self, pane_id: &str, lines: usize) -> HerdrResult<Value> {
         let req = HerdrRequest::inspect_pane(pane_id, lines);
+        self.send_request(&req).await
+    }
+
+    /// Read the last `lines` lines of `source` from a terminal pane.
+    pub async fn inspect_pane_from(
+        &self,
+        pane_id: &str,
+        lines: usize,
+        source: ReadSource,
+    ) -> HerdrResult<Value> {
+        let req = HerdrRequest::inspect_pane_from(pane_id, lines, source);
         self.send_request(&req).await
     }
 
