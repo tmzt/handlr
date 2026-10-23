@@ -243,6 +243,10 @@ pub struct View {
     pub field: String,
     /// The field has the keyboard.
     pub field_focused: bool,
+    /// Hide the pairing field and its Pair button: the app is paired. The
+    /// pairing area (a device code, notes) still shows above where they
+    /// were.
+    pub paired: bool,
 }
 
 /// A control a touch landed on.
@@ -418,10 +422,10 @@ impl Screen {
             place(&mut self.router, &mut y, id, Some(text), (15.0, MUTED), 0.0);
         }
 
-        // The bottom: the field and Pair.
+        // The bottom: the field and Pair, hidden once paired.
         let bottom = layout.h - layout.bottom - 24.0 * s;
         let row_h = Layout::ROW_H * s;
-        let row_y = bottom - row_h;
+        let row_y = if view.paired { bottom } else { bottom - row_h };
         let pair_w = Layout::PAIR_W * s;
         let field_w = layout.w - 2.0 * pad - pair_w - 12.0 * s;
         let field_rect = Rect::new(pad, row_y, field_w, row_h);
@@ -445,11 +449,15 @@ impl Screen {
             edit.font_size = Some(Layout::FIELD_SIZE * s);
             edit.corner_radius = Some(8.0 * s);
             edit.rect = field_rect;
-            edit.state.set_active(view.field_focused);
+            edit.state.set_active(view.field_focused && !view.paired);
         }
-        self.place_button(self.pair, pair_rect, s, true);
-        self.hits.push((Hit::Field, field_rect));
-        self.hits.push((Hit::Pair, pair_rect));
+        self.router
+            .set_flags(self.field, NodeFlags::HIDDEN, view.paired);
+        self.place_button(self.pair, pair_rect, s, !view.paired);
+        if !view.paired {
+            self.hits.push((Hit::Field, field_rect));
+            self.hits.push((Hit::Pair, pair_rect));
+        }
 
         // Above them, the pairing area, as many lines as fit.
         let height = |line: &Line| (line.gap + line.size * 1.35) * s;
@@ -636,6 +644,28 @@ mod tests {
         assert!(screen.draw(&mut list, &ctx));
         let status = screen.router.get::<Label>(screen.status[0]).unwrap();
         assert_eq!(status.text(), "listening");
+    }
+
+    #[test]
+    fn the_pairing_row_is_hidden_once_paired() {
+        let mut screen = Screen::new();
+        screen.set(PHONE, View::default());
+        assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
+        assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Field));
+        screen.set(
+            PHONE,
+            View {
+                paired: true,
+                code: vec![line("handlrkey1abc")],
+                ..View::default()
+            },
+        );
+        assert!(
+            !screen
+                .hits
+                .iter()
+                .any(|(h, _)| matches!(h, Hit::Pair | Hit::Field))
+        );
     }
 
     #[test]

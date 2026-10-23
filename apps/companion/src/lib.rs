@@ -579,6 +579,7 @@ impl App {
             code,
             field: self.field.clone(),
             field_focused: self.field_focused,
+            paired: self.paired,
         };
         self.screen.set(layout, view);
     }
