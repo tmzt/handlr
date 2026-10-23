@@ -336,6 +336,85 @@ pub fn response_handle(target: &common::FocusInfo, response: Suggestion) -> Stri
     format!("reply{}", &handle["message".len()..])
 }
 
+/// What a tapped Yes or No says to the agent: the answer with the
+/// question's context (owner, 2026-10-23: "the \"yes\" should carry the
+/// context handle when typed, either a phrase such as \"Yes, install it on
+/// the S23\" … the button should only show \"yes\""). "Install it on the
+/// S23?" gives "Yes, install it on the S23" or "No, don't install it on
+/// the S23"; "Should I write the amendment now?" gives "Yes, write the
+/// amendment now". A question that is not a request ("Is that what you
+/// meant?") gives "Yes, re: is that what you meant". Only the message
+/// filter's characters are kept.
+pub fn answer_text(yes: bool, question: &str) -> String {
+    const ASKING: [&str; 9] = [
+        "should i ",
+        "shall i ",
+        "do you want me to ",
+        "would you like me to ",
+        "want me to ",
+        "can i ",
+        "may i ",
+        "could i ",
+        "ok to ",
+    ];
+    const QUESTION_WORDS: [&str; 16] = [
+        "is", "are", "was", "do", "does", "did", "what", "which", "where", "when", "why", "how",
+        "who", "will", "would", "could",
+    ];
+    // The last sentence that asks, without its question mark or marks.
+    let asked = question
+        .split_inclusive(['?', '.', '!', '\n'])
+        .map(str::trim)
+        .rfind(|t| t.ends_with('?'))
+        .unwrap_or(question.trim());
+    let asked: String = asked
+        .trim_end_matches('?')
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | ',' | '\'' | ':') {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let asked = asked.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lower = asked.to_ascii_lowercase();
+    let (yes_word, no_word) = ("Yes", "No");
+    let answer = if yes { yes_word } else { no_word };
+    let request = ASKING
+        .iter()
+        .find_map(|p| lower.strip_prefix(p).map(|_| &asked[p.len()..]))
+        .or_else(|| {
+            let first = lower.split(' ').next().unwrap_or("");
+            (!QUESTION_WORDS.contains(&first) && !asked.is_empty()).then_some(asked.as_str())
+        });
+    let text = match request {
+        Some(rest) => {
+            let mut chars = rest.chars();
+            let rest = chars
+                .next()
+                .map(|c| c.to_ascii_lowercase().to_string() + chars.as_str())
+                .unwrap_or_default();
+            if yes {
+                format!("{answer}, {rest}")
+            } else {
+                format!("{answer}, don't {rest}")
+            }
+        }
+        None if asked.is_empty() => answer.to_string(),
+        None => {
+            let mut chars = asked.chars();
+            let rest = chars
+                .next()
+                .map(|c| c.to_ascii_lowercase().to_string() + chars.as_str())
+                .unwrap_or_default();
+            format!("{answer}, re: {rest}")
+        }
+    };
+    text.chars().take(200).collect()
+}
+
 /// A dictated message's handle, under plan 20261023_01's rules: `message`,
 /// the agent, its project and the message's first two words, lowercased,
 /// joined with `-`, as many whole words as fit in 64 characters. The daemon
@@ -395,7 +474,7 @@ enum Sent {
     /// `session.peek` for the agent view of this pane.
     Peek(String),
     /// `agents.send` of a suggested response.
-    Respond(Suggestion),
+    Respond(Suggestion, String),
     /// `speech.summarize` of the reply being read with this serial.
     Summarize(u64),
 }
@@ -1173,7 +1252,19 @@ impl State {
             )));
             return;
         }
-        let (text, kind) = response.send();
+        let (word, kind) = response.send();
+        // A Yes or No answering the agent's question says what it answers.
+        let question = self
+            .view
+            .as_ref()
+            .and_then(|v| v.pending_question.as_ref())
+            .map(|q| q.text.clone());
+        let text = match (response, &question) {
+            (Suggestion::Yes | Suggestion::No, Some(q)) => {
+                answer_text(response == Suggestion::Yes, q)
+            }
+            _ => word.to_string(),
+        };
         let agent = self.agents.iter().find(|a| a.pane_id == pane_id);
         let target = common::FocusInfo {
             pane_id: pane_id.clone(),
@@ -1197,7 +1288,7 @@ impl State {
             text: text.to_string(),
             confirm_id: None,
         });
-        out.push(self.request(methods::AGENTS_SEND, params, Sent::Respond(response)));
+        out.push(self.request(methods::AGENTS_SEND, params, Sent::Respond(response, text)));
     }
 
     /// An utterance while dictating (decision 2, as amended).
@@ -1434,8 +1525,7 @@ impl State {
                     log::info!("dictation: focus {target:?}: {message}");
                     out.push(event(Event::Say(format!("I couldn't focus {target}."))));
                 }
-                Sent::Respond(response) => {
-                    let text = response.send().0;
+                Sent::Respond(response, text) => {
                     self.tapped
                         .retain(|t| t.confirm_id.is_some() || t.text != text);
                     out.push(event(Event::Error(message)));
@@ -1534,9 +1624,8 @@ impl State {
                     self.message_resolved("failed", out);
                 }
             },
-            Sent::Respond(response) => match parse::<common::AgentsSendResult>(result) {
+            Sent::Respond(_, text) => match parse::<common::AgentsSendResult>(result) {
                 Ok(common::AgentsSendResult::Pending { confirm_id, .. }) => {
-                    let text = response.send().0;
                     let queued = self.confirms.iter().any(|c| c.id == confirm_id);
                     if let Some(i) = self
                         .tapped
@@ -1553,7 +1642,6 @@ impl State {
                     }
                 }
                 Ok(common::AgentsSendResult::Sent) => {
-                    let text = response.send().0;
                     self.tapped
                         .retain(|t| t.confirm_id.is_some() || t.text != text);
                 }
@@ -3445,7 +3533,7 @@ mod tests {
         let out = s.input(Input::Respond(Suggestion::Yes));
         assert_eq!(
             requests(&out, "agents.send")[0].params,
-            json!({"pane_id": "w2:pZ", "text": "yes", "kind": "message",
+            json!({"pane_id": "w2:pZ", "text": "Yes, go on", "kind": "message",
                    "handle": "reply-claude-handlr-yes"})
         );
         // The tap is the approval: its question is answered, not asked.
@@ -3454,7 +3542,7 @@ mod tests {
         let out = s.incoming(note(
             "confirm.requested",
             json!({"confirm_id": 9, "pane_id": "w2:pZ", "agent": "claude",
-                   "command": "yes", "requested_by": "companion:test",
+                   "command": "Yes, go on", "requested_by": "companion:test",
                    "text": "Approve sending your message to Claude?"}),
         ));
         assert_eq!(
@@ -3731,5 +3819,47 @@ mod tests {
         // No session at all: answered, so no longer loading.
         let out = peek_answer(&mut s, &out, "idle", Value::Null);
         assert_eq!(loading(&out), Some(false));
+    }
+
+    #[test]
+    fn a_tapped_yes_or_no_carries_the_question() {
+        assert_eq!(
+            answer_text(true, "Install it on the S23?"),
+            "Yes, install it on the S23"
+        );
+        assert_eq!(
+            answer_text(false, "Install it on the S23?"),
+            "No, don't install it on the S23"
+        );
+        assert_eq!(
+            answer_text(
+                true,
+                "Should I write the L3 amendment for today's changes now?"
+            ),
+            "Yes, write the L3 amendment for today's changes now"
+        );
+        assert_eq!(
+            answer_text(true, "Is that what you meant?"),
+            "Yes, re: is that what you meant"
+        );
+        // The last question of the paragraph, in the filter's characters.
+        assert_eq!(
+            answer_text(
+                true,
+                "Built (`a1d3d2a`). Restart the daemon and install the new build?"
+            ),
+            "Yes, restart the daemon and install the new build"
+        );
+        assert_eq!(answer_text(true, ""), "Yes");
+    }
+
+    #[test]
+    fn the_tapped_yes_sends_the_answer_with_its_context() {
+        let mut s = viewing("idle", asking());
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        assert_eq!(
+            requests(&out, "agents.send")[0].params["text"],
+            "Yes, go on"
+        );
     }
 }
