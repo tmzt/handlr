@@ -43,7 +43,8 @@ members = [
     "crates/handlr-companion",
     "crates/libhandlr_proto",
     "crates/libherdr",
-    "crates/libinfer"
+    "crates/libinfer",
+    "crates/qrcodeurl"
 ]
 # handlr-audio is built with -p only: it compiles libvoicexn's ML stack
 # (docs/design/20261022_04_COMPANION_APP_PLAN.md, 18:10 EDT amendment).
@@ -52,5 +53,6 @@ default-members = [
     "crates/handlr-companion",
     "crates/libhandlr_proto",
     "crates/libherdr",
-    "crates/libinfer"
+    "crates/libinfer",
+    "crates/qrcodeurl"
 ]

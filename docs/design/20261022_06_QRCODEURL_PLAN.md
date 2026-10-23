@@ -1,7 +1,7 @@
 ---
 title: qrcodeurl, and pairing by a scanned URL
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - "`crates/qrcodeurl`: a small, pure, synchronous crate that turns any
     string into a QR matrix (the `qrcode` crate), a 1-bit grayscale PNG
@@ -220,3 +220,16 @@ string or url and qr data url on handlr pair".
   `Inline`, `Qr::inline` and `Qr::terminal`, with their tests, for later
   use.
 - **Unchanged:** `--qr-png <path>` stays as decision 6 describes it.
+
+## Amendment — 2026-10-22 22:56 EDT: implementation started
+
+Step 1 is implemented: `crates/qrcodeurl`, which this commit adds to the
+workspace. The status is `In implementation`, and this document is now
+immutable. It changes only on the owner's explicit instruction (AGENTS.md,
+Rule 1.5).
+
+In the step 1 tests, `rqrr` reads back every level at scales 2 and 8. At
+scale 1 it reads a pairing-sized code (version 11), but not the densest test
+code (version 18 at level H). The PNG of that code reads back at scale 8, so
+the limit is `rqrr`'s sampling, not the encoder. Scale 1 is tested on its
+own.

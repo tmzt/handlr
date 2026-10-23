@@ -1,0 +1,17 @@
+[package]
+name = "qrcodeurl"
+version = "0.1.0"
+edition = "2021"
+description = "A string as a QR code: terminal text, a 1-bit PNG, a data: URL, and inline kitty or iTerm2 images"
+
+[dependencies]
+# The matrix only; its image, svg and pic renderers are left out.
+qrcode = { version = "0.14", default-features = false }
+# The PNG's IDAT (zlib); the PNG itself is written in src/png.rs.
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
+base64 = "0.22"
+
+[dev-dependencies]
+# Independent readers: the PNG back to pixels, the pixels back to the text.
+png = "0.18"
+rqrr = { version = "0.11", default-features = false }
