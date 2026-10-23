@@ -190,3 +190,12 @@ under the header and answers open question 3.
 Step 1's tests gain the short names of recorded descriptions; step 5's,
 the row's order, colours, the minutes shown past 5 and not before, and a
 tap on each name.
+
+## Amendment — 2026-10-23 17:48 EDT: "main" is the first name in the row
+
+The owner (2026-10-23): "no back to, main is the first chip". This
+replaces item 4's "Inside a subagent, the row's first item is '‹ back to
+<parent>'": the row always starts with **main**, the pane's own agent,
+followed by the subagents. Tapping main shows the main agent; the name
+being viewed (main or a subagent) is underlined. The header's "‹" still
+leaves the agent view for the overview.
