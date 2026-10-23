@@ -914,3 +914,14 @@ being said the play button shows `▶│` (the terminal face has no ⏭ or ⏩)
 and a tap is `Input::Skip`: the client stops the speech
 (`Event::StopSpeaking`) and the next held reply follows. When nothing is
 being said, a tap turns read aloud on or off as before.
+
+## 2026-10-23 15:55 EDT — plan 20261023_05, step 3: the summary's temperature is not applied yet
+
+Plan 20261023_05, decision 8, gives `spoken_summary` the member
+`- [abc] temperature: 0.2`. libinfer-gemini's `GeminiReasoningEngine` has
+no generation settings, so `speech.summarize` cannot pass a temperature
+without changing libinfer-gemini, which the plan does not cover. The
+member is read and kept in the prompt's settings, as decision 7 keeps any
+member the daemon does not use, and Gemini runs at its default
+temperature. Passing it on needs a generation-settings option in
+libinfer-gemini, left to a later change.
