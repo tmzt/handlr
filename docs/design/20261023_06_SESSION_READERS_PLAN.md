@@ -180,3 +180,30 @@ owner; 2 and 3 need nothing; 4 needs 1, 2 and 3; 5 needs 4.
    aider, or others you run in herdr.
 3. **agy's `brain/` directory** may hold its plans or notes. Should the
    agent view show them, or only the conversation?
+
+## Amendment — 2026-10-23 17:28 EDT: the repowiki agy session as the example, never committed
+
+The owner (2026-10-23), answering open question 1: "you can use the repo
+wiki session as an example. But don't commit it". This replaces decision
+7's committed copies and step 1's "two fixtures are committed with the
+owner's approval".
+
+- **The example** is the agy conversation in the repowiki pane (herdr
+  pane `w2:p4`, session `1225868f-05e4-41d8-85dd-c12a0851b232`). The
+  recording script copies its `.db` and `-wal`, read-only, to
+  `out/sessions/agy_example/` (gitignored) and checkpoints the copy. It
+  is never committed, never pushed, and never copied anywhere else. Tests
+  that need it are `#[ignore]` unless `HANDLR_AGY_EXAMPLE` points at it,
+  as `live_naming.rs` does with `HANDLR_SNAPSHOT`.
+- **The committed fixtures are synthetic:** `scripts/make-agy-fixture.rs`
+  (or a test helper) writes a small database with the same tables and the
+  step types and fields found in the example, holding made-up text. Those
+  go under `tests/fixtures/sessions/agy/`.
+- `docs/AGY_STEPS.md` records the structure found (step types, field
+  numbers, which carries text, role and tool calls) and counts, never the
+  example's text.
+
+**Step 1, as amended. Done when:** the example is copied to
+`out/sessions/agy_example/` and read by an ignored test, `AGY_STEPS.md`
+names the step types for a user prompt, a reply, a tool call and a tool
+result, and two synthetic fixtures are committed.
