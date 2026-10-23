@@ -1072,3 +1072,13 @@ herdr's workspace label, falling back to the cwd's last part only when
 agents shared a label. Now `[naming] project_from` chooses: `"directory"`
 (the default) names it by the cwd's last part, using the label only when
 there is no cwd; `"workspace"` keeps decision 3 as it was.
+
+## 2026-10-23 19:22 EDT — plan 20261023_04: the overview remembers where it was scrolled
+
+The owner: "The scroll should remember where it is on the overview page".
+The common `Scroll` (`apps/companion/src/controls/scroll.rs`) kept only a
+clamped offset, so any moment when the window was shorter or the content
+smaller (a confirmation or message card appearing, the strip, a list
+answer while cards were re-laid out) moved the place up for good. It now
+keeps where the user left it, and the offset returns there as soon as
+there is room again. The agent view's own scrolling is unchanged.
