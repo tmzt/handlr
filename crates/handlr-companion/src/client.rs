@@ -21,6 +21,7 @@ use libhandlr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::view::{AgentCard, Cards, Facts, PendingConfirm};
 use crate::wire;
 
 /// What the app tells the client.
@@ -60,6 +61,14 @@ pub enum Input {
     Clear,
     /// The Scratch button: remove the last utterance.
     Scratch,
+    /// Open the agent view of this pane (plan 20261022_03, step 4): its
+    /// session is peeked now, and again while it is open.
+    OpenAgent(String),
+    /// Close the agent view.
+    CloseAgent,
+    /// A card's Approve or Deny: answers this confirmation, whichever is
+    /// being asked.
+    Answer { confirm_id: u64, approve: bool },
 }
 
 /// How often the `net` thread ticks while connected.
@@ -72,6 +81,16 @@ pub const DICTATION_SILENCE: Duration = Duration::from_secs(8);
 pub const MESSAGE_CAP: usize = 4000;
 /// The countdown shown before a silence submits, in seconds.
 pub const COUNTDOWN_SECS: u64 = 3;
+
+/// The least time between two peeks of the open agent view (plan
+/// 20261022_03, step 4), and how often it is peeked while the agent works
+/// or is blocked. A notice for the agent, or a change of its status, asks
+/// for a peek at once, within this limit.
+pub const PEEK_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the view is peeked while the agent is idle.
+pub const PEEK_IDLE_INTERVAL: Duration = Duration::from_secs(15);
+/// The entries the agent view asks for: the most `session.peek` gives.
+pub const VIEW_ENTRIES: usize = common::PEEK_ENTRIES_MAX;
 
 /// Where a dictated message stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +208,16 @@ pub enum Event {
     Focus(Option<common::FocusInfo>),
     /// The dictation card changed.
     Dictation(Dictation),
+    /// The open agent view changed (plan 20261022_03, step 4): the agent's
+    /// shown name and status, its entries (oldest first), the priority
+    /// cards in flow order, and the index of the pinned one.
+    AgentView {
+        name: String,
+        status: String,
+        entries: Vec<common::Entry>,
+        cards: Vec<AgentCard>,
+        pinned: Option<usize>,
+    },
     Error(String),
 }
 
@@ -296,6 +325,8 @@ enum Sent {
     Focus(String),
     /// `agents.send` of a dictated message.
     Message,
+    /// `session.peek` for the agent view of this pane.
+    Peek(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,6 +349,8 @@ struct Turn {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Confirmation {
     id: u64,
+    /// A handle only, never shown: which agent view it belongs to.
+    pane_id: String,
     text: String,
     label: Option<String>,
     phrase: String,
@@ -355,6 +388,9 @@ struct Dictating {
     /// next change.
     quiet_from: Option<Duration>,
     read_back: ReadBack,
+    /// Started from the agent view of this pane: the target is that agent,
+    /// whatever the focus does.
+    fixed_pane: Option<String>,
 }
 
 impl Dictating {
@@ -404,6 +440,28 @@ pub struct State {
     silence: Duration,
     /// The dictation card as last given.
     shown: Dictation,
+    /// The agents as `agents.list` last gave them.
+    agents: Vec<common::AgentInfo>,
+    /// The open agent view.
+    view: Option<AgentView>,
+}
+
+/// The open agent view (plan 20261022_03, step 4).
+#[derive(Debug)]
+struct AgentView {
+    pane_id: String,
+    status: String,
+    entries: Vec<common::Entry>,
+    pending_question: Option<common::PendingQuestion>,
+    cards: Cards,
+    /// A peek is on its way.
+    peeking: bool,
+    /// When the last peek was sent.
+    peeked_at: Option<Duration>,
+    /// A notice or a status change asks for a peek as soon as allowed.
+    wanted: bool,
+    /// The event as last given.
+    shown: Option<Event>,
 }
 
 impl State {
@@ -429,6 +487,8 @@ impl State {
             dictation: None,
             silence: DICTATION_SILENCE,
             shown: Dictation::off(),
+            agents: Vec::new(),
+            view: None,
         }
     }
 
@@ -491,6 +551,12 @@ impl State {
             d.quiet_from = None;
         }
         self.show_dictation(&mut out);
+        // The view keeps what it showed; its approvals are withdrawn.
+        if let Some(v) = self.view.as_mut() {
+            v.peeking = false;
+            v.wanted = true;
+        }
+        self.recompute_view(&mut out);
         if self.turn.take().is_some() {
             out.push(Output::Event(Event::Error(
                 "the connection closed during the turn".to_string(),
@@ -550,8 +616,181 @@ impl State {
             Input::Submit => self.submit(true, &mut out),
             Input::Clear => self.clear_dictation(&mut out),
             Input::Scratch => self.scratch(&mut out),
+            Input::OpenAgent(pane_id) => self.open_agent(pane_id, &mut out),
+            Input::CloseAgent => self.view = None,
+            Input::Answer {
+                confirm_id,
+                approve,
+            } => self.answer_id(confirm_id, approve, &mut out),
         }
         out
+    }
+
+    /// The agent view as it stands, if one is open.
+    pub fn agent_view(&self) -> Option<Event> {
+        let v = self.view.as_ref()?;
+        let (cards, pinned) = v.cards.placed(&v.entries);
+        Some(Event::AgentView {
+            name: self.agent_name(&v.pane_id),
+            status: v.status.clone(),
+            entries: v.entries.clone(),
+            cards,
+            pinned,
+        })
+    }
+
+    /// The shown name of the agent in `pane_id`, from `agents.list` or the
+    /// focus.
+    fn agent_name(&self, pane_id: &str) -> String {
+        self.agents
+            .iter()
+            .find(|a| a.pane_id == pane_id)
+            .and_then(|a| a.name.clone())
+            .or_else(|| {
+                self.focus
+                    .as_ref()
+                    .filter(|f| f.pane_id == pane_id)
+                    .map(|f| f.name.clone())
+            })
+            .unwrap_or_else(|| "the agent".to_string())
+    }
+
+    /// The agent in `pane_id` as a message target: from `agents.list`, else
+    /// the focus when it is that pane.
+    fn target_for(&self, pane_id: &str) -> Option<common::FocusInfo> {
+        if let Some(a) = self.agents.iter().find(|a| a.pane_id == pane_id) {
+            return Some(focus_of(a));
+        }
+        self.focus.clone().filter(|f| f.pane_id == pane_id)
+    }
+
+    fn open_agent(&mut self, pane_id: String, out: &mut Vec<Output>) {
+        if self.view.as_ref().is_some_and(|v| v.pane_id == pane_id) {
+            return self.show_view(out);
+        }
+        let status = self
+            .agents
+            .iter()
+            .find(|a| a.pane_id == pane_id)
+            .map(|a| a.status.clone())
+            .unwrap_or_default();
+        self.view = Some(AgentView {
+            pane_id,
+            status,
+            entries: Vec::new(),
+            pending_question: None,
+            cards: Cards::default(),
+            peeking: false,
+            peeked_at: None,
+            wanted: true,
+            shown: None,
+        });
+        if self.online() {
+            // Names and statuses, for the view's title and its target.
+            out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+        }
+        self.peek_if_due(out);
+        self.recompute_view(out);
+    }
+
+    /// Peeks the open view's session if it is due: asked for, or its
+    /// interval passed, and never within `PEEK_INTERVAL` of the last.
+    fn peek_if_due(&mut self, out: &mut Vec<Output>) {
+        let (online, now) = (self.online(), self.now);
+        let Some(v) = self.view.as_mut() else {
+            return;
+        };
+        if !online || v.peeking {
+            return;
+        }
+        let interval = if matches!(v.status.as_str(), "idle" | "done") {
+            PEEK_IDLE_INTERVAL
+        } else {
+            PEEK_INTERVAL
+        };
+        let due = match v.peeked_at {
+            None => true,
+            Some(at) => {
+                let since = now.saturating_sub(at);
+                since >= interval || (v.wanted && since >= PEEK_INTERVAL)
+            }
+        };
+        if !due {
+            return;
+        }
+        v.peeking = true;
+        v.wanted = false;
+        v.peeked_at = Some(now);
+        let pane_id = v.pane_id.clone();
+        let params = common::SessionPeekParams {
+            pane_id: pane_id.clone(),
+            entries: VIEW_ENTRIES,
+        };
+        out.push(self.request(methods::SESSION_PEEK, params, Sent::Peek(pane_id)));
+    }
+
+    /// Applies the card rules to the open view and gives it if it changed.
+    fn recompute_view(&mut self, out: &mut Vec<Output>) {
+        let Some(v) = self.view.as_ref() else {
+            return;
+        };
+        let name = self.agent_name(&v.pane_id);
+        let confirms: Vec<PendingConfirm> = self
+            .confirms
+            .iter()
+            .filter(|c| c.pane_id == v.pane_id)
+            .map(|c| PendingConfirm {
+                confirm_id: c.id,
+                text: c.text.clone(),
+            })
+            .collect();
+        let v = self.view.as_mut().expect("checked above");
+        let facts = Facts {
+            name: &name,
+            status: &v.status,
+            entries: &v.entries,
+            pending_question: v.pending_question.as_ref(),
+            confirms: &confirms,
+        };
+        v.cards.update(&facts);
+        self.show_view(out);
+    }
+
+    /// Gives the agent view if it changed since it was last given.
+    fn show_view(&mut self, out: &mut Vec<Output>) {
+        let Some(event) = self.agent_view() else {
+            return;
+        };
+        let v = self.view.as_mut().expect("a view");
+        if v.shown.as_ref() != Some(&event) {
+            v.shown = Some(event.clone());
+            out.push(Output::Event(event));
+        }
+    }
+
+    /// A notice or a status change for `pane_id`: the open view of it
+    /// wants a peek.
+    fn view_wants_peek(&mut self, pane_id: &str, out: &mut Vec<Output>) {
+        if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
+            v.wanted = true;
+            self.peek_if_due(out);
+        }
+    }
+
+    /// Answers the confirmation `confirm_id` (a card's button), whether or
+    /// not it is the one being asked.
+    fn answer_id(&mut self, confirm_id: u64, approve: bool, out: &mut Vec<Output>) {
+        if self.confirms.front().map(|c| c.id) == Some(confirm_id) {
+            return self.answer(approve, None, out);
+        }
+        let before = self.confirms.len();
+        self.confirms.retain(|c| c.id != confirm_id);
+        if self.confirms.len() == before {
+            log::debug!("no confirmation {confirm_id} to answer");
+            return;
+        }
+        self.reply(confirm_id, approve, out);
+        self.recompute_view(out);
     }
 
     /// The dictation card as it stands now.
@@ -620,15 +859,23 @@ impl State {
             self.submit(false, out);
         }
         self.show_dictation(out);
+        self.peek_if_due(out);
     }
 
     fn start_dictation(&mut self, out: &mut Vec<Output>) {
         if self.dictation.is_some() {
             return;
         }
+        // From the agent view, the message is for that agent.
+        let fixed_pane = self.view.as_ref().map(|v| v.pane_id.clone());
+        let target = match &fixed_pane {
+            Some(pane_id) => self.target_for(pane_id),
+            None => self.focus.clone(),
+        };
         self.dictation = Some(Dictating {
+            fixed_pane,
             parts: Vec::new(),
-            target: self.focus.clone(),
+            target,
             refresh_target: self.online(),
             phase: DictationPhase::Collecting,
             confirm_id: None,
@@ -751,6 +998,7 @@ impl State {
                 if let Some(d) = self.dictation.as_mut() {
                     d.target = focus;
                     d.refresh_target = false;
+                    d.fixed_pane = None;
                 }
                 self.show_dictation(out);
                 out.push(event(Event::Arm));
@@ -804,7 +1052,7 @@ impl State {
             self.focus = focus.clone();
             out.push(event(Event::Focus(focus.clone())));
         }
-        if let Some(d) = self.dictation.as_mut() {
+        if let Some(d) = self.dictation.as_mut().filter(|d| d.fixed_pane.is_none()) {
             if !d.has_target() || d.refresh_target {
                 d.target = focus;
             }
@@ -919,6 +1167,7 @@ impl State {
             }
         }
         self.ask_next(out);
+        self.recompute_view(out);
         self.flush_notices(out);
     }
 
@@ -952,6 +1201,12 @@ impl State {
                     message,
                 })),
                 Sent::List => log::warn!("agents.list: {message}"),
+                Sent::Peek(pane_id) => {
+                    if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
+                        v.peeking = false;
+                    }
+                    out.push(event(Event::Error(format!("session.peek: {message}"))));
+                }
                 Sent::Focus(target) => {
                     log::info!("dictation: focus {target:?}: {message}");
                     out.push(event(Event::Say(format!("I couldn't focus {target}."))));
@@ -987,6 +1242,11 @@ impl State {
                     out.push(event(Event::Vocabulary(hello.vocabulary)));
                     // herdr's focus, for the dictation mode's target.
                     out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+                    // An open view is peeked again at once.
+                    if let Some(v) = self.view.as_mut() {
+                        v.peeked_at = None;
+                    }
+                    self.peek_if_due(out);
                 }
                 Err(e) => {
                     let message = format!("a bad hello result: {e}");
@@ -1006,6 +1266,8 @@ impl State {
             },
             Sent::List => match parse::<common::AgentsListResult>(result) {
                 Ok(list) => {
+                    self.agents = list.agents;
+                    self.list_learned(out);
                     self.set_focus(list.focus, out);
                     if let Some(d) = self.dictation.as_mut() {
                         d.refresh_target = false;
@@ -1038,8 +1300,63 @@ impl State {
                     self.message_resolved("failed", out);
                 }
             },
+            Sent::Peek(pane_id) => match parse::<common::SessionPeekResult>(result) {
+                Ok(peek) => self.peeked(&pane_id, peek, out),
+                Err(e) => {
+                    if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
+                        v.peeking = false;
+                    }
+                    log::warn!("a bad session.peek result: {e}");
+                }
+            },
             Sent::Interrupt | Sent::ConfirmReply(_) => {}
         }
+    }
+
+    /// A `session.peek` answered for `pane_id`.
+    fn peeked(&mut self, pane_id: &str, peek: common::SessionPeekResult, out: &mut Vec<Output>) {
+        let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) else {
+            return; // the view closed, or moved to another agent
+        };
+        v.peeking = false;
+        v.status = peek.status;
+        match peek.session {
+            Some(session) => {
+                v.entries = session.entries;
+                v.pending_question = session.pending_question;
+            }
+            None => {
+                v.entries.clear();
+                v.pending_question = None;
+            }
+        }
+        self.recompute_view(out);
+    }
+
+    /// `agents.list` answered: the view's status, and a message target
+    /// fixed to the viewed agent before its names were known.
+    fn list_learned(&mut self, out: &mut Vec<Output>) {
+        if let Some(v) = self.view.as_mut() {
+            if let Some(a) = self.agents.iter().find(|a| a.pane_id == v.pane_id) {
+                if a.status != v.status && !v.status.is_empty() {
+                    v.wanted = true;
+                }
+                v.status = a.status.clone();
+            }
+        }
+        let fixed = self
+            .dictation
+            .as_ref()
+            .filter(|d| d.target.is_none())
+            .and_then(|d| d.fixed_pane.clone());
+        if let Some(pane_id) = fixed {
+            let target = self.target_for(&pane_id);
+            if let Some(d) = self.dictation.as_mut() {
+                d.target = target;
+            }
+        }
+        self.peek_if_due(out);
+        self.recompute_view(out);
     }
 
     fn end_turn(&mut self, id: u64, outcome: String, stopped: Vec<String>, out: &mut Vec<Output>) {
@@ -1087,6 +1404,7 @@ impl State {
             }
             wire::methods::NOTICE => {
                 if let Some(n) = parse_or_log::<wire::Notice>(note) {
+                    self.view_wants_peek(&n.pane_id, out);
                     self.notices.push_back(n.text);
                     while self.notices.len() > NOTICE_CAP {
                         self.notices.pop_front();
@@ -1125,6 +1443,7 @@ impl State {
         }
         self.confirms.push_back(Confirmation {
             id: c.confirm_id,
+            pane_id: c.pane_id,
             text: c.text,
             label: c.handle,
             phrase: c.token.unwrap_or_default(),
@@ -1135,6 +1454,7 @@ impl State {
         if self.confirms.len() == 1 {
             self.ask_next(out);
         }
+        self.recompute_view(out);
     }
 
     /// Approves the own message's confirmation, already queued, when it was
@@ -1190,6 +1510,7 @@ impl State {
         if was_asked {
             self.ask_next(out);
         }
+        self.recompute_view(out);
         self.flush_notices(out);
     }
 
@@ -1223,6 +1544,26 @@ impl State {
         self.next_request += 1;
         self.sent.insert(id.clone(), sent);
         Output::Send(Request::new(id, method, params))
+    }
+}
+
+/// An agent of `agents.list` as a message target, as the focus names it.
+fn focus_of(a: &common::AgentInfo) -> common::FocusInfo {
+    let shown = |agent: &str| {
+        let mut chars = agent.chars();
+        chars
+            .next()
+            .map(|c| c.to_uppercase().chain(chars).collect::<String>())
+            .unwrap_or_default()
+    };
+    common::FocusInfo {
+        pane_id: a.pane_id.clone(),
+        project: a.project.clone(),
+        agent: (a.agent != "shell").then(|| shown(&a.agent)),
+        tab_label: a.tab_label.clone(),
+        tab_number: a.tab_number,
+        name: a.name.clone().unwrap_or_else(|| shown(&a.agent)),
+        spoken: a.spoken.clone().unwrap_or_else(|| shown(&a.agent)),
     }
 }
 
@@ -2315,5 +2656,253 @@ mod tests {
         for no in ["yes", "approve it", "ok, approve", "", "approves"] {
             assert!(!is_approval(no), "{no}");
         }
+    }
+
+    // The agent view (plan 20261022_03, step 4).
+
+    fn agent_info(pane: &str, status: &str) -> Value {
+        json!({"pane_id": pane, "name": "the handlr agent", "spoken": "the handlr agent",
+               "agent": "claude", "project": "handlr", "tab_label": "17-hr",
+               "tab_number": 17, "status": status, "focused": false})
+    }
+
+    fn requests<'a>(out: &'a [Output], method: &str) -> Vec<&'a Request> {
+        sent(out)
+            .into_iter()
+            .filter(|r| r.method == method)
+            .collect()
+    }
+
+    fn view_of(out: &[Output]) -> Option<(Vec<common::Entry>, Vec<AgentCard>, Option<usize>)> {
+        out.iter().rev().find_map(|o| match o {
+            Output::Event(Event::AgentView {
+                entries,
+                cards,
+                pinned,
+                ..
+            }) => Some((entries.clone(), cards.clone(), *pinned)),
+            _ => None,
+        })
+    }
+
+    fn peek_answer(s: &mut State, out: &[Output], status: &str, session: Value) -> Vec<Output> {
+        let peek = requests(out, "session.peek")[0].clone();
+        s.incoming(response(
+            peek.id,
+            json!({"session": session, "status": status}),
+        ))
+    }
+
+    fn asking() -> Value {
+        json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text", "summary": "Done.\n\nShall I go on?"}
+            ],
+            "pending_question": {"text": "Shall I go on?", "ts": "2"}
+        })
+    }
+
+    /// Online with the view of w2:pZ open and its first peek answered with
+    /// `session`; the clock at 100 s.
+    fn viewing(status: &str, session: Value) -> State {
+        let mut s = online();
+        s.input(Input::Tick(secs(100.0)));
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let list = requests(&out, "agents.list")[0].clone();
+        s.incoming(response(
+            list.id,
+            json!({"agents": [agent_info("w2:pZ", status)]}),
+        ));
+        peek_answer(&mut s, &out, status, session);
+        s
+    }
+
+    #[test]
+    fn opening_the_view_peeks_and_lists() {
+        let mut s = online();
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let peeks = requests(&out, "session.peek");
+        assert_eq!(peeks.len(), 1, "{out:?}");
+        assert_eq!(peeks[0].params, json!({"pane_id": "w2:pZ", "entries": 200}));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        // Shown at once, empty, until the peek answers.
+        let (entries, cards, pinned) = view_of(&out).expect("a view");
+        assert!(entries.is_empty() && cards.is_empty() && pinned.is_none());
+
+        let out = peek_answer(&mut s, &out, "idle", asking());
+        let (entries, cards, pinned) = view_of(&out).expect("the view again");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].kind, crate::view::CardKind::Question);
+        assert_eq!(cards[0].at, 2);
+        assert_eq!(pinned, Some(0));
+        match s.agent_view() {
+            Some(Event::AgentView { name, status, .. }) => {
+                assert_eq!((name.as_str(), status.as_str()), ("the agent", "idle"))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_view_is_named_from_agents_list_and_closes() {
+        let mut s = viewing("idle", asking());
+        match s.agent_view() {
+            Some(Event::AgentView { name, .. }) => assert_eq!(name, "the handlr agent"),
+            other => panic!("{other:?}"),
+        }
+        s.input(Input::CloseAgent);
+        assert!(s.agent_view().is_none());
+        // Closed, it is no longer peeked.
+        assert!(requests(&s.input(Input::Tick(secs(200.0))), "session.peek").is_empty());
+    }
+
+    #[test]
+    fn the_view_is_peeked_at_most_every_5_s() {
+        let mut s = viewing("working", json!(null));
+        // Working: every 5 s.
+        assert!(requests(&s.input(Input::Tick(secs(104.9))), "session.peek").is_empty());
+        let out = s.input(Input::Tick(secs(105.0)));
+        assert_eq!(requests(&out, "session.peek").len(), 1);
+        // One at a time: nothing more until it is answered.
+        assert!(requests(&s.input(Input::Tick(secs(111.0))), "session.peek").is_empty());
+        let out2 = peek_answer(&mut s, &out, "idle", json!(null));
+        assert!(requests(&out2, "session.peek").is_empty());
+        // Idle: every 15 s, from the last at 105 s.
+        assert!(requests(&s.input(Input::Tick(secs(119.0))), "session.peek").is_empty());
+        let out = s.input(Input::Tick(secs(120.0)));
+        assert_eq!(requests(&out, "session.peek").len(), 1);
+        peek_answer(&mut s, &out, "idle", json!(null));
+
+        // A notice for the agent asks at once, within the 5 s limit.
+        let notice = |s: &mut State, pane: &str| {
+            s.incoming(note(
+                "notice",
+                json!({"id": 1, "kind": "agent_status", "pane_id": pane, "text": "x"}),
+            ))
+        };
+        s.input(Input::Tick(secs(122.0)));
+        assert!(requests(&notice(&mut s, "w2:pZ"), "session.peek").is_empty());
+        let out = s.input(Input::Tick(secs(125.0)));
+        assert_eq!(requests(&out, "session.peek").len(), 1, "due at 125 s");
+        peek_answer(&mut s, &out, "idle", json!(null));
+        s.input(Input::Tick(secs(131.0)));
+        assert_eq!(requests(&notice(&mut s, "w2:pZ"), "session.peek").len(), 1);
+        // Another agent's notice does not.
+        let mut s = viewing("idle", json!(null));
+        s.input(Input::Tick(secs(110.0)));
+        assert!(requests(&notice(&mut s, "w9:p1"), "session.peek").is_empty());
+    }
+
+    #[test]
+    fn a_pending_confirmation_for_the_agent_is_a_live_card_that_fades() {
+        let mut s = viewing("working", json!(null));
+        // confirm_requested is for w2:pZ.
+        let out = s.incoming(confirm_requested(7));
+        let (_, cards, pinned) = view_of(&out).expect("the view");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].kind, crate::view::CardKind::Approval);
+        assert_eq!(cards[0].confirm_id, Some(7));
+        assert!(cards[0].live);
+        assert_eq!(pinned, Some(0));
+
+        let out = s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 7, "outcome": "sent"}),
+        ));
+        let (_, cards, pinned) = view_of(&out).expect("the view");
+        assert!(!cards[0].live, "resolved: faded");
+        assert_eq!(pinned, None);
+    }
+
+    #[test]
+    fn another_agents_confirmation_is_no_card() {
+        let mut s = viewing("working", json!(null));
+        let out = s.incoming(note(
+            "confirm.requested",
+            json!({"confirm_id": 8, "pane_id": "w9:p1", "agent": "codex",
+                   "command": "continue", "text": "Approve?"}),
+        ));
+        assert!(view_of(&out).is_none(), "{out:?}");
+    }
+
+    #[test]
+    fn a_cards_buttons_answer_its_own_confirmation() {
+        let mut s = viewing("working", json!(null));
+        s.incoming(note(
+            "confirm.requested",
+            json!({"confirm_id": 8, "pane_id": "w9:p1", "agent": "codex",
+                   "command": "continue", "text": "Approve for codex?"}),
+        ));
+        s.incoming(confirm_requested(7));
+        // 8 is being asked; the card answers 7.
+        let out = s.input(Input::Answer {
+            confirm_id: 7,
+            approve: false,
+        });
+        let replies = requests(&out, "confirm.reply");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].params["confirm_id"], 7);
+        assert_eq!(replies[0].params["approve"], false);
+        // 8 is still asked, and Approve answers it.
+        let out = s.input(Input::Approve);
+        assert_eq!(requests(&out, "confirm.reply")[0].params["confirm_id"], 8);
+    }
+
+    #[test]
+    fn a_question_resolves_when_the_user_answers() {
+        let mut s = viewing("idle", asking());
+        let out = s.input(Input::Tick(secs(115.0)));
+        let answered = json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text", "summary": "Done.\n\nShall I go on?"},
+                {"ts": "3", "role": "user", "kind": "text", "summary": "yes"}
+            ]
+        });
+        let out = peek_answer(&mut s, &out, "working", answered);
+        let (_, cards, pinned) = view_of(&out).expect("the view");
+        assert_eq!(cards.len(), 1);
+        assert!(!cards[0].live);
+        assert_eq!(cards[0].at, 2, "still at its reply");
+        assert_eq!(pinned, None);
+    }
+
+    #[test]
+    fn take_a_message_from_the_view_is_for_that_agent() {
+        let mut s = viewing("idle", asking());
+        // herdr's focus is elsewhere.
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        let out = s.input(Input::StartDictation);
+        let d = dictation_of(&out).expect("the card");
+        let target = d.target.expect("a target");
+        assert_eq!(target.pane_id, "w2:pZ");
+        assert_eq!(target.agent.as_deref(), Some("Claude"));
+        assert_eq!(target.name, "the handlr agent");
+        // The list asked for at the start does not move it to the focus.
+        let out = list_answer(&mut s, &out, claude());
+        if let Some(d) = dictation_of(&out) {
+            assert_eq!(d.target.unwrap().pane_id, "w2:pZ");
+        }
+        assert_eq!(s.dictation().target.unwrap().pane_id, "w2:pZ");
+        s.input(Input::Utterance("please go on".into()));
+        let out = s.input(Input::Submit);
+        let send = message_send(&out).expect("agents.send");
+        assert_eq!(send.params["pane_id"], "w2:pZ");
+    }
+
+    #[test]
+    fn a_disconnect_keeps_the_view_and_peeks_again_on_hello() {
+        let mut s = viewing("idle", asking());
+        s.input(Input::Tick(secs(101.0)));
+        s.disconnected(1000);
+        assert!(s.agent_view().is_some());
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(id, json!({"server": "handlr"})));
+        assert_eq!(requests(&out, "session.peek").len(), 1, "{out:?}");
     }
 }

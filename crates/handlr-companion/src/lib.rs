@@ -21,6 +21,7 @@ pub mod client;
 pub mod keys;
 mod net;
 pub mod scan;
+pub mod view;
 pub mod wire;
 
 use std::path::PathBuf;
@@ -31,6 +32,7 @@ use std::time::Duration;
 pub use client::{Dictation, DictationPhase, Event, Input, DICTATION_SILENCE};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
+pub use view::{AgentCard, CardKind};
 
 /// How the client runs.
 #[derive(Debug, Clone, PartialEq, Eq)]

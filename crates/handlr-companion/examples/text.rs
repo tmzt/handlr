@@ -1,8 +1,8 @@
 //! The companion without audio (plan 20261022_04, step 2 of the 18:10 EDT
 //! amendment): each typed line is an utterance, an empty line is the tap,
 //! and `pair <URL, handlr1… or data: URL>` pairs. `/start`, `/submit`,
-//! `/clear` and `/scratch` are the dictation buttons. Events are printed as
-//! they arrive.
+//! `/clear` and `/scratch` are the dictation buttons; `/view <pane>` opens an
+//! agent view and `/close` closes it. Events are printed as they arrive.
 //!
 //! ```text
 //! cargo run -p handlr-companion --example text -- [--keys <dir>] [--socket <path>]
@@ -28,7 +28,8 @@ use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input};
 const USAGE: &str = "usage: text [--keys <dir>] [--socket <path>] [--client <name>] \
      [--name <device name>] [--pair <pairing URL, string or data URL>]\n\
      Lines are utterances, an empty line is the tap, `pair <…>` pairs,\n\
-     /start, /submit, /clear and /scratch are the dictation buttons.";
+     /start, /submit, /clear and /scratch are the dictation buttons,\n\
+     /view <pane> opens an agent view and /close closes it.";
 
 fn main() {
     let mut keys = FileKeyStore::default_dir();
@@ -101,6 +102,10 @@ fn input(line: &str) -> Input {
         Input::Clear
     } else if line == "/scratch" {
         Input::Scratch
+    } else if let Some(pane) = line.strip_prefix("/view ") {
+        Input::OpenAgent(pane.trim().to_string())
+    } else if line == "/close" {
+        Input::CloseAgent
     } else if let Some(string) = line.strip_prefix("pair ") {
         Input::Pair(string.trim().to_string())
     } else {
@@ -167,6 +172,20 @@ fn print_event(event: Event) {
                 "* message for {target}{moved} [{:?}]{countdown}: {}",
                 d.phase, d.text
             );
+        }
+        Event::AgentView {
+            name,
+            status,
+            entries,
+            cards,
+            pinned,
+        } => {
+            println!("* view of {name} ({status}): {} entries", entries.len());
+            for (i, c) in cards.iter().enumerate() {
+                let pin = if Some(i) == pinned { " (pinned)" } else { "" };
+                let live = if c.live { "live" } else { "resolved" };
+                println!("  card at {}: {} [{live}]{pin}: {}", c.at, c.title, c.text);
+            }
         }
         Event::Error(e) => println!("! {e}"),
     }
