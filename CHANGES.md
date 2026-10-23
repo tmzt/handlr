@@ -946,3 +946,24 @@ is now drawn only at the bottom; the flow keeps its place (no height), and
 tapping its bar while scrolled back returns to the bottom instead of
 jumping into the flow. This replaces the 03:11 EDT amendment's "Tapping
 the bar puts the card a third of the way down the view".
+
+## 2026-10-23 16:38 EDT — plan 20261023_05, step 8: only Gemini's summaries are kept, and a failed summary is still an error
+
+Two small departures in the daemon's `speech.summarize`, needed by the
+16:28 EDT amendment:
+
+* **The cache keeps only Gemini's summaries.** The 15:45 EDT amendment's
+  64-entry cache "keeps both answers". Under A2 the rules' text reads clock
+  times relative to when it is asked for, and under A4 the answer for the
+  same reply changes with the connection's `spoken_output`, so a kept
+  rules answer would go stale ("just now" said an hour later). The rules
+  are cheap and are applied afresh on every call; a summary is kept and
+  answered from the cache only while spoken output is on.
+* **A summary that fails is still `UNAVAILABLE`.** A3 has the client read
+  its own copy of the rules only when the daemon cannot be reached or does
+  not answer in time. When spoken output is on and the reply is complex
+  but Gemini has no key, the prompt did not load, or the call fails or
+  times out, the daemon still answers `UNAVAILABLE` (decision 4 and step
+  3's tests), and the client reads the reply through its copy of the
+  rules, which is the same `handlr_speech::read_aloud` (at the phone's
+  local time rather than the daemon's).
