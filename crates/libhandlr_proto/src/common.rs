@@ -196,12 +196,13 @@ pub struct SpeechSummarizeParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeechSummarizeResult {
-    /// What to read aloud. Since the 16:28 EDT amendment (A3) the daemon
-    /// always sets it: Gemini's summary when the reply is complex and
-    /// spoken output is on, otherwise the reply under the reading rules.
-    /// A client still reads the reply itself when it is `None`.
+    /// The reply under the reading rules: always (plan 20261023_05, the
+    /// 16:56 EDT amendment, "both versions in the answer").
+    pub read: String,
+    /// Gemini's spoken summary: only when the reply is complex, spoken
+    /// output is on, and the summary was made. Said instead of `read`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spoken: Option<String>,
+    pub summary: Option<String>,
     /// Whether the daemon measured the reply as complex.
     #[serde(default)]
     pub complex: bool,
@@ -696,11 +697,13 @@ mod tests {
             text: "Done: `src/prompts.rs` added.".to_string(),
         });
         round_trip(SpeechSummarizeResult {
-            spoken: Some("The prompts module is added.".to_string()),
+            read: "I added the prompts module.".to_string(),
+            summary: Some("The prompts module is added.".to_string()),
             complex: true,
         });
         round_trip(SpeechSummarizeResult {
-            spoken: None,
+            read: "Done.".to_string(),
+            summary: None,
             complex: false,
         });
         round_trip(ClientOptionsParams {
@@ -924,15 +927,16 @@ mod tests {
             json!({"session": null, "status": "idle"})
         );
 
-        // speech.summarize: a plain reply's answer has no `spoken`, and the
+        // speech.summarize: a plain reply's answer has no `summary`, and the
         // client's text may be left out.
         assert_eq!(
             serde_json::to_value(SpeechSummarizeResult {
-                spoken: None,
+                read: "Done.".to_string(),
+                summary: None,
                 complex: false
             })
             .unwrap(),
-            json!({"complex": false})
+            json!({"read": "Done.", "complex": false})
         );
         let summarize: SpeechSummarizeParams =
             serde_json::from_value(json!({"pane_id": "p1", "ts": "t"})).unwrap();

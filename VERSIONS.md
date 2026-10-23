@@ -60,3 +60,12 @@ Strictly additive (plan 20261023_05, the 16:28 EDT amendment, A4 and A6):
   - `common::methods::CLIENT_OPTIONS` (`"client.options"`);
   - `common::ClientOptionsParams` (`spoken_output`), whose unknown fields
     are ignored.
+
+## libhandlr_proto 0.2.0 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.2.0`)
+
+Not strictly additive (plan 20261023_05, the 16:56 EDT amendment, "both
+versions in the answer"):
+
+- **Breaking:** `common::SpeechSummarizeResult` loses `spoken` and gains
+  `read` (`String`, always present: the reply under the reading rules)
+  and `summary` (`Option<String>`: Gemini's, when one was made).
