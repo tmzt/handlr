@@ -6,18 +6,26 @@
 //! With a paired server in the [`KeyStore`] (a server record and this
 //! client's static key), it connects over handlr link: TCP to the record's
 //! addresses in order, `IK`, and `hello` carried in the handshake. Without
-//! one, it connects to the daemon's local socket. [`Input::Pair`] pairs
-//! over `XXpsk3` from a `handlr1…` string, stores the server and continues
-//! on that connection (plan 20261022_02, the 11:58 EDT amendment).
+//! one, it connects to the daemon's local socket.
+//!
+//! [`Input::Pair`] takes the pairing URL, the bare string or the QR code's
+//! data URL (plan 20261022_06, step 5). The client stores the server's key
+//! and addresses, makes its own key if it has none, and gives its device
+//! code as [`Event::PairingCode`]. It then connects with `IK` as usual,
+//! but retries every [`PAIRING_RETRY`] for [`PAIRING_WINDOW`] while the
+//! server drops it, until the user pastes the code into `handlr pair`;
+//! after that it falls back to the usual backoff. The `hello` answered with
+//! `paired: true` gives [`Event::Paired`] (plan 20261022_02, amendment of
+//! 23:07 EDT).
 //!
 //! Liveness is the operating system's: link sockets have `SO_KEEPALIVE`,
 //! and a connection ends only on an error or end of stream. The client does
 //! not `ping`.
 
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use libhandlr_proto::link::{self, LinkError, LinkStream, LinkWriter, PairingPayload, StaticKey};
+use libhandlr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, StaticKey};
 use libhandlr_proto::Incoming;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf};
 use tokio::net::unix::OwnedWriteHalf;
@@ -28,6 +36,7 @@ use tokio::time::timeout;
 
 use crate::client::{Event, Input, Output, State};
 use crate::keys::{KeyStore, ServerRecord};
+use crate::scan::{self, Pairing};
 use crate::CompanionConfig;
 
 /// The longest line read from the daemon's socket (the daemon's own limit).
@@ -39,6 +48,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long a link handshake may take (as the daemon's, CHANGES.md 18:24).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// While pairing, how often to try again while the server drops the
+/// connection (it does until the code is added).
+pub const PAIRING_RETRY: Duration = Duration::from_secs(2);
+/// How long to retry at [`PAIRING_RETRY`] after a pairing input.
+pub const PAIRING_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// Delays between reconnects: `initial`, doubling up to `max` (1, 2, 4 …
 /// 30 s by default), back to `initial` once a connection says hello.
@@ -93,6 +108,7 @@ pub(crate) fn run(
         config,
         keys,
         server: None,
+        pairing_until: None,
         inputs,
         events,
     };
@@ -107,6 +123,8 @@ struct Net {
     server: Option<ServerRecord>,
     state: State,
     backoff: Backoff,
+    /// While pairing: until when to retry at [`PAIRING_RETRY`].
+    pairing_until: Option<tokio::time::Instant>,
     inputs: UnboundedReceiver<Input>,
     events: mpsc::Sender<Event>,
 }
@@ -117,8 +135,8 @@ enum End {
     Closed,
     /// The app is gone; stop.
     AppGone,
-    /// The app gave a valid pairing string; pair with it now.
-    Pair(PairingPayload),
+    /// The app gave a valid pairing input; pair with it now.
+    Pair(Pairing),
 }
 
 /// A connection, its handshake done.
@@ -153,21 +171,22 @@ impl Writer {
 
 impl Net {
     async fn run(mut self) {
-        let mut pairing: Option<PairingPayload> = None;
+        let mut pairing: Option<Pairing> = None;
         loop {
-            let conn = match pairing.take() {
-                Some(payload) => self.pair(payload).await,
-                None => self.connect().await,
-            };
+            if let Some(p) = pairing.take() {
+                self.begin_pairing(p);
+            }
+            let conn = self.connect().await;
             if let Some(conn) = conn {
+                self.pairing_until = None;
                 match self.session(conn).await {
                     End::AppGone => return,
-                    End::Pair(payload) => {
+                    End::Pair(p) => {
                         // Leave this connection for the new server at once.
                         let outputs = self.state.disconnected(0);
                         self.emit_offline(outputs);
                         self.backoff.reset();
-                        pairing = Some(payload);
+                        pairing = Some(p);
                         continue;
                     }
                     End::Closed => {}
@@ -176,7 +195,13 @@ impl Net {
             if self.state.online() {
                 self.backoff.reset();
             }
-            let delay = self.backoff.next_delay();
+            let delay = match self.pairing_until {
+                Some(until) if tokio::time::Instant::now() < until => PAIRING_RETRY,
+                _ => {
+                    self.pairing_until = None;
+                    self.backoff.next_delay()
+                }
+            };
             let retry_in_ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
             let outputs = self.state.disconnected(retry_in_ms);
             self.emit_offline(outputs);
@@ -187,8 +212,8 @@ impl Net {
                     _ = &mut sleep => break,
                     input = self.inputs.recv() => match input {
                         Some(Input::Pair(text)) => {
-                            if let Some(payload) = self.check_pairing(&text) {
-                                pairing = Some(payload);
+                            if let Some(p) = self.check_pairing(&text) {
+                                pairing = Some(p);
                                 break;
                             }
                         }
@@ -311,22 +336,11 @@ impl Net {
         }
     }
 
-    /// Decodes a pairing string and refuses an expired one, before any
-    /// connection is made. A refusal is given as [`Event::PairFailed`].
-    fn check_pairing(&self, text: &str) -> Option<PairingPayload> {
-        let checked = PairingPayload::decode(text)
-            .map_err(|e| e.to_string())
-            .and_then(|payload| {
-                if payload.is_expired(unix_now()) {
-                    Err("the pairing string has expired; run handlr pair again".to_string())
-                } else if payload.addresses.is_empty() {
-                    Err("the pairing string has no addresses".to_string())
-                } else {
-                    Ok(payload)
-                }
-            });
-        match checked {
-            Ok(payload) => Some(payload),
+    /// Reads a pairing input before any connection is made. A refusal is
+    /// given as [`Event::PairFailed`].
+    fn check_pairing(&self, text: &str) -> Option<Pairing> {
+        match scan::read(text) {
+            Ok(p) => Some(p),
             Err(why) => {
                 self.emit(Event::PairFailed(why));
                 None
@@ -334,84 +348,53 @@ impl Net {
         }
     }
 
-    /// Pairs over `XXpsk3`, trying the payload's addresses in order until
-    /// one accepts a TCP connection. A handshake that fails there ends the
-    /// attempt: the secret is single use. On success, the server is stored
-    /// and the connection, `hello` already sent, is returned.
-    async fn pair(&mut self, payload: PairingPayload) -> Option<Conn> {
+    /// Stores the server, makes this client's key if it has none, gives the
+    /// device code, and opens the window of quick retries. The connection
+    /// itself is the usual `IK`, which the server drops until the code is
+    /// added. Nothing is stored if the key or the code cannot be made.
+    fn begin_pairing(&mut self, p: Pairing) {
         let key = match self.static_key() {
             Ok(key) => key,
             Err(e) => {
                 self.emit(Event::PairFailed(format!("this client's key: {e}")));
-                return None;
+                return;
             }
         };
-        // A new server: no session to continue.
-        let previous_session = self.state.session_id().map(str::to_string);
-        self.state.set_session_id(None);
-        let result = self.pair_with(&payload, &key).await;
-        match result {
-            Ok(stream) => {
-                self.emit(Event::Paired {
-                    name: payload.name.clone(),
-                });
-                Some(Conn::Link(stream))
-            }
-            Err(why) => {
-                self.state.set_session_id(previous_session);
-                self.emit(Event::PairFailed(why));
-                None
-            }
+        let code = DeviceCode {
+            key: key.public(),
+            name: self.config.device_name.clone(),
         }
-    }
-
-    async fn pair_with(
-        &mut self,
-        payload: &PairingPayload,
-        key: &Arc<dyn StaticKey>,
-    ) -> Result<LinkStream<TcpStream>, String> {
-        let hello = self.hello()?;
-        let mut failures = Vec::new();
-        for addr in &payload.addresses {
-            let stream = match tcp_connect(addr).await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    failures.push(format!("{addr}: {e}"));
-                    continue;
-                }
-            };
-            let handshake = link::pair(
-                stream,
-                key,
-                &payload.server_key,
-                &payload.secret,
-                Some(&hello),
-            );
-            let stream = match timeout(HANDSHAKE_TIMEOUT, handshake).await {
-                Ok(Ok((stream, _))) => stream,
-                Ok(Err(LinkError::Closed)) => {
-                    return Err(format!(
-                        "{addr} closed the connection: the pairing string may be used, \
-                         expired or for another server"
-                    ))
-                }
-                Ok(Err(e)) => return Err(format!("pairing with {addr}: {e}")),
-                Err(_) => return Err(format!("pairing with {addr}: the handshake timed out")),
-            };
-            let record = ServerRecord {
-                name: payload.name.clone(),
-                public_key: payload.server_key,
-                addresses: payload.addresses.clone(),
-                session_id: None,
-            };
-            self.keys
-                .set_server(record.clone())
-                .map_err(|e| format!("storing the paired server: {e}"))?;
-            log::info!("paired as {} at {addr}", payload.name);
-            self.server = Some(record);
-            return Ok(stream);
+        .encode(&p.payload.server_key);
+        let code = match code {
+            Ok(code) => code,
+            Err(e) => {
+                self.emit(Event::PairFailed(format!(
+                    "the device name '{}': {e}",
+                    self.config.device_name
+                )));
+                return;
+            }
+        };
+        let record = ServerRecord {
+            name: p.server.clone(),
+            public_key: p.payload.server_key,
+            addresses: p.payload.addresses,
+            // A new server: no session to continue.
+            session_id: None,
+        };
+        if let Err(e) = self.keys.set_server(record) {
+            self.emit(Event::PairFailed(format!("storing the server: {e}")));
+            return;
         }
-        Err(format!("could not connect: {}", failures.join("; ")))
+        log::info!(
+            "pairing with {}; waiting for the code to be added",
+            p.server
+        );
+        self.pairing_until = Some(tokio::time::Instant::now() + PAIRING_WINDOW);
+        self.emit(Event::PairingCode {
+            code,
+            server: p.server,
+        });
     }
 
     /// This client's static key, made and stored on first use.
@@ -481,6 +464,11 @@ impl Net {
                 message = messages.recv() => match message {
                     Some(message) => match serde_json::from_slice::<Incoming>(&message) {
                         Ok(message) => {
+                            if is_paired_hello(&message) {
+                                self.emit(Event::Paired {
+                                    name: self.config.device_name.clone(),
+                                });
+                            }
                             let outputs = self.state.incoming(message);
                             self.persist_session();
                             end = self.carry_out(outputs, &mut write).await;
@@ -491,8 +479,8 @@ impl Net {
                 },
                 input = self.inputs.recv() => match input {
                     Some(Input::Pair(text)) => {
-                        if let Some(payload) = self.check_pairing(&text) {
-                            end = Some(End::Pair(payload));
+                        if let Some(p) = self.check_pairing(&text) {
+                            end = Some(End::Pair(p));
                         }
                     }
                     Some(input) => {
@@ -533,6 +521,17 @@ impl Net {
         }
         None
     }
+}
+
+/// Whether `message` is a response saying `paired: true`: the `hello` of
+/// the first connection after the code was added. Only `hello` results
+/// carry `paired`.
+fn is_paired_hello(message: &Incoming) -> bool {
+    matches!(
+        message,
+        Incoming::Response(response)
+            if response.result.as_ref().and_then(|r| r.get("paired")) == Some(&serde_json::Value::Bool(true))
+    )
 }
 
 /// Reads lines from the daemon's socket into `lines` until it closes.
@@ -594,13 +593,6 @@ async fn tcp_connect(addr: &str) -> std::io::Result<TcpStream> {
         }
     }
     Err(last)
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]

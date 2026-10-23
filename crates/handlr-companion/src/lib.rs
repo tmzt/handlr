@@ -10,12 +10,17 @@
 //! [`FileKeyStore`], and the connection. With a paired server in the
 //! [`KeyStore`], the client reconnects to it over handlr link (`IK`, with
 //! `hello` and its `session_id` in the handshake); without one, it uses the
-//! daemon's Unix socket. [`Input::Pair`] pairs from a `handlr1…` string.
-//! `examples/text.rs` drives it from typed lines.
+//! daemon's Unix socket. [`Input::Pair`] pairs from the pairing URL, the
+//! bare `handlr1…` string or the QR code's `data:` URL: the client stores
+//! the server, shows its device code as [`Event::PairingCode`] for the user
+//! to paste into `handlr pair`, and connects once the server knows its key
+//! (plan 20261022_02, amendment of 23:07 EDT). `examples/text.rs` drives it
+//! from typed lines.
 
 pub mod client;
 pub mod keys;
 mod net;
+pub mod scan;
 pub mod wire;
 
 use std::path::PathBuf;
@@ -25,13 +30,16 @@ use std::time::Duration;
 
 pub use client::{Event, Input};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
-pub use net::Backoff;
+pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
 
 /// How the client runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompanionConfig {
     /// The name the client gives in `hello`.
     pub client: String,
+    /// The name the device asks to be paired as, in its device code: 1 to
+    /// 32 ASCII letters, digits, `-`, `_` or `.`. The user may change it.
+    pub device_name: String,
     /// The TTS voice, for the front end.
     pub voice: Option<String>,
     /// The daemon's socket, used while no server is paired.
@@ -43,17 +51,48 @@ pub struct CompanionConfig {
 }
 
 impl CompanionConfig {
-    /// The defaults: the daemon's default socket, and backoff of 1, 2, 4 …
-    /// 30 s.
+    /// The defaults: the daemon's default socket, backoff of 1, 2, 4 …
+    /// 30 s, and [`default_device_name`].
     pub fn new(client: impl Into<String>) -> Self {
         CompanionConfig {
             client: client.into(),
+            device_name: default_device_name(),
             voice: None,
             socket: default_socket_path(),
             backoff_initial: Duration::from_secs(1),
             backoff_max: Duration::from_secs(30),
         }
     }
+}
+
+/// The machine's hostname as a device name (see [`device_name_from`]), or
+/// `companion`.
+pub fn default_device_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: gethostname writes at most `buf.len()` bytes into `buf`,
+    // which is valid and owned.
+    let ok = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0;
+    let host = if ok {
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..end]).into_owned()
+    } else {
+        String::new()
+    };
+    device_name_from(&host).unwrap_or_else(|| "companion".to_string())
+}
+
+/// A device name from a hostname: its first label, lowercased, with any
+/// character but ASCII letters, digits, `-` and `_` dropped, cut to 32
+/// bytes. `None` if nothing is left.
+pub fn device_name_from(host: &str) -> Option<String> {
+    let label = host.trim().split('.').next().unwrap_or("");
+    let name: String = label
+        .to_ascii_lowercase()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(libhandlr_proto::link::DEVICE_NAME_MAX)
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 /// `~/.config/handlr/handlr.sock`, where `handlr serve` listens by default.
@@ -98,5 +137,24 @@ impl Companion {
     /// Waits up to `timeout` for the next event.
     pub fn wait_timeout(&self, timeout: Duration) -> Option<Event> {
         self.events.recv_timeout(timeout).ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libhandlr_proto::link::DeviceCode;
+
+    #[test]
+    fn device_names_come_from_the_hostname() {
+        assert_eq!(device_name_from("M4.local").as_deref(), Some("m4"));
+        assert_eq!(
+            device_name_from("Tim's MacBook Pro.local").as_deref(),
+            Some("timsmacbookpro")
+        );
+        assert_eq!(device_name_from(&"x".repeat(40)).unwrap().len(), 32);
+        assert_eq!(device_name_from(""), None);
+        assert_eq!(device_name_from("..."), None);
+        assert!(DeviceCode::valid_name(&default_device_name()));
     }
 }

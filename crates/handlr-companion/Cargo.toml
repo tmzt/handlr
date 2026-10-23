@@ -13,7 +13,15 @@ log = "0.4"
 # FileKeyStore: the key file is base64, the server record is TOML.
 base64 = "0.22"
 toml = "0.8"
+# Input::Pair reads a data:image/png;base64, URL's QR code (plan
+# 20261022_06, step 5).
+png = "0.18"
+rqrr = { version = "0.11", default-features = false }
+# The default device name is the hostname.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+# Tests build the QR code's data URL as handlr pair does.
+qrcodeurl = { path = "../qrcodeurl" }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "io-util", "macros"] }

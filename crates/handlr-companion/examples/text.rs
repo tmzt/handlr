@@ -1,10 +1,16 @@
 //! The companion without audio (plan 20261022_04, step 2 of the 18:10 EDT
 //! amendment): each typed line is an utterance, an empty line is the tap,
-//! and `pair <handlr1…>` pairs. Events are printed as they arrive.
+//! and `pair <URL, handlr1… or data: URL>` pairs. Events are printed as
+//! they arrive.
 //!
 //! ```text
-//! cargo run -p handlr-companion --example text -- [--keys <dir>] [--socket <path>] [--client <name>]
+//! cargo run -p handlr-companion --example text -- [--keys <dir>] [--socket <path>]
+//!     [--client <name>] [--name <device name>] [--pair <what handlr pair printed>]
 //! ```
+//!
+//! `--pair` (or a `pair` line) prints the device code to paste into
+//! `handlr pair`, then connects once it has been pasted. `--name` is the
+//! name the device asks to be paired as (default: the hostname).
 //!
 //! `--keys` is where the key and the paired server are kept (default
 //! `~/.config/handlr-companion/`). Without a paired server it uses the
@@ -18,12 +24,14 @@ use std::time::Duration;
 
 use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input};
 
-const USAGE: &str = "usage: text [--keys <dir>] [--socket <path>] [--client <name>]\n\
-     Lines are utterances, an empty line is the tap, `pair <handlr1…>` pairs.";
+const USAGE: &str = "usage: text [--keys <dir>] [--socket <path>] [--client <name>] \
+     [--name <device name>] [--pair <pairing URL, string or data URL>]\n\
+     Lines are utterances, an empty line is the tap, `pair <…>` pairs.";
 
 fn main() {
     let mut keys = FileKeyStore::default_dir();
     let mut config = CompanionConfig::new("text");
+    let mut pair = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || {
@@ -36,6 +44,8 @@ fn main() {
             "--keys" => keys = PathBuf::from(value()),
             "--socket" => config.socket = PathBuf::from(value()),
             "--client" => config.client = value(),
+            "--name" => config.device_name = value(),
+            "--pair" => pair = Some(value()),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return;
@@ -48,6 +58,9 @@ fn main() {
     }
 
     let companion = Companion::spawn(config, Box::new(FileKeyStore::new(keys)));
+    if let Some(text) = pair {
+        companion.send(Input::Pair(text));
+    }
     let (lines_tx, lines) = mpsc::channel();
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines() {
@@ -99,6 +112,10 @@ fn print_event(event: Event) {
         Event::Connected { server } => println!("* connected to {server}"),
         Event::Disconnected { retry_in_ms } => {
             println!("* disconnected; retrying in {retry_in_ms} ms")
+        }
+        Event::PairingCode { code, server } => {
+            println!("* paste this code into handlr pair on {server}:");
+            println!("{code}");
         }
         Event::Paired { name } => println!("* paired as {name}"),
         Event::PairFailed(why) => println!("! pairing failed: {why}"),

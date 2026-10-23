@@ -19,8 +19,10 @@ use crate::wire;
 /// What the app tells the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    /// A `handlr1…` pairing string. The `net` thread pairs with it over
-    /// the link; [`State`] itself cannot, and gives [`Event::PairFailed`].
+    /// What `handlr pair` shows: the pairing URL, the bare `handlr1…`
+    /// string, or the QR code's `data:image/png;base64,` URL. The `net`
+    /// thread stores the server, gives [`Event::PairingCode`] and connects;
+    /// [`State`] itself cannot, and gives [`Event::PairFailed`].
     Pair(String),
     /// What STT heard, or a typed line.
     Utterance(String),
@@ -48,9 +50,19 @@ pub enum Event {
     Disconnected {
         retry_in_ms: u32,
     },
+    /// The device's code, `handlrkey1…`, for the user to paste into
+    /// `handlr pair` on `server` (show it with a Copy button). The client
+    /// keeps connecting until the server knows its key.
+    PairingCode {
+        code: String,
+        server: String,
+    },
+    /// The server answered `hello` with `paired: true`: the code was added.
+    /// `name` is the name this device asked to be paired as.
     Paired {
         name: String,
     },
+    /// A pairing input was refused, such as a string with a bad checksum.
     PairFailed(String),
     /// Speak this.
     Say(String),
