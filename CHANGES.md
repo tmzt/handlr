@@ -1020,3 +1020,32 @@ two more windows would have copied it. It is now a component of its own,
 list), using the agent view's slop, decay and least fling speed; `CardGrid`
 and `TurnLog` each keep one. `AgentScreen` keeps its own scrolling for now,
 as decision 8 moves code into the layout as it is changed, not all at once.
+
+## 2026-10-23 17:48 EDT — plan 20261023_04, step 5: what the overview takes from the main screen
+
+Small departures in `apps/companion`, needed to put the overview in the
+main screen's place:
+
+* **The overview draws the whole home screen.** The main screen was one
+  libcontrols `Router` whose draw clears the list, so the overview could
+  not draw beside it. The overview draws the title, the status lines (and
+  a pairing note or an error under them), the two halves, the
+  confirmation and dictation cards and the bottom row itself. `ui.rs`'s
+  `Screen` is now the pairing screen only: it shows while the phone is
+  neither paired nor connected, or shows its device code, and it loses the
+  conversation, the focus line and its Approve, Deny, Take a message,
+  Submit, Scratch and Clear row, which the overview replaces.
+* **The confirmation card's buttons are in the card.** Approve and Deny
+  sit under its lines and answer its own id (`Input::Answer`), as the
+  agent view's do. While a confirmation asks, the dictation card makes
+  way for it, as the main screen's did.
+* **Scratch is a word, not a button, on the home screen.** The bottom row
+  is the agent view's (decision 5): record, then send and cancel. "Scratch
+  that" still removes the last utterance.
+* **`OverviewHit::Tap`.** Section 4's `OverviewHit` has `Agent` and
+  `Bottom`; a tap on no control is also a hit, the main screen's tap
+  (`Input::Tap`), so the overview returns it too.
+* **What Gemini says is the turn log.** The main screen showed the last
+  `Event::Say`, which also carries notices and replies read aloud; the
+  lower half shows `Event::Conversation` (see the 17:31 EDT entry), with
+  what STT is hearing as its last, dim line.
