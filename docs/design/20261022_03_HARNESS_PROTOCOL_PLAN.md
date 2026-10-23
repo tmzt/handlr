@@ -790,3 +790,43 @@ flow, where it then stays as ordinary scrollback.
 The previous amendment cites "the 16:38 EDT amendment's amber input box";
 that amendment, "a tapped answer dismisses its card and shows as typed
 input", is at 16:39 EDT.
+
+## Amendment — 2026-10-23 17:39 EDT: code diffs drawn as the terminal interface draws them, never spoken (living section L3)
+
+Agreed with the owner on 2026-10-23 (by voice; "code depths" read as "code
+diffs", "the quad to be" as "the Claude TUI"): "we should include the code
+[diffs] in the same way that they're shown in the [Claude TUI]"; "diffs
+are never spoken"; "skip the 'changed three files' unless it's a summing up
+of a long action and in prose"; then "Yes, write the diff amendment into
+L3". This replaces, for edits, the 02:34 EDT amendment's "diff lines in
+green and red".
+
+1. **What is drawn.** An edit (Claude Code's `Edit`, `MultiEdit` and
+   `Write`) is drawn from its result's `structuredPatch` hunks, as the
+   terminal interface draws it:
+   - a header, `Update(<path>)`, or `Write(<path>)` for a new file,
+     with the path shortened to its last two parts;
+   - each hunk's lines numbered from `oldStart` and `newStart`: removed
+     lines red on a dark red band, added lines green on a dark green
+     band, context dim;
+   - a footer, `⎿ N additions, M removals`.
+2. **Limits.** At most 20 lines of an edit show in the flow; tapping it
+   shows all of its hunks, up to 400 lines, and tapping again folds it.
+3. **The protocol.** `Entry` gains `diff: Option<Diff>`, with
+   `Diff { path, kind (update or write), hunks: [{old_start, old_lines,
+   new_start, new_lines, lines}] }`, each line redacted as entries are,
+   and at most 400 lines. It goes in the next libhandlr_proto release
+   after 0.3.0. Edits from agents whose readers give no hunks (Codex's
+   patches, agy's tool results) stay as green and red lines until their
+   reader supplies hunks.
+4. **Diffs are never spoken, and edits are not announced.** Read aloud
+   never reads an edit: its hunks never go to the reading rules or to
+   Gemini, and what is spoken does not count or describe edits ("changed
+   three files"). The one exception is the agent's own prose: a reply that
+   sums up a long piece of work in prose is read or summarised like any
+   other reply, its mentions of files included. The `spoken_summary`
+   prompt in `ADDITIONAL_PROMPTS.md` gets the same rule (say what was done
+   in the agent's own terms; never list or count edits); since plan
+   20261023_05 is implemented, that change is recorded in CHANGES.md when
+   it is made.
+5. **One control per file:** `apps/companion/src/agent/diff_block.rs`.
