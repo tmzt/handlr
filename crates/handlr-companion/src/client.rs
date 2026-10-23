@@ -43,6 +43,12 @@ pub enum Input {
     Speaking(bool),
     /// The STT gate opened (`true`) or went idle (`false`).
     Listening(bool),
+    /// Voice is being heard (`true`: the gate is open on speech) or has
+    /// stopped (`false`). An armed gate waiting for speech is not voice.
+    /// Front ends with a VAD send it; once one has, the dictation silence
+    /// counts from the end of voice, not from the gate going idle (plan
+    /// 20261023_02, the VAD amendment).
+    Voice(bool),
     /// The driver's monotonic clock: the time since any fixed start. It
     /// never goes back; an earlier time is taken as the latest one.
     Tick(Duration),
@@ -381,6 +387,9 @@ pub struct State {
     deferred: Option<String>,
     speaking: bool,
     listening: bool,
+    /// Voice heard right now, and whether the front end reports it at all.
+    voice: bool,
+    voice_reported: bool,
     notices: VecDeque<String>,
     /// The driver's clock, as last ticked.
     now: Duration,
@@ -408,6 +417,8 @@ impl State {
             deferred: None,
             speaking: false,
             listening: false,
+            voice: false,
+            voice_reported: false,
             notices: VecDeque::new(),
             now: Duration::ZERO,
             focus: None,
@@ -505,11 +516,26 @@ impl State {
             Input::Listening(on) => {
                 self.listening = on;
                 let now = self.now;
-                if let Some(d) = self.dictation.as_mut() {
-                    d.quiet_from = (!on).then_some(now);
+                if !self.voice_reported {
+                    if let Some(d) = self.dictation.as_mut() {
+                        d.quiet_from = (!on).then_some(now);
+                    }
                 }
                 self.show_dictation(&mut out);
                 self.flush_notices(&mut out);
+            }
+            Input::Voice(on) => {
+                self.voice_reported = true;
+                self.voice = on;
+                let now = self.now;
+                if let Some(d) = self.dictation.as_mut() {
+                    if on {
+                        d.quiet_from = None;
+                    } else if d.quiet_from.is_none() {
+                        d.quiet_from = Some(now);
+                    }
+                }
+                self.show_dictation(&mut out);
             }
             Input::Tick(now) => self.tick(now, &mut out),
             Input::Tap => self.tap(&mut out),
@@ -559,13 +585,23 @@ impl State {
         }
     }
 
+    /// Whether no one is speaking: no voice when the front end reports it,
+    /// else the gate idle.
+    fn quiet(&self) -> bool {
+        if self.voice_reported {
+            !self.voice
+        } else {
+            !self.listening
+        }
+    }
+
     /// When the silence submits the message, if it is running: collecting,
     /// something to submit, the gate closed, and not reading it back.
     fn deadline(&self) -> Option<Duration> {
         let d = self.dictation.as_ref()?;
         let running = d.phase == DictationPhase::Collecting
             && !d.parts.is_empty()
-            && !self.listening
+            && self.quiet()
             && d.read_back == ReadBack::No;
         running.then_some(d.quiet_from? + self.silence)
     }
@@ -610,10 +646,10 @@ impl State {
 
     fn scratch(&mut self, out: &mut Vec<Output>) {
         let now = self.now;
-        let listening = self.listening;
+        let quiet = self.quiet();
         if let Some(d) = self.dictation.as_mut() {
             d.parts.pop();
-            if !listening {
+            if quiet {
                 d.quiet_from = Some(now);
             }
         }
@@ -744,9 +780,11 @@ impl State {
             out.push(event(Event::Say("The message is full.".to_string())));
             return;
         }
+        let (quiet, now) = (self.quiet(), self.now);
+        let d = self.dictation.as_mut().expect("dictating");
         d.parts.push(text);
-        if !self.listening && d.quiet_from.is_none() {
-            d.quiet_from = Some(self.now);
+        if quiet && d.quiet_from.is_none() {
+            d.quiet_from = Some(now);
         }
         self.show_dictation(out);
         // Hands free: listen for the next sentence.
@@ -1803,6 +1841,48 @@ mod tests {
         speak(&mut s, 10.0, 12.0, "one");
         // Speech at 7 s: the gate opens at 19 and closes at 21.
         let out = speak(&mut s, 19.0, 21.0, "two");
+        assert!(message_send(&out).is_none());
+        assert!(message_send(&s.input(Input::Tick(secs(28.9)))).is_none());
+        let send = message_send(&s.input(Input::Tick(secs(29.0)))).unwrap();
+        assert_eq!(send.params["text"], "one two");
+    }
+
+    /// Says `text` as an audio front end with a VAD does: the gate is
+    /// re-armed and waits (listening, no voice), voice runs from `from` to
+    /// `to`, and the utterance follows.
+    fn speak_with_voice(s: &mut State, from: f64, to: f64, text: &str) -> Vec<Output> {
+        let mut out = s.input(Input::Tick(secs(from)));
+        out.extend(s.input(Input::Listening(true)));
+        out.extend(s.input(Input::Voice(true)));
+        out.extend(s.input(Input::Tick(secs(to))));
+        out.extend(s.input(Input::Voice(false)));
+        out.extend(s.input(Input::Utterance(text.into())));
+        out
+    }
+
+    #[test]
+    fn an_armed_gate_waiting_for_voice_does_not_hold_the_silence() {
+        // The re-armed gate stays "listening" for its arm time-out with no
+        // voice. The silence counts from the end of voice, so it submits 8 s
+        // after the speaker stopped, not 8 s after the gate gave up.
+        let mut s = dictating();
+        speak_with_voice(&mut s, 10.0, 12.0, "Please run the tests.");
+        // Re-armed and still waiting at 18 s: listening, but no voice.
+        s.input(Input::Tick(secs(13.0)));
+        s.input(Input::Listening(true));
+        assert!(message_send(&s.input(Input::Tick(secs(19.9)))).is_none());
+        let send = message_send(&s.input(Input::Tick(secs(20.0)))).expect("8 s after voice");
+        assert_eq!(send.params["text"], "Please run the tests.");
+        // The gate going idle later changes nothing.
+        assert!(message_send(&s.input(Input::Listening(false))).is_none());
+    }
+
+    #[test]
+    fn voice_resets_the_silence_even_while_armed() {
+        let mut s = dictating();
+        speak_with_voice(&mut s, 10.0, 12.0, "one");
+        s.input(Input::Listening(true));
+        let out = speak_with_voice(&mut s, 18.0, 21.0, "two");
         assert!(message_send(&out).is_none());
         assert!(message_send(&s.input(Input::Tick(secs(28.9)))).is_none());
         let send = message_send(&s.input(Input::Tick(secs(29.0)))).unwrap();
