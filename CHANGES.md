@@ -720,3 +720,24 @@ owner asked.
 
 Front ends without a VAD, such as the text example, still count from the
 gate going idle.
+
+## 2026-10-23 02:52 EDT — plan 20261022_03, steps 1 to 3: agents' sessions reach Gemini
+
+**What it does:**
+- Gemini's turn context now carries the agents' own transcripts, as clean
+  text and redacted, found by herdr's `agent_session` id.
+- An agent's pending question is detected, and becomes a spoken notice
+  when a watched agent stops on one.
+- Terminal tails are read with `recent_unwrapped`, 80 lines.
+
+**Versions:**
+- libherdr is 0.2.0, tagged `libherdr-v0.2.0`, its first separate
+  version. Before it, a rustfmt-only commit cleaned up its formatting.
+- `libhandlr_proto`'s additions are additive. It stays at 0.1.0 while it
+  is used only inside this repository, as before.
+
+**Also:** `pane.read` used to send `count`, which herdr ignores. It now
+sends `lines` as well, so the 50 lines Gemini was given were really
+herdr's default all along.
+
+**Still to check live:** step 2's question to the phone.
