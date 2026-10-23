@@ -41,6 +41,10 @@ pub enum Touched {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scroll {
     offset: f32,
+    /// Where the user left it: kept when the window or content shrinks for
+    /// a while, so the offset comes back to it (owner, 2026-10-23: "The
+    /// scroll should remember where it is on the overview page").
+    wanted: f32,
     max: f32,
     /// Follows the end while it is there.
     sticky: bool,
@@ -66,9 +70,9 @@ impl Scroll {
     pub fn set_extent(&mut self, content: f32, window: f32) {
         self.max = (content - window).max(0.0);
         if self.following {
-            self.offset = self.max;
+            self.wanted = self.max;
         }
-        self.offset = self.offset.clamp(0.0, self.max);
+        self.offset = self.wanted.clamp(0.0, self.max);
     }
 
     pub fn offset(&self) -> f32 {
@@ -92,6 +96,7 @@ impl Scroll {
 
     fn scroll_to(&mut self, offset: f32) {
         self.offset = offset.clamp(0.0, self.max);
+        self.wanted = self.offset;
         if self.sticky {
             self.following = self.offset >= self.max - 1.0;
         }
@@ -272,5 +277,19 @@ mod tests {
         assert!(s.following());
         s.set_extent(5000.0, 1000.0);
         assert_eq!(s.offset(), 4000.0);
+    }
+
+    #[test]
+    fn the_place_comes_back_when_the_window_grows_again() {
+        let mut sc = Scroll::new(false);
+        sc.set_extent(1000.0, 400.0);
+        sc.scroll_to(300.0);
+        // A card appears below and the window shrinks... or the content
+        // is briefly shorter: the offset is held within it.
+        sc.set_extent(500.0, 400.0);
+        assert_eq!(sc.offset(), 100.0);
+        // Room again: back where the user left it.
+        sc.set_extent(1000.0, 400.0);
+        assert_eq!(sc.offset(), 300.0);
     }
 }
