@@ -82,6 +82,10 @@ pub(super) struct Conn {
     /// Held while a `speech.summarize` runs: one at a time per connection
     /// (plan 20261023_05, decision 5).
     pub(super) speech: tokio::sync::Mutex<()>,
+    /// A companion's `client.options` `spoken_output`: read aloud is on,
+    /// so `speech.summarize` may call Gemini (plan 20261023_05, A4). Off
+    /// when the connection opens.
+    spoken_output: std::sync::atomic::AtomicBool,
 }
 
 impl Conn {
@@ -89,6 +93,11 @@ impl Conn {
         if let Ok(line) = serde_json::to_string(value) {
             let _ = self.out.send(line);
         }
+    }
+
+    pub(super) fn spoken_output(&self) -> bool {
+        self.spoken_output
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn principal(&self) -> &Principal {
@@ -218,6 +227,7 @@ async fn serve<S>(
         notices: Mutex::new(Announcer::default()),
         next_notice: std::sync::atomic::AtomicU64::new(0),
         speech: tokio::sync::Mutex::new(()),
+        spoken_output: std::sync::atomic::AtomicBool::new(false),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -663,6 +673,20 @@ async fn call(
             }
             let p: common::SpeechSummarizeParams = params(raw)?;
             super::speech::speech_summarize(conn, p).await
+        }
+        methods::CLIENT_OPTIONS => {
+            // Plan 20261023_05, A4: a companion's options for this
+            // connection; unknown ones are ignored.
+            if !conn.is_companion() {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "client.options is served to companions",
+                ));
+            }
+            let p: common::ClientOptionsParams = params(raw)?;
+            conn.spoken_output
+                .store(p.spoken_output, std::sync::atomic::Ordering::Relaxed);
+            ok(common::Empty {})
         }
         methods::AGENTS_SEND => {
             let p: common::AgentsSendParams = params(raw)?;

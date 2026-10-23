@@ -1,15 +1,17 @@
-//! `speech.summarize`: a reply about to be read aloud, measured and, when
-//! complex, summarised for the ear by Gemini
+//! `speech.summarize`: what to say for a reply about to be read aloud
 //! (docs/design/20261023_05_SPOKEN_SUMMARIES_PLAN.md, as amended at 15:45
-//! EDT: the daemon decides what is complex).
+//! EDT, the daemon decides what is complex, and at 16:28 EDT, reading rules
+//! first and Gemini only in speaking mode).
 //!
 //! The client names the reply by its pane and time. The daemon reads the
 //! whole reply from the agent's session through the same reader and
-//! redaction as `session.peek`, measures it with [`complexity`], and runs
-//! the `spoken_summary` prompt of `ADDITIONAL_PROMPTS.md` on a complex one:
-//! one system text, one user message, no tools and no history. Answers
-//! are kept by `(pane_id, ts)`, so the same reply is never summarised
-//! twice.
+//! redaction as `session.peek` and measures it with
+//! [`handlr_speech::complexity`]. A complex reply, on a connection whose
+//! `client.options` turned spoken output on, gets the `spoken_summary`
+//! prompt of `ADDITIONAL_PROMPTS.md`: one system text, one user message, no
+//! tools and no history. Every other reply is answered with
+//! [`handlr_speech::read_aloud`] at the daemon's local time. Summaries are
+//! kept by `(pane_id, ts)`, so the same reply is never summarised twice.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
@@ -17,6 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use handlr_speech::LocalTime;
 use libhandlr_proto::ErrorObject;
 use libhandlr_proto::common::{SpeechSummarizeParams, SpeechSummarizeResult};
 use libhandlr_proto::envelope::codes;
@@ -34,92 +37,6 @@ pub const SUMMARY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CACHE_SIZE: usize = 64;
 /// The words of a summary when the prompt has no `max_words`.
 pub const MAX_WORDS_DEFAULT: usize = 60;
-
-/// Decision 2's thresholds: complex when code-like words are at least
-/// `CODE_WORDS_PERCENT` of the words or at least `CODE_WORDS_MIN` of them,
-/// when there are `LIST_ITEMS_MIN` list items or a table row, or when the
-/// reply is longer than `LENGTH_MAX` characters.
-pub const CODE_WORDS_PERCENT: usize = 10;
-pub const CODE_WORDS_MIN: usize = 4;
-pub const LIST_ITEMS_MIN: usize = 3;
-pub const LENGTH_MAX: usize = 600;
-
-/// A reply's measures (decision 2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Complexity {
-    pub backquotes: bool,
-    /// Words, split on whitespace.
-    pub words: usize,
-    /// Words that look like code.
-    pub code_words: usize,
-    /// Lines starting `- `, `* ` or `<n>. `.
-    pub list_items: usize,
-    /// Lines starting `|`.
-    pub table_rows: usize,
-    /// Characters.
-    pub chars: usize,
-}
-
-impl Complexity {
-    /// Whether the reply goes to Gemini rather than being read as it is.
-    pub fn is_complex(&self) -> bool {
-        self.backquotes
-            || (self.words > 0 && self.code_words * 100 >= self.words * CODE_WORDS_PERCENT)
-            || self.code_words >= CODE_WORDS_MIN
-            || self.list_items >= LIST_ITEMS_MIN
-            || self.table_rows > 0
-            || self.chars > LENGTH_MAX
-    }
-}
-
-/// Measure `text` by decision 2's basic coding measure.
-pub fn complexity(text: &str) -> Complexity {
-    let mut c = Complexity {
-        backquotes: text.contains('`'),
-        chars: text.chars().count(),
-        ..Complexity::default()
-    };
-    for word in text.split_whitespace() {
-        c.words += 1;
-        if code_like(word) {
-            c.code_words += 1;
-        }
-    }
-    for line in text.lines().map(str::trim_start) {
-        if line.starts_with('|') {
-            c.table_rows += 1;
-        } else if is_list_item(line) {
-            c.list_items += 1;
-        }
-    }
-    c
-}
-
-/// Whether a word looks like code: it has `/`, `::`, `_`, `=`, `{`, `}`,
-/// `<`, `>`, `#` or `$`, a `.` between two letters, a capital after a
-/// lower-case letter, or both letters and digits.
-fn code_like(word: &str) -> bool {
-    if word.contains("::") || word.contains(['/', '_', '=', '{', '}', '<', '>', '#', '$']) {
-        return true;
-    }
-    let chars: Vec<char> = word.chars().collect();
-    let dotted = chars
-        .windows(3)
-        .any(|w| w[1] == '.' && w[0].is_alphabetic() && w[2].is_alphabetic());
-    let camel = chars
-        .windows(2)
-        .any(|w| w[0].is_lowercase() && w[1].is_uppercase());
-    let mixed = chars.iter().any(|c| c.is_alphabetic()) && chars.iter().any(|c| c.is_ascii_digit());
-    dotted || camel || mixed
-}
-
-fn is_list_item(line: &str) -> bool {
-    if line.starts_with("- ") || line.starts_with("* ") {
-        return true;
-    }
-    let digits = line.chars().take_while(char::is_ascii_digit).count();
-    digits > 0 && line[digits..].starts_with(". ")
-}
 
 /// `text` cut to at most `max` words, at the end of a sentence where one
 /// is within them (decision 5).
@@ -215,20 +132,37 @@ impl SpeechService {
         cache.push_back((key, result));
     }
 
-    /// Measure `reply` and, when it is complex, summarise it. `agent` and
-    /// `project` fill the prompt's user message.
-    pub async fn summarize(
+    /// What to say for `reply`: Gemini's summary when it is complex and
+    /// `spoken_output` is on (A4), otherwise the reply under the reading
+    /// rules at `now` (A3).
+    pub async fn answer(
         &self,
         agent: &str,
         project: &str,
         reply: &str,
+        spoken_output: bool,
+        now: LocalTime,
     ) -> Result<SpeechSummarizeResult, ErrorObject> {
-        if !complexity(reply).is_complex() {
-            return Ok(SpeechSummarizeResult {
-                spoken: None,
-                complex: false,
-            });
-        }
+        let complex = handlr_speech::complexity(reply).is_complex();
+        let spoken = if complex && spoken_output {
+            self.summarize(agent, project, reply).await?
+        } else {
+            handlr_speech::read_aloud(reply, now)
+        };
+        Ok(SpeechSummarizeResult {
+            spoken: Some(spoken),
+            complex,
+        })
+    }
+
+    /// Gemini's spoken summary of `reply`. `agent` and `project` fill the
+    /// prompt's user message.
+    async fn summarize(
+        &self,
+        agent: &str,
+        project: &str,
+        reply: &str,
+    ) -> Result<String, ErrorObject> {
         let (prompt, system) = self.prompt.as_ref().map_err(unavailable)?;
         let values: BTreeMap<&str, String> = [
             ("agent", agent.to_string()),
@@ -254,10 +188,34 @@ impl SpeechService {
         let max = prompt
             .number("max_words")
             .map_or(MAX_WORDS_DEFAULT, |n| n as usize);
-        Ok(SpeechSummarizeResult {
-            spoken: Some(cut_at_sentence(&answer, max)),
-            complex: true,
-        })
+        Ok(cut_at_sentence(&answer, max))
+    }
+}
+
+/// The daemon's local time of day, for reading clock times as relative.
+pub fn local_now() -> LocalTime {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let now = secs as libc::time_t;
+    // SAFETY: localtime_r writes only into `tm`, which is a valid, owned
+    // value; `now` is a valid time_t.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
+        // UTC, then.
+        let seconds = secs % 86_400;
+        return LocalTime {
+            hour: (seconds / 3600) as u8,
+            minute: (seconds / 60 % 60) as u8,
+            second: (seconds % 60) as u8,
+            utc_offset_minutes: 0,
+        };
+    }
+    LocalTime {
+        hour: tm.tm_hour as u8,
+        minute: tm.tm_min as u8,
+        second: tm.tm_sec as u8,
+        utc_offset_minutes: (tm.tm_gmtoff / 60) as i16,
     }
 }
 
@@ -298,8 +256,9 @@ impl ToolExecutor for NoTools {
 
 /// `speech.summarize` on a companion connection: the pane resolved and
 /// permitted as `session.peek` does, the reply read from the session (the
-/// client's text when it is not found), then measured and summarised.
-/// One summary runs at a time on a connection; a second waits.
+/// client's text when it is not found), then measured and answered. One
+/// runs at a time on a connection; a second waits. Only Gemini's summaries
+/// are kept: the rules' text reads clock times relative to now.
 pub(super) async fn speech_summarize(
     conn: &Conn,
     p: SpeechSummarizeParams,
@@ -329,7 +288,8 @@ pub(super) async fn speech_summarize(
     }
     let key = (pane_id.clone(), p.ts.clone());
     let _one = conn.speech.lock().await;
-    if let Some(result) = daemon.speech.cached(&key) {
+    let spoken_output = conn.spoken_output();
+    if spoken_output && let Some(result) = daemon.speech.cached(&key) {
         return conn::ok(result);
     }
     let reply = conn::sessions_here(daemon)
@@ -344,9 +304,17 @@ pub(super) async fn speech_summarize(
         .unwrap_or_else(|| "this project".to_string());
     let result = daemon
         .speech
-        .summarize(&named.agent_part.shown, &project, &reply)
+        .answer(
+            &named.agent_part.shown,
+            &project,
+            &reply,
+            spoken_output,
+            local_now(),
+        )
         .await?;
-    daemon.speech.keep(key, result.clone());
+    if spoken_output && result.complex {
+        daemon.speech.keep(key, result.clone());
+    }
     conn::ok(result)
 }
 
@@ -364,64 +332,12 @@ mod tests {
         - crates/libhandlr_proto/src/common.rs\n\
         All tests pass.";
 
-    #[test]
-    fn a_plain_reply_is_not_complex() {
-        let c = complexity(PLAIN);
-        assert_eq!(c.code_words, 0);
-        assert!(!c.is_complex(), "{c:?}");
-        assert!(!complexity("Yes, that works.").is_complex());
-    }
-
-    #[test]
-    fn backquotes_are_complex() {
-        assert!(complexity(BACKQUOTES).backquotes);
-        assert!(complexity(BACKQUOTES).is_complex());
-    }
-
-    #[test]
-    fn a_list_of_paths_is_complex() {
-        let c = complexity(PATHS);
-        assert_eq!(c.list_items, 3);
-        assert_eq!(c.code_words, 3);
-        assert!(c.is_complex(), "{c:?}");
-    }
-
-    #[test]
-    fn the_measures_each_count() {
-        // Code-like words: each kind.
-        for word in [
-            "a/b",
-            "a::b",
-            "snake_case",
-            "x=1",
-            "{",
-            "}",
-            "<T>",
-            "#3",
-            "$HOME",
-            "foo.rs",
-            "AgentInfo",
-            "v0",
-            "355f5f0",
-        ] {
-            assert!(code_like(word), "{word}");
-        }
-        for word in ["plain", "Hello,", "end.", "3"] {
-            assert!(!code_like(word), "{word}");
-        }
-        // 1 code word in 10 is 10%.
-        let one_in_ten = "one two three four five six seven eight nine foo.rs";
-        assert!(complexity(one_in_ten).is_complex());
-        let one_in_eleven = "one two three four five six seven eight nine ten foo.rs";
-        assert!(!complexity(one_in_eleven).is_complex());
-        // Two list items are not enough; a table row is.
-        assert!(!complexity("Two things:\n- one\n- two").is_complex());
-        assert!(complexity("1. one\n2. two\n10. three").is_complex());
-        assert!(complexity("| a | b |").is_complex());
-        // Length.
-        assert!(!complexity(&"word ".repeat(120)).is_complex());
-        assert!(complexity(&"word ".repeat(121)).is_complex());
-    }
+    const NOON: LocalTime = LocalTime {
+        hour: 12,
+        minute: 0,
+        second: 0,
+        utc_offset_minutes: 0,
+    };
 
     #[test]
     fn a_long_answer_is_cut_at_a_sentence() {
@@ -432,7 +348,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_complex_reply_is_summarised_and_a_plain_one_is_not() {
+    async fn a_complex_reply_is_summarised_only_with_spoken_output_on() {
         let mock = Arc::new(MockReasoningEngine::with_response("The tests pass."));
         let service = SpeechService::new(
             &AppConfig::default(),
@@ -442,10 +358,39 @@ mod tests {
             },
         );
         assert!(service.system_text().unwrap().contains("at most 60 words"));
-        let plain = service.summarize("Claude", "handlr", PLAIN).await.unwrap();
-        assert_eq!((plain.spoken, plain.complex), (None, false));
+        // Not complex: the rules, on or off.
+        for on in [false, true] {
+            let r = service
+                .answer("Claude", "handlr", BACKQUOTES, on, NOON)
+                .await
+                .unwrap();
+            assert_eq!(
+                r.spoken.as_deref(),
+                Some("Done: sessions reply text now joins the parts.")
+            );
+            assert!(!r.complex);
+        }
+        let r = service
+            .answer("Claude", "handlr", PLAIN, true, NOON)
+            .await
+            .unwrap();
+        assert_eq!((r.spoken.as_deref(), r.complex), (Some(PLAIN), false));
+        // Complex, off: the rules, and no call.
+        let r = service
+            .answer("Claude", "handlr", PATHS, false, NOON)
+            .await
+            .unwrap();
+        assert_eq!(
+            r.spoken.as_deref(),
+            Some("I changed three files: the speech the mod the common All tests pass.")
+        );
+        assert!(r.complex);
         assert!(mock.recorded_transcripts().is_empty());
-        let r = service.summarize("Claude", "handlr", PATHS).await.unwrap();
+        // Complex, on: Gemini.
+        let r = service
+            .answer("Claude", "handlr", PATHS, true, NOON)
+            .await
+            .unwrap();
         assert_eq!(r.spoken.as_deref(), Some("The tests pass."));
         assert!(r.complex);
         let sent = mock.recorded_transcripts();
@@ -455,7 +400,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_prompt_is_unavailable_for_complex_replies_only() {
+    async fn a_missing_prompt_is_unavailable_for_summaries_only() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("prompts.md");
         std::fs::write(&file, "# [Prompt] spoken_summary\n\n- system: |\n    s\n").unwrap();
@@ -468,9 +413,30 @@ mod tests {
             },
         );
         assert!(service.system_text().is_none());
-        assert!(service.summarize("Claude", "h", PLAIN).await.is_ok());
-        let err = service.summarize("Claude", "h", PATHS).await.unwrap_err();
+        assert!(
+            service
+                .answer("Claude", "h", PLAIN, true, NOON)
+                .await
+                .is_ok()
+        );
+        assert!(
+            service
+                .answer("Claude", "h", PATHS, false, NOON)
+                .await
+                .is_ok()
+        );
+        let err = service
+            .answer("Claude", "h", PATHS, true, NOON)
+            .await
+            .unwrap_err();
         assert_eq!(err.code, codes::UNAVAILABLE);
+    }
+
+    #[test]
+    fn the_local_time_is_a_time_of_day() {
+        let now = local_now();
+        assert!(now.hour < 24 && now.minute < 60 && now.second < 61);
+        assert!(now.utc_offset_minutes.abs() <= 14 * 60);
     }
 
     #[test]

@@ -1288,10 +1288,16 @@ async fn peeked_entries_are_redacted() {
     assert!(text.contains("[redacted]"), "{text}");
 }
 
-// speech.summarize (plan 20261023_05, step 3, as amended at 15:45 EDT).
+// speech.summarize (plan 20261023_05, step 3, as amended at 15:45 EDT, and
+// step 8, as amended at 16:28 EDT: Gemini only with spoken output on).
 
 /// The time of the reply `speech_home` writes.
 const REPLY_TS: &str = "2026-01-02T12:00:05.000Z";
+
+/// A reply that is complex after the reading rules: a list of changes.
+const COMPLEX: &str = "I changed three files:\n- src/alpha.rs\n- src/beta.rs\n- src/gamma.rs";
+/// `COMPLEX` under the reading rules.
+const COMPLEX_READ: &str = "I changed three files: the alpha the beta the gamma";
 
 /// A home whose session for p1 (see `give_session`) ends in an assistant
 /// reply of `text`, at `REPLY_TS`.
@@ -1334,15 +1340,26 @@ async fn start_summaries(home: &Path, engine: Arc<dyn ReasoningEngine>, timeout:
     env
 }
 
+/// A companion with spoken output on (`client.options`).
+async fn speaking_companion(env: &Env) -> Client {
+    let (mut c, _) = Client::companion(env).await;
+    let r = c
+        .call("client.options", json!({"spoken_output": true}))
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    c
+}
+
 /// Synthetic: the right shape for a Google key, made-up characters.
 const FAKE_KEY: &str = "AIzaSyD0nTuSeTh1sFakeKeyAbCdEfGhIjKlMn";
 
 #[tokio::test]
 async fn the_whole_reply_reaches_the_engine_redacted_and_is_summarised_once() {
-    // Past 500 characters, with backquotes, a key and a closing sentence
-    // that the client's 500-character summary would not have.
+    // Past 500 characters, with a list, a key and a closing sentence that
+    // the client's 500-character summary would not have.
     let reply = format!(
-        "I changed `src/server/speech.rs` and set the key to {FAKE_KEY}. {} The very last sentence.",
+        "I changed `src/server/speech.rs` and set the key to {FAKE_KEY}.\n\
+         - one\n- two\n- three\n{} The very last sentence.",
         "The rest of the change keeps every reply in order. ".repeat(12)
     );
     assert!(reply.chars().count() > 600);
@@ -1351,7 +1368,7 @@ async fn the_whole_reply_reaches_the_engine_redacted_and_is_summarised_once() {
         "The speech module changed.",
     ));
     let env = start_summaries(home.path(), mock.clone(), WAIT).await;
-    let (mut c, _) = Client::companion(&env).await;
+    let mut c = speaking_companion(&env).await;
 
     let params = json!({"pane_id": "p1", "ts": REPLY_TS, "text": "cut off…"});
     let r = c.call("speech.summarize", params.clone()).await;
@@ -1372,19 +1389,73 @@ async fn the_whole_reply_reaches_the_engine_redacted_and_is_summarised_once() {
 }
 
 #[tokio::test]
-async fn a_plain_reply_is_not_summarised() {
-    let home = speech_home("I ran the tests and they all pass. Shall I go on?");
+async fn a_plain_reply_is_read_through_the_rules() {
+    let home = speech_home("I ran `cargo test` and they all pass. Shall I go on?");
     let mock = Arc::new(MockReasoningEngine::with_response("unused"));
     let env = start_summaries(home.path(), mock.clone(), WAIT).await;
-    let (mut c, _) = Client::companion(&env).await;
+    let mut c = speaking_companion(&env).await;
     let r = c
         .call(
             "speech.summarize",
             json!({"pane_id": "p1", "ts": REPLY_TS, "text": "I ran the tests"}),
         )
         .await;
-    assert_eq!(r["result"], json!({"complex": false}), "{r}");
+    assert_eq!(
+        r["result"],
+        json!({"spoken": "I ran cargo test and they all pass. Shall I go on?", "complex": false}),
+        "{r}"
+    );
     assert!(mock.recorded_transcripts().is_empty());
+}
+
+#[tokio::test]
+async fn a_complex_reply_calls_the_engine_only_with_spoken_output_on() {
+    let home = speech_home(COMPLEX);
+    let mock = Arc::new(MockReasoningEngine::with_response("Three files changed."));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let params = json!({"pane_id": "p1", "ts": REPLY_TS});
+
+    // A new connection starts with spoken output off: the rules, no call.
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("speech.summarize", params.clone()).await;
+    assert_eq!(
+        r["result"],
+        json!({"spoken": COMPLEX_READ, "complex": true}),
+        "{r}"
+    );
+    assert!(mock.recorded_transcripts().is_empty());
+
+    // On: one call.
+    let r = c
+        .call("client.options", json!({"spoken_output": true, "later": 1}))
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    let r = c.call("speech.summarize", params.clone()).await;
+    assert_eq!(
+        r["result"],
+        json!({"spoken": "Three files changed.", "complex": true}),
+        "{r}"
+    );
+    assert_eq!(mock.recorded_transcripts().len(), 1);
+
+    // Off again: the rules, though a summary is kept.
+    c.call("client.options", json!({"spoken_output": false}))
+        .await;
+    let r = c.call("speech.summarize", params.clone()).await;
+    assert_eq!(r["result"]["spoken"], COMPLEX_READ, "{r}");
+
+    // Another connection of the same daemon starts off too.
+    let (mut other, _) = Client::companion(&env).await;
+    let r = other.call("speech.summarize", params).await;
+    assert_eq!(r["result"]["spoken"], COMPLEX_READ, "{r}");
+    assert_eq!(mock.recorded_transcripts().len(), 1);
+
+    // client.options is for companions.
+    let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "ctl").await;
+    let r = local
+        .call("client.options", json!({"spoken_output": true}))
+        .await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
 }
 
 #[tokio::test]
@@ -1392,15 +1463,15 @@ async fn a_reply_not_found_is_measured_from_the_clients_text() {
     let home = speech_home("Plain.");
     let mock = Arc::new(MockReasoningEngine::with_response("Summary."));
     let env = start_summaries(home.path(), mock.clone(), WAIT).await;
-    let (mut c, _) = Client::companion(&env).await;
+    let mut c = speaking_companion(&env).await;
     let r = c
         .call(
             "speech.summarize",
-            json!({"pane_id": "p1", "ts": "2026-01-02T13:00:00.000Z", "text": "See `a.rs`."}),
+            json!({"pane_id": "p1", "ts": "2026-01-02T13:00:00.000Z", "text": COMPLEX}),
         )
         .await;
     assert_eq!(r["result"]["spoken"], "Summary.", "{r}");
-    assert!(mock.recorded_transcripts()[0].ends_with("See `a.rs`."));
+    assert!(mock.recorded_transcripts()[0].ends_with("- src/gamma.rs"));
 }
 
 /// A summary that never comes in time.
@@ -1416,14 +1487,14 @@ impl MockHandler for Never {
 
 #[tokio::test]
 async fn a_summary_that_times_out_is_unavailable() {
-    let home = speech_home("Changed `x`.");
+    let home = speech_home(COMPLEX);
     let env = start_summaries(
         home.path(),
         Arc::new(MockReasoningEngine::with_handler(Never)),
         Duration::from_millis(200),
     )
     .await;
-    let (mut c, _) = Client::companion(&env).await;
+    let mut c = speaking_companion(&env).await;
     let started = Instant::now();
     let r = c
         .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
@@ -1437,7 +1508,7 @@ async fn a_summary_that_times_out_is_unavailable() {
         WAIT,
     )
     .await;
-    let (mut c, _) = Client::companion(&env).await;
+    let mut c = speaking_companion(&env).await;
     let r = c
         .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
         .await;
@@ -1500,10 +1571,10 @@ impl MockHandler for Slow {
 
 #[tokio::test]
 async fn a_second_summary_on_a_connection_waits_for_the_first() {
-    let home = speech_home("Changed `x`.");
+    let home = speech_home(COMPLEX);
     let mock = Arc::new(MockReasoningEngine::with_handler(Slow));
     let env = start_summaries(home.path(), mock.clone(), WAIT).await;
-    let (mut c, _) = Client::companion(&env).await;
+    let mut c = speaking_companion(&env).await;
     // Both at once, for the same reply: the second waits, then finds the
     // first's answer kept.
     let params = json!({"pane_id": "p1", "ts": REPLY_TS});
