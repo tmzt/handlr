@@ -762,3 +762,9 @@ the responses to typed amber text with the input box".
   when the agent works, or when the send is refused.
 - "after the tap animation plays": the press effect is libcontrols' to plan
   (the 16:23 EDT amendment); until it ships, the card goes on the tap.
+
+## Amendment — 2026-10-23 16:39 EDT: a correction to the previous amendment's reference (living section L3)
+
+The previous amendment cites "the 16:23 EDT amendment" for the press
+effect; the amendment it means is "buttons press in, withdrawn", at 16:19
+EDT.
