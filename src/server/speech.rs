@@ -30,8 +30,8 @@ use crate::config::AppConfig;
 use crate::prompts::{Prompt, Prompts, SPOKEN_SUMMARY};
 use crate::reasoning::{GeminiReasoningEngine, Message, ReasoningEngine, ToolExecutor};
 
-/// How long a summary may take before the call is `UNAVAILABLE`
-/// (decision 5).
+/// How long a summary may take before it is given up and the reply is
+/// read through the rules (decision 5, as amended at 16:56 EDT).
 pub const SUMMARY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How many answers are kept, by `(pane_id, ts)` (decision 5).
 pub const CACHE_SIZE: usize = 64;
