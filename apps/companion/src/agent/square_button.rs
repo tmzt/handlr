@@ -6,7 +6,7 @@ use libmsdf::drawlist::DrawList;
 
 use super::{
     AgentHit, CANCEL_GLYPH, CELL_EM, DIM, DOT, FG, FlowButton, PLAY_GLYPH, RECORDING, Row,
-    SEND_GLYPH, Terminal, button, draw_row, fill, term_h,
+    SEND_GLYPH, SKIP_GLYPH, Terminal, button, draw_row, fill, term_h,
 };
 
 /// `glyph` centred in `rect` at `px`, from the terminal face; `fallback`
@@ -31,7 +31,7 @@ fn draw_glyph(
         mono: true,
     };
     let pos = [
-        rect.x + (rect.w - CELL_EM * px) * 0.5,
+        rect.x + (rect.w - CELL_EM * px * row.text.chars().count() as f32) * 0.5,
         rect.y + (rect.h - term_h(px)) * 0.5,
     ];
     draw_row(list, ctx, term, &row, pos);
@@ -52,6 +52,7 @@ impl SquareButton {
         rect: Rect,
         s: f32,
         read_aloud: bool,
+        speaking: bool,
         recording: bool,
     ) {
         let px = 26.0 * s;
@@ -69,8 +70,14 @@ impl SquareButton {
             }
             AgentHit::ReadAloud => {
                 fill(list, rect, b.bg, 10.0 * s);
+                // Bright when on, dull when off; skip while a reply is read.
                 let color = if read_aloud { FG } else { DIM };
-                draw_glyph(list, ctx, term, PLAY_GLYPH, ">", rect, px, color);
+                let (glyph, fallback) = if read_aloud && speaking {
+                    (SKIP_GLYPH, ">|")
+                } else {
+                    (PLAY_GLYPH, ">")
+                };
+                draw_glyph(list, ctx, term, glyph, fallback, rect, px, color);
             }
             AgentHit::Submit if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);

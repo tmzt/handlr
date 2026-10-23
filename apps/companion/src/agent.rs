@@ -98,8 +98,10 @@ const SEND_GLYPH: &str = "\u{27A4}";
 const CANCEL_GLYPH: &str = "\u{2715}";
 /// The back glyph, from the terminal face (Roboto here is ASCII only).
 const BACK_GLYPH: &str = "\u{2039}";
-/// The play button's glyph, from the terminal face.
+/// The play button's glyph, from the terminal face, and the skip glyph it
+/// shows while a reply is being read (no ⏭ in the face: play and a bar).
 const PLAY_GLYPH: &str = "\u{25B6}";
+const SKIP_GLYPH: &str = "\u{25B6}\u{2502}";
 /// Lines of a tool result shown: one, or a diff's or an error's first few.
 const RESULT_LINES: usize = 12;
 const ERROR_LINES: usize = 4;
@@ -651,6 +653,8 @@ pub struct AgentScreen {
     dictation: Option<Vec<Line>>,
     /// The play button is on: replies are read aloud.
     read_aloud: bool,
+    /// Something is being said: the play button skips it.
+    speaking: bool,
     /// The card a message is being taken in reply to.
     reply: Option<AgentCard>,
     dirty: bool,
@@ -776,6 +780,20 @@ impl AgentScreen {
 
     pub fn read_aloud(&self) -> bool {
         self.read_aloud
+    }
+
+    /// Whether something is being said; with read aloud on, the play button
+    /// shows skip.
+    pub fn set_speaking(&mut self, on: bool) {
+        if on != self.speaking {
+            self.speaking = on;
+            self.dirty = true;
+        }
+    }
+
+    /// Whether a tap on the play button skips what is being said.
+    pub fn skips(&self) -> bool {
+        self.read_aloud && self.speaking
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
@@ -1179,7 +1197,17 @@ impl AgentScreen {
         for b in &self.flow.buttons {
             if visible(b.rect.y, b.rect.h) {
                 let rect = Rect::new(b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
-                SquareButton::draw(list, ctx, term, b, rect, s, self.read_aloud, recording);
+                SquareButton::draw(
+                    list,
+                    ctx,
+                    term,
+                    b,
+                    rect,
+                    s,
+                    self.read_aloud,
+                    self.speaking,
+                    recording,
+                );
             }
         }
         if self.entries.is_empty() && self.cards.is_empty() {
@@ -1227,7 +1255,17 @@ impl AgentScreen {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
             for b in &d.buttons {
-                SquareButton::draw(list, ctx, term, b, b.rect, s, self.read_aloud, recording);
+                SquareButton::draw(
+                    list,
+                    ctx,
+                    term,
+                    b,
+                    b.rect,
+                    s,
+                    self.read_aloud,
+                    self.speaking,
+                    recording,
+                );
             }
         }
         if let Some(p) = &self.frame.pin {
@@ -1238,7 +1276,17 @@ impl AgentScreen {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
             for b in &p.flow.buttons {
-                SquareButton::draw(list, ctx, term, b, b.rect, s, self.read_aloud, recording);
+                SquareButton::draw(
+                    list,
+                    ctx,
+                    term,
+                    b,
+                    b.rect,
+                    s,
+                    self.read_aloud,
+                    self.speaking,
+                    recording,
+                );
             }
         }
         let sg_px = SUGGEST_PT * s;
@@ -1247,7 +1295,17 @@ impl AgentScreen {
             ctx.draw_text(list, g.label, [g.rect.x + 4.0 * s, y], sg_px, g.color);
         }
         for b in &self.frame.buttons {
-            SquareButton::draw(list, ctx, term, b, b.rect, s, self.read_aloud, recording);
+            SquareButton::draw(
+                list,
+                ctx,
+                term,
+                b,
+                b.rect,
+                s,
+                self.read_aloud,
+                self.speaking,
+                recording,
+            );
         }
         self.dirty = false;
         true
@@ -1900,6 +1958,7 @@ mod tests {
             ("back", BACK_GLYPH),
             ("play", PLAY_GLYPH),
             ("send", SEND_GLYPH),
+            ("skip", SKIP_GLYPH),
             ("cancel", CANCEL_GLYPH),
         ] {
             let line = shaper.line(glyph, GlyphStyle::Regular);
@@ -2022,5 +2081,21 @@ mod tests {
         assert!(a.replying_to().is_none());
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
         assert_eq!(hits, [AgentHit::ReadAloud, AgentHit::Message]);
+    }
+
+    #[test]
+    fn play_skips_while_a_reply_is_read() {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_speaking(true);
+        assert!(!a.skips(), "read aloud is off: a tap turns it on");
+        a.set_read_aloud(true);
+        assert!(a.skips());
+        a.draw(&mut DrawList::new(), &DrawContext::default(), None);
+        a.set_speaking(false);
+        assert!(!a.skips());
+        assert!(
+            a.draw(&mut DrawList::new(), &DrawContext::default(), None),
+            "the glyph changes back"
+        );
     }
 }

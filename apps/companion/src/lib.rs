@@ -492,6 +492,10 @@ impl App {
                 }
             }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
+            AgentHit::ReadAloud if self.agent.as_ref().is_some_and(|a| a.skips()) => {
+                log::info!("agent view: skip");
+                self.send(Input::Skip);
+            }
             AgentHit::ReadAloud => {
                 self.read_aloud = !self.read_aloud;
                 log::info!(
@@ -519,6 +523,11 @@ impl App {
     fn on_audio(&mut self, event: AudioEvent) {
         match event {
             AudioEvent::Input(input) => {
+                if let Input::Speaking(on) = input
+                    && let Some(agent) = &mut self.agent
+                {
+                    agent.set_speaking(on);
+                }
                 match &input {
                     Input::Utterance(text) => {
                         self.heard = text.clone();
