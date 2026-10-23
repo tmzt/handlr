@@ -936,3 +936,13 @@ has not yet looked at, which is exactly when a question at the end of a
 task waits, so no Question card (and no Yes or No) appeared. `done` now
 counts too (`src/sessions/pending.rs`). The client's rules are unchanged:
 the Question card is the highest live card, so it is the pinned one.
+
+## 2026-10-23 16:04 EDT — plan 20261022_03, L3: the pinned card is shown once
+
+The owner: "got two cards instead of one with the same content". The
+pinned card was drawn in full above the bottom row and again at its place
+in the flow, which at the bottom of the view sit one above the other. It
+is now drawn only at the bottom; the flow keeps its place (no height), and
+tapping its bar while scrolled back returns to the bottom instead of
+jumping into the flow. This replaces the 03:11 EDT amendment's "Tapping
+the bar puts the card a third of the way down the view".
