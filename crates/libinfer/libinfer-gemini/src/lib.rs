@@ -17,10 +17,36 @@ pub use gemini_rust::{
 /// The default number of tool-calling steps allowed in one turn.
 pub const DEFAULT_MAX_TURNS: usize = 5;
 
+/// The model used when none is configured (decision 3).
+pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+
+/// The `gemini-rust` model for a configured name such as `gemini-2.5-pro`
+/// (decision 3). A leading `models/` is optional, and an empty name means
+/// [`DEFAULT_MODEL`]. A name `gemini-rust` does not know is passed through
+/// as `Model::Custom("models/<name>")`, the resource name the API's URL
+/// needs, so a new model needs no code change.
+pub fn model_from_name(name: &str) -> Model {
+    let name = name.trim();
+    let name = name.strip_prefix("models/").unwrap_or(name);
+    let name = if name.is_empty() { DEFAULT_MODEL } else { name };
+    match name {
+        "gemini-2.5-flash" => Model::Gemini25Flash,
+        "gemini-2.5-flash-lite" => Model::Gemini25FlashLite,
+        "gemini-2.5-flash-image" => Model::Gemini25FlashImage,
+        "gemini-2.5-pro" => Model::Gemini25Pro,
+        "gemini-3-flash-preview" => Model::Gemini3Flash,
+        "gemini-3-pro-preview" => Model::Gemini3Pro,
+        "gemini-3-pro-image-preview" => Model::Gemini3ProImage,
+        "text-embedding-004" => Model::TextEmbedding004,
+        other => Model::Custom(format!("models/{other}")),
+    }
+}
+
 /// Builds a [`GeminiReasoningEngine`].
 #[derive(Default)]
 pub struct GeminiReasoningEngineBuilder {
     api_key: Option<String>,
+    model: Option<String>,
     system_prompt: Option<String>,
     tools: Vec<Tool>,
     max_turns: Option<usize>,
@@ -30,6 +56,13 @@ impl GeminiReasoningEngineBuilder {
     /// The API key; with `None`, `build` reads `GEMINI_API_KEY`.
     pub fn api_key(mut self, api_key: Option<String>) -> Self {
         self.api_key = api_key;
+        self
+    }
+
+    /// The model, by name (see [`model_from_name`]); unset or empty means
+    /// [`DEFAULT_MODEL`].
+    pub fn model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
         self
     }
 
@@ -54,10 +87,12 @@ impl GeminiReasoningEngineBuilder {
     /// The engine. Fails, naming `GEMINI_API_KEY`, when no key was given
     /// and the variable is not set.
     pub fn build(self) -> Result<GeminiReasoningEngine, String> {
-        let engine = match self.api_key {
-            Some(key) => GeminiReasoningEngine::new(key, self.system_prompt, self.tools)?,
-            None => GeminiReasoningEngine::from_env(self.system_prompt, self.tools)?,
+        let key = match self.api_key {
+            Some(key) => key,
+            None => api_key_from_env()?,
         };
+        let model = model_from_name(self.model.as_deref().unwrap_or(DEFAULT_MODEL));
+        let engine = GeminiReasoningEngine::with_model(key, model, self.system_prompt, self.tools)?;
         Ok(engine.with_max_turns(self.max_turns.unwrap_or(DEFAULT_MAX_TURNS)))
     }
 }
@@ -68,9 +103,14 @@ impl GeminiReasoningEngineBuilder {
 /// them.
 pub struct GeminiReasoningEngine {
     client: Gemini,
+    model: Model,
     system_prompt: Option<String>,
     tools: Vec<Tool>,
     max_turns: usize,
+}
+
+fn api_key_from_env() -> Result<String, String> {
+    std::env::var("GEMINI_API_KEY").map_err(|_| "GEMINI_API_KEY not set".to_string())
 }
 
 impl GeminiReasoningEngine {
@@ -79,15 +119,33 @@ impl GeminiReasoningEngine {
         GeminiReasoningEngineBuilder::default()
     }
 
-    /// Create a new `GeminiReasoningEngine` with the given API key.
+    /// Create a new `GeminiReasoningEngine` with the given API key and the
+    /// default model.
     pub fn new(
         api_key: String,
         system_prompt: Option<String>,
         tools: Vec<Tool>,
     ) -> Result<Self, String> {
-        let client = Gemini::new(api_key).map_err(|e| format!("gemini client init: {e}"))?;
+        Self::with_model(
+            api_key,
+            model_from_name(DEFAULT_MODEL),
+            system_prompt,
+            tools,
+        )
+    }
+
+    /// Create a new `GeminiReasoningEngine` with the given API key and model.
+    pub fn with_model(
+        api_key: String,
+        model: Model,
+        system_prompt: Option<String>,
+        tools: Vec<Tool>,
+    ) -> Result<Self, String> {
+        let client = Gemini::with_model(api_key, model.clone())
+            .map_err(|e| format!("gemini client init: {e}"))?;
         Ok(Self {
             client,
+            model,
             system_prompt,
             tools,
             max_turns: DEFAULT_MAX_TURNS,
@@ -96,9 +154,7 @@ impl GeminiReasoningEngine {
 
     /// Create from the `GEMINI_API_KEY` environment variable.
     pub fn from_env(system_prompt: Option<String>, tools: Vec<Tool>) -> Result<Self, String> {
-        let key =
-            std::env::var("GEMINI_API_KEY").map_err(|_| "GEMINI_API_KEY not set".to_string())?;
-        Self::new(key, system_prompt, tools)
+        Self::new(api_key_from_env()?, system_prompt, tools)
     }
 
     /// Set the maximum multi-turn tool calling steps allowed per query.
@@ -111,6 +167,11 @@ impl GeminiReasoningEngine {
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = Some(prompt.into());
         self
+    }
+
+    /// The model every request goes to.
+    pub fn model(&self) -> &Model {
+        &self.model
     }
 
     /// The system prompt sent with every request, if any.
@@ -170,8 +231,9 @@ impl ReasoningEngine for GeminiReasoningEngine {
 
         // Add all historical messages to the builder
         log::info!(
-            "libinfer-gemini: Compiling {} messages into Gemini request context (tools: {})",
+            "libinfer-gemini: Compiling {} messages into a {} request (tools: {})",
             turns.len(),
+            self.model,
             self.tools().len()
         );
         for (i, turn) in turns.iter().enumerate() {
@@ -284,5 +346,44 @@ mod tests {
         assert_eq!(engine.system_prompt(), None);
         assert!(engine.tools().is_empty());
         assert_eq!(engine.max_turns(), DEFAULT_MAX_TURNS);
+        assert_eq!(engine.model(), &Model::Gemini25Flash);
+    }
+
+    fn built_with(model: &str) -> Model {
+        GeminiReasoningEngine::builder()
+            .api_key(Some("test_api_key".to_string()))
+            .model(model)
+            .build()
+            .unwrap()
+            .model()
+            .clone()
+    }
+
+    #[test]
+    fn the_builder_passes_the_configured_model() {
+        assert_eq!(built_with("gemini-2.5-pro"), Model::Gemini25Pro);
+        assert_eq!(
+            built_with("models/gemini-2.5-flash-lite"),
+            Model::Gemini25FlashLite
+        );
+        assert_eq!(built_with(" gemini-3-flash-preview "), Model::Gemini3Flash);
+    }
+
+    #[test]
+    fn an_empty_model_is_the_default() {
+        assert_eq!(built_with(""), Model::Gemini25Flash);
+        assert_eq!(built_with("  "), Model::Gemini25Flash);
+    }
+
+    #[test]
+    fn an_unknown_model_is_passed_through() {
+        let model = built_with("gemini-9-ultra");
+        assert_eq!(model, Model::Custom("models/gemini-9-ultra".to_string()));
+        // The request URL is `<base>/<model>:generateContent`.
+        assert_eq!(model.to_string(), "models/gemini-9-ultra");
+        assert_eq!(
+            built_with("models/gemini-9-ultra"),
+            Model::Custom("models/gemini-9-ultra".to_string())
+        );
     }
 }
