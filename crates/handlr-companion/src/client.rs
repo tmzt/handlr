@@ -77,6 +77,16 @@ pub enum Input {
     ReadAloud(bool),
 }
 
+/// A tapped suggestion on its way: its own approval, once confirmed.
+#[derive(Debug, Clone)]
+struct Tapped {
+    pane_id: String,
+    /// What was sent.
+    text: String,
+    /// Known once `agents.send` answers.
+    confirm_id: Option<u64>,
+}
+
 /// The agent view's suggested responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Suggestion {
@@ -429,10 +439,13 @@ struct Dictating {
     phase: DictationPhase,
     /// The own message's confirmation, once `agents.send` answered.
     confirm_id: Option<u64>,
-    /// Submitted with the Submit button, which is the approval: its own
+    /// Submitted: the text was shown for review first, so its own
     /// confirmation is approved without asking (plan 20261023_02, the
-    /// amendment on button submits). A silence submit still asks.
-    by_button: bool,
+    /// amendment on button submits; extended by the owner on 2026-10-23 to
+    /// every submit of reviewed text: "a separate approval isn't needed for
+    /// UI entered buttons or when text has been buffered for review
+    /// first").
+    own_approval: bool,
     /// Since when the gate has been closed, for the silence timer. `None`
     /// while it is open, and after a refused or denied submit until the
     /// next change.
@@ -493,6 +506,8 @@ pub struct State {
     voice_ended: Option<Duration>,
     /// The play button: the agent view's new replies are read aloud.
     read_aloud: bool,
+    /// Suggestions tapped and sent, until their confirmation is approved.
+    tapped: Vec<Tapped>,
     notices: VecDeque<String>,
     /// The driver's clock, as last ticked.
     now: Duration,
@@ -549,6 +564,7 @@ impl State {
             voice_reported: false,
             voice_ended: None,
             read_aloud: false,
+            tapped: Vec::new(),
             notices: VecDeque::new(),
             now: Duration::ZERO,
             focus: None,
@@ -970,7 +986,7 @@ impl State {
             refresh_target: self.online(),
             phase: DictationPhase::Collecting,
             confirm_id: None,
-            by_button: false,
+            own_approval: false,
             quiet_from: None,
             read_back: ReadBack::No,
             submit_waiting: None,
@@ -1075,7 +1091,15 @@ impl State {
         let target = d.target.clone().expect("checked above");
         let text = d.text();
         d.phase = DictationPhase::Submitting;
-        d.by_button = by_button;
+        d.own_approval = true;
+        log::info!(
+            "dictation: submitted by {}",
+            if by_button {
+                "the button"
+            } else {
+                "the silence"
+            }
+        );
         let params = serde_json::json!({
             "pane_id": target.pane_id,
             "text": text,
@@ -1086,8 +1110,8 @@ impl State {
         self.show_dictation(out);
     }
 
-    /// Sends a suggested response to the open view's pane. The daemon
-    /// confirms it as any other send; the tap is not the confirmation.
+    /// Sends a suggested response to the open view's pane. The tap is the
+    /// approval: its confirmation is approved without asking.
     fn respond(&mut self, response: Suggestion, out: &mut Vec<Output>) {
         let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
             return;
@@ -1117,6 +1141,11 @@ impl State {
         if kind == common::SendKind::Message {
             params["kind"] = serde_json::json!(kind);
         }
+        self.tapped.push(Tapped {
+            pane_id: pane_id.clone(),
+            text: text.to_string(),
+            confirm_id: None,
+        });
         out.push(self.request(methods::AGENTS_SEND, params, Sent::Respond(response)));
     }
 
@@ -1351,6 +1380,9 @@ impl State {
                     out.push(event(Event::Say(format!("I couldn't focus {target}."))));
                 }
                 Sent::Respond(response) => {
+                    let text = response.send().0;
+                    self.tapped
+                        .retain(|t| t.confirm_id.is_some() || t.text != text);
                     out.push(event(Event::Error(message)));
                     out.push(event(Event::Say(format!(
                         "I can't send {}. {}",
@@ -1435,7 +1467,7 @@ impl State {
                     }
                     // Its question may have arrived first.
                     if self.confirms.iter().any(|c| c.id == confirm_id) {
-                        self.approve_own_if_button(confirm_id, out);
+                        self.approve_own_message(confirm_id, out);
                     }
                     self.show_dictation(out);
                 }
@@ -1448,8 +1480,28 @@ impl State {
                 }
             },
             Sent::Respond(response) => match parse::<common::AgentsSendResult>(result) {
-                // Pending: its confirmation arrives as any other.
-                Ok(r) => log::info!("agent view: {}: {r:?}", response.label()),
+                Ok(common::AgentsSendResult::Pending { confirm_id, .. }) => {
+                    let text = response.send().0;
+                    let queued = self.confirms.iter().any(|c| c.id == confirm_id);
+                    if let Some(i) = self
+                        .tapped
+                        .iter()
+                        .position(|t| t.confirm_id.is_none() && t.text == text)
+                    {
+                        if queued {
+                            // Its question came first and is queued.
+                            self.tapped.remove(i);
+                            self.approve_own(confirm_id, out);
+                        } else {
+                            self.tapped[i].confirm_id = Some(confirm_id);
+                        }
+                    }
+                }
+                Ok(common::AgentsSendResult::Sent) => {
+                    let text = response.send().0;
+                    self.tapped
+                        .retain(|t| t.confirm_id.is_some() || t.text != text);
+                }
                 Err(e) => out.push(event(Event::Error(format!(
                     "a bad agents.send result: {e}"
                 )))),
@@ -1611,14 +1663,27 @@ impl State {
         if self.confirms.iter().any(|known| known.id == c.confirm_id) {
             return; // a reminder of one already being handled
         }
-        let own_by_button = self.dictation.as_ref().is_some_and(|d| {
-            d.by_button
+        let own_message = self.dictation.as_ref().is_some_and(|d| {
+            d.own_approval
                 && (d.confirm_id == Some(c.confirm_id)
                     || (d.phase == DictationPhase::Submitting
                         && same_message(&c.command, &d.text())))
         });
-        if own_by_button {
-            log::info!("dictation: approving the message submitted with the button");
+        if own_message {
+            log::info!("dictation: approving the submitted message");
+            self.reply(c.confirm_id, true, out);
+            return;
+        }
+        // A suggestion tapped in the view is its own approval too.
+        let own_tap = self.tapped.iter().position(|t| {
+            t.confirm_id == Some(c.confirm_id)
+                || (t.confirm_id.is_none()
+                    && t.pane_id == c.pane_id
+                    && same_message(&c.command, &t.text))
+        });
+        if let Some(i) = own_tap {
+            let t = self.tapped.remove(i);
+            log::info!("agent view: approving the tapped {}", t.text);
             self.reply(c.confirm_id, true, out);
             return;
         }
@@ -1638,12 +1703,16 @@ impl State {
         self.recompute_view(out);
     }
 
-    /// Approves the own message's confirmation, already queued, when it was
-    /// submitted with the button.
-    fn approve_own_if_button(&mut self, confirm_id: u64, out: &mut Vec<Output>) {
-        if !self.dictation.as_ref().is_some_and(|d| d.by_button) {
+    /// Approves the own message's confirmation, if it is already queued.
+    fn approve_own_message(&mut self, confirm_id: u64, out: &mut Vec<Output>) {
+        if !self.dictation.as_ref().is_some_and(|d| d.own_approval) {
             return;
         }
+        self.approve_own(confirm_id, out);
+    }
+
+    /// Approves `confirm_id` as the user's own, taking it off the queue.
+    fn approve_own(&mut self, confirm_id: u64, out: &mut Vec<Output>) {
         let was_asked = self.confirms.front().map(|c| c.id) == Some(confirm_id);
         self.confirms.retain(|c| c.id != confirm_id);
         self.reply(confirm_id, true, out);
@@ -2581,19 +2650,17 @@ mod tests {
 
     /// Submits "one" from [`dictating`] by the silence, which asks, and
     /// answers it as pending, confirmation 9, asked as the daemon asks it.
-    fn confirming_message() -> State {
+    /// A message submitted by the silence and approved as its own, waiting
+    /// for the daemon to send it.
+    fn submitted_message() -> State {
         let mut s = dictating();
         speak(&mut s, 10.0, 12.0, "one");
         let send = message_send(&s.input(Input::Tick(secs(20.0)))).unwrap();
-        let out = s.incoming(note(
-            "confirm.requested",
-            json!({"confirm_id": 9, "pane_id": "w2:p4", "agent": "claude",
-                   "name": "Claude in libmorph", "command": "one",
-                   "requested_by": "companion:test",
-                   "handle": "message-claude-libmorph-one",
-                   "text": "Approve sending your message to Claude in libmorph?"}),
-        ));
-        assert!(events(&out).contains(&say("Approve sending your message to Claude in libmorph?")));
+        let out = s.incoming(own_question(9, "one"));
+        assert_eq!(
+            approvals(&out),
+            vec![json!({"confirm_id": 9, "approve": true})]
+        );
         s.incoming(response(
             send.id,
             json!({"status": "pending", "confirm_id": 9,
@@ -2674,27 +2741,27 @@ mod tests {
     }
 
     #[test]
-    fn a_silence_submit_still_asks() {
+    fn a_silence_submit_is_its_own_approval_too() {
         let mut s = dictating();
         speak(&mut s, 10.0, 12.0, "one");
         message_send(&s.input(Input::Tick(secs(20.0)))).unwrap();
         let out = s.incoming(own_question(9, "one"));
         assert!(
-            events(&out)
+            !events(&out)
                 .iter()
                 .any(|e| matches!(e, Event::Confirm { .. })),
             "{out:?}"
         );
-        assert!(approvals(&out).is_empty());
+        assert_eq!(
+            approvals(&out),
+            vec![json!({"confirm_id": 9, "approve": true})]
+        );
     }
 
     #[test]
-    fn deny_resumes_the_mode_with_the_text_kept() {
-        let mut s = confirming_message();
-        let out = s.input(Input::Utterance("deny".into()));
-        let reqs = sent(&out);
-        assert_eq!(reqs.len(), 1, "only the reply: {out:?}");
-        assert_eq!(reqs[0].params, json!({"confirm_id": 9, "approve": false}));
+    fn denied_elsewhere_resumes_the_mode_with_the_text_kept() {
+        // Approved here, but denied by another client before it was sent.
+        let mut s = submitted_message();
         let out = s.incoming(note(
             "confirm.resolved",
             json!({"confirm_id": 9, "outcome": "denied"}),
@@ -2709,22 +2776,6 @@ mod tests {
         speak(&mut s, 101.0, 102.0, "two");
         let send = message_send(&s.input(Input::Tick(secs(110.0)))).unwrap();
         assert_eq!(send.params["text"], "one two");
-    }
-
-    #[test]
-    fn approve_during_dictation_sends_and_ends_the_mode() {
-        let mut s = confirming_message();
-        let out = s.input(Input::Utterance("Approve.".into()));
-        assert_eq!(
-            sent(&out)[0].params,
-            json!({"confirm_id": 9, "approve": true})
-        );
-        assert_eq!(s.dictation().text, "one", "not added to the message");
-        let out = s.incoming(note(
-            "confirm.resolved",
-            json!({"confirm_id": 9, "outcome": "sent"}),
-        ));
-        assert_eq!(dictation_of(&out), Some(Dictation::off()));
     }
 
     #[test]
@@ -3153,10 +3204,39 @@ mod tests {
             json!({"pane_id": "w2:pZ", "text": "yes", "kind": "message",
                    "handle": "reply-claude-handlr-yes"})
         );
-        // Pending: the tap is not the confirmation.
+        // The tap is the approval: its question is answered, not asked.
         let id = requests(&out, "agents.send")[0].id.clone();
-        let out = s.incoming(response(id, json!({"status": "pending", "confirm_id": 9})));
-        assert!(requests(&out, "confirm.reply").is_empty(), "{out:?}");
+        s.incoming(response(id, json!({"status": "pending", "confirm_id": 9})));
+        let out = s.incoming(note(
+            "confirm.requested",
+            json!({"confirm_id": 9, "pane_id": "w2:pZ", "agent": "claude",
+                   "command": "yes", "requested_by": "companion:test",
+                   "text": "Approve sending your message to Claude?"}),
+        ));
+        assert_eq!(
+            approvals(&out),
+            vec![json!({"confirm_id": 9, "approve": true})]
+        );
+        assert!(
+            !events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Confirm { .. }))
+        );
+        // Question first works too.
+        let out = s.input(Input::Respond(Suggestion::Continue));
+        let id = requests(&out, "agents.send")[0].id.clone();
+        let out = s.incoming(note(
+            "confirm.requested",
+            json!({"confirm_id": 10, "pane_id": "w2:pZ", "agent": "claude",
+                   "command": "continue", "requested_by": "companion:test",
+                   "text": "Approve continue?"}),
+        ));
+        assert_eq!(
+            approvals(&out),
+            vec![json!({"confirm_id": 10, "approve": true})]
+        );
+        let out = s.incoming(response(id, json!({"status": "pending", "confirm_id": 10})));
+        assert!(approvals(&out).is_empty(), "approved once");
     }
 
     #[test]
