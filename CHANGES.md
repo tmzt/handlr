@@ -967,3 +967,11 @@ Two small departures in the daemon's `speech.summarize`, needed by the
   3's tests), and the client reads the reply through its copy of the
   rules, which is the same `handlr_speech::read_aloud` (at the phone's
   local time rather than the daemon's).
+
+## 2026-10-23 17:33 EDT — plan 20261023_06, step 1: the ignored test of the example waits for the reader
+
+Step 1, as amended, says the example is "read by an ignored test". Reading
+it needs the agy reader of step 4 and a SQLite dependency, so that test is
+written in step 4, as `#[ignore]` unless `HANDLR_AGY_EXAMPLE` names the
+copy. Step 1's mapping was checked instead with a throwaway decoder outside
+the repository, against the example and the synthetic fixtures alike.
