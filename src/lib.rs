@@ -6,6 +6,7 @@ pub mod core;
 pub mod ctl;
 pub mod notify;
 pub mod pair;
+pub mod prompts;
 pub mod reasoning;
 pub mod server;
 pub mod sessions;

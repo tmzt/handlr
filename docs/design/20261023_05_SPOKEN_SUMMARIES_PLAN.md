@@ -1,7 +1,7 @@
 ---
 title: Spoken summaries of complex replies, from structured prompts
 date: 2026-10-23
-status: Draft
+status: In implementation
 covers:
   - "Read aloud (the agent view's play button) sends a reply that is
     complex, by a basic coding measure or because it has backquotes, to
@@ -236,3 +236,34 @@ and 2; 4 needs 2; 5 needs 3 and 4.
 3. **More prompts.** Which other prompts belong in ADDITIONAL_PROMPTS.md
    later (for example, the confirmation question's wording, or a summary
    of what several agents did for the overview)?
+
+## Amendment — 2026-10-23 15:45 EDT: the daemon decides what is complex
+
+The owner (2026-10-23): "the phone wouldn't decide, the daemon would".
+This replaces decision 1, the client side of decision 2, the params and
+result in decision 4 and section 4, and step 4's `complexity` in the
+client.
+
+* The client sends every reply it is about to read aloud to
+  `speech.summarize` `{pane_id, ts, text}`. The daemon reads the full
+  reply (decision 3) and measures it with decision 2's rules, as
+  `complexity(&str) -> Complexity` in the daemon (`src/server/speech.rs`
+  or a module beside it), on the full text rather than the client's 500
+  characters.
+* The result is `{spoken: Option<String>, complex: bool}`. Complex:
+  `spoken` is Gemini's summary. Not complex: `spoken` is `None`, no Gemini
+  call is made, and the client reads the reply through `speakable` as now.
+  The 64-entry cache keeps both answers.
+* The client keeps reading in order, the 10 s timeout and the fallback to
+  `speakable` on any error. It has no complexity measure of its own.
+* Step 3's tests also cover the measure on recorded replies: a plain one
+  not complex, one with backquotes and one with a list of paths complex.
+  Step 4's tests cover a `None` answer read through `speakable`.
+
+## Amendment — 2026-10-23 15:45 EDT: implementation has started; the document is now immutable
+
+The owner approved building this plan on 2026-10-23. Implementation starts
+with step 1, `ADDITIONAL_PROMPTS.md` and `src/prompts.rs`. The open
+questions of section 6 stay open; the plan's values (the thresholds of
+decision 2, no cap on calls, one prompt) are used as written. From here
+the document changes only by amendment on the owner's instruction.
