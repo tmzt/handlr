@@ -758,3 +758,21 @@ stays at 0.1.0, as it is used only inside this repository.
 was given "were really herdr's default all along". That isn't verified.
 `pane.read` sent `count`, which herdr's schema does not define, so herdr
 **probably** used its own default. The read now sends `lines` too.
+
+## 2026-10-23 14:54 EDT — plan 20261023_03: sections and serials; the card rules move to the daemon
+
+Plan 20261023_03 (session subscriptions, Draft) gains an amendment of the
+same time: the agent view is made of sections (turns, text blocks, tool
+groups and cards), each with one serial derived from the session file
+(`<file-name hash>:<line>.<slot>`), used to store, compare and backfill
+them; `session.history` pages back through the session; resolved cards
+are rebuilt in history; an approval journal per session keeps Approval
+cards across restarts; and the UI always shows sections in serial order.
+
+This departs from plan 20261022_03 (In implementation), decision 9 as
+amended at 02:34 EDT and its step 4: the four card rules there run in the
+companion client (`crates/handlr-companion/src/view.rs`). Under plan
+20261023_03 they move, unchanged in what they find, to the daemon
+(`src/sessions/sections.rs`), and the client receives cards as sections.
+Discussed with and agreed by the owner on 2026-10-23 (Rule 2). Plan
+20261022_03 is not edited.
