@@ -291,6 +291,46 @@ impl Sessions {
     }
 }
 
+/// A pane's session as `session.peek` and `agents.list` report it (plan
+/// 20261022_03, step 4): redacted entries, the newest last, and the
+/// pending question for the pane's status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peeked {
+    pub located: Located,
+    pub entries: Vec<Entry>,
+    pub pending_question: Option<PendingQuestion>,
+}
+
+impl Sessions {
+    /// The last `n` entries of the agent in `pane` and its pending
+    /// question. Reads back until there are `n` entries and an assistant
+    /// reply among them, within `read_tail`'s limits.
+    pub fn peek(&self, pane: &AgentRef, n: usize) -> Option<Peeked> {
+        let read = self.read(pane, |items| {
+            items.len() >= n
+                && items
+                    .iter()
+                    .any(|i| i.is_text() && i.role == Role::Assistant)
+        })?;
+        let pending_question = pending::pending_question(&read.items, &pane.status);
+        let skip = read.items.len().saturating_sub(n);
+        Some(Peeked {
+            located: read.located,
+            entries: read.items[skip..].iter().map(Item::entry).collect(),
+            pending_question,
+        })
+    }
+}
+
+impl From<Matched> for libhandlr_proto::common::SessionMatched {
+    fn from(m: Matched) -> Self {
+        match m {
+            Matched::Id => Self::Id,
+            Matched::Cwd => Self::Cwd,
+        }
+    }
+}
+
 /// Whether a session id can be used in a file name as given.
 pub(crate) fn safe_id(id: &str) -> bool {
     !id.is_empty()

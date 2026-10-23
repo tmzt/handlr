@@ -464,6 +464,28 @@ fn wire_status(status: &libherdr::protocol::AgentStatus) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// Whether session files are on this machine: not for a remote herdr
+/// (plan 20261022_03, decision 4).
+fn sessions_here(daemon: &Daemon) -> bool {
+    !matches!(
+        daemon.client.transport(),
+        libherdr::transport::HerdrTransport::RemoteSsh { .. }
+    )
+}
+
+/// The session of the agent in `pane`, for `agents.list`.
+fn agent_session(daemon: &Daemon, pane: &agents::AgentRef) -> Option<common::AgentSessionInfo> {
+    if !sessions_here(daemon) || daemon.sessions.reader_for(&pane.agent).is_none() {
+        return None;
+    }
+    let peeked = daemon.sessions.peek(pane, 1)?;
+    Some(common::AgentSessionInfo {
+        session_id: peeked.located.session_id,
+        matched: peeked.located.matched.into(),
+        pending_question: peeked.pending_question,
+    })
+}
+
 async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
     conn.daemon
         .client
@@ -538,7 +560,9 @@ async fn call(
                 .into_iter()
                 .map(|named| {
                     let a = named.agent;
+                    let session = agent_session(daemon, &a);
                     common::AgentInfo {
+                        session,
                         status: wire_status(&a.status),
                         pane_id: a.pane_id,
                         name: Some(named.shown),
@@ -573,6 +597,52 @@ async fn call(
                 .map_err(herdr_unavailable)?;
             let text = agents::pane_text(&read).unwrap_or_default().to_string();
             ok(common::AgentsReadResult { text })
+        }
+        methods::SESSION_PEEK => {
+            // Plan 20261022_03, decision 9: companions and local clients,
+            // read-only. Paired harness clients get it with step 5.
+            if !(conn.is_companion() || matches!(conn.origin, Origin::Local)) {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "session.peek is served to companions and on the daemon socket",
+                ));
+            }
+            let p: common::SessionPeekParams = params(raw)?;
+            if !(1..=common::PEEK_ENTRIES_MAX).contains(&p.entries) {
+                return Err(ErrorObject::new(
+                    codes::INVALID_PARAMS,
+                    format!("entries must be 1 to {}", common::PEEK_ENTRIES_MAX),
+                ));
+            }
+            let snap = snapshot(conn).await?;
+            let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
+            let names = daemon.names(&snap);
+            let Some(named) = names.get(&pane_id) else {
+                return Err(ErrorObject::new(
+                    codes::UNKNOWN_AGENT,
+                    format!("no pane '{pane_id}'"),
+                ));
+            };
+            let pane = &named.agent;
+            if !conn.principal().may_reach(&pane.agent) {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    format!("{} may not reach {}", conn.principal().id, named.shown),
+                ));
+            }
+            let session = sessions_here(daemon)
+                .then(|| daemon.sessions.peek(pane, p.entries))
+                .flatten()
+                .map(|peeked| common::SessionPeek {
+                    session_id: peeked.located.session_id,
+                    matched: peeked.located.matched.into(),
+                    entries: peeked.entries,
+                    pending_question: peeked.pending_question,
+                });
+            ok(common::SessionPeekResult {
+                session,
+                status: wire_status(&pane.status),
+            })
         }
         methods::AGENTS_SEND => {
             let p: common::AgentsSendParams = params(raw)?;

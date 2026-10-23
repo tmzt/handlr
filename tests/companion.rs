@@ -103,6 +103,16 @@ fn direct(key: &str) -> AppConfig {
 }
 
 async fn start_with(config: AppConfig, engine: Arc<dyn ReasoningEngine>, with_link: bool) -> Env {
+    start_home(config, engine, with_link, &fixture_home()).await
+}
+
+/// As `start_with`, with the agents' sessions read under `home`.
+async fn start_home(
+    config: AppConfig,
+    engine: Arc<dyn ReasoningEngine>,
+    with_link: bool,
+    home: &Path,
+) -> Env {
     let dir = tempfile::Builder::new()
         .prefix("hc")
         .tempdir_in("/tmp")
@@ -131,7 +141,7 @@ async fn start_with(config: AppConfig, engine: Arc<dyn ReasoningEngine>, with_li
             engine: Some(engine),
             session_dir: Some(sessions.clone()),
             // The synthetic fixtures, never this machine's own sessions.
-            agent_sessions: Some(Arc::new(Sessions::with_home(&fixture_home()))),
+            agent_sessions: Some(Arc::new(Sessions::with_home(home))),
         },
     );
     let listener = server::bind(&socket).await.unwrap();
@@ -833,6 +843,12 @@ async fn the_vocabulary_is_sent_again_when_it_changes() {
 
 /// Pair a companion over the link, as the phone would.
 async fn pair_companion(env: &Env) -> Client {
+    pair_as(env, "companion").await
+}
+
+/// Pair a device over the link for `protocol` (`companion` or `harness`),
+/// and say hello with it.
+async fn pair_as(env: &Env, protocol: &str) -> Client {
     let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "pair").await;
     let r = local.call("link.pair_begin", json!({})).await;
     let payload = PairingPayload::decode(r["result"]["pairing"].as_str().unwrap()).unwrap();
@@ -843,13 +859,18 @@ async fn pair_companion(env: &Env) -> Client {
     }
     .encode(&payload.server_key)
     .unwrap();
-    let r = local.call("link.pair_add", json!({"code": code})).await;
+    let r = local
+        .call(
+            "link.pair_add",
+            json!({"code": code, "protocols": [protocol]}),
+        )
+        .await;
     assert_eq!(r["result"]["name"], "phone", "{r}");
     let (address, _) = env.link.as_ref().unwrap();
     let tcp = TcpStream::connect(address).await.unwrap();
     let hello = serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "id": 0, "method": "hello",
-        "params": {"protocol": "handlr.companion", "version": 1, "client": "phone"}
+        "params": {"protocol": format!("handlr.{protocol}"), "version": 1, "client": "phone"}
     }))
     .unwrap();
     let stream = reconnect(tcp, &keypair, &payload.server_key, Some(&hello))
@@ -861,7 +882,9 @@ async fn pair_companion(env: &Env) -> Client {
         seen: Vec::new(),
     };
     let hello = c.response(0).await;
-    assert_eq!(hello["result"]["session_id"], "companion:phone", "{hello}");
+    if protocol == "companion" {
+        assert_eq!(hello["result"]["session_id"], "companion:phone", "{hello}");
+    }
     assert_eq!(hello["result"]["paired"], true, "{hello}");
     c
 }
@@ -1086,4 +1109,169 @@ async fn agents_list_carries_the_focus_and_focus_changes_are_pushed() {
     let moved = c.note("focus.changed").await;
     assert_eq!(moved["params"]["focus"]["pane_id"], "p2", "{moved}");
     assert!(moved["params"]["focus"].get("agent").is_none(), "{moved}");
+}
+
+#[tokio::test]
+async fn session_peek_gives_the_agent_view_its_entries_and_question() {
+    let env = start(confirming()).await;
+    give_session(&env.daemon).await;
+    set_status(&env.daemon, AgentStatus::Idle).await;
+    let (mut c, _) = Client::companion(&env).await;
+
+    let r = c.call("session.peek", json!({"pane_id": "p1"})).await;
+    let result = &r["result"];
+    assert_eq!(result["status"], "idle", "{r}");
+    let session = &result["session"];
+    assert_eq!(
+        session["session_id"],
+        "00000000-0000-4000-8000-0000000000a1"
+    );
+    assert_eq!(session["matched"], "id");
+    let entries = session["entries"].as_array().unwrap();
+    // The fixture's whole conversation: the question, a tool call and its
+    // result, and the reply ending in a question.
+    let kinds: Vec<(&str, &str)> = entries
+        .iter()
+        .map(|e| (e["role"].as_str().unwrap(), e["kind"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("user", "text"),
+            ("assistant", "tool_use"),
+            ("tool", "tool_result"),
+            ("assistant", "text"),
+        ],
+        "{r}"
+    );
+    assert_eq!(entries[1]["tool"], "Grep");
+    assert_eq!(entries[2]["summary"], "src/notify.rs");
+    assert_eq!(
+        session["pending_question"]["text"],
+        "Should the notices wait for the phone to finish speaking, or interrupt it?"
+    );
+
+    // Fewer entries: the newest. Working, there is no pending question.
+    set_status(&env.daemon, AgentStatus::Working).await;
+    let r = c
+        .call("session.peek", json!({"pane_id": "p1", "entries": 2}))
+        .await;
+    let entries = r["result"]["session"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "{r}");
+    assert_eq!(entries[0]["kind"], "tool_result");
+    assert!(
+        r["result"]["session"].get("pending_question").is_none(),
+        "{r}"
+    );
+    assert_eq!(r["result"]["status"], "working");
+
+    // The bounds of `entries`.
+    for bad in [0, 201] {
+        let r = c
+            .call("session.peek", json!({"pane_id": "p1", "entries": bad}))
+            .await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+    }
+    let r = c
+        .call("session.peek", json!({"pane_id": "p1", "entries": 200}))
+        .await;
+    assert!(r.get("error").is_none(), "{r}");
+}
+
+#[tokio::test]
+async fn a_pane_without_a_session_peeks_as_null() {
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    // p1 has no cwd and no session id: no file is found.
+    let r = c.call("session.peek", json!({"pane_id": "p1"})).await;
+    assert_eq!(r["result"]["session"], Value::Null, "{r}");
+    assert_eq!(r["result"]["status"], "working");
+    let r = c.call("session.peek", json!({"pane_id": "nowhere"})).await;
+    assert_eq!(r["error"]["code"], -32002, "{r}");
+}
+
+#[tokio::test]
+async fn agents_list_carries_each_agents_session() {
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("agents.list", json!({})).await;
+    assert!(r["result"]["agents"][0].get("session").is_none(), "{r}");
+
+    give_session(&env.daemon).await;
+    set_status(&env.daemon, AgentStatus::Blocked).await;
+    let r = c.call("agents.list", json!({})).await;
+    let session = &r["result"]["agents"][0]["session"];
+    assert_eq!(session["matched"], "id", "{r}");
+    assert_eq!(
+        session["session_id"],
+        "00000000-0000-4000-8000-0000000000a1"
+    );
+    assert_eq!(
+        session["pending_question"]["text"],
+        "Should the notices wait for the phone to finish speaking, or interrupt it?"
+    );
+    assert!(session.get("entries").is_none(), "{r}");
+}
+
+#[tokio::test]
+async fn session_peek_is_for_companions_and_local_clients_only() {
+    let env = start_with(
+        confirming(),
+        Arc::new(MockReasoningEngine::with_handler(Script)),
+        true,
+    )
+    .await;
+    give_session(&env.daemon).await;
+    // A local harness client may peek.
+    let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "ctl").await;
+    let r = local.call("session.peek", json!({"pane_id": "p1"})).await;
+    assert_eq!(r["result"]["session"]["matched"], "id", "{r}");
+    // A paired companion may.
+    let mut phone = pair_companion(&env).await;
+    let r = phone.call("session.peek", json!({"pane_id": "p1"})).await;
+    assert_eq!(r["result"]["session"]["matched"], "id", "{r}");
+}
+
+#[tokio::test]
+async fn a_paired_harness_may_not_peek_yet() {
+    let env = start_with(
+        confirming(),
+        Arc::new(MockReasoningEngine::with_handler(Script)),
+        true,
+    )
+    .await;
+    give_session(&env.daemon).await;
+    let mut harness = pair_as(&env, "harness").await;
+    let r = harness.call("session.peek", json!({"pane_id": "p1"})).await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+}
+
+#[tokio::test]
+async fn peeked_entries_are_redacted() {
+    // A home whose session reads a `.private/` file and a `.env` file.
+    let home = tempfile::tempdir().unwrap();
+    let project = home.path().join(".claude/projects/-work-example");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sessions/claude_secret.jsonl"),
+        project.join("00000000-0000-4000-8000-0000000000a1.jsonl"),
+    )
+    .unwrap();
+    let env = start_home(
+        confirming(),
+        Arc::new(MockReasoningEngine::with_handler(Script)),
+        false,
+        home.path(),
+    )
+    .await;
+    give_session(&env.daemon).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c
+        .call("session.peek", json!({"pane_id": "p1", "entries": 200}))
+        .await;
+    let text = r["result"]["session"]["entries"].to_string();
+    assert!(!text.is_empty() && text != "null", "{r}");
+    assert!(!text.contains("not-a-real-secret-value"), "{text}");
+    assert!(!text.contains("not-a-real-token"), "{text}");
+    assert!(text.contains("[redacted]"), "{text}");
 }
