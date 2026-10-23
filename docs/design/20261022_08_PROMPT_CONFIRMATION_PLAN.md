@@ -304,3 +304,50 @@ now `In implementation`, and this document is immutable (AGENTS.md, Rule
 
 **Step 2,** the live turn, follows with the daemon on the owner's live
 herdr.
+
+## Amendment — 2026-10-23 01:26 EDT: Gemini validates the handle in the current turn; entropy matching is for handles that come back later
+
+On the owner's instruction, after the live test of 01:13 EDT. Gemini sent
+`send-continue-again-handlr` for a request that speech-to-text heard as
+"sin did again". The daemon's check against the utterance failed, so it
+replaced Gemini's handle with `sin-did-again`.
+
+This replaces two parts of the 23:44 EDT amendment: the check of the
+handle against the turn's utterance, and building the handle from the
+utterance.
+
+**Within the turn** (the `run_command` call, and the companion's display
+and immediate approval):
+- The handle Gemini supplies is accepted as given, after normalising.
+  Gemini validates it against what the user meant: it has the utterance
+  and resolves speech-to-text errors such as "sin" for "send". The daemon
+  no longer checks it against the utterance's words.
+- Only a missing or empty handle is built by the daemon, from the command
+  and the agent's spoken name.
+- **Unchanged:**
+  - the 3-word minimum, padded as before;
+  - `-2` for an exactly equal pending handle;
+  - the distinguishing word when it would not stand apart among the pending
+    handles;
+  - the handle returned to Gemini.
+
+**Out of sequence** (a handle that comes back after the turn: a later
+turn, `confirm.status` by handle, another principal, or a standing
+confirmation):
+- The handle is matched by **entropy**, not by word overlap alone. A
+  match is accepted only when the words it matches carry enough
+  information to pick out one pending handle and to rule out a chance
+  match.
+- Until the measure is defined, the existing loose rule (at least 2/3 and a
+  margin of one word) and the distinguishing word stay in place. The
+  comprehensive plan the owner has asked for defines the measure, its
+  threshold and its tests.
+- The nonce is still always over the stored handle.
+
+**Step 1's tests change:**
+- the test that "a handle not drawn from the utterance is replaced" is
+  removed;
+- a new test checks that a handle Gemini supplies within the turn is kept
+  when the utterance is garbled ("sin did again" with
+  `send-continue-again-handlr`);
+- the rest are unchanged.
