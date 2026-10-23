@@ -1433,7 +1433,16 @@ impl State {
     /// The own message's confirmation ended.
     fn message_resolved(&mut self, outcome: &str, out: &mut Vec<Output>) {
         if outcome == "sent" {
-            self.dictation = None;
+            // Sent to the viewed agent: it shows as typed input until the
+            // session has it (owner, 2026-10-23: "Spoken messages should be
+            // included as text in the flow after they're submitted").
+            if let Some(d) = self.dictation.take()
+                && let Some(v) = self.view.as_mut()
+                && d.target.as_ref().is_some_and(|t| t.pane_id == v.pane_id)
+            {
+                v.typed = Some(d.text());
+                self.show_view(out);
+            }
         } else if let Some(d) = self.dictation.as_mut() {
             // Denied, expired, failed: the text is kept to be fixed and
             // submitted again, after the next change.
@@ -4009,5 +4018,21 @@ mod tests {
         assert!(!events(&out).contains(&Event::StopSpeaking), "not this one");
         assert_eq!(s.held_notices(), 0);
         assert!(events(&s.input(Input::Speaking(false))).is_empty());
+    }
+
+    #[test]
+    fn a_message_sent_from_the_view_shows_as_typed_until_the_session_has_it() {
+        let mut s = viewing("idle", asking());
+        s.input(Input::StartDictation);
+        speak(&mut s, 110.0, 112.0, "please run the tests");
+        let send = message_send(&s.input(Input::Submit)).unwrap();
+        let target = send.params["pane_id"].clone();
+        assert_eq!(target, "w2:pZ");
+        s.incoming(response(send.id, json!({"status": "sent"})));
+        let typed = s.agent_view().and_then(|e| match e {
+            Event::AgentView { typed, .. } => typed,
+            _ => None,
+        });
+        assert_eq!(typed.as_deref(), Some("please run the tests"));
     }
 }
