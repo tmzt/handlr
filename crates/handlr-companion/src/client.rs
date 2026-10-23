@@ -326,6 +326,11 @@ pub const NOTICE_CAP: usize = 8;
 /// read as it is (plan 20261023_05, decision 5).
 pub const SUMMARY_WAIT: Duration = Duration::from_secs(10);
 
+/// How long the link may be quiet before a `ping`, and how long the ping
+/// may go unanswered before the link is closed and made again.
+pub const PING_IDLE: Duration = Duration::from_secs(30);
+pub const PING_WAIT: Duration = Duration::from_secs(10);
+
 /// Whether an utterance answers a confirmation with approval: the whole
 /// utterance is "approve" or "approved", in any case, ignoring punctuation
 /// and surrounding space (plan 20261022_02, 12:06 EDT amendment).
@@ -510,6 +515,8 @@ enum Sent {
     Summarize(u64),
     /// `client.options`, with read aloud as it was then.
     Options,
+    /// `ping`, after a quiet spell.
+    Ping,
 }
 
 /// A reply to read aloud, in its turn (plan 20261023_05, decisions 5 and
@@ -646,6 +653,10 @@ pub struct State {
     voice_ended: Option<Duration>,
     /// The play button: the agent view's new replies are read aloud.
     read_aloud: bool,
+    /// When anything last came from the daemon, and when a `ping` went
+    /// unanswered so far.
+    last_heard: Duration,
+    ping_sent: Option<Duration>,
     /// Replies to read aloud, oldest first, each waiting for its summary
     /// or ready.
     reading: VecDeque<Reading>,
@@ -733,6 +744,8 @@ impl State {
             voice_reported: false,
             voice_ended: None,
             read_aloud: false,
+            last_heard: Duration::ZERO,
+            ping_sent: None,
             reading: VecDeque::new(),
             next_reading: 1,
             read_replies: VecDeque::new(),
@@ -797,6 +810,8 @@ impl State {
     pub fn connected(&mut self) -> Vec<Output> {
         self.link = Link::Greeting;
         self.sent.clear();
+        self.last_heard = self.now;
+        self.ping_sent = None;
         let params = wire::HelloParams {
             protocol: protocols::COMPANION.to_string(),
             version: wire::VERSION,
@@ -1185,6 +1200,7 @@ impl State {
 
     fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
         self.now = self.now.max(now);
+        self.keep_alive(out);
         if let Some(by_button) = d_waiting(&self.dictation).filter(|_| !self.unheard()) {
             self.submit(by_button, out);
         }
@@ -1518,6 +1534,9 @@ impl State {
     /// A message from the daemon.
     pub fn incoming(&mut self, message: Incoming) -> Vec<Output> {
         let mut out = Vec::new();
+        // Anything from the daemon shows the link is alive.
+        self.last_heard = self.now;
+        self.ping_sent = None;
         match message {
             Incoming::Response(response) => self.response(response, &mut out),
             Incoming::Notification(note) => self.notification(note, &mut out),
@@ -1648,6 +1667,7 @@ impl State {
                     log::warn!("agents.list: {message}");
                 }
                 Sent::Options => log::warn!("client.options: {message}"),
+                Sent::Ping => {}
                 Sent::Summarize(serial) => {
                     log::info!("speech.summarize: {message}; reading the reply here");
                     self.summarized(serial, None, out);
@@ -1819,7 +1839,36 @@ impl State {
                     self.summarized(serial, None, out);
                 }
             },
-            Sent::Interrupt | Sent::ConfirmReply(_) | Sent::Options => {}
+            Sent::Interrupt | Sent::ConfirmReply(_) | Sent::Options | Sent::Ping => {}
+        }
+    }
+
+    /// After [`PING_IDLE`] with nothing from the daemon, a `ping`; with no
+    /// answer in [`PING_WAIT`], the link is taken as dead and closed, to be
+    /// made again (owner, 2026-10-23: "ping 30s is fine, but should only
+    /// be sent if nothing received for that time"). This departs from plan
+    /// 20261022_02's liveness, which left it to `SO_KEEPALIVE`.
+    fn keep_alive(&mut self, out: &mut Vec<Output>) {
+        if self.link == Link::Offline {
+            return;
+        }
+        match self.ping_sent {
+            Some(at) if self.now.saturating_sub(at) >= PING_WAIT => {
+                log::info!(
+                    "link: no answer to a ping in {} s; reconnecting",
+                    PING_WAIT.as_secs()
+                );
+                self.ping_sent = None;
+                out.push(Output::Close("no answer to a ping".to_string()));
+            }
+            Some(_) => {}
+            None if self.link == Link::Online
+                && self.now.saturating_sub(self.last_heard) >= PING_IDLE =>
+            {
+                self.ping_sent = Some(self.now);
+                out.push(self.request(methods::PING, common::Empty {}, Sent::Ping));
+            }
+            None => {}
         }
     }
 
@@ -4422,6 +4471,44 @@ mod tests {
             !events(&out)
                 .iter()
                 .any(|e| matches!(e, Event::Conversation { .. }))
+        );
+    }
+
+    #[test]
+    fn a_quiet_link_is_pinged_and_closed_when_the_ping_is_unanswered() {
+        let mut s = online();
+        s.input(Input::Tick(secs(10.0)));
+        let pings = |out: &[Output]| requests(out, "ping").len();
+        // Heard from at 10 s: nothing sent until 30 s of quiet.
+        s.incoming(note("focus.changed", json!({"focus": null})));
+        assert_eq!(pings(&s.input(Input::Tick(secs(39.0)))), 0);
+        let out = s.input(Input::Tick(secs(40.0)));
+        assert_eq!(pings(&out), 1);
+        // Not again while it is waiting.
+        assert_eq!(pings(&s.input(Input::Tick(secs(45.0)))), 0);
+        // Unanswered for 10 s: closed, to reconnect.
+        let out = s.input(Input::Tick(secs(50.0)));
+        assert!(out.iter().any(|o| matches!(o, Output::Close(_))), "{out:?}");
+    }
+
+    #[test]
+    fn anything_heard_keeps_the_link_from_being_pinged() {
+        let mut s = online();
+        for t in [10.0, 30.0, 50.0, 70.0] {
+            s.input(Input::Tick(secs(t)));
+            s.incoming(note("focus.changed", json!({"focus": null})));
+        }
+        assert!(requests(&s.input(Input::Tick(secs(95.0))), "ping").is_empty());
+        // A ping answered: the next comes only after another quiet spell.
+        let out = s.input(Input::Tick(secs(100.0)));
+        let ping = requests(&out, "ping")[0].clone();
+        let out = s.incoming(response(ping.id, json!({})));
+        assert!(!out.iter().any(|o| matches!(o, Output::Close(_))));
+        assert!(requests(&s.input(Input::Tick(secs(115.0))), "ping").is_empty());
+        assert!(
+            !s.input(Input::Tick(secs(125.0)))
+                .iter()
+                .any(|o| matches!(o, Output::Close(_)))
         );
     }
 }
