@@ -39,9 +39,11 @@ use crate::ui::{Layout, Line};
 
 mod control_row;
 mod dictation_card;
+mod input_box;
 mod square_button;
 use control_row::ControlRow;
 use dictation_card::DictationCard;
+use input_box::InputBox;
 use square_button::SquareButton;
 
 pub const BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
@@ -578,6 +580,8 @@ pub struct Frame {
     pub back: Rect,
     /// The suggested responses, as plain coloured text above the buttons.
     pub suggestions: Vec<Suggested>,
+    /// The response just sent, as typed input in its box.
+    pub typed: Option<Flow>,
 }
 
 /// A suggested response as placed: its tap area and its text.
@@ -674,6 +678,8 @@ pub struct AgentScreen {
     loading: bool,
     /// Seconds since the entries or the status last changed.
     quiet_for: f32,
+    /// The response just sent, until the session shows it.
+    typed: Option<String>,
     /// The card a message is being taken in reply to.
     reply: Option<AgentCard>,
     dirty: bool,
@@ -814,6 +820,15 @@ impl AgentScreen {
         }
     }
 
+    /// The response just sent from the view, shown as typed input until
+    /// the session has it.
+    pub fn set_typed(&mut self, typed: Option<String>) {
+        if typed != self.typed {
+            self.typed = typed;
+            self.settle();
+        }
+    }
+
     /// Whether something is being said; with read aloud on, the play button
     /// shows skip.
     pub fn set_speaking(&mut self, on: bool) {
@@ -935,6 +950,12 @@ impl AgentScreen {
         if !suggestions.is_empty() {
             above = row_top - 8.0 * s;
         }
+        // A response just sent, as typed input, until the session has it.
+        let typed = self.typed.as_deref().filter(|_| !dictating).map(|t| {
+            let flow = InputBox::lay_out(t, pad, l.w - 2.0 * pad, above, s);
+            above -= flow.height + 8.0 * s;
+            flow
+        });
         // The message being taken, pinned above the buttons: on its own
         // card, or in the card it replies to with the controls.
         let dictation = self.dictation.as_ref().map(|lines| {
@@ -1015,6 +1036,7 @@ impl AgentScreen {
             buttons,
             back,
             suggestions,
+            typed,
         }
     }
 
@@ -1303,6 +1325,14 @@ impl AgentScreen {
         );
 
         // The pinned card, the dictation card, then the buttons.
+        if let Some(t) = &self.frame.typed {
+            for f in &t.fills {
+                fill(list, f.rect, f.color, f.radius);
+            }
+            for r in &t.rows {
+                draw_row(list, ctx, term, r, [r.x, r.y]);
+            }
+        }
         if let Some(d) = &self.frame.dictation {
             for f in &d.fills {
                 fill(list, f.rect, f.color, f.radius);
@@ -2033,6 +2063,7 @@ mod tests {
             ("play", PLAY_GLYPH),
             ("send", SEND_GLYPH),
             ("skip", SKIP_GLYPH),
+            ("prompt", "\u{203A}"),
             ("cancel", CANCEL_GLYPH),
         ] {
             let line = shaper.line(glyph, GlyphStyle::Regular);
@@ -2171,5 +2202,23 @@ mod tests {
             a.draw(&mut DrawList::new(), &DrawContext::default(), None),
             "the glyph changes back"
         );
+    }
+
+    #[test]
+    fn a_sent_response_shows_as_typed_amber_input_until_the_session_has_it() {
+        let mut a = screen(conversation(3), vec![], None);
+        assert!(a.frame().typed.is_none());
+        a.set_typed(Some("Yes, install it on the S23".into()));
+        let f = a.frame().clone();
+        let typed = f.typed.expect("the input box");
+        let row = &typed.rows[0];
+        assert_eq!(row.text, "\u{203A} Yes, install it on the S23");
+        assert_eq!(row.color, input_box::AMBER);
+        assert!(row.mono, "on the terminal grid");
+        // Above the controls; the flow ends above it.
+        assert!(typed.fills[0].rect.y + typed.height <= f.buttons[0].rect.y);
+        assert!(f.viewport.y + f.viewport.h <= typed.fills[0].rect.y);
+        a.set_typed(None);
+        assert!(a.frame().typed.is_none());
     }
 }
