@@ -75,7 +75,7 @@ pub struct SpeechService {
     /// there.
     prompt: Result<(Prompt, String), String>,
     timeout: Duration,
-    cache: Mutex<VecDeque<((String, String), SpeechSummarizeResult)>>,
+    cache: Mutex<VecDeque<((String, String), String)>>,
 }
 
 impl SpeechService {
@@ -118,12 +118,12 @@ impl SpeechService {
         Ok(Arc::clone(self.gemini.get_or_init(|| engine)))
     }
 
-    fn cached(&self, key: &(String, String)) -> Option<SpeechSummarizeResult> {
+    fn cached(&self, key: &(String, String)) -> Option<String> {
         let cache = self.cache.lock().unwrap();
         cache.iter().find(|(k, _)| k == key).map(|(_, r)| r.clone())
     }
 
-    fn keep(&self, key: (String, String), result: SpeechSummarizeResult) {
+    fn keep(&self, key: (String, String), result: String) {
         let mut cache = self.cache.lock().unwrap();
         cache.retain(|(k, _)| k != &key);
         if cache.len() >= CACHE_SIZE {
@@ -142,15 +142,32 @@ impl SpeechService {
         reply: &str,
         spoken_output: bool,
         now: LocalTime,
+        cached: Option<String>,
     ) -> Result<SpeechSummarizeResult, ErrorObject> {
         let complex = handlr_speech::complexity(reply).is_complex();
-        let spoken = if complex && spoken_output {
-            self.summarize(agent, project, reply).await?
+        // The rules' version is made fresh every time: its clock times
+        // are relative to now.
+        let read = handlr_speech::read_aloud(reply, now);
+        // Both versions: a failed summary leaves `read` to be said.
+        let summary = if !(complex && spoken_output) {
+            None
+        } else if cached.is_some() {
+            cached
         } else {
-            handlr_speech::read_aloud(reply, now)
+            match self.summarize(agent, project, reply).await {
+                Ok(summary) => Some(summary),
+                Err(e) => {
+                    log::warn!(
+                        "speech.summarize: {}; the reply is read as it is",
+                        e.message
+                    );
+                    None
+                }
+            }
         };
         Ok(SpeechSummarizeResult {
-            spoken: Some(spoken),
+            read,
+            summary,
             complex,
         })
     }
@@ -289,9 +306,7 @@ pub(super) async fn speech_summarize(
     let key = (pane_id.clone(), p.ts.clone());
     let _one = conn.speech.lock().await;
     let spoken_output = conn.spoken_output();
-    if spoken_output && let Some(result) = daemon.speech.cached(&key) {
-        return conn::ok(result);
-    }
+    let cached = spoken_output.then(|| daemon.speech.cached(&key)).flatten();
     let reply = conn::sessions_here(daemon)
         .then(|| daemon.sessions.reply_text(pane, &p.ts))
         .flatten()
@@ -310,10 +325,11 @@ pub(super) async fn speech_summarize(
             &reply,
             spoken_output,
             local_now(),
+            cached,
         )
         .await?;
-    if spoken_output && result.complex {
-        daemon.speech.keep(key, result.clone());
+    if let Some(summary) = &result.summary {
+        daemon.speech.keep(key, summary.clone());
     }
     conn::ok(result)
 }
@@ -361,37 +377,37 @@ mod tests {
         // Not complex: the rules, on or off.
         for on in [false, true] {
             let r = service
-                .answer("Claude", "handlr", BACKQUOTES, on, NOON)
+                .answer("Claude", "handlr", BACKQUOTES, on, NOON, None)
                 .await
                 .unwrap();
-            assert_eq!(
-                r.spoken.as_deref(),
-                Some("Done: sessions reply text now joins the parts.")
-            );
-            assert!(!r.complex);
+            assert_eq!(r.read, "Done: sessions reply text now joins the parts.");
+            assert_eq!((r.summary, r.complex), (None, false));
         }
         let r = service
-            .answer("Claude", "handlr", PLAIN, true, NOON)
-            .await
-            .unwrap();
-        assert_eq!((r.spoken.as_deref(), r.complex), (Some(PLAIN), false));
-        // Complex, off: the rules, and no call.
-        let r = service
-            .answer("Claude", "handlr", PATHS, false, NOON)
+            .answer("Claude", "handlr", PLAIN, true, NOON, None)
             .await
             .unwrap();
         assert_eq!(
-            r.spoken.as_deref(),
-            Some("I changed three files: the speech the mod the common All tests pass.")
+            (r.read.as_str(), r.summary, r.complex),
+            (PLAIN, None, false)
         );
+        // Complex, off: the rules, and no call.
+        let r = service
+            .answer("Claude", "handlr", PATHS, false, NOON, None)
+            .await
+            .unwrap();
+        let rules = "I changed three files: the speech the mod the common All tests pass.";
+        assert_eq!((r.read.as_str(), r.summary), (rules, None));
         assert!(r.complex);
         assert!(mock.recorded_transcripts().is_empty());
         // Complex, on: Gemini.
         let r = service
-            .answer("Claude", "handlr", PATHS, true, NOON)
+            .answer("Claude", "handlr", PATHS, true, NOON, None)
             .await
             .unwrap();
-        assert_eq!(r.spoken.as_deref(), Some("The tests pass."));
+        // Both versions.
+        assert_eq!(r.read, rules);
+        assert_eq!(r.summary.as_deref(), Some("The tests pass."));
         assert!(r.complex);
         let sent = mock.recorded_transcripts();
         assert_eq!(sent.len(), 1);
@@ -400,7 +416,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_prompt_is_unavailable_for_summaries_only() {
+    async fn a_missing_prompt_leaves_the_rules_version() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("prompts.md");
         std::fs::write(&file, "# [Prompt] spoken_summary\n\n- system: |\n    s\n").unwrap();
@@ -415,21 +431,23 @@ mod tests {
         assert!(service.system_text().is_none());
         assert!(
             service
-                .answer("Claude", "h", PLAIN, true, NOON)
+                .answer("Claude", "h", PLAIN, true, NOON, None)
                 .await
                 .is_ok()
         );
         assert!(
             service
-                .answer("Claude", "h", PATHS, false, NOON)
+                .answer("Claude", "h", PATHS, false, NOON, None)
                 .await
                 .is_ok()
         );
-        let err = service
-            .answer("Claude", "h", PATHS, true, NOON)
+        // A failed summary: the rules' version alone, not an error.
+        let r = service
+            .answer("Claude", "h", PATHS, true, NOON, None)
             .await
-            .unwrap_err();
-        assert_eq!(err.code, codes::UNAVAILABLE);
+            .unwrap();
+        assert_eq!(r.summary, None);
+        assert!(r.complex && !r.read.is_empty());
     }
 
     #[test]
@@ -442,10 +460,7 @@ mod tests {
     #[test]
     fn the_cache_keeps_the_last_64() {
         let service = SpeechService::new(&AppConfig::default(), SpeechOptions::default());
-        let answer = |n: usize| SpeechSummarizeResult {
-            spoken: Some(n.to_string()),
-            complex: true,
-        };
+        let answer = |n: usize| n.to_string();
         for n in 0..=CACHE_SIZE {
             service.keep(("p1".to_string(), n.to_string()), answer(n));
         }

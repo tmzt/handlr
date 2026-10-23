@@ -1373,7 +1373,11 @@ async fn the_whole_reply_reaches_the_engine_redacted_and_is_summarised_once() {
     let params = json!({"pane_id": "p1", "ts": REPLY_TS, "text": "cut off…"});
     let r = c.call("speech.summarize", params.clone()).await;
     assert_eq!(r["result"]["complex"], true, "{r}");
-    assert_eq!(r["result"]["spoken"], "The speech module changed.");
+    assert_eq!(r["result"]["summary"], "The speech module changed.");
+    assert!(
+        r["result"]["read"].as_str().is_some_and(|t| !t.is_empty()),
+        "{r}"
+    );
     let sent = mock.recorded_transcripts();
     assert_eq!(sent.len(), 1);
     assert!(sent[0].starts_with("The Claude agent in "), "{}", sent[0]);
@@ -1402,7 +1406,7 @@ async fn a_plain_reply_is_read_through_the_rules() {
         .await;
     assert_eq!(
         r["result"],
-        json!({"spoken": "I ran cargo test and they all pass. Shall I go on?", "complex": false}),
+        json!({"read": "I ran cargo test and they all pass. Shall I go on?", "complex": false}),
         "{r}"
     );
     assert!(mock.recorded_transcripts().is_empty());
@@ -1420,7 +1424,7 @@ async fn a_complex_reply_calls_the_engine_only_with_spoken_output_on() {
     let r = c.call("speech.summarize", params.clone()).await;
     assert_eq!(
         r["result"],
-        json!({"spoken": COMPLEX_READ, "complex": true}),
+        json!({"read": COMPLEX_READ, "complex": true}),
         "{r}"
     );
     assert!(mock.recorded_transcripts().is_empty());
@@ -1433,7 +1437,7 @@ async fn a_complex_reply_calls_the_engine_only_with_spoken_output_on() {
     let r = c.call("speech.summarize", params.clone()).await;
     assert_eq!(
         r["result"],
-        json!({"spoken": "Three files changed.", "complex": true}),
+        json!({"read": COMPLEX_READ, "summary": "Three files changed.", "complex": true}),
         "{r}"
     );
     assert_eq!(mock.recorded_transcripts().len(), 1);
@@ -1442,12 +1446,17 @@ async fn a_complex_reply_calls_the_engine_only_with_spoken_output_on() {
     c.call("client.options", json!({"spoken_output": false}))
         .await;
     let r = c.call("speech.summarize", params.clone()).await;
-    assert_eq!(r["result"]["spoken"], COMPLEX_READ, "{r}");
+    assert_eq!(
+        r["result"],
+        json!({"read": COMPLEX_READ, "complex": true}),
+        "{r}"
+    );
 
     // Another connection of the same daemon starts off too.
     let (mut other, _) = Client::companion(&env).await;
     let r = other.call("speech.summarize", params).await;
-    assert_eq!(r["result"]["spoken"], COMPLEX_READ, "{r}");
+    assert_eq!(r["result"]["read"], COMPLEX_READ, "{r}");
+    assert!(r["result"].get("summary").is_none(), "{r}");
     assert_eq!(mock.recorded_transcripts().len(), 1);
 
     // client.options is for companions.
@@ -1470,7 +1479,7 @@ async fn a_reply_not_found_is_measured_from_the_clients_text() {
             json!({"pane_id": "p1", "ts": "2026-01-02T13:00:00.000Z", "text": COMPLEX}),
         )
         .await;
-    assert_eq!(r["result"]["spoken"], "Summary.", "{r}");
+    assert_eq!(r["result"]["summary"], "Summary.", "{r}");
     assert!(mock.recorded_transcripts()[0].ends_with("- src/gamma.rs"));
 }
 
@@ -1486,7 +1495,7 @@ impl MockHandler for Never {
 }
 
 #[tokio::test]
-async fn a_summary_that_times_out_is_unavailable() {
+async fn a_summary_that_times_out_leaves_the_rules_version() {
     let home = speech_home(COMPLEX);
     let env = start_summaries(
         home.path(),
@@ -1499,9 +1508,10 @@ async fn a_summary_that_times_out_is_unavailable() {
     let r = c
         .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
         .await;
-    assert_eq!(r["error"]["code"], -32015, "{r}");
+    assert_eq!(r["result"]["read"], COMPLEX_READ, "{r}");
+    assert!(r["result"].get("summary").is_none(), "{r}");
     assert!(started.elapsed() < Duration::from_secs(5));
-    // An engine error is unavailable too.
+    // An engine error leaves it too.
     let env = start_summaries(
         home.path(),
         Arc::new(MockReasoningEngine::with_error("no key")),
@@ -1512,7 +1522,8 @@ async fn a_summary_that_times_out_is_unavailable() {
     let r = c
         .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
         .await;
-    assert_eq!(r["error"]["code"], -32015, "{r}");
+    assert_eq!(r["result"]["read"], COMPLEX_READ, "{r}");
+    assert!(r["result"].get("summary").is_none(), "{r}");
 }
 
 #[tokio::test]
@@ -1582,7 +1593,7 @@ async fn a_second_summary_on_a_connection_waits_for_the_first() {
     let second = c.request("speech.summarize", params).await;
     let a = c.response(first).await;
     let b = c.response(second).await;
-    assert_eq!(a["result"]["spoken"], "Summary.", "{a}");
+    assert_eq!(a["result"]["summary"], "Summary.", "{a}");
     assert_eq!(b["result"], a["result"]);
     assert_eq!(mock.recorded_transcripts().len(), 1);
 }
