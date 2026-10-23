@@ -893,3 +893,14 @@ the left, cancel in the middle and send in record's place at the bottom
 right, in the screen's row and inside a card being replied to. This
 replaces the previous entry's "play becomes send … and the record dot turns
 red": record is not shown while a message is taken.
+
+## 2026-10-23 15:39 EDT — read aloud: paths and code as their English words
+
+The owner, on a reply read aloud: "abbreviate a path like the one in the
+last spoken message (I only need the English parts of it)", "(such as \"the
+overview screen plan\")". `handlr_companion::speakable` now reads a link
+as its text, a path as "the" and the words of its last part
+(`docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md` is "the overview screen
+plan", without the date, sequence or extension), inline code as its words
+(`AgentInfo.asking` is "agent info asking"), a number or version as it is,
+and a commit hash not at all. Part of the read aloud of the 15:11 entry.
