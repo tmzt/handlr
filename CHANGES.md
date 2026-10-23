@@ -708,3 +708,15 @@ The work is built, with its tests. The live S23 check is next.
   directory.
 
 **Also:** `config.default.toml` does not yet mention `allow_messages`.
+
+## 2026-10-23 02:23 EDT — plan 20261023_02: the silence counts from the end of voice
+
+**Fixed:** the effective silence of about 14 s that the step 3 entry
+recorded. `handlr-audio` now reports when the gate opens on speech, as
+`Input::Voice(bool)`. An armed gate waiting for speech is not voice. Once
+a front end reports voice, the companion counts the dictation silence from
+the end of voice, so a message submits 8 s after the speaker stops, as the
+owner asked.
+
+Front ends without a VAD, such as the text example, still count from the
+gate going idle.
