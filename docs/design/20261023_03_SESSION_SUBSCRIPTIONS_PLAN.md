@@ -577,3 +577,281 @@ either order; 3 needs 2; 4 needs 1 and 3; 5 and 6 need 4; 7 needs 6.
 4. **The cursor across a daemon restart.** Offsets survive, so this plan
    continues from them. If you would rather reset after a restart, the
    cursor gains the daemon's start time.
+
+## Amendment — 2026-10-23 14:54 EDT: sections, serials and scrolling back through the session
+
+Agreed with the owner on 2026-10-23: "if I scrollback, it should
+scrollback in the session and rebuild the missing cards/sections";
+"sections is all of those, blocks of text output, actual cards, turns,
+etc. they should all have a serial number associated with them
+monotically"; "one serial number, not a different one per type"; "it
+could be derived from the jsonl line if that makes sense, with the
+filename hashed in"; "maybe the filename hash is the prefix?"; "that
+works, as long as we can store and compare them, and use them for
+backfill"; "the UI should always show them in order".
+
+This amendment replaces, where they disagree: decision 5 (cursors) and
+the cursor format in 4.2; `Entry.seq`; the `entries` fields of 4.1 and
+4.2 (deliveries now carry sections); the ordering rules of 4.4; the
+client's card handling in section 6; the app's "the agent view does not
+change" in section 7; and the numbered steps 2, 3, 4, 5, 6 and 7, which
+gain the work below. Everything else stands.
+
+### A1. Sections
+
+A **section** is one unit of the agent view. There are four kinds:
+
+| `kind` | What it is |
+|---|---|
+| `turn` | A user prompt: the start of a turn |
+| `text` | A block of the agent's output: consecutive assistant text entries with no tool call between them |
+| `tool` | A tool call and its result, once the result arrives |
+| `card` | A priority card: Approval, Question, Something broke, Finished |
+
+Sections are flat and ordered: a turn's text, tools and cards follow it
+in serial order until the next `turn`. Entries of other kinds (thinking,
+system lines the readers already drop) form no section.
+
+### A2. The serial
+
+Every section has one serial, from one sequence shared by all four kinds.
+It is derived from the session file, not counted:
+
+* **file**: a 32-bit FNV-1a hash of the session file's name (for example
+  `992c3f44-18e7-4cf8-814f-e437b90209b6.jsonl`), not its path;
+* **line**: the 1-based number of the JSONL line the section starts on.
+  Every line counts, including lines the readers skip or do not parse,
+  so a later reader that understands more line types gives the same
+  numbers;
+* **slot**: the section's place among those starting on that line,
+  0 to 255: the line's own blocks first, in order (a Claude line is one
+  message, which can hold text and several tool calls), then the cards
+  anchored after it, highest priority first. A line with more than 256
+  sections puts the rest into slot 255's section.
+
+**On the wire** it is a string with the hash as its prefix:
+`"3fa9c21e:412.2"`, that is `<file hash, 8 lower-case hex digits>:<line,
+decimal>.<slot, decimal>`. A full u64 would exceed 2^53, which
+JavaScript and many JSON readers cannot hold exactly.
+
+**In memory** it is `libhandlr_proto::common::Serial`:
+
+```rust
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Serial { pub file: u32, pub line: u32, pub slot: u8 }
+
+impl Serial {
+    /// The packed form: file in bits 63–32, line in 31–8, slot in 7–0.
+    pub fn to_u64(self) -> u64;
+    pub fn from_u64(v: u64) -> Self;
+    pub fn same_file(self, other: Serial) -> bool;
+}
+impl PartialOrd for Serial { /* None across files; else by (line, slot) */ }
+impl FromStr for Serial { /* "3fa9c21e:412.2" */ }
+impl Display for Serial { /* the same form */ }
+// Serialize and Deserialize as the string.
+```
+
+* **Store:** it round-trips exactly through the string, the u64 and
+  serde, so a client can keep it in memory, in a file or in a database.
+  `line` must fit 24 bits (16,777,215 lines); a longer file is a parse
+  error for serials past that line, and the daemon sends a reset with
+  `reason: "too_long"`.
+* **Compare:** within one file, by line then slot. Serials of two files
+  have no order (`partial_cmp` returns `None`); a different prefix means
+  a different session.
+* **Backfill:** it replaces the cursor. `session.subscribe`'s `after`
+  and `session.history`'s `before` are serials. The `c1:` cursor format,
+  `SessionDelivery.cursor` and `Entry.seq` are dropped; a delivery's
+  newest serial is what the client gives back.
+* **Stable:** the same line gives the same serial on every read, after
+  a reconnect, after a daemon restart, and for every client. It does not
+  depend on how the daemon groups sections, so changing the card rules
+  later does not renumber anything already shown.
+
+After `/clear` the pane's agent writes a new file, so serials get a new
+prefix and the subscription sends a reset, as in decision 6.
+
+### A3. The daemon builds sections and runs the card rules
+
+The four card rules move from `crates/handlr-companion/src/view.rs` into
+the daemon, as `src/sessions/sections.rs`, run by the hub once per
+tailer and shared by all its subscribers, as redaction is (decision 7).
+The rules are unchanged in what they find. They become a pure function
+over a span of entries plus the pane's status, pending question and
+confirmations, so the same function finds live cards at the newest end
+and resolved cards in history.
+
+```rust
+pub struct Section {
+    pub serial: Serial,
+    pub kind: SectionKind,          // Turn, Text, Tool, Card
+    pub entries: Vec<Entry>,        // redacted, oldest first; empty for some cards
+    pub card: Option<CardBody>,     // for kind Card
+}
+pub struct CardBody {
+    pub card: CardKind,             // Approval, Question, Broke, Finished
+    pub live: bool,
+    pub title: String,
+    pub text: String,
+    pub confirm_id: Option<u64>,
+}
+```
+
+`Section`, `SectionKind`, `CardBody` and `CardKind` are in
+`libhandlr_proto::common`. A section that changes is sent again with the
+same serial: a text block that grows, a tool group that gets its result,
+a card that goes from live to resolved. The client replaces it.
+
+The tailer counts lines as it reads and keeps each line's start offset
+(8 bytes a line; a 100,000-line session costs 800 KB), built by one scan
+of the file when the tailer starts. History pages are found from it.
+
+### A4. The approval journal
+
+Approval cards come from handlr's confirmations, not the session file.
+To rebuild them in history and after a restart, the daemon appends each
+confirmation that reaches a session's pane to
+`~/.local/state/handlr/sessions/<session_id>.jsonl` (directory 0700, file
+0600), one line each:
+
+```json
+{"ts":"2026-10-23T18:40:02Z","line":412,"slot":2,"confirm_id":17,
+ "command":"/compact","outcome":"approved"}
+```
+
+`line` is the session file's newest line when the confirmation was
+made, and `slot` the card's slot after that line; `outcome` is written
+when it resolves (`approved`, `declined`, `expired`), as a second line
+for the same `confirm_id`. The command is the redacted text the card
+showed. The serial does not depend on the journal: a missing or deleted
+journal loses only the Approval cards, never shifts a number.
+
+### A5. The protocol, as amended
+
+`session.subscribe` params: `pane_id`, `sections` (the backfill size, 1
+to 200, 50 by default; replaces `entries`), `after` (a serial, optional).
+
+`SessionDelivery`: `subscription_id`, `pane_id`, `agent`, `reset`,
+`session`, `reason` (adds `too_long`), `sections` (replaces `entries`),
+`status`, `pending_question`. A delivery may resend sections at or below
+the newest serial already delivered (changes); new sections are always
+above it.
+
+New method, **`session.history`**:
+
+```json
+{"jsonrpc":"2.0","id":9,"method":"session.history","params":{
+  "subscription_id": 3, "before": "3fa9c21e:412.0", "sections": 100}}
+```
+
+* `before`: a serial; the page is the sections just below it, from the
+  subscription's current session file.
+* `sections`: 1 to 200, 100 by default.
+* Result: `{"sections": [ … oldest first … ], "start": true}`. `start`
+  is true when the page reaches the file's first line.
+* The file is read backwards from the line's offset in 256 KiB chunks;
+  a line split across chunks is joined; a line longer than `TAIL_MAX` is
+  handled as `read_tail` handles it now.
+* Cards in the page are found by the same rules, as resolved, and the
+  journal's Approval cards for the page's lines are merged in.
+* Redaction in an older page: a tool result whose call is on a line not
+  in the page keeps its text only if its own text names no secret path
+  (decision 7's rule for an unknown call). When the page holds both, the
+  full rule applies.
+* One history request in flight per subscription; a second waits for
+  the first.
+
+| Error | When |
+|---|---|
+| `SUBSCRIPTION_NOT_FOUND` (-32013) | an unknown `subscription_id` |
+| `SESSION_CHANGED` (new, -32014) | `before`'s prefix is not the current session file's; the client waits for the reset delivery |
+| `INVALID_PARAMS` | a serial that does not parse; `sections` out of range |
+
+Back-pressure (decision 9) counts sections: one catch-up delivery holds at
+most 200 sections and 256 KiB of JSON; past that it becomes a reset
+carrying the newest 50 sections.
+
+### A6. Ordering, in the protocol and the UI
+
+* Within a subscription, new sections arrive in increasing serial order;
+  resent sections may repeat an earlier serial.
+* **The UI always shows sections in serial order**, whatever order they
+  arrive in: a history page that lands after live deliveries, a resent
+  section, a rebuilt card, a reconnect's backfill. The client keeps its
+  sections sorted by serial and inserts by binary search; a serial
+  already held replaces that section in place, never adds a copy.
+  Sections whose prefix is not the view's current one are ignored unless
+  they come with a reset.
+
+### A7. The companion client and the app
+
+* `AgentView` holds `Vec<Section>` sorted by serial instead of entries
+  and cards. The card rules, `Cards`, `Facts` and `live_cards` leave
+  `view.rs`; the client applies sections and finds the pinned card (the
+  highest live one) among them.
+* On reconnect, an open view subscribes with `after` set to its newest
+  serial.
+* **Scrolling back:** when the top of the flow comes within one screen
+  of the view's top, the client asks `session.history` with `before` set
+  to its oldest serial. A dim "loading earlier…" row shows at the top
+  while it is in flight, and a dim "start of session" row once a page
+  says `start`.
+* Prepending a page keeps the section under the user's thumb at the same
+  place on screen (the L3-1 rule).
+* Up to 1000 sections are held while scrolled back. When the view is
+  pinned to the bottom again, it trims to the newest 200.
+* The app lays out sections: `turn` as a prompt line, `text` and `tool`
+  as terminal rows as now, `card` as a card block (live raised, resolved
+  faded).
+
+### A8. Testing, added to section 10
+
+1. **Serial:** string, u64 and serde round trips; ordering within a file
+   and `None` across files; the 24-bit line limit; parsing errors.
+2. **Sections:** recorded Claude and Codex transcripts give the expected
+   sections and serials; a line with several tool calls gets slots in
+   order; the same file read twice, and read after appending, gives the
+   same serials for the same lines; adding a skipped line type does not
+   renumber.
+3. **The backward reader:** lines straddling a 256 KiB chunk; a line
+   longer than `TAIL_MAX`; pages that walk the whole file back to
+   `start: true` and together equal one forward read.
+4. **Redaction in history:** a page whose oldest result's call is in the
+   next older page shows no text from a secret path.
+5. **Rebuilt cards:** the cards a forward, live run found and resolved
+   equal those a history read finds, by serial and kind; the journal's
+   Approval cards land at their serials; a deleted journal loses only
+   them.
+6. **The UI order:** the same sections delivered shuffled, duplicated and
+   split between live deliveries and history pages give the same sorted
+   view; a resent section replaces in place.
+7. **Over the Noise link:** a 200-section history page spanning frames.
+8. **Live, read-only:** `handlr session tail --pane <id> --history N`
+   pages back N sections and prints serials, logged with the live check
+   in `out/sessions/YYYYMMDD_NN_subscriptions_live/`.
+9. **On the S23:** scrolling back to the start of a long session loads
+   pages and shows past cards, faded, in order.
+
+### A9. The steps, as amended
+
+* Step 2 (libhandlr_proto) also adds `Serial`, `Section`, `SectionKind`,
+  `CardBody`, `CardKind`, `session.history`'s params and result, and
+  `SESSION_CHANGED` (-32014); it drops `Entry.seq` and the cursor.
+  **Done when:** A8.1 and the round trips pass.
+* Step 3 (the hub) also builds the line index, sections and serials
+  (`src/sessions/sections.rs`, with the card rules), and the backward
+  reader. **Done when:** A8.2 to A8.5 pass.
+* Step 4 (the daemon) also adds `session.history` and the approval
+  journal. **Done when:** A8.7 passes as well.
+* Step 5 (the CLI) also adds `--history N`. **Done when:** A8.8 passes.
+* Step 6 (the client) holds sorted sections, removes its card rules, and
+  pages back. **Done when:** A8.6 passes.
+* Step 7 (the app) lays out sections and adds the scroll trigger and the
+  marker rows. **Done when:** A8.9 passes.
+
+### A10. Left for later
+
+Scrolling back past the current session file into the pane's earlier
+sessions (before a `/clear`). The prefix already tells sessions apart;
+reaching an earlier file needs a way to find it and is not in this plan.
