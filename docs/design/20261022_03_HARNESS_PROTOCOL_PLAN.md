@@ -695,3 +695,13 @@ the bar puts the card a third of the way down the view".
 - **The pinned card is shown once,** at the bottom; its place in the flow
   is kept with no height, and tapping its bar while scrolled back returns
   to the bottom.
+
+## Amendment — 2026-10-23 16:19 EDT: buttons press in (living section L3)
+
+The owner (2026-10-23): "a visual effect like pressing it should have like
+a depress effect or something like that". Every button in the agent view
+(the bottom row's squares, a card's buttons, the message card's controls)
+and every suggestion is drawn pressed in while a finger is on it: 2 pt
+lower and its colour at 70%. A tap's press shows for 120 ms after the
+finger lifts, so a quick tap is seen; a drag past the 10 pt slop is not a
+press. `Look` and `depressed` are in `apps/companion/src/agent/square_button.rs`.
