@@ -289,6 +289,10 @@ pub enum Output {
 /// Notices held at most, the oldest dropped beyond it (decision 4).
 pub const NOTICE_CAP: usize = 8;
 
+/// How long a reply read aloud waits for its spoken summary before it is
+/// read as it is (plan 20261023_05, decision 5).
+pub const SUMMARY_WAIT: Duration = Duration::from_secs(10);
+
 /// Whether an utterance answers a confirmation with approval: the whole
 /// utterance is "approve" or "approved", in any case, ignoring punctuation
 /// and surrounding space (plan 20261022_02, 12:06 EDT amendment).
@@ -390,6 +394,23 @@ enum Sent {
     Peek(String),
     /// `agents.send` of a suggested response.
     Respond(Suggestion),
+    /// `speech.summarize` of the reply being read with this serial.
+    Summarize(u64),
+}
+
+/// A reply to read aloud, in its turn (plan 20261023_05, decisions 5 and
+/// 6, as amended at 15:45 EDT): the daemon is asked how to say it, and
+/// later replies wait for it, up to `SUMMARY_WAIT`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Reading {
+    serial: u64,
+    /// The reply as the view has it, read through `speakable` when there
+    /// is no summary.
+    text: String,
+    /// When the summary was asked for.
+    asked_at: Duration,
+    /// What to say, once known.
+    ready: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -509,6 +530,10 @@ pub struct State {
     voice_ended: Option<Duration>,
     /// The play button: the agent view's new replies are read aloud.
     read_aloud: bool,
+    /// Replies to read aloud, oldest first, each waiting for its summary
+    /// or ready.
+    reading: VecDeque<Reading>,
+    next_reading: u64,
     /// Suggestions tapped and sent, until their confirmation is approved.
     tapped: Vec<Tapped>,
     notices: VecDeque<String>,
@@ -567,6 +592,8 @@ impl State {
             voice_reported: false,
             voice_ended: None,
             read_aloud: false,
+            reading: VecDeque::new(),
+            next_reading: 1,
             tapped: Vec::new(),
             notices: VecDeque::new(),
             now: Duration::ZERO,
@@ -654,6 +681,12 @@ impl State {
             }));
         }
         out.push(Output::Event(Event::Disconnected { retry_in_ms }));
+        // No summary will come on this connection: what waits is read as
+        // it is.
+        for r in self.reading.iter_mut().filter(|r| r.ready.is_none()) {
+            r.ready = Some(speakable(&r.text));
+        }
+        self.read_in_order();
         self.flush_notices(&mut out);
         out
     }
@@ -975,6 +1008,10 @@ impl State {
         }
         self.show_dictation(out);
         self.peek_if_due(out);
+        if !self.reading.is_empty() {
+            self.read_in_order();
+            self.flush_notices(out);
+        }
     }
 
     fn start_dictation(&mut self, out: &mut Vec<Output>) {
@@ -1377,6 +1414,10 @@ impl State {
                     message,
                 })),
                 Sent::List => log::warn!("agents.list: {message}"),
+                Sent::Summarize(serial) => {
+                    log::info!("speech.summarize: {message}; reading the reply as it is");
+                    self.summarized(serial, None, out);
+                }
                 Sent::Peek(pane_id) => {
                     if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
                         v.peeking = false;
@@ -1523,7 +1564,77 @@ impl State {
                     log::warn!("a bad session.peek result: {e}");
                 }
             },
+            Sent::Summarize(serial) => match parse::<common::SpeechSummarizeResult>(result) {
+                Ok(r) => self.summarized(serial, r.spoken, out),
+                Err(e) => {
+                    log::warn!("a bad speech.summarize result: {e}");
+                    self.summarized(serial, None, out);
+                }
+            },
             Sent::Interrupt | Sent::ConfirmReply(_) => {}
+        }
+    }
+
+    /// Ask the daemon how to say a reply, and queue it to be read in its
+    /// turn. Offline, it is read as it is.
+    fn read_reply(&mut self, pane_id: &str, ts: String, text: String, out: &mut Vec<Output>) {
+        let serial = self.next_reading;
+        self.next_reading += 1;
+        let ready = if self.online() {
+            let params = common::SpeechSummarizeParams {
+                pane_id: pane_id.to_string(),
+                ts,
+                text: text.clone(),
+            };
+            out.push(self.request(methods::SPEECH_SUMMARIZE, params, Sent::Summarize(serial)));
+            None
+        } else {
+            Some(speakable(&text))
+        };
+        self.reading.push_back(Reading {
+            serial,
+            text,
+            asked_at: self.now,
+            ready,
+        });
+        while self.reading.len() > NOTICE_CAP {
+            self.reading.pop_front();
+        }
+    }
+
+    /// The daemon's answer for a reply being read: its summary, or `None`
+    /// to read it through `speakable` (not complex, or no summary).
+    fn summarized(&mut self, serial: u64, spoken: Option<String>, out: &mut Vec<Output>) {
+        if let Some(r) = self.reading.iter_mut().find(|r| r.serial == serial) {
+            let spoken = spoken
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty());
+            r.ready = Some(spoken.unwrap_or_else(|| speakable(&r.text)));
+        }
+        self.read_in_order();
+        self.flush_notices(out);
+    }
+
+    /// Move the replies that are ready to the notices, in order: the first
+    /// still waiting holds the rest, until `SUMMARY_WAIT` reads it as it is.
+    fn read_in_order(&mut self) {
+        let now = self.now;
+        while let Some(front) = self.reading.front_mut() {
+            let text = match front.ready.take() {
+                Some(text) => text,
+                None if now.saturating_sub(front.asked_at) >= SUMMARY_WAIT => {
+                    log::info!("no summary in time; reading the reply as it is");
+                    speakable(&front.text)
+                }
+                None => break,
+            };
+            self.reading.pop_front();
+            if !text.is_empty() {
+                self.notices.push_back(text);
+            }
+        }
+        while self.notices.len() > NOTICE_CAP {
+            self.notices.pop_front();
         }
     }
 
@@ -1545,9 +1656,11 @@ impl State {
                 v.pending_question = None;
             }
         }
-        // The replies after the last one read, read aloud; the first
-        // peek's backfill is not.
+        // The replies after the last one read, read aloud in order, each
+        // as the daemon says (plan 20261023_05); the first peek's backfill
+        // is not.
         let newest = newest_reply(&v.entries);
+        let mut replies = Vec::new();
         if self.read_aloud && !first {
             let after = match &v.read_upto {
                 None => 0,
@@ -1557,19 +1670,19 @@ impl State {
                     .rposition(|e| is_reply(e) && e.ts == *ts)
                     .map_or(v.entries.len(), |i| i + 1),
             };
-            for e in v.entries[after..].iter().filter(|e| is_reply(e)) {
-                let text = speakable(&e.summary);
-                if !text.is_empty() {
-                    self.notices.push_back(text);
-                }
-            }
-            while self.notices.len() > NOTICE_CAP {
-                self.notices.pop_front();
-            }
+            replies = v.entries[after..]
+                .iter()
+                .filter(|e| is_reply(e))
+                .map(|e| (e.ts.clone(), e.summary.clone()))
+                .collect();
         }
         if newest.is_some() {
             v.read_upto = newest;
         }
+        for (ts, text) in replies {
+            self.read_reply(pane_id, ts, text, out);
+        }
+        self.read_in_order();
         self.recompute_view(out);
         self.flush_notices(out);
     }
@@ -3437,14 +3550,122 @@ mod tests {
             ]
         });
         let out = peek_answer(&mut s, &out, "idle", session);
-        let said: Vec<String> = events(&out)
+        // The daemon is asked how to say the new reply, and only that one.
+        let asked = requests(&out, "speech.summarize");
+        assert_eq!(asked.len(), 1, "{out:?}");
+        assert_eq!(
+            asked[0].params,
+            json!({"pane_id": "w2:pZ", "ts": "5",
+                   "text": "## Result\n\nThe **tests** pass:\n```\nok\n```\n- `fmt` is clean"})
+        );
+        assert!(said(&out).is_empty());
+        // Not complex: read through `speakable`.
+        let out = s.incoming(response(asked[0].id.clone(), json!({"complex": false})));
+        assert_eq!(said(&out), ["Result The tests pass: fmt is clean"]);
+    }
+
+    fn said(out: &[Output]) -> Vec<String> {
+        events(out)
             .into_iter()
             .filter_map(|e| match e {
                 Event::Say(t) => Some(t),
                 _ => None,
             })
+            .collect()
+    }
+
+    /// Replies as agents gave them (plan 20261023_05, step 4).
+    const PLAIN: &str = "I ran the tests and they all pass. Shall I go on?";
+    const BACKQUOTES: &str = "Done: `Sessions::reply_text` now joins the parts.";
+    const PATHS: &str = "I changed three files:\n- src/server/speech.rs\n- src/sessions/mod.rs\n- crates/libhandlr_proto/src/common.rs";
+
+    /// Viewing w2:pZ with play on, then a peek at 200 s with `replies`
+    /// new after the first: the `speech.summarize` requests it sent.
+    fn reading(replies: &[&str]) -> (State, Vec<Request>, Vec<Output>) {
+        let mut s = viewing("working", asking());
+        s.input(Input::ReadAloud(true));
+        let out = s.input(Input::Tick(secs(200.0)));
+        let mut entries = asking()["entries"].as_array().unwrap().clone();
+        for (i, text) in replies.iter().enumerate() {
+            entries.push(json!({"ts": (10 + i).to_string(), "role": "assistant",
+                                "kind": "text", "summary": text}));
+        }
+        let session = json!({"session_id": "s1", "matched": "id", "entries": entries});
+        let out = peek_answer(&mut s, &out, "idle", session);
+        let asked = requests(&out, "speech.summarize")
+            .into_iter()
+            .cloned()
             .collect();
-        assert_eq!(said, ["Result The tests pass: fmt is clean"]);
+        (s, asked, out)
+    }
+
+    #[test]
+    fn every_reply_is_sent_to_be_measured_and_a_plain_one_read_as_it_is() {
+        let (mut s, asked, out) = reading(&[PLAIN]);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].params["text"], PLAIN);
+        assert!(said(&out).is_empty());
+        let out = s.incoming(response(asked[0].id.clone(), json!({"complex": false})));
+        assert_eq!(said(&out), [PLAIN]);
+    }
+
+    #[test]
+    fn complex_replies_are_read_as_their_summaries_in_order() {
+        let (mut s, asked, _) = reading(&[BACKQUOTES, PATHS]);
+        assert_eq!(asked.len(), 2);
+        assert_eq!(asked[0].params["ts"], "10");
+        assert_eq!(asked[1].params["ts"], "11");
+        // The second answers first: it waits for the first.
+        let out = s.incoming(response(
+            asked[1].id.clone(),
+            json!({"spoken": "Three files changed.", "complex": true}),
+        ));
+        assert!(said(&out).is_empty(), "{out:?}");
+        let out = s.incoming(response(
+            asked[0].id.clone(),
+            json!({"spoken": "Reply text now joins the parts.", "complex": true}),
+        ));
+        assert_eq!(
+            said(&out),
+            ["Reply text now joins the parts.", "Three files changed."]
+        );
+    }
+
+    #[test]
+    fn a_refused_summary_is_read_through_speakable() {
+        let (mut s, asked, _) = reading(&[BACKQUOTES]);
+        let refused = Incoming::Response(Response::err(
+            Some(asked[0].id.clone()),
+            libhandlr_proto::ErrorObject::new(-32015, "no summary: no key"),
+        ));
+        let out = s.incoming(refused);
+        assert_eq!(said(&out), [speakable(BACKQUOTES)]);
+        assert!(!events(&out).iter().any(|e| matches!(e, Event::Error(_))));
+    }
+
+    #[test]
+    fn a_summary_that_does_not_come_holds_the_next_reply_until_the_wait() {
+        let (mut s, asked, _) = reading(&[PATHS, PLAIN]);
+        // The second is ready; the first holds it.
+        let out = s.incoming(response(asked[1].id.clone(), json!({"complex": false})));
+        assert!(said(&out).is_empty());
+        assert!(said(&s.input(Input::Tick(secs(209.0)))).is_empty());
+        // At the wait, the first is read as it is, then the second.
+        let out = s.input(Input::Tick(secs(210.0)));
+        assert_eq!(said(&out), [speakable(PATHS), PLAIN.to_string()]);
+        // Its summary arriving late is not read again.
+        let out = s.incoming(response(
+            asked[0].id.clone(),
+            json!({"spoken": "Three files changed.", "complex": true}),
+        ));
+        assert!(said(&out).is_empty());
+    }
+
+    #[test]
+    fn a_closed_connection_reads_what_waits_as_it_is() {
+        let (mut s, _, _) = reading(&[BACKQUOTES]);
+        let out = s.disconnected(1000);
+        assert_eq!(said(&out), [speakable(BACKQUOTES)]);
     }
 
     #[test]
