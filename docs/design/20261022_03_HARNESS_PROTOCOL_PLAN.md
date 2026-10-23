@@ -705,3 +705,12 @@ and every suggestion is drawn pressed in while a finger is on it: 2 pt
 lower and its colour at 70%. A tap's press shows for 120 ms after the
 finger lifts, so a quick tap is seen; a drag past the 10 pt slop is not a
 press. `Look` and `depressed` are in `apps/companion/src/agent/square_button.rs`.
+
+## Amendment — 2026-10-23 16:19 EDT: buttons press in, withdrawn (living section L3)
+
+The owner (2026-10-23): "actually, that's better to recommend to
+libcontrols so it can plan the feature, it doesn't belong in handlr (the
+press effect)". This withdraws the previous amendment, "buttons press in":
+its code (`b54544b`) is reverted, and a pressed look is recommended to
+libcontrols to plan as its own feature. The app takes it from a libcontrols
+release when there is one.
