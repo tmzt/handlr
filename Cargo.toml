@@ -15,7 +15,8 @@ async-compat = "0.2"
 schemars = "1"
 tokio = { version = "1", features = ["full"] }
 dotenvy = "0.15"
-libinfer = { path = "crates/libinfer" }
+libinfer = { path = "crates/libinfer/libinfer" }
+libinfer-gemini = { path = "crates/libinfer/libinfer-gemini" }
 toml = "0.8"
 # Confirmation tokens and nonces (src/core/confirm.rs).
 blake2 = "0.10"
@@ -47,7 +48,8 @@ members = [
     "crates/handlr-companion",
     "crates/libhandlr_proto",
     "crates/libherdr",
-    "crates/libinfer",
+    "crates/libinfer/libinfer",
+    "crates/libinfer/libinfer-gemini",
     "crates/qrcodeurl"
 ]
 # handlr-audio is built with -p only: it compiles libvoicexn's ML stack
@@ -57,6 +59,7 @@ default-members = [
     "crates/handlr-companion",
     "crates/libhandlr_proto",
     "crates/libherdr",
-    "crates/libinfer",
+    "crates/libinfer/libinfer",
+    "crates/libinfer/libinfer-gemini",
     "crates/qrcodeurl"
 ]

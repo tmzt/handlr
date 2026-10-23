@@ -1695,6 +1695,7 @@ dependencies = [
  "libhandlr_proto",
  "libherdr",
  "libinfer",
+ "libinfer-gemini",
  "log",
  "png",
  "qrcodeurl",
@@ -2185,19 +2186,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libgenai"
-version = "0.1.0"
-source = "git+https://github.com/tmzt/libgenai?rev=57fb65dd9269b7341346a8241d9f10d7a9565266#57fb65dd9269b7341346a8241d9f10d7a9565266"
-dependencies = [
- "async-compat",
- "gemini-rust",
- "schemars",
- "serde",
- "serde_json",
- "smol",
-]
-
-[[package]]
 name = "libhandlr_proto"
 version = "0.1.0"
 dependencies = [
@@ -2226,14 +2214,23 @@ dependencies = [
 name = "libinfer"
 version = "0.1.0"
 dependencies = [
- "async-compat",
  "async-trait",
- "libgenai",
  "log",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "libinfer-gemini"
+version = "0.1.0"
+dependencies = [
+ "async-compat",
+ "async-trait",
+ "gemini-rust",
+ "libinfer",
+ "log",
 ]
 
 [[package]]
