@@ -145,3 +145,48 @@ nothing; 3 needs 1 and 2; 4 needs 2; 5 needs 3 and 4.
    only the last few?
 3. **The chips' place:** under the header as proposed, or a list behind a
    button to save the scrollback's height?
+
+## Amendment — 2026-10-23 17:47 EDT: the subagents as cyan words above the controls
+
+Agreed with the owner on 2026-10-23: "visually I like the way Claude shows
+them, but let's try the chips idea. where should they go in the UI?";
+"right now they say something like general purpose then time elapsed and
+tokens. the 2 agents isn't very helpful. I'm thinking we could get them to
+one or two word summaries with main purpose, stop words filtered, as plain
+text in cyan"; "elapsed in minutes, m in () only if more than 5"; then
+"Yes, write it into the subagents plan". This replaces decision 3's chips
+under the header and answers open question 3.
+
+1. **Where.** One row at the bottom of the agent view, just above the
+   suggestions and the controls, where the terminal interface shows its
+   background agents; shown only while the pane has subagents, one line
+   high. It scrolls sideways when the names do not fit.
+2. **What it says.** Each subagent by one or two words of its purpose, in
+   plain cyan text, separated by dim dots, for example
+   `overview screen (12m) · spoken summaries · licences`:
+   - bright cyan while running, dim cyan once finished;
+   - a running subagent's elapsed minutes in parentheses, `(12m)`, only
+     past 5 minutes, counted from its first entry; finished ones show no
+     time; no agent type and no token counts.
+3. **The short name** (`ChildInfo.short`), made by the daemon so every
+   client and reader gets the same words: the description's words with
+   stop words and task verbs removed (articles, prepositions,
+   conjunctions, "plan", "plans", "step", "steps", "build", "implement",
+   "fix", "add", "write", "update", "make", "run", "check" and the like,
+   and plan numbers such as `20261023_05`), then the first two left, in
+   their order, lower-cased except for words written in capitals. Nothing
+   left: the agent type. So "Build the overview screen plan" is
+   "overview screen" and "libtypedmd licences and README" is "libtypedmd
+   licences".
+4. **Tapping a name** opens that subagent in the standard view (decision
+   3's opening and header stand). Inside a subagent, the row's first item
+   is "‹ back to <parent>" in dim text, then the other subagents.
+5. **The protocol** adds `ChildInfo.short: String` and
+   `ChildInfo.started: u64` (seconds since the epoch, the first entry's
+   time), so the phone keeps the minutes current without asking again.
+6. **Controls:** `agent/subagent_row.rs` replaces decision 8's
+   `subagent_chips.rs`; `subagent_link.rs` stands.
+
+Step 1's tests gain the short names of recorded descriptions; step 5's,
+the row's order, colours, the minutes shown past 5 and not before, and a
+tap on each name.
