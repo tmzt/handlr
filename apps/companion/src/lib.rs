@@ -19,17 +19,25 @@
 //! the plan's 16:23 EDT amendment), which the app reads and deletes at
 //! start.
 //!
-//! Dictation (plan 20261023_02): "take a message" or the Take a message
-//! button collects utterances into one message for herdr's focused agent,
-//! shown on its card as it grows; Submit, Scratch and Clear are buttons. It
-//! is submitted after `--dictation-silence <seconds>` (default and least 8)
-//! of silence, set on Android by `dictation_silence.txt` in the data
-//! directory, holding the seconds.
+//! The home screen is the overview (plan 20261023_04, `overview.rs`): the
+//! agents' cards above and the conversation with Gemini below, each
+//! scrolling on its own, with the confirmation and dictation cards and the
+//! bottom row under them. The pairing screen (`ui.rs`) shows instead while
+//! the phone is neither paired nor connected, or shows its device code.
 //!
-//! The agent view (plan 20261022_03, step 4, `agent.rs`): tapping the focus
-//! line opens the focused agent's transcript as terminal scrollback with
-//! its priority cards; Back, or the system Back, returns. "Take a message"
-//! there dictates to that agent, with its card in the view.
+//! Dictation (plan 20261023_02): "take a message" or the record button
+//! collects utterances into one message for herdr's focused agent, shown
+//! on its card as it grows; send and cancel are buttons, and "scratch
+//! that" removes the last utterance. It is submitted after
+//! `--dictation-silence <seconds>` (default and least 8) of silence, set
+//! on Android by `dictation_silence.txt` in the data directory, holding
+//! the seconds.
+//!
+//! The agent view (plan 20261022_03, step 4, `agent.rs`): tapping an
+//! agent's card on the overview opens its transcript as terminal
+//! scrollback with its priority cards; Back, or the system Back, returns
+//! to the overview. "Take a message" there dictates to that agent, with
+//! its card in the view.
 
 pub mod agent;
 pub mod controls;
@@ -47,7 +55,7 @@ use handlr_companion::{
     Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore,
 };
 use libcontrols::DrawContext;
-use libhandlr_proto::common::FocusInfo;
+use libhandlr_proto::common::AgentInfo;
 use libmorph::{
     AudioSetup, Frame, Key, KeyStatus, LimitsRequest, MorphApp, MorphContext, Touch, TouchPhase,
     wgpu,
@@ -61,9 +69,10 @@ use libmsdf::font::{
 
 use crate::agent::{AgentHit, AgentScreen, Terminal};
 use crate::keys::VaultKeyStore;
+use crate::overview::{Overview, OverviewHit, Panel};
 use crate::ui::{
-    Buttons, CODE, Card, CardState, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN,
-    chunk, dictation_lines, focus_words, wrap,
+    CODE, Card, CardState, Hit, Layout, Line, MUTED, Screen, View, WARN, chunk, dictation_lines,
+    wrap,
 };
 
 /// The frame rate: enough for text, and far less heat than the display's
@@ -79,6 +88,35 @@ const CLIENT: &str = "companion";
 
 /// The most lines of a dictated message's text the card shows: its tail.
 const MESSAGE_LINES: usize = 8;
+
+/// The dictation card's lines, with the tail of a long message.
+fn message_lines(d: &Dictation, layout: &Layout) -> Vec<Line> {
+    dictation_lines(d)
+        .into_iter()
+        .map(|l| {
+            if l.text != d.text {
+                return l;
+            }
+            let lines = wrap(&l.text, layout.columns(l.size));
+            let skip = lines.len().saturating_sub(MESSAGE_LINES);
+            if skip == 0 {
+                return l;
+            }
+            Line {
+                text: format!("\u{2026} {}", lines[skip..].join(" ")),
+                ..l
+            }
+        })
+        .collect()
+}
+
+/// What was drawn last.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shown {
+    Pairing,
+    Overview,
+    Agent,
+}
 
 /// The desktop's command line (Android has none).
 #[derive(Debug, Default)]
@@ -150,7 +188,12 @@ pub struct App {
     terminal: TerminalShaper,
     sdf: GpuSdfRenderer,
     list: DrawList,
+    /// The pairing screen.
     screen: Screen,
+    /// The home screen, once paired or connected.
+    overview: Overview,
+    /// What was drawn last: a change of screen draws the new one in full.
+    shown: Option<Shown>,
     next_frame: Instant,
     /// `None` when there is no key storage (Android without a key store).
     companion: Option<Companion>,
@@ -167,9 +210,6 @@ pub struct App {
     sound: String,
     /// A server is stored, so a disconnect is a retry, not "not paired".
     paired: bool,
-    heard: String,
-    partial: String,
-    said: String,
     /// The confirmation being asked, or the last one, with its outcome,
     /// until the next utterance (plan 20261023_01, section 4).
     card: Option<Card>,
@@ -181,8 +221,9 @@ pub struct App {
     field_focused: bool,
     /// `hello` was answered on the current connection.
     online: bool,
-    /// herdr's focus, as last told.
-    focus: Option<FocusInfo>,
+    /// The agents, as last listed, and the panes waiting for an approval.
+    agents: Vec<AgentInfo>,
+    pending: Vec<String>,
     /// The message being dictated, while the mode is on.
     dictation: Option<Dictation>,
     /// The agent view, while it is open.
@@ -190,6 +231,11 @@ pub struct App {
     /// The agent view's play button: replies are read aloud. Kept while
     /// the view is closed.
     read_aloud: bool,
+    /// Something is being said.
+    speaking: bool,
+    /// An agent view has been opened: the overview's play has replies to
+    /// read.
+    viewed: bool,
     /// The clock touches and flings are timed by.
     started: Instant,
     /// When the last frame was updated, for a fling's step.
@@ -383,7 +429,6 @@ impl App {
                 log::warn!("pairing: refused");
                 self.note = Some((format!("pairing failed: {why}"), WARN));
             }
-            Event::Say(text) => self.said = text,
             // The card shows the handle; only `text` is spoken.
             Event::Confirm {
                 confirm_id,
@@ -425,7 +470,15 @@ impl App {
                 log::warn!("companion: {e}");
                 self.note = Some((e, WARN));
             }
-            Event::Focus(focus) => self.focus = focus,
+            Event::Agents(agents) => {
+                self.agents = agents;
+                self.overview.set_agents(self.agents.clone(), &self.pending);
+            }
+            Event::PendingPanes(panes) => {
+                self.pending = panes;
+                self.overview.set_agents(self.agents.clone(), &self.pending);
+            }
+            Event::Conversation { speaker, text } => self.overview.push_turn(speaker, text),
             Event::Dictation(d) => {
                 if d.active != self.dictation.is_some() {
                     log::info!("dictation: {}", if d.active { "on" } else { "off" });
@@ -447,26 +500,34 @@ impl App {
                     agent.set_content(name, status, entries, cards, pinned);
                 }
             }
-            Event::StopSpeaking | Event::Arm | Event::Vocabulary(_) => {}
-            // For the overview (plan 20261023_04), which is not built yet.
-            Event::Agents(_) | Event::PendingPanes(_) | Event::Conversation { .. } => {}
+            // herdr's focus shows on the cards, from the list it refreshes.
+            Event::Say(_)
+            | Event::Focus(_)
+            | Event::StopSpeaking
+            | Event::Arm
+            | Event::Vocabulary(_) => {}
         }
     }
 
-    /// Opens the view of the focused agent.
-    fn open_agent(&mut self) {
-        let Some(focus) = &self.focus else {
-            return;
-        };
+    /// Opens the view of the agent in `pane_id`, from its card.
+    fn open_agent(&mut self, pane_id: String) {
         log::info!("agent view: open");
-        self.send(Input::OpenAgent(focus.pane_id.clone()));
+        let name = self
+            .agents
+            .iter()
+            .find(|a| a.pane_id == pane_id)
+            .and_then(|a| a.name.clone())
+            .unwrap_or_else(|| "the agent".to_string());
+        self.send(Input::OpenAgent(pane_id));
         let mut agent = AgentScreen::new();
-        agent.name = focus.name.clone();
+        agent.name = name;
         agent.set_read_aloud(self.read_aloud);
+        agent.set_speaking(self.speaking);
         self.agent = Some(agent);
+        self.viewed = true;
     }
 
-    /// Closes the agent view, back to the main screen.
+    /// Closes the agent view, back to the overview.
     fn close_agent(&mut self) {
         if self.agent.take().is_some() {
             log::info!("agent view: closed");
@@ -475,7 +536,7 @@ impl App {
         }
     }
 
-    /// A tap on one of the agent view's controls.
+    /// A tap on one of the agent view's controls, or the overview's.
     fn agent_hit(&mut self, hit: AgentHit) {
         match hit {
             AgentHit::Back => self.close_agent(),
@@ -500,8 +561,8 @@ impl App {
                 }
             }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
-            AgentHit::ReadAloud if self.agent.as_ref().is_some_and(|a| a.skips()) => {
-                log::info!("agent view: skip");
+            AgentHit::ReadAloud if self.read_aloud && self.speaking => {
+                log::info!("read aloud: skip");
                 self.send(Input::Skip);
             }
             AgentHit::ReadAloud => {
@@ -531,15 +592,15 @@ impl App {
     fn on_audio(&mut self, event: AudioEvent) {
         match event {
             AudioEvent::Input(input) => {
-                if let Input::Speaking(on) = input
-                    && let Some(agent) = &mut self.agent
-                {
-                    agent.set_speaking(on);
+                if let Input::Speaking(on) = input {
+                    self.speaking = on;
+                    if let Some(agent) = &mut self.agent {
+                        agent.set_speaking(on);
+                    }
                 }
                 match &input {
-                    Input::Utterance(text) => {
-                        self.heard = text.clone();
-                        self.partial.clear();
+                    Input::Utterance(_) => {
+                        self.overview.set_partial(None);
                         // A new utterance: an answered card has had its say.
                         if self
                             .card
@@ -549,7 +610,7 @@ impl App {
                             self.card = None;
                         }
                     }
-                    Input::Listening(false) => self.partial.clear(),
+                    Input::Listening(false) => self.overview.set_partial(None),
                     _ => {}
                 }
                 self.send(input);
@@ -569,7 +630,7 @@ impl App {
                 log::error!("audio: TTS: {e}");
                 self.sound = format!("TTS model missing: {e}");
             }
-            AudioEvent::Partial(text) => self.partial = text,
+            AudioEvent::Partial(text) => self.overview.set_partial(Some(text)),
             AudioEvent::Gate(state) => {
                 self.sound = match state {
                     GateState::Idle => "tap to talk",
@@ -599,6 +660,12 @@ impl App {
         self.open_url(&text);
     }
 
+    /// Whether the pairing screen shows: neither paired nor connected, or a
+    /// device code to paste.
+    fn pairing(&self) -> bool {
+        self.code.is_some() || (!self.paired && !self.online)
+    }
+
     /// Gives the screen what it shows now; it changes only what differs.
     fn lay_out(&mut self, ctx: &MorphContext) {
         let (w, h) = ctx.surface_size();
@@ -610,59 +677,32 @@ impl App {
             top: safe.top,
             bottom: safe.bottom,
         };
+        if let Some(agent) = &mut self.agent {
+            agent.set_layout(layout);
+            agent.set_dictation(self.dictation.as_ref().map(dictation_lines));
+        }
+        if !self.pairing() {
+            let o = &mut self.overview;
+            o.set_layout(layout);
+            o.set_status(
+                vec![self.link.clone(), self.sound.clone()],
+                self.note.clone(),
+            );
+            o.set_card(self.card.as_ref().map(|c| Panel {
+                lines: c.lines(),
+                confirm: c.asks().then_some(c.confirm_id),
+            }));
+            o.set_dictation(self.dictation.as_ref().map(|d| message_lines(d, &layout)));
+            o.set_play(self.read_aloud, self.speaking, self.viewed);
+            return;
+        }
+
         let line = |text: String, size: f32, color, gap| Line {
             text,
             size,
             color,
             gap,
         };
-        let mut body = Vec::new();
-        let mut push = |text: &str, size: f32, color, gap: f32| {
-            for (i, t) in wrap(text, layout.columns(size)).into_iter().enumerate() {
-                body.push(line(t, size, color, if i == 0 { gap } else { 0.0 }));
-            }
-        };
-        // The focus line: tapping it opens the agent view.
-        let mut focus_lines = 0;
-        if self.dictation.is_none()
-            && let Some(focus) = &self.focus
-        {
-            let text = format!("focus: {}", focus_words(focus));
-            focus_lines = wrap(&text, layout.columns(15.0)).len();
-            push(&text, 15.0, MUTED, 0.0);
-        }
-        if !self.partial.is_empty() {
-            push(&format!("> {}\u{2026}", self.partial), 20.0, MUTED, 24.0);
-        } else if !self.heard.is_empty() {
-            push(&format!("> {}", self.heard), 20.0, TEXT, 24.0);
-        }
-        if !self.said.is_empty() {
-            push(&format!("< {}", self.said), 19.0, SPOKEN, 18.0);
-        }
-        let asking = self.card.as_ref().is_some_and(Card::asks);
-        if let Some(d) = self.dictation.as_ref().filter(|_| !asking) {
-            for l in dictation_lines(d) {
-                let text = if l.text == d.text {
-                    // The tail of a long message.
-                    let lines = wrap(&l.text, layout.columns(l.size));
-                    let skip = lines.len().saturating_sub(MESSAGE_LINES);
-                    if skip > 0 {
-                        format!("\u{2026} {}", lines[skip..].join(" "))
-                    } else {
-                        l.text
-                    }
-                } else {
-                    l.text
-                };
-                push(&text, l.size, l.color, l.gap);
-            }
-        }
-        if let Some(card) = &self.card {
-            for l in card.lines() {
-                push(&l.text, l.size, l.color, l.gap);
-            }
-        }
-
         let mut code = Vec::new();
         if let Some((device_code, server)) = &self.code {
             code.push(line(
@@ -682,24 +722,8 @@ impl App {
                 code.push(line(t, 15.0, *color, if i == 0 { 8.0 } else { 0.0 }));
             }
         }
-
-        if let Some(agent) = &mut self.agent {
-            agent.set_layout(layout);
-            agent.set_dictation(self.dictation.as_ref().map(dictation_lines));
-        }
         let view = View {
             status: vec![self.link.clone(), self.sound.clone()],
-            body,
-            focus_lines,
-            buttons: if asking {
-                Buttons::Confirm
-            } else if self.dictation.is_some() {
-                Buttons::Dictation
-            } else if self.online {
-                Buttons::Start
-            } else {
-                Buttons::None
-            },
             code,
             field: self.field.clone(),
             field_focused: self.field_focused,
@@ -762,6 +786,8 @@ impl MorphApp for App {
             sdf,
             list: DrawList::new(),
             screen: Screen::new(),
+            overview: Overview::new(),
+            shown: None,
             next_frame: Instant::now(),
             companion: None,
             audio: None,
@@ -771,19 +797,19 @@ impl MorphApp for App {
             link: "starting\u{2026}".into(),
             sound: "waiting for the microphone\u{2026}".into(),
             paired: false,
-            heard: String::new(),
-            partial: String::new(),
-            said: String::new(),
             card: None,
             code: None,
             note: None,
             field: String::new(),
             field_focused: false,
             online: false,
-            focus: None,
+            agents: Vec::new(),
+            pending: Vec::new(),
             dictation: None,
             agent: None,
             read_aloud: false,
+            speaking: false,
+            viewed: false,
             started: Instant::now(),
             last_update: Instant::now(),
         };
@@ -899,17 +925,32 @@ impl MorphApp for App {
         self.last_update = now;
         if let Some(agent) = &mut self.agent {
             agent.tick(dt);
+        } else {
+            self.overview.tick(dt);
         }
         self.lay_out(ctx);
     }
 
-    /// The buttons and the field, and a tap anywhere else. In the agent
-    /// view, every phase goes to it: a drag scrolls, a tap hits.
+    /// The controls, and a tap anywhere else. On the overview and in the
+    /// agent view, every phase goes to the screen: a drag scrolls, a tap
+    /// hits. On the pairing screen, only a touch's end counts.
     fn on_touch(&mut self, _ctx: &mut MorphContext, touch: Touch) {
+        let now = self.started.elapsed();
         if let Some(agent) = &mut self.agent {
-            let now = self.started.elapsed();
             if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
                 self.agent_hit(hit);
+            }
+            return;
+        }
+        if !self.pairing() {
+            match self
+                .overview
+                .touch(touch.id, touch.phase, touch.x, touch.y, now)
+            {
+                Some(OverviewHit::Agent(pane_id)) => self.open_agent(pane_id),
+                Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
+                Some(OverviewHit::Tap) => self.send(Input::Tap),
+                None => {}
             }
             return;
         }
@@ -917,13 +958,6 @@ impl MorphApp for App {
             return;
         }
         match self.screen.hit(touch.x, touch.y) {
-            Some(Hit::Focus) => self.open_agent(),
-            Some(Hit::Approve) => self.send(Input::Approve),
-            Some(Hit::Deny) => self.send(Input::Deny),
-            Some(Hit::Start) => self.send(Input::StartDictation),
-            Some(Hit::Submit) => self.send(Input::Submit),
-            Some(Hit::Scratch) => self.send(Input::Scratch),
-            Some(Hit::Clear) => self.send(Input::Clear),
             Some(Hit::Field) => self.field_focused = true,
             Some(Hit::Pair) => self.pair(),
             None => {
@@ -975,9 +1009,24 @@ impl MorphApp for App {
             symbols: font(self.symbols),
             px_range: BUNDLED_ATLAS_PX_RANGE,
         };
+        let shown = match (&self.agent, self.pairing()) {
+            (Some(_), _) => Shown::Agent,
+            (None, true) => Shown::Pairing,
+            (None, false) => Shown::Overview,
+        };
+        // Another screen drew over the list: the one shown now draws it all.
+        if self.shown != Some(shown) {
+            self.shown = Some(shown);
+            self.screen.invalidate();
+            self.overview.invalidate();
+            if let Some(agent) = &mut self.agent {
+                agent.invalidate();
+            }
+        }
         match &mut self.agent {
             Some(agent) => agent.draw(&mut self.list, &draw, Some(&term)),
-            None => self.screen.draw(&mut self.list, &draw),
+            None if shown == Shown::Pairing => self.screen.draw(&mut self.list, &draw),
+            None => self.overview.draw(&mut self.list, &draw, Some(&term)),
         };
         let (w, h) = frame.size;
         self.sdf.render_draw_list_in(

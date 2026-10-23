@@ -1,22 +1,21 @@
-//! The screen: a libcontrols `Router` that keeps its nodes for the life of
-//! the app, as voicexn's does (libvoicexn v0.2.0, `examples/voicexn/src/ui.rs`).
-//! A change of text, colour or size edits the nodes; the draw list is
-//! rebuilt only when something changed.
+//! The pairing screen: a libcontrols `Router` that keeps its nodes for the
+//! life of the app, as voicexn's does (libvoicexn v0.2.0,
+//! `examples/voicexn/src/ui.rs`). A change of text, colour or size edits
+//! the nodes; the draw list is rebuilt only when something changed.
 //!
-//! From the top: the title, two status lines, and the conversation, with
-//! a row of buttons under it: Approve and Deny while a confirmation waits,
-//! Submit, Scratch and Clear while a message is dictated, and Take a
-//! message otherwise (plan 20261023_02, step 4). From the bottom: the
+//! From the top: the title and two status lines. From the bottom: the
 //! pairing field and its Pair button, and above them the device code and
-//! any pairing note.
+//! any pairing note. It shows while the phone is not paired and not
+//! connected, or shows its device code; otherwise the overview is the home
+//! screen (plan 20261023_04), and the conversation, the confirmation and
+//! the dictation cards, and their buttons, are there. The lines those
+//! cards show are built here.
 
 use handlr_companion::{Dictation, DictationPhase};
 use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Router, TextAlign};
 use libhandlr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
-/// Lines of conversation the screen can show.
-const LINES: usize = 16;
 /// Lines of the pairing area (the code and its notes).
 const CODE_LINES: usize = 8;
 
@@ -26,11 +25,7 @@ pub const SPOKEN: [f32; 4] = [0.55, 0.78, 1.0, 1.0];
 pub const WARN: [f32; 4] = [1.0, 0.62, 0.45, 1.0];
 pub const CODE: [f32; 4] = [1.0, 0.86, 0.45, 1.0];
 
-const APPROVE_BG: [f32; 4] = [0.16, 0.45, 0.25, 1.0];
-const DENY_BG: [f32; 4] = [0.55, 0.18, 0.18, 1.0];
 const PAIR_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
-const START_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
-const SCRATCH_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 
 /// One line of text, before layout.
 #[derive(Clone, Debug, PartialEq)]
@@ -215,31 +210,11 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
     lines
 }
 
-/// The row of buttons under the body.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Buttons {
-    #[default]
-    None,
-    /// Approve and Deny.
-    Confirm,
-    /// Take a message.
-    Start,
-    /// Submit, Scratch and Clear.
-    Dictation,
-}
-
 /// What the screen shows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct View {
     /// The connection and the audio, one line each.
     pub status: Vec<String>,
-    /// The conversation, and the confirmation's text.
-    pub body: Vec<Line>,
-    /// How many of `body`'s first lines are the focus line, which opens
-    /// the agent view when tapped (plan 20261022_03, step 4).
-    pub focus_lines: usize,
-    /// The buttons under the body.
-    pub buttons: Buttons,
     /// The pairing area above the field: the device code and notes.
     pub code: Vec<Line>,
     /// The pairing field's text; the screen shows its tail.
@@ -255,16 +230,8 @@ pub struct View {
 /// A control a touch landed on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit {
-    Approve,
-    Deny,
-    Start,
-    Submit,
-    Scratch,
-    Clear,
     Field,
     Pair,
-    /// The focus line: open the focused agent's view.
-    Focus,
 }
 
 /// Surface size, scale factor and safe area top and bottom.
@@ -303,16 +270,9 @@ pub struct Screen {
     router: Router,
     title: NodeId,
     status: [NodeId; 2],
-    lines: Vec<NodeId>,
     code: Vec<NodeId>,
     field: NodeId,
     pair: NodeId,
-    approve: NodeId,
-    deny: NodeId,
-    start: NodeId,
-    submit: NodeId,
-    scratch: NodeId,
-    clear: NodeId,
     /// Where each visible control is, as last laid out.
     hits: Vec<(Hit, Rect)>,
     /// What the screen shows, as last laid out.
@@ -340,15 +300,6 @@ impl Screen {
             router.add(None, label("", 15.0, MUTED, TextAlign::Center)),
             router.add(None, label("", 15.0, MUTED, TextAlign::Center)),
         ];
-        let lines = (0..LINES)
-            .map(|_| router.add(None, label("", 20.0, TEXT, TextAlign::Left)))
-            .collect();
-        let approve = router.add(None, button("Approve", APPROVE_BG));
-        let deny = router.add(None, button("Deny", DENY_BG));
-        let start = router.add(None, button("Take a message", START_BG));
-        let submit = router.add(None, button("Submit", APPROVE_BG));
-        let scratch = router.add(None, button("Scratch", SCRATCH_BG));
-        let clear = router.add(None, button("Clear", DENY_BG));
         let code = (0..CODE_LINES)
             .map(|_| router.add(None, label("", 20.0, CODE, TextAlign::Left)))
             .collect();
@@ -363,16 +314,9 @@ impl Screen {
             router,
             title,
             status,
-            lines,
             code,
             field,
             pair,
-            approve,
-            deny,
-            start,
-            submit,
-            scratch,
-            clear,
             hits: Vec::new(),
             shown: None,
             dirty: true,
@@ -469,7 +413,6 @@ impl Screen {
         let code_lines = &view.code[..view.code.len().min(CODE_LINES)];
         let code_h: f32 = code_lines.iter().map(height).sum();
         let mut code_y = (row_y - 12.0 * s - code_h).max(y);
-        let code_top = code_y;
         let mut code_lines = code_lines.iter();
         for &id in &self.code {
             match code_lines.next() {
@@ -490,83 +433,6 @@ impl Screen {
                     .get_mut::<Label>(id)
                     .expect("a label node")
                     .set_text(""),
-            }
-        }
-
-        // The conversation, then the buttons.
-        let buttons_h = if view.buttons == Buttons::None {
-            0.0
-        } else {
-            (52.0 + 16.0) * s
-        };
-        let limit = code_top - 16.0 * s - buttons_h;
-        let mut body_lines = view.body.iter();
-        let mut focus_rect: Option<Rect> = None;
-        for (i, &id) in self.lines.iter().enumerate() {
-            match body_lines.next() {
-                Some(line) if y + height(line) <= limit => {
-                    y += line.gap * s;
-                    if i < view.focus_lines {
-                        // The whole width, and at least a finger's height.
-                        let h = (line.size * s * 1.35).max(44.0 * s);
-                        let top = y - (h - line.size * s * 1.35) * 0.5;
-                        let rect = match focus_rect {
-                            None => Rect::new(0.0, top, layout.w, h),
-                            Some(r) => Rect::new(0.0, r.y, layout.w, top + h - r.y),
-                        };
-                        focus_rect = Some(rect);
-                    }
-                    let line_style = (line.size, line.color);
-                    place(
-                        &mut self.router,
-                        &mut y,
-                        id,
-                        Some(&line.text),
-                        line_style,
-                        pad,
-                    );
-                }
-                _ => self
-                    .router
-                    .get_mut::<Label>(id)
-                    .expect("a label node")
-                    .set_text(""),
-            }
-        }
-        if let Some(rect) = focus_rect {
-            self.hits.push((Hit::Focus, rect));
-        }
-        let row: Vec<(Hit, NodeId)> = match view.buttons {
-            Buttons::None => vec![],
-            Buttons::Confirm => vec![(Hit::Approve, self.approve), (Hit::Deny, self.deny)],
-            Buttons::Start => vec![(Hit::Start, self.start)],
-            Buttons::Dictation => vec![
-                (Hit::Submit, self.submit),
-                (Hit::Scratch, self.scratch),
-                (Hit::Clear, self.clear),
-            ],
-        };
-        // One button takes half the row; more share it.
-        let slots = row.len().max(2) as f32;
-        let gap = 16.0 * s;
-        let w = (layout.w - 2.0 * pad - gap * (slots - 1.0)) / slots;
-        let top = y + 16.0 * s;
-        for (hit, id) in [
-            (Hit::Approve, self.approve),
-            (Hit::Deny, self.deny),
-            (Hit::Start, self.start),
-            (Hit::Submit, self.submit),
-            (Hit::Scratch, self.scratch),
-            (Hit::Clear, self.clear),
-        ] {
-            // In row order, so each goes in at its slot.
-            match row.iter().position(|(h, _)| *h == hit) {
-                Some(slot) => {
-                    let rect = Rect::new(pad + slot as f32 * (w + gap), top, w, 52.0 * s);
-                    self.place_button(id, rect, s, true);
-                    self.hits.insert(slot, (hit, rect));
-                }
-                None => self.place_button(id, Rect::default(), s, false),
             }
         }
 
@@ -646,7 +512,7 @@ mod tests {
         let mut screen = Screen::new();
         let view = View {
             status: vec!["ready".into()],
-            body: vec![line("hello")],
+            code: vec![line("hello")],
             ..View::default()
         };
         let mut list = DrawList::new();
@@ -694,36 +560,13 @@ mod tests {
     }
 
     #[test]
-    fn approve_and_deny_are_there_only_while_confirming() {
+    fn the_pair_button_is_a_control() {
         let mut screen = Screen::new();
         screen.set(PHONE, View::default());
         let pair = screen.hits.iter().find(|(h, _)| *h == Hit::Pair).unwrap().1;
         assert_eq!(screen.hit(pair.x + 1.0, pair.y + 1.0), Some(Hit::Pair));
-        assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Approve));
         // The middle of the screen is no control: a tap.
         assert_eq!(screen.hit(540.0, 1200.0), None);
-
-        screen.set(
-            PHONE,
-            View {
-                body: vec![line("Approve sending \"continue\" to claude?")],
-                buttons: Buttons::Confirm,
-                ..View::default()
-            },
-        );
-        let approve = screen
-            .hits
-            .iter()
-            .find(|(h, _)| *h == Hit::Approve)
-            .unwrap()
-            .1;
-        let deny = screen.hits.iter().find(|(h, _)| *h == Hit::Deny).unwrap().1;
-        assert_eq!(
-            screen.hit(approve.x + 1.0, approve.y + 1.0),
-            Some(Hit::Approve)
-        );
-        assert_eq!(screen.hit(deny.x + 1.0, deny.y + 1.0), Some(Hit::Deny));
-        assert!(approve.y + approve.h < pair.y, "above the pairing row");
     }
 
     fn card(state: CardState) -> Card {
@@ -861,85 +704,6 @@ mod tests {
             focus_words(&numbered),
             "Claude \u{b7} libmorph \u{b7} tab 4"
         );
-    }
-
-    #[test]
-    fn the_button_rows() {
-        let mut screen = Screen::new();
-        let hits = |screen: &Screen| -> Vec<Hit> {
-            screen
-                .hits
-                .iter()
-                .map(|(h, _)| *h)
-                .filter(|h| !matches!(h, Hit::Field | Hit::Pair))
-                .collect()
-        };
-        screen.set(
-            PHONE,
-            View {
-                buttons: Buttons::Start,
-                ..View::default()
-            },
-        );
-        assert_eq!(hits(&screen), [Hit::Start]);
-        screen.set(
-            PHONE,
-            View {
-                buttons: Buttons::Dictation,
-                ..View::default()
-            },
-        );
-        assert_eq!(hits(&screen), [Hit::Submit, Hit::Scratch, Hit::Clear]);
-        let rect = |hit| screen.hits.iter().find(|(h, _)| *h == hit).unwrap().1;
-        let (submit, clear) = (rect(Hit::Submit), rect(Hit::Clear));
-        assert!(submit.x + submit.w < clear.x, "side by side");
-        assert_eq!(screen.hit(clear.x + 1.0, clear.y + 1.0), Some(Hit::Clear));
-        screen.set(PHONE, View::default());
-        assert!(hits(&screen).is_empty());
-    }
-
-    #[test]
-    fn the_focus_line_is_a_control() {
-        let mut screen = Screen::new();
-        let focus = Line {
-            text: "focus: Claude \u{b7} handlr".into(),
-            size: 15.0,
-            color: MUTED,
-            gap: 0.0,
-        };
-        screen.set(
-            PHONE,
-            View {
-                body: vec![focus.clone(), line("> hello")],
-                focus_lines: 1,
-                buttons: Buttons::Start,
-                ..View::default()
-            },
-        );
-        let rect = screen
-            .hits
-            .iter()
-            .find(|(h, _)| *h == Hit::Focus)
-            .expect("the focus line")
-            .1;
-        assert!(rect.h >= 44.0 * PHONE.scale, "a finger's height");
-        assert_eq!(screen.hit(540.0, rect.y + rect.h / 2.0), Some(Hit::Focus));
-        let start = screen
-            .hits
-            .iter()
-            .find(|(h, _)| *h == Hit::Start)
-            .unwrap()
-            .1;
-        assert!(rect.y + rect.h <= start.y, "above the buttons");
-        // Without a focus line, there is none.
-        screen.set(
-            PHONE,
-            View {
-                body: vec![line("> hello")],
-                ..View::default()
-            },
-        );
-        assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Focus));
     }
 
     #[test]
