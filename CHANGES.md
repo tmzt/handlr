@@ -1010,3 +1010,13 @@ The card itself needs the reply to be the view's newest entry, so a turn
 the view has seen go on (a tool call after the reply) is not finished on
 an older list. This is the only list asked while a view is open besides
 the one on opening it.
+
+## 2026-10-23 17:43 EDT — plan 20261023_04, step 4: the scrolling as a common control
+
+A1 has both halves of the overview scroll on their own "with the agent
+view's drag, fling and slop". That scrolling lived inside `AgentScreen`, so
+two more windows would have copied it. It is now a component of its own,
+`Scroll` in `apps/companion/src/controls/scroll.rs` (a file A6 does not
+list), using the agent view's slop, decay and least fling speed; `CardGrid`
+and `TurnLog` each keep one. `AgentScreen` keeps its own scrolling for now,
+as decision 8 moves code into the layout as it is changed, not all at once.
