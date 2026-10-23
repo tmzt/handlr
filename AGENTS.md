@@ -112,13 +112,13 @@ Before writing, modifying or deleting code for a new planned work item:
 1. `README.md` is laid out in this order, so every section has a fixed
    place:
    1. a short introduction: what the project is, in a paragraph or two;
-   2. `## Critical rules`: a short summary of the rules the project follows,
-      linking to `AGENTS.md` for the full text (not a copy, so the two cannot
-      drift);
-   3. the rest of the README: usage, features, building, licences and so on;
-   4. `## Architectural decisions`, last: one GitHub Markdown table listing
+   2. the rest of the README: usage, features, building, licences and so on;
+   3. `## Architectural decisions`, last: one GitHub Markdown table listing
       every spec and plan in `docs/design/`, oldest first. Nothing follows
       the table.
+
+   The critical rules live in `AGENTS.md` only; the README does not repeat
+   or summarise them.
 2. Columns: **Document** (the title, as a relative link such as
    `[Camera view and capture](docs/design/20261014_01_CAMERA_VIEW_AND_CAPTURE_PLAN.md)`;
    no absolute or GitHub URLs), **Date** (from its front matter), **Status**
