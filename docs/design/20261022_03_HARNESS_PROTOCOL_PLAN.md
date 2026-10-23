@@ -577,3 +577,99 @@ phone. This records under L3 what the plan left open.
 - **Closing:** the Back button, Android's Back, or Escape on the desktop.
 - **Not done:** opening the view from a notice, since notices are spoken,
   with nothing on screen to tap.
+
+## Amendment — 2026-10-23 16:02 EDT: the agent view's controls, suggestions, message card, read aloud and scroll hold (living section L3)
+
+Agreed with the owner on 2026-10-23, in the order asked, and built that
+day. It records in this living section what the CHANGES.md entries of
+15:01, 15:11, 15:23, 15:29, 15:39, 15:49 and 15:59 EDT recorded as
+departures. Where they disagree with the 03:11 EDT amendment, this one
+wins: it replaces that amendment's bottom row (Back and "Take a message"),
+its "Back button" under **Closing**, and its "Take a message" button.
+
+**The header.** Back is a `‹` glyph (U+2039, from the terminal face) at the
+left of the title row; the left 44 pt of the header is its tap area.
+Android's Back and Escape still close the view.
+
+**The bottom row controls the audio** ("the bottom row to control the
+audio, with the left having a square play button, the right a square
+record button"; "play doesn't become send, record becomes send"; "the
+record/send action should always be in the bottom right per Fitz"). All
+its buttons are 52 pt squares:
+- not taking a message: play at the left, record (a white dot on blue) at
+  the right;
+- taking a message: play at the left, cancel (`✕`) in the middle, send
+  (`➤`, on green) in record's place at the bottom right.
+
+Scratch has no button; "scratch that" still works by voice. A microphone
+glyph for record is for later; no bundled atlas has one.
+
+**Suggested responses** ("a \"suggested response\" row with yes, no,
+continue, compact (if needed)"; "just above the bottom buttons, plain text
+in a different color"; "suggestions that belong in a card can go there"):
+- `handlr_companion::Suggestion` is `yes`, `no`, `cont` and `cmpct`, sent
+  to the view's pane by one `agents.send` (yes and no as messages,
+  `continue` and `/compact` as commands);
+- the row, plain text just above the bottom row, shows `cont` while the
+  pinned live card is Something broke or Finished, and nothing while
+  working, taking a message, or when the card has its own buttons;
+- a Question card's actions are Yes, No and a record button; an
+  Approval card keeps Approve and Deny;
+- yes green, no red, the commands yellow;
+- `cmpct` waits for the context's use, which the daemon does not report
+  yet; Claude's numbered options (`1.`, `2.`) as taps are for later.
+
+**The message card** ("the entered text should be on a pinned card with
+the scrolling pane pushed up and out of the way. the same applied to an
+inline message, it expands the card being responded to with the same
+buttons in place, hiding the global ones"):
+- while a message is taken, its text is on a card pinned above the bottom
+  row; the agent's pinned card makes way, and the flow ends above it;
+- a Question card's record button takes a message in reply to that card:
+  the card is pinned at the bottom, expanded with the message under its
+  title and text and the same row inside it, and the screen's row is
+  hidden.
+
+**Read aloud** ("add a play button (dull/bright) on the left, this will
+play or not the incoming white text boxes as voice"; "tapping the play
+while it's speaking should stop the current playback (skip)"):
+- play, dull when off and bright when on, reads the view's new replies
+  (assistant text only, never tool calls, their output or code blocks)
+  from when it is turned on, after speaking, listening and confirmations;
+- while something is being said, play shows `▶│` and a tap skips to the
+  next reply;
+- what is read follows the reading rules: a link as its text, a path as
+  "the" and the English words of its last part, inline code as its words,
+  a number or version as it is, a commit hash not at all;
+- complex replies are summarised by the daemon under plan 20261023_05.
+
+**Own approvals** ("a separate approval isn't needed for UI entered
+buttons or when text has been buffered for review first"): a tapped
+suggestion, and a message submitted from the view by its button or its
+silence, approve their own confirmation; the daemon still makes it. Plan
+20261023_02's side of this is its 15:23 EDT CHANGES.md entry.
+
+**Scrolled back, the view holds** ("if I'm scrolled back, don't force the
+scroll"): when the entry at the window's top leaves the 200-entry window,
+the view stays on the next entry still there; entries are matched by time,
+role and kind, so a summary that changes between peeks keeps the place.
+
+**Questions at the end of a task** ("if the question stops as a task, it
+should be a pinned card"): a reply's final question is pending (decision
+8) while the pane is `done` as well as `idle` or `blocked`; its Question
+card is the pinned one.
+
+**"(loading session)"** shows until the session first answers; "(no
+session to show)" only after it answered with nothing.
+
+**Code layout** ("one control per file"): the controls are component
+structs in `apps/companion/src/agent/` (`control_row.rs`,
+`dictation_card.rs`, `square_button.rs`); plan 20261023_04 moves those
+used by more than one screen to `src/controls/`.
+
+**Implemented by:** `f76ca33`, `3bc21df` (back, suggestions); `ae8b110`
+(scroll hold); `a68beee`, `0496df6`, `0ec7a2e` (Submit waits, read aloud,
+play and record); `979e732`, `c8ebd95` (own approvals, the audio row, the
+message card); `73668af` (record becomes send); `3ba67c9` (the reading
+rules); `d8e62e2` (skip); `2e70b69`, `41cfda1` (loading); `05561dd`
+(questions when done).
