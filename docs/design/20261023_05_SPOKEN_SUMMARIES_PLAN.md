@@ -1,7 +1,7 @@
 ---
 title: Spoken summaries of complex replies, from structured prompts
 date: 2026-10-23
-status: In implementation
+status: Implemented
 covers:
   - "Read aloud (the agent view's play button) sends a reply that is
     complex, by a basic coding measure or because it has backquotes, to
@@ -425,3 +425,9 @@ when present and `read` otherwise.
 The status returns from `Implemented` to `In implementation` for step
 10 of the previous amendment. The document stays immutable; it returns to
 `Implemented` when step 10 is done.
+
+## Amendment — 2026-10-23 16:59 EDT: implemented again
+
+Step 10 is done and its **Done when:** holds: libhandlr_proto 0.2.0
+(`b4f4fa1`, tag `libhandlr_proto-v0.2.0`), the daemon (`b7c9e8b`) and the client
+(`94c1c8f`). Every step is done; the status returns to `Implemented`.
