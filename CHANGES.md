@@ -652,3 +652,14 @@ spoken turn from the S23 over the tailnet reached Gemini with no error.
 - The key had an IP restriction, which the owner widened. It is now
   bound to the service account `handlrofflinesa`.
 - The text example drops a line typed before it has connected.
+
+## 2026-10-23 01:08 EDT — plan 20261022_08, step 1: the prompt leaves approval to handlr
+
+Gemini no longer asks "Should I send…?" itself. It calls `run_command`
+with a handle drawn from the user's words, and handlr asks a single
+approval question. Only the gate block of `PROMPT.md` changed. The item 1
+wording the owner approved is recorded in the plan.
+
+Step 2's live turn uses the daemon on the owner's live herdr, without
+`--mock`, by the owner's choice. Nothing reaches a pane without approval
+on the phone.
