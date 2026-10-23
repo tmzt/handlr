@@ -34,6 +34,10 @@ pub mod methods {
     /// A reply read aloud, measured and, when complex, summarised for the
     /// ear (plan 20261023_05, as amended at 15:45 EDT). Companions only.
     pub const SPEECH_SUMMARIZE: &str = "speech.summarize";
+    /// A companion's options for its connection, such as whether its
+    /// output is spoken (plan 20261023_05, the 16:28 EDT amendment, A4).
+    /// Answered `{}`.
+    pub const CLIENT_OPTIONS: &str = "client.options";
 
     /// Notifications from the daemon.
     pub const AGENT_STATUS_CHANGED: &str = "agent.status_changed";
@@ -192,13 +196,26 @@ pub struct SpeechSummarizeParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpeechSummarizeResult {
-    /// The spoken summary, when the reply is complex; `None` when it is
-    /// not, and the client reads the reply as it is.
+    /// What to read aloud. Since the 16:28 EDT amendment (A3) the daemon
+    /// always sets it: Gemini's summary when the reply is complex and
+    /// spoken output is on, otherwise the reply under the reading rules.
+    /// A client still reads the reply itself when it is `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spoken: Option<String>,
     /// Whether the daemon measured the reply as complex.
     #[serde(default)]
     pub complex: bool,
+}
+
+/// `client.options`: a companion's options for its connection (plan
+/// 20261023_05, A4). Each starts off when the connection opens. Unknown
+/// options are ignored, so more can be added.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClientOptionsParams {
+    /// Read aloud is on: `speech.summarize` may ask Gemini for a summary
+    /// of a complex reply.
+    #[serde(default)]
+    pub spoken_output: bool,
 }
 
 /// The pane herdr reports as focused, named as `AgentInfo` names it
@@ -686,6 +703,9 @@ mod tests {
             spoken: None,
             complex: false,
         });
+        round_trip(ClientOptionsParams {
+            spoken_output: true,
+        });
         round_trip(AgentsReadResult {
             text: "ok".to_string(),
         });
@@ -917,6 +937,13 @@ mod tests {
         let summarize: SpeechSummarizeParams =
             serde_json::from_value(json!({"pane_id": "p1", "ts": "t"})).unwrap();
         assert_eq!(summarize.text, "");
+
+        // client.options: an unknown option is ignored, a missing one off.
+        let options: ClientOptionsParams =
+            serde_json::from_value(json!({"spoken_output": true, "louder": 3})).unwrap();
+        assert!(options.spoken_output);
+        let options: ClientOptionsParams = serde_json::from_value(json!({})).unwrap();
+        assert!(!options.spoken_output);
 
         // link.pair_begin takes nothing; link.pair_add needs only the code.
         assert_eq!(

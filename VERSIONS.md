@@ -51,3 +51,12 @@ section 4, as amended at 15:45 EDT):
     `common::SpeechSummarizeResult` (`spoken: Option<String>`, `complex`);
   - `envelope::codes::UNAVAILABLE` (-32015). `codes::ALL` is unchanged, so
     its type stays `[i64; 15]`.
+
+## libhandlr_proto 0.1.2 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.1.2`)
+
+Strictly additive (plan 20261023_05, the 16:28 EDT amendment, A4 and A6):
+
+- **Added:**
+  - `common::methods::CLIENT_OPTIONS` (`"client.options"`);
+  - `common::ClientOptionsParams` (`spoken_output`), whose unknown fields
+    are ignored.
