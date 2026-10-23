@@ -1,8 +1,8 @@
 //! Plan 20261022_06, step 1: the PNG read back by `png`, the code read back
 //! by `rqrr`, and the other renderings.
 
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use qrcodeurl::{Ecc, Error, Inline, Png, Qr, Terminal};
 
 const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";

@@ -11,8 +11,8 @@ mod png;
 
 use std::fmt;
 
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use qrcode::render::unicode::Dense1x2;
 use qrcode::types::QrError;
 use qrcode::{Color, EcLevel, QrCode, Version};
