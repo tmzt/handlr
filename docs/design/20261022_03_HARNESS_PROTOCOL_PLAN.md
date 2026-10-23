@@ -776,3 +776,11 @@ skip the question playback". When a Yes or No answers the pending
 question, the reply it belongs to is not read aloud: if it is waiting to be
 read (for its summary or behind other speech) it is dropped, and if it is
 being read, the speech stops (`Event::StopSpeaking`), as skip does.
+
+## Amendment — 2026-10-23 17:33 EDT: a dictated message shows in the flow once sent (living section L3)
+
+The owner (2026-10-23): "Spoken messages should be included as text in the
+flow after they're submitted". A dictated message sent to the viewed agent
+shows as typed input (the 16:38 EDT amendment's amber input box) from the
+moment it is sent until the session shows it as the user's entry in the
+flow, where it then stays as ordinary scrollback.
