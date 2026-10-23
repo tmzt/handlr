@@ -631,3 +631,24 @@ The owner's credential is a service account
 changes plan 07, so it waits on the owner. First, a check run by the owner
 must show which endpoint the credential works with: Vertex AI, or the
 Gemini API over OAuth.
+
+## 2026-10-23 00:54 EDT — plan 20261022_07: the default model is gemini-3.8-flash; the first real turns
+
+**A departure from decision 3, needed to make it work.** Google answered
+`gemini-2.5-flash` with a 404 for the owner's key: "no longer available to
+new users … use models/gemini-3.8-flash". `libinfer-gemini`'s default is
+now `gemini-3.8-flash`, which the key lists, and it is sent as
+`Model::Custom`, since gemini-rust 1.7 doesn't name it. `src/config.rs`
+still says "gemini-2.5-flash" in its doc comment; that is fixed in the next
+handlr commit. The owner's `~/.config/handlr/config.toml` sets
+`[gemini] model = "gemini-3.8-flash"` meanwhile.
+
+**The first real turns.** With the owner's API key in
+`.private/gemini_api_key` (mode 0600), `handlr serve --mock` answered a
+typed turn from `handlr-companion`'s text example from the mock pane. A
+spoken turn from the S23 over the tailnet reached Gemini with no error.
+
+**Found along the way:**
+- The key had an IP restriction, which the owner widened. It is now
+  bound to the service account `handlrofflinesa`.
+- The text example drops a line typed before it has connected.
