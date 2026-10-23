@@ -1225,6 +1225,119 @@ async fn agents_list_carries_each_agents_session() {
     assert!(session.get("entries").is_none(), "{r}");
 }
 
+/// Write p1's session (see `give_session`) under `home`: a user line, then
+/// `reply` from the agent, then `more` if given; written `age` ago.
+fn write_turn(home: &Path, reply: &str, more: Option<Value>, age: Duration) {
+    let project = home.join(".claude/projects/-work-example");
+    std::fs::create_dir_all(&project).unwrap();
+    let user = json!({
+        "type": "user", "cwd": "/work/example", "timestamp": "2026-01-02T12:00:00.000Z",
+        "message": {"role": "user", "content": "Go on."}
+    });
+    let reply = json!({
+        "type": "assistant", "cwd": "/work/example", "timestamp": "2026-01-02T12:00:05.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}
+    });
+    let mut body = format!("{user}\n{reply}\n");
+    if let Some(more) = more {
+        body.push_str(&format!("{more}\n"));
+    }
+    let path = project.join("00000000-0000-4000-8000-0000000000a1.jsonl");
+    std::fs::write(&path, body).unwrap();
+    let file = std::fs::File::options().write(true).open(&path).unwrap();
+    file.set_modified(std::time::SystemTime::now() - age)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn agents_list_gives_each_agents_turn_from_its_session() {
+    // Plan 20261023_04, step 1 as amended (A4).
+    let home = tempfile::tempdir().unwrap();
+    let quiet = Duration::from_secs(60);
+    write_turn(
+        home.path(),
+        "Built it.\n\nInstall it on the S23?",
+        None,
+        quiet,
+    );
+    let env = start_home(
+        confirming(),
+        Arc::new(MockReasoningEngine::with_handler(Script)),
+        false,
+        home.path(),
+    )
+    .await;
+    give_session(&env.daemon).await;
+    // p2: a shell beside it.
+    match env.daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let mut shell = state.snapshot.workspaces[0].tabs[0].panes[0].clone();
+            shell.pane_id = "p2".to_string();
+            shell.extra.clear();
+            shell.terminal_title = None;
+            shell.agent_session = None;
+            shell.focused = false;
+            state.snapshot.workspaces[0].tabs[0].panes.push(shell);
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+    set_status(&env.daemon, AgentStatus::Working).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let turn_of = |r: &Value, pane: &str| {
+        r["result"]["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["pane_id"] == pane)
+            .unwrap_or_else(|| panic!("{pane} in {r}"))
+            .get("turn")
+            .cloned()
+    };
+
+    // Asking: the question, though herdr says working.
+    let r = c.call("agents.list", json!({})).await;
+    assert_eq!(
+        turn_of(&r, "p1"),
+        Some(json!({"state": "asking", "question": "Install it on the S23?"})),
+        "{r}"
+    );
+    // No session: a shell has no turn.
+    let shell = r["result"]["agents"][1].clone();
+    assert_eq!(shell["agent"], "shell", "{r}");
+    assert_eq!(turn_of(&r, "p2"), None, "{r}");
+
+    // Stopped: a quiet reply with no question, herdr still saying working.
+    write_turn(home.path(), "All tests pass.\n\nCommitted.", None, quiet);
+    let r = c.call("agents.list", json!({})).await;
+    assert_eq!(
+        turn_of(&r, "p1"),
+        Some(json!({"state": "stopped", "line": "All tests pass."})),
+        "{r}"
+    );
+    assert_eq!(r["result"]["agents"][0]["status"], "working");
+
+    // Working: the file was just written, with a tool call after the
+    // reply.
+    let call = json!({
+        "type": "assistant", "cwd": "/work/example", "timestamp": "2026-01-02T12:00:06.000Z",
+        "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_fake_09", "name": "Bash",
+             "input": {"command": "cargo test"}}
+        ]}
+    });
+    write_turn(
+        home.path(),
+        "Running the tests.",
+        Some(call),
+        Duration::ZERO,
+    );
+    let r = c.call("agents.list", json!({})).await;
+    let turn = turn_of(&r, "p1").unwrap();
+    assert_eq!(turn["state"], "working", "{r}");
+    assert!(turn["line"].as_str().unwrap().contains("cargo test"), "{r}");
+}
+
 #[tokio::test]
 async fn session_peek_is_for_companions_and_local_clients_only() {
     let env = start_with(

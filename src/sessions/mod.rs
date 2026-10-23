@@ -8,14 +8,15 @@
 //! never whole, and only on the machine the daemon runs on.
 //!
 //! Everything that leaves this module for a client or for Gemini goes
-//! through [`redact::redact`] first: [`Item::entry`], [`pending`] and
-//! [`context`] all redact.
+//! through [`redact::redact`] first: [`Item::entry`], [`pending`],
+//! [`turn`] and [`context`] all redact.
 
 pub mod claude;
 pub mod codex;
 pub mod context;
 pub mod pending;
 pub mod redact;
+pub mod turn;
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -306,17 +307,19 @@ impl Sessions {
 
 /// A pane's session as `session.peek` and `agents.list` report it (plan
 /// 20261022_03, step 4): redacted entries, the newest last, and the
-/// pending question for the pane's status.
+/// pending question for the pane's status, and where its turn stands
+/// (plan 20261023_04, A4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Peeked {
     pub located: Located,
     pub entries: Vec<Entry>,
     pub pending_question: Option<PendingQuestion>,
+    pub turn: turn::Turn,
 }
 
 impl Sessions {
-    /// The last `n` entries of the agent in `pane` and its pending
-    /// question. Reads back until there are `n` entries and an assistant
+    /// The last `n` entries of the agent in `pane`, its pending question
+    /// and its turn. Reads back until there are `n` entries and an assistant
     /// reply among them, within `read_tail`'s limits.
     pub fn peek(&self, pane: &AgentRef, n: usize) -> Option<Peeked> {
         let read = self.read(pane, |items| {
@@ -325,13 +328,15 @@ impl Sessions {
                     .iter()
                     .any(|i| i.is_text() && i.role == Role::Assistant)
         })?;
-        let pending_question =
-            pending::pending_question(&read.items, &pane.status, read.located.quiet());
+        let quiet = read.located.quiet();
+        let pending_question = pending::pending_question(&read.items, &pane.status, quiet);
+        let turn = turn::turn(&read.items, &pane.status, quiet);
         let skip = read.items.len().saturating_sub(n);
         Some(Peeked {
             located: read.located,
             entries: read.items[skip..].iter().map(Item::entry).collect(),
             pending_question,
+            turn,
         })
     }
 }

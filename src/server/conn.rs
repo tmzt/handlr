@@ -487,17 +487,22 @@ pub(super) fn sessions_here(daemon: &Daemon) -> bool {
     )
 }
 
-/// The session of the agent in `pane`, for `agents.list`.
-fn agent_session(daemon: &Daemon, pane: &agents::AgentRef) -> Option<common::AgentSessionInfo> {
+/// The session of the agent in `pane` and its turn (plan 20261023_04,
+/// A4), for `agents.list`.
+fn agent_session(
+    daemon: &Daemon,
+    pane: &agents::AgentRef,
+) -> Option<(common::AgentSessionInfo, common::Turn)> {
     if !sessions_here(daemon) || daemon.sessions.reader_for(&pane.agent).is_none() {
         return None;
     }
     let peeked = daemon.sessions.peek(pane, 1)?;
-    Some(common::AgentSessionInfo {
+    let session = common::AgentSessionInfo {
         session_id: peeked.located.session_id,
         matched: peeked.located.matched.into(),
         pending_question: peeked.pending_question,
-    })
+    };
+    Some((session, peeked.turn))
 }
 
 pub(super) async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
@@ -578,9 +583,10 @@ async fn call(
                 .into_iter()
                 .map(|named| {
                     let a = named.agent;
-                    let session = agent_session(daemon, &a);
+                    let (session, turn) = agent_session(daemon, &a).unzip();
                     common::AgentInfo {
                         session,
+                        turn,
                         status: wire_status(&a.status),
                         pane_id: a.pane_id,
                         name: Some(named.shown),
