@@ -14,10 +14,10 @@
 //! and a connection ends only on an error or end of stream. The client does
 //! not `ping`.
 
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use libhandlr_proto::link::{self, LinkError, LinkStream, LinkWriter, PairingPayload};
+use libhandlr_proto::link::{self, LinkError, LinkStream, LinkWriter, PairingPayload, StaticKey};
 use libhandlr_proto::Incoming;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf};
 use tokio::net::unix::OwnedWriteHalf;
@@ -247,8 +247,8 @@ impl Net {
         let Some(server) = server else {
             return self.connect_local().await;
         };
-        let secret = match self.keys.secret() {
-            Ok(Some(secret)) => secret,
+        let key = match self.keys.static_key() {
+            Ok(Some(key)) => key,
             Ok(None) => {
                 self.emit(Event::Error(format!(
                     "paired with {}, but this client has no key; pair again",
@@ -277,7 +277,7 @@ impl Net {
                     continue;
                 }
             };
-            let handshake = link::reconnect(stream, &secret, &server.public_key, Some(&hello));
+            let handshake = link::reconnect(stream, &key, &server.public_key, Some(&hello));
             match timeout(HANDSHAKE_TIMEOUT, handshake).await {
                 Ok(Ok(stream)) => {
                     log::info!("connected to {} at {addr}", server.name);
@@ -339,8 +339,8 @@ impl Net {
     /// attempt: the secret is single use. On success, the server is stored
     /// and the connection, `hello` already sent, is returned.
     async fn pair(&mut self, payload: PairingPayload) -> Option<Conn> {
-        let private = match self.static_key() {
-            Ok(private) => private,
+        let key = match self.static_key() {
+            Ok(key) => key,
             Err(e) => {
                 self.emit(Event::PairFailed(format!("this client's key: {e}")));
                 return None;
@@ -349,7 +349,7 @@ impl Net {
         // A new server: no session to continue.
         let previous_session = self.state.session_id().map(str::to_string);
         self.state.set_session_id(None);
-        let result = self.pair_with(&payload, &private).await;
+        let result = self.pair_with(&payload, &key).await;
         match result {
             Ok(stream) => {
                 self.emit(Event::Paired {
@@ -368,7 +368,7 @@ impl Net {
     async fn pair_with(
         &mut self,
         payload: &PairingPayload,
-        private: &[u8; 32],
+        key: &Arc<dyn StaticKey>,
     ) -> Result<LinkStream<TcpStream>, String> {
         let hello = self.hello()?;
         let mut failures = Vec::new();
@@ -382,7 +382,7 @@ impl Net {
             };
             let handshake = link::pair(
                 stream,
-                private,
+                key,
                 &payload.server_key,
                 &payload.secret,
                 Some(&hello),
@@ -415,13 +415,11 @@ impl Net {
     }
 
     /// This client's static key, made and stored on first use.
-    fn static_key(&mut self) -> Result<[u8; 32], String> {
-        if let Some(private) = self.keys.secret()? {
-            return Ok(private);
+    fn static_key(&mut self) -> Result<Arc<dyn StaticKey>, String> {
+        if let Some(key) = self.keys.static_key()? {
+            return Ok(key);
         }
-        let keypair = link::generate_keypair().map_err(|e| e.to_string())?;
-        self.keys.set_secret(keypair.private)?;
-        Ok(keypair.private)
+        self.keys.generate_static_key()
     }
 
     /// Stores a `session_id` that `hello` changed in the server record.

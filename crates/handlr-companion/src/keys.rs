@@ -4,16 +4,23 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use libhandlr_proto::link::{self, StaticKey, StaticKeypair};
 use serde::{Deserialize, Serialize};
 
 /// Where a client keeps its static key and the server it is paired with.
+///
+/// The static key is a [`StaticKey`], which does its own Diffie-Hellman, so
+/// a store backed by a platform key store (the Android Keystore, a
+/// Keychain) never hands out the private key.
 pub trait KeyStore: Send {
     /// This client's static key, if it has one.
-    fn secret(&mut self) -> Result<Option<[u8; 32]>, String>;
-    fn set_secret(&mut self, key: [u8; 32]) -> Result<(), String>;
+    fn static_key(&mut self) -> Result<Option<Arc<dyn StaticKey>>, String>;
+    /// Makes and stores a new static key, replacing any there was.
+    fn generate_static_key(&mut self) -> Result<Arc<dyn StaticKey>, String>;
     /// The paired server, if any.
     fn server(&mut self) -> Result<Option<ServerRecord>, String>;
     fn set_server(&mut self, server: ServerRecord) -> Result<(), String>;
@@ -110,8 +117,9 @@ fn decode_key(text: &str, what: &str) -> Result<[u8; 32], String> {
         .map_err(|b: Vec<u8>| format!("{what} is {} bytes, not 32", b.len()))
 }
 
-impl KeyStore for FileKeyStore {
-    fn secret(&mut self) -> Result<Option<[u8; 32]>, String> {
+impl FileKeyStore {
+    /// The private key in `<dir>/key`, if there is one.
+    fn read_key(&self) -> Result<Option<[u8; 32]>, String> {
         let path = self.key_path();
         let meta = match fs::metadata(&path) {
             Ok(meta) => meta,
@@ -130,10 +138,22 @@ impl KeyStore for FileKeyStore {
             None => Ok(None),
         }
     }
+}
 
-    fn set_secret(&mut self, key: [u8; 32]) -> Result<(), String> {
-        let text = format!("{}\n", STANDARD.encode(key));
-        self.write_private(&self.key_path(), text.as_bytes())
+impl KeyStore for FileKeyStore {
+    fn static_key(&mut self) -> Result<Option<Arc<dyn StaticKey>>, String> {
+        let Some(private) = self.read_key()? else {
+            return Ok(None);
+        };
+        let keypair = StaticKeypair::from_private(private).map_err(|e| e.to_string())?;
+        Ok(Some(Arc::new(keypair)))
+    }
+
+    fn generate_static_key(&mut self) -> Result<Arc<dyn StaticKey>, String> {
+        let keypair = link::generate_keypair().map_err(|e| e.to_string())?;
+        let text = format!("{}\n", STANDARD.encode(keypair.private));
+        self.write_private(&self.key_path(), text.as_bytes())?;
+        Ok(Arc::new(keypair))
     }
 
     fn server(&mut self) -> Result<Option<ServerRecord>, String> {
@@ -176,26 +196,26 @@ mod tests {
     #[test]
     fn nothing_stored_reads_as_none() {
         let (_dir, mut keys) = store();
-        assert_eq!(keys.secret().unwrap(), None);
+        assert!(keys.static_key().unwrap().is_none());
         assert_eq!(keys.server().unwrap(), None);
     }
 
     #[test]
     fn the_key_round_trips_at_mode_0600() {
         let (_dir, mut keys) = store();
-        let key = [7u8; 32];
-        keys.set_secret(key).unwrap();
+        let key = keys.generate_static_key().unwrap();
         let mode = fs::metadata(keys.key_path()).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-        assert_eq!(keys.secret().unwrap(), Some(key));
+        let stored = keys.static_key().unwrap().expect("the key is stored");
+        assert_eq!(stored.public(), key.public());
     }
 
     #[test]
     fn a_key_file_at_0644_is_refused() {
         let (_dir, mut keys) = store();
-        keys.set_secret([1u8; 32]).unwrap();
+        keys.generate_static_key().unwrap();
         fs::set_permissions(keys.key_path(), fs::Permissions::from_mode(0o644)).unwrap();
-        let err = keys.secret().unwrap_err();
+        let err = keys.static_key().err().expect("refused");
         assert!(err.contains("0644"), "{err}");
     }
 
@@ -204,7 +224,8 @@ mod tests {
         let (_dir, mut keys) = store();
         keys.write_private(&keys.key_path(), STANDARD.encode([1u8; 16]).as_bytes())
             .unwrap();
-        assert!(keys.secret().unwrap_err().contains("16 bytes"));
+        let err = keys.static_key().err().expect("refused");
+        assert!(err.contains("16 bytes"), "{err}");
     }
 
     #[test]

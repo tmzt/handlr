@@ -49,7 +49,7 @@ impl Server {
         let authorized = Arc::new(Mutex::new(HashSet::new()));
         let close_after_hello = Arc::new(AtomicUsize::new(0));
         let ctx = Ctx {
-            private: key.private,
+            key: key.clone(),
             seen: seen_tx,
             accepts: accepts.clone(),
             pending: pending.clone(),
@@ -109,7 +109,7 @@ impl Server {
 
 #[derive(Clone)]
 struct Ctx {
-    private: [u8; 32],
+    key: StaticKeypair,
     seen: mpsc::Sender<Seen>,
     accepts: Arc<AtomicUsize>,
     pending: Arc<Mutex<HashMap<PairingId, [u8; 32]>>>,
@@ -123,7 +123,7 @@ impl Ctx {
         let authorized = self.authorized.clone();
         let accepted = link::accept(
             stream,
-            &self.private,
+            &self.key,
             |id| pending.lock().unwrap().remove(&id),
             |key| authorized.lock().unwrap().contains(key),
         )
@@ -267,8 +267,11 @@ fn pairing_stores_the_key_and_the_server_and_connects() {
     assert!(hello.get("session_id").is_none(), "{hello}");
 
     let mut keys = FileKeyStore::new(keys_dir(&dir));
-    let private = keys.secret().unwrap().expect("the client's key is stored");
-    assert_eq!(link::public_key(&private).unwrap(), seen.peer_key);
+    let key = keys
+        .static_key()
+        .unwrap()
+        .expect("the client's key is stored");
+    assert_eq!(key.public(), seen.peer_key);
     assert_eq!(
         keys.server().unwrap(),
         Some(ServerRecord {
@@ -294,9 +297,8 @@ fn pairing_stores_the_key_and_the_server_and_connects() {
 fn reconnecting_uses_ik_and_the_stored_session_id_and_fails_over() {
     let server = Server::start();
     let dir = tempfile::tempdir().unwrap();
-    let client = link::generate_keypair().unwrap();
     let mut keys = FileKeyStore::new(keys_dir(&dir));
-    keys.set_secret(client.private).unwrap();
+    let client = keys.generate_static_key().unwrap().public();
     let addresses = vec![closed_addr(), server.addr.clone()];
     keys.set_server(ServerRecord {
         name: "phone".into(),
@@ -305,13 +307,13 @@ fn reconnecting_uses_ik_and_the_stored_session_id_and_fails_over() {
         session_id: Some("companion:old".into()),
     })
     .unwrap();
-    server.authorized.lock().unwrap().insert(client.public);
+    server.authorized.lock().unwrap().insert(client);
     server.close_after_hello.store(1, Ordering::SeqCst);
 
     let c = companion(&dir);
     let seen = server.next_seen();
     assert_eq!(seen.mode, AcceptedMode::Reconnect);
-    assert_eq!(seen.peer_key, client.public);
+    assert_eq!(seen.peer_key, client);
     assert_eq!(
         assert_exact_hello(&seen.first)["session_id"],
         "companion:old"
@@ -386,7 +388,10 @@ fn an_expired_string_is_refused_before_connecting() {
     }
     std::thread::sleep(Duration::from_millis(200));
     assert_eq!(server.accepts.load(Ordering::SeqCst), 0);
-    assert_eq!(FileKeyStore::new(keys_dir(&dir)).secret().unwrap(), None);
+    assert!(FileKeyStore::new(keys_dir(&dir))
+        .static_key()
+        .unwrap()
+        .is_none());
 }
 
 #[test]
