@@ -199,3 +199,10 @@ replaces item 4's "Inside a subagent, the row's first item is '‹ back to
 followed by the subagents. Tapping main shows the main agent; the name
 being viewed (main or a subagent) is underlined. The header's "‹" still
 leaves the agent view for the overview.
+
+## Amendment — 2026-10-23 17:48 EDT: a dot marks the name being viewed
+
+The owner (2026-10-23): "use a dot to the left instead of underline". This
+replaces the previous amendment's underline: the name being viewed (main
+or a subagent) has a small dot to its left, in its own cyan; the others
+have none.
