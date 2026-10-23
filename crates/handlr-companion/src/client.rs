@@ -346,6 +346,10 @@ struct Dictating {
     phase: DictationPhase,
     /// The own message's confirmation, once `agents.send` answered.
     confirm_id: Option<u64>,
+    /// Submitted with the Submit button, which is the approval: its own
+    /// confirmation is approved without asking (plan 20261023_02, the
+    /// amendment on button submits). A silence submit still asks.
+    by_button: bool,
     /// Since when the gate has been closed, for the silence timer. `None`
     /// while it is open, and after a refused or denied submit until the
     /// next change.
@@ -543,7 +547,7 @@ impl State {
             Input::Approve => self.answer(true, None, &mut out),
             Input::Deny => self.answer(false, None, &mut out),
             Input::StartDictation => self.start_dictation(&mut out),
-            Input::Submit => self.submit(&mut out),
+            Input::Submit => self.submit(true, &mut out),
             Input::Clear => self.clear_dictation(&mut out),
             Input::Scratch => self.scratch(&mut out),
         }
@@ -613,7 +617,7 @@ impl State {
                 "dictation: {} s of silence; submitting",
                 self.silence.as_secs()
             );
-            self.submit(out);
+            self.submit(false, out);
         }
         self.show_dictation(out);
     }
@@ -628,6 +632,7 @@ impl State {
             refresh_target: self.online(),
             phase: DictationPhase::Collecting,
             confirm_id: None,
+            by_button: false,
             quiet_from: None,
             read_back: ReadBack::No,
         });
@@ -691,7 +696,7 @@ impl State {
 
     /// Submits the message (decision 5): one `agents.send` of kind
     /// `message`, which the daemon confirms.
-    fn submit(&mut self, out: &mut Vec<Output>) {
+    fn submit(&mut self, by_button: bool, out: &mut Vec<Output>) {
         let online = self.online();
         let Some(d) = self.dictation.as_mut() else {
             return;
@@ -723,6 +728,7 @@ impl State {
         let target = d.target.clone().expect("checked above");
         let text = d.text();
         d.phase = DictationPhase::Submitting;
+        d.by_button = by_button;
         let params = serde_json::json!({
             "pane_id": target.pane_id,
             "text": text,
@@ -1018,6 +1024,10 @@ impl State {
                         d.phase = DictationPhase::Confirming;
                         d.confirm_id = Some(confirm_id);
                     }
+                    // Its question may have arrived first.
+                    if self.confirms.iter().any(|c| c.id == confirm_id) {
+                        self.approve_own_if_button(confirm_id, out);
+                    }
                     self.show_dictation(out);
                 }
                 Ok(common::AgentsSendResult::Sent) => self.message_resolved("sent", out),
@@ -1102,6 +1112,17 @@ impl State {
         if self.confirms.iter().any(|known| known.id == c.confirm_id) {
             return; // a reminder of one already being handled
         }
+        let own_by_button = self.dictation.as_ref().is_some_and(|d| {
+            d.by_button
+                && (d.confirm_id == Some(c.confirm_id)
+                    || (d.phase == DictationPhase::Submitting
+                        && same_message(&c.command, &d.text())))
+        });
+        if own_by_button {
+            log::info!("dictation: approving the message submitted with the button");
+            self.reply(c.confirm_id, true, out);
+            return;
+        }
         self.confirms.push_back(Confirmation {
             id: c.confirm_id,
             text: c.text,
@@ -1114,6 +1135,38 @@ impl State {
         if self.confirms.len() == 1 {
             self.ask_next(out);
         }
+    }
+
+    /// Approves the own message's confirmation, already queued, when it was
+    /// submitted with the button.
+    fn approve_own_if_button(&mut self, confirm_id: u64, out: &mut Vec<Output>) {
+        if !self.dictation.as_ref().is_some_and(|d| d.by_button) {
+            return;
+        }
+        let was_asked = self.confirms.front().map(|c| c.id) == Some(confirm_id);
+        self.confirms.retain(|c| c.id != confirm_id);
+        self.reply(confirm_id, true, out);
+        if was_asked {
+            self.ask_next(out);
+        }
+    }
+
+    /// Sends `confirm.reply` for `confirm_id` without asking anyone.
+    fn reply(&mut self, confirm_id: u64, approve: bool, out: &mut Vec<Output>) {
+        let params = common::ConfirmReplyParams {
+            confirm_id,
+            approve,
+            nonce: None,
+        };
+        out.push(event(Event::Answered {
+            confirm_id,
+            approve,
+        }));
+        out.push(self.request(
+            methods::CONFIRM_REPLY,
+            params,
+            Sent::ConfirmReply(confirm_id),
+        ));
     }
 
     fn resolved(&mut self, r: common::ConfirmResolved, out: &mut Vec<Output>) {
@@ -1189,6 +1242,20 @@ fn parse_or_log<T: DeserializeOwned>(note: Notification) -> Option<T> {
             None
         }
     }
+}
+
+/// Whether the daemon's copy of a message is the text submitted, allowing
+/// for its cleaning: runs of whitespace folded, and trailing `.` and `,`
+/// dropped (`validate_message`).
+fn same_message(daemon: &str, submitted: &str) -> bool {
+    fn clean(s: &str) -> String {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches(['.', ','])
+            .to_string()
+    }
+    clean(daemon) == clean(submitted)
 }
 
 #[cfg(test)]
@@ -1948,12 +2015,12 @@ mod tests {
         assert!(message_send(&s.input(Input::Tick(secs(39.0)))).is_some());
     }
 
-    /// Submits "one" from [`dictating`] and answers it as pending,
-    /// confirmation 9, asked as the daemon asks it.
+    /// Submits "one" from [`dictating`] by the silence, which asks, and
+    /// answers it as pending, confirmation 9, asked as the daemon asks it.
     fn confirming_message() -> State {
         let mut s = dictating();
         speak(&mut s, 10.0, 12.0, "one");
-        let send = message_send(&s.input(Input::Submit)).unwrap();
+        let send = message_send(&s.input(Input::Tick(secs(20.0)))).unwrap();
         let out = s.incoming(note(
             "confirm.requested",
             json!({"confirm_id": 9, "pane_id": "w2:p4", "agent": "claude",
@@ -1970,6 +2037,91 @@ mod tests {
         ));
         assert_eq!(s.dictation().phase, DictationPhase::Confirming);
         s
+    }
+
+    fn own_question(id: u64, command: &str) -> Incoming {
+        note(
+            "confirm.requested",
+            json!({"confirm_id": id, "pane_id": "w2:p4", "agent": "claude",
+                   "name": "Claude in libmorph", "command": command,
+                   "requested_by": "companion:test",
+                   "handle": "message-claude-libmorph-one",
+                   "text": "Approve sending your message to Claude in libmorph?"}),
+        )
+    }
+
+    fn approvals(out: &[Output]) -> Vec<serde_json::Value> {
+        sent(out)
+            .into_iter()
+            .filter(|r| r.method == "confirm.reply")
+            .map(|r| r.params.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_button_submit_is_its_own_approval_question_first() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "Please run the tests.");
+        let send = message_send(&s.input(Input::Submit)).unwrap();
+        // The daemon cleans the trailing full stop; it is still ours.
+        let out = s.incoming(own_question(9, "Please run the tests"));
+        assert!(
+            !events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Confirm { .. } | Event::Say(_))),
+            "not asked: {out:?}"
+        );
+        assert_eq!(
+            approvals(&out),
+            vec![json!({"confirm_id": 9, "approve": true})]
+        );
+        let out = s.incoming(response(
+            send.id,
+            json!({"status": "pending", "confirm_id": 9, "handle": "message-claude-libmorph-one"}),
+        ));
+        assert!(approvals(&out).is_empty(), "approved once");
+        let out = s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 9, "outcome": "sent"}),
+        ));
+        assert_eq!(dictation_of(&out).map(|d| d.active), Some(false));
+    }
+
+    #[test]
+    fn a_button_submit_is_its_own_approval_answer_first() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        let send = message_send(&s.input(Input::Submit)).unwrap();
+        s.incoming(response(
+            send.id,
+            json!({"status": "pending", "confirm_id": 9, "handle": "message-claude-libmorph-one"}),
+        ));
+        let out = s.incoming(own_question(9, "one"));
+        assert!(
+            !events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Confirm { .. })),
+            "{out:?}"
+        );
+        assert_eq!(
+            approvals(&out),
+            vec![json!({"confirm_id": 9, "approve": true})]
+        );
+    }
+
+    #[test]
+    fn a_silence_submit_still_asks() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        message_send(&s.input(Input::Tick(secs(20.0)))).unwrap();
+        let out = s.incoming(own_question(9, "one"));
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Confirm { .. })),
+            "{out:?}"
+        );
+        assert!(approvals(&out).is_empty());
     }
 
     #[test]
