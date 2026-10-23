@@ -16,15 +16,17 @@ log = "0.4"
 # `cpal`: the default input and output devices; the version voicexn-tty and
 # libmobile use.
 cpal = { version = "0.18.2", optional = true }
-# `morph`: libmorph's Sink and Source, at the revision libvoicexn pins.
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "bb0174d14f77e4b54a250e78293b3a9cb4a6617a", default-features = false, optional = true }
+# `morph`: libmorph's Sink and Source types, at the companion app's
+# revision (libmorph 0.3.1). The adapters are in src/morph.rs, so
+# libvoicexn's own `morph` feature, and its older libmorph, stay off.
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, optional = true }
 
 [features]
 default = []
 # Opens the default devices (companion-tty, and the libmorph desktop window).
 cpal = ["dep:cpal"]
-# libmorph's Source and Sink through libvoicexn's morph adapters (Android).
-morph = ["dep:libmorph", "libvoicexn/morph"]
+# libmorph's Source and Sink, through this crate's adapters (Android).
+morph = ["dep:libmorph"]
 
 [dev-dependencies]
 env_logger = "0.11"

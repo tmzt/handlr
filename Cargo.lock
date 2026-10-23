@@ -2179,8 +2179,8 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libdevice"
-version = "0.1.0"
-source = "git+https://github.com/tmzt/libdevice#b27ba72a52bbf0567ba25f685f06cc5211aadb7d"
+version = "0.1.1"
+source = "git+https://github.com/tmzt/libdevice#b46963b724cf0451e94d099e26b1e8e7473d3add"
 dependencies = [
  "toml 1.1.8+spec-1.1.0",
 ]
@@ -2250,27 +2250,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
-name = "libmobile"
-version = "0.2.0"
-source = "git+https://github.com/tmzt/libmobile#d7ab0c1e405bcea1d499b2f1983dfdd81ce12c8f"
-dependencies = [
- "android-activity",
- "cpal",
- "jni",
- "log",
- "ndk",
- "raw-window-handle",
-]
-
-[[package]]
 name = "libmorph"
-version = "0.3.0"
-source = "git+https://github.com/tmzt/libmorph?rev=bb0174d14f77e4b54a250e78293b3a9cb4a6617a#bb0174d14f77e4b54a250e78293b3a9cb4a6617a"
+version = "0.3.1"
+source = "git+https://github.com/tmzt/libmorph?rev=568cf953f4e3de823f9d44cc58275d334265607a#568cf953f4e3de823f9d44cc58275d334265607a"
 dependencies = [
  "block2 0.5.1",
- "cpal",
  "libdevice",
- "libmobile",
  "log",
  "objc2 0.5.3",
  "objc2-app-kit",
@@ -2300,7 +2285,6 @@ version = "0.2.0"
 source = "git+https://github.com/tmzt/libvoicexn?rev=32b8032082997a34190b458f79716d998a0d850a#32b8032082997a34190b458f79716d998a0d850a"
 dependencies = [
  "earshot",
- "libmorph",
  "log",
  "ptts",
  "rtrb",

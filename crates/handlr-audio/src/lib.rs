@@ -18,12 +18,14 @@
 //! [`Playback::fill`]. [`AudioSession::spawn`] hands them to the caller;
 //! with `cpal`, [`AudioSession::open_default`] opens the default devices
 //! with them, and with `morph`, [`AudioSession::spawn_morph`] turns them
-//! into a libmorph `Sink` and `Source`.
+//! into a libmorph `Sink` and `Source` (the adapters in `morph.rs`).
 //!
 //! The mapping itself is in [`pump`], with no devices or models.
 
 #[cfg(feature = "cpal")]
 mod devices;
+#[cfg(feature = "morph")]
+mod morph;
 mod playback;
 pub mod pump;
 
@@ -187,8 +189,8 @@ impl AudioSession {
     }
 
     /// Starts the session for libmorph's audio: a `Sink` for
-    /// `Audio::add_sink` in `capture`'s format, through libvoicexn's
-    /// `morph` adapter, and a `Source` for a speaker in `output`.
+    /// `Audio::add_sink` in `capture`'s format, and a `Source` for a speaker
+    /// in `output`.
     #[cfg(feature = "morph")]
     pub fn spawn_morph(
         config: AudioConfig,
@@ -199,9 +201,8 @@ impl AudioSession {
             rate: capture.sample_rate,
             channels: capture.channels,
         };
-        let (session, mic, mut playback) = Self::spawn(config, input, output);
-        let source: libmorph::Source = Box::new(move |out: &mut [f32]| playback.fill(out));
-        (session, libvoicexn::morph::sink(mic), source)
+        let (session, mic, playback) = Self::spawn(config, input, output);
+        (session, morph::sink(mic), morph::source(playback))
     }
 
     /// Acts on a companion event. Events that are not the audio's are
