@@ -904,3 +904,13 @@ as its text, a path as "the" and the words of its last part
 plan", without the date, sequence or extension), inline code as its words
 (`AgentInfo.asking` is "agent info asking"), a number or version as it is,
 and a commit hash not at all. Part of the read aloud of the 15:11 entry.
+
+## 2026-10-23 15:49 EDT — read aloud: skip while speaking
+
+The owner: "tapping the play while it's speaking should stop the current
+playback (skip). we should probably switch the glyph to the >> glyph while
+speaking"; "or |> if we have it". With read aloud on, while something is
+being said the play button shows `▶│` (the terminal face has no ⏭ or ⏩)
+and a tap is `Input::Skip`: the client stops the speech
+(`Event::StopSpeaking`) and the next held reply follows. When nothing is
+being said, a tap turns read aloud on or off as before.
