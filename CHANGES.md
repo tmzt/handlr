@@ -611,3 +611,23 @@ owner asked. It's a separate workspace, so the root build skips it.
 **Google Lens** reads `https` QR codes but ignored `handlr://` ones, and
 also a plain-text one. The owner chose to wait for the scheme
 registration.
+
+## 2026-10-23 00:28 EDT — the Gemini key file refuses JSON; service-account auth was lost
+
+**The key file now refuses anything that isn't an API key.** An API key is
+one token with no spaces or line breaks, at most 256 characters.
+`.private/gemini_api_key` had been made a symlink to a service-account
+JSON, which would have been read as an API key. The JSON is now refused
+before any request is built, and the error never quotes it.
+
+**A regression found while checking this.** handlr once authenticated to
+Gemini with a service account: `febf29c` and `4892d5d` used `gcp_auth`,
+then `e3465a1` moved that into libgenai. The interim libinfer fix of 17:11
+EDT, and plan 20261022_07's move to `gemini-rust` 1.7, dropped it, because
+that library only sends an API key.
+
+The owner's credential is a service account
+(`.private/service_credentials.json`). Restoring service-account auth
+changes plan 07, so it waits on the owner. First, a check run by the owner
+must show which endpoint the credential works with: Vertex AI, or the
+Gemini API over OAuth.
