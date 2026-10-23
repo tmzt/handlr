@@ -72,13 +72,32 @@ pub enum Event {
     Arm,
     /// A confirmation is waiting for the user's answer. Its `text` is also
     /// given as [`Event::Say`]. `phrase` is empty when the daemon sent none.
+    /// For its card (plan 20261023_01, section 4): `command`, `agent` (the
+    /// agent's shown name, else its herdr name) and `project`; `label` is
+    /// the handle, which is shown and never spoken.
     Confirm {
+        confirm_id: u64,
         text: String,
         label: Option<String>,
         phrase: String,
+        command: String,
+        agent: String,
+        project: Option<String>,
+    },
+    /// The user answered a confirmation; the reply is on its way.
+    Answered {
+        confirm_id: u64,
+        approve: bool,
+    },
+    /// The daemon refused an answer (a wrong nonce says how many tries
+    /// are left). The confirmation is no longer asked.
+    ReplyFailed {
+        confirm_id: u64,
+        message: String,
     },
     /// A confirmation ended, with plan 01's outcome (`sent`, `denied` …).
     Resolved {
+        confirm_id: u64,
         outcome: String,
     },
     /// A turn ended. `stopped` are the spoken names of the agents its
@@ -134,7 +153,7 @@ enum Sent {
     Hello,
     Turn(u64),
     Interrupt,
-    ConfirmReply,
+    ConfirmReply(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,6 +179,9 @@ struct Confirmation {
     text: String,
     label: Option<String>,
     phrase: String,
+    command: String,
+    agent: String,
+    project: Option<String>,
 }
 
 /// The client's state (decision 3). The plan's states map onto it as:
@@ -344,7 +366,15 @@ impl State {
             approve,
             nonce: None,
         };
-        out.push(self.request(methods::CONFIRM_REPLY, params, Sent::ConfirmReply));
+        out.push(event(Event::Answered {
+            confirm_id: confirm.id,
+            approve,
+        }));
+        out.push(self.request(
+            methods::CONFIRM_REPLY,
+            params,
+            Sent::ConfirmReply(confirm.id),
+        ));
         if let Some(text) = then {
             if self.turn.is_some() {
                 self.deferred = Some(text);
@@ -380,7 +410,11 @@ impl State {
                     out.push(event(Event::Error(message)));
                     self.end_turn(id, "error".to_string(), Vec::new(), out);
                 }
-                Sent::Interrupt | Sent::ConfirmReply => out.push(event(Event::Error(message))),
+                Sent::Interrupt => out.push(event(Event::Error(message))),
+                Sent::ConfirmReply(confirm_id) => out.push(event(Event::ReplyFailed {
+                    confirm_id,
+                    message,
+                })),
             }
             return;
         }
@@ -413,7 +447,7 @@ impl State {
                     self.end_turn(id, "error".to_string(), Vec::new(), out);
                 }
             },
-            Sent::Interrupt | Sent::ConfirmReply => {}
+            Sent::Interrupt | Sent::ConfirmReply(_) => {}
         }
     }
 
@@ -487,6 +521,9 @@ impl State {
             text: c.text,
             label: c.handle,
             phrase: c.token.unwrap_or_default(),
+            command: c.command,
+            agent: c.name.unwrap_or(c.agent),
+            project: c.project,
         });
         if self.confirms.len() == 1 {
             self.ask_next(out);
@@ -500,7 +537,10 @@ impl State {
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
-        out.push(event(Event::Resolved { outcome }));
+        out.push(event(Event::Resolved {
+            confirm_id: r.confirm_id,
+            outcome,
+        }));
         if was_asked {
             self.ask_next(out);
         }
@@ -511,9 +551,13 @@ impl State {
     fn ask_next(&mut self, out: &mut Vec<Output>) {
         if let Some(c) = self.confirms.front() {
             out.push(event(Event::Confirm {
+                confirm_id: c.id,
                 text: c.text.clone(),
                 label: c.label.clone(),
                 phrase: c.phrase.clone(),
+                command: c.command.clone(),
+                agent: c.agent.clone(),
+                project: c.project.clone(),
             }));
             out.push(event(Event::Say(c.text.clone())));
         }
@@ -616,6 +660,7 @@ mod tests {
             "confirm.requested",
             json!({
                 "confirm_id": id, "pane_id": "w2:pZ", "agent": "claude",
+                "name": "Claude", "project": "handlr",
                 "command": "continue", "requested_by": "companion:test",
                 "label": "keep-going", "phrase": "copper-lantern-ninety",
                 "text": "Approve sending \"continue\" to Claude? For keep going."
@@ -814,9 +859,13 @@ mod tests {
             events(&out),
             vec![
                 Event::Confirm {
+                    confirm_id: 7,
                     text: text.into(),
                     label: Some("keep-going".into()),
-                    phrase: "copper-lantern-ninety".into()
+                    phrase: "copper-lantern-ninety".into(),
+                    command: "continue".into(),
+                    agent: "Claude".into(),
+                    project: Some("handlr".into()),
                 },
                 say(text),
             ]
@@ -864,6 +913,31 @@ mod tests {
     }
 
     #[test]
+    fn answers_and_refusals_are_told_to_the_card() {
+        let mut s = confirming();
+        let out = s.input(Input::Utterance("approve".into()));
+        assert_eq!(
+            events(&out),
+            vec![Event::Answered {
+                confirm_id: 7,
+                approve: true
+            }]
+        );
+        let reply = sent(&out)[0].id.clone();
+        let out = s.incoming(Incoming::Response(Response::err(
+            Some(reply),
+            libhandlr_proto::ErrorObject::new(-32008, "wrong nonce; 4 attempt(s) left"),
+        )));
+        assert_eq!(
+            events(&out),
+            vec![Event::ReplyFailed {
+                confirm_id: 7,
+                message: "wrong nonce; 4 attempt(s) left (-32008)".into()
+            }]
+        );
+    }
+
+    #[test]
     fn the_buttons_answer_without_matching() {
         let mut s = confirming();
         let out = s.input(Input::Approve);
@@ -907,6 +981,7 @@ mod tests {
         assert_eq!(
             evs[0],
             Event::Resolved {
+                confirm_id: 7,
                 outcome: "expired".into()
             }
         );
@@ -956,7 +1031,16 @@ mod tests {
         let mut s = confirming();
         assert!(s.incoming(notice("one")).is_empty());
         let out = s.input(Input::Utterance("approve".into()));
-        assert_eq!(events(&out), vec![say("one")]);
+        assert_eq!(
+            events(&out),
+            vec![
+                Event::Answered {
+                    confirm_id: 7,
+                    approve: true
+                },
+                say("one")
+            ]
+        );
     }
 
     #[test]

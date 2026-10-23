@@ -105,6 +105,7 @@ fn print_event(event: Event) {
             text,
             label,
             phrase,
+            ..
         } => {
             let label = label.map(|l| format!(" [{l}]")).unwrap_or_default();
             println!("? {text}{label} {phrase}");
@@ -121,7 +122,11 @@ fn print_event(event: Event) {
         Event::PairFailed(why) => println!("! pairing failed: {why}"),
         Event::StopSpeaking => println!("* stop speaking"),
         Event::Arm => println!("* listening"),
-        Event::Resolved { outcome } => println!("* confirmation {outcome}"),
+        Event::Answered { approve, .. } => {
+            println!("* {}", if approve { "approving" } else { "denying" })
+        }
+        Event::ReplyFailed { message, .. } => println!("! {message}"),
+        Event::Resolved { outcome, .. } => println!("* confirmation {outcome}"),
         Event::TurnEnded { outcome, stopped } => {
             if stopped.is_empty() {
                 println!("* turn {outcome}");
