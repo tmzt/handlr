@@ -116,6 +116,8 @@ pub struct Pump {
     speaking: bool,
     /// The last `Listening` given.
     listening: bool,
+    /// The last `Voice` given.
+    voice: bool,
 }
 
 impl Pump {
@@ -155,6 +157,12 @@ impl Pump {
                 if listening != self.listening {
                     self.listening = listening;
                     out.push(AudioEvent::Input(Input::Listening(listening)));
+                }
+                // Voice is the gate open on speech; armed and waiting is not.
+                let voice = state == GateState::Open;
+                if voice != self.voice {
+                    self.voice = voice;
+                    out.push(AudioEvent::Input(Input::Voice(voice)));
                 }
                 out
             }
@@ -327,8 +335,14 @@ mod tests {
         let armed = pump.on_stt(SttEvent::Gate(GateState::Armed));
         assert_eq!(armed[0], AudioEvent::Gate(GateState::Armed));
         assert_eq!(inputs(&armed), vec![Input::Listening(true)]);
-        assert!(inputs(&pump.on_stt(SttEvent::Gate(GateState::Open))).is_empty());
-        assert!(inputs(&pump.on_stt(SttEvent::Gate(GateState::Closing))).is_empty());
+        assert_eq!(
+            inputs(&pump.on_stt(SttEvent::Gate(GateState::Open))),
+            vec![Input::Voice(true)]
+        );
+        assert_eq!(
+            inputs(&pump.on_stt(SttEvent::Gate(GateState::Closing))),
+            vec![Input::Voice(false)]
+        );
         let idle = pump.on_stt(SttEvent::Gate(GateState::Idle));
         assert_eq!(inputs(&idle), vec![Input::Listening(false)]);
         // An arm that times out is still a change, and back.
