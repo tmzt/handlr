@@ -845,7 +845,7 @@ impl AgentScreen {
         let pad = PAD * s;
         let header = Rect::new(0.0, 0.0, l.w, l.top + HEADER_H * s);
         // The bottom row controls the audio: play at the left and record at
-        // the right, square. While a message is taken, play becomes send
+        // the right, square. While a message is taken, record becomes send
         // and a cancel sits in the middle. Replying to a card, the row is
         // in that card instead, and the screen's is hidden.
         let row_bottom = l.h - l.bottom - 16.0 * s;
@@ -1739,7 +1739,10 @@ mod tests {
         ];
         a.set_dictation(Some(lines));
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(hits, [AgentHit::Submit, AgentHit::Clear, AgentHit::Message]);
+        assert_eq!(
+            hits,
+            [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
+        );
         let card = a.frame().dictation.clone().expect("the card");
         assert!(card.rows.iter().any(|r| r.text == "please go on"));
         let v = a.frame().viewport;
@@ -1975,8 +1978,11 @@ mod tests {
         a.set_dictation(Some(said("please go on")));
         let f = a.frame().clone();
         let hits: Vec<AgentHit> = f.buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(hits, [AgentHit::Submit, AgentHit::Clear, AgentHit::Message]);
-        // Square, play's place, the middle, record's place.
+        assert_eq!(
+            hits,
+            [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
+        );
+        // Square: play, cancel in the middle, send in record's place.
         for b in &f.buttons {
             assert!((b.rect.w - b.rect.h).abs() < 0.5);
         }
@@ -2004,8 +2010,11 @@ mod tests {
         assert!(card.rows.iter().any(|r| r.text.ends_with("is asking")));
         assert!(card.rows.iter().any(|r| r.text == "yes, the second one"));
         let hits: Vec<AgentHit> = card.buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(hits, [AgentHit::Submit, AgentHit::Clear, AgentHit::Message]);
-        let b = card.buttons[0].rect;
+        assert_eq!(
+            hits,
+            [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
+        );
+        let b = card.buttons[2].rect;
         assert_eq!(a.hit(b.x + 5.0, b.y + 5.0), Some(AgentHit::Submit));
         assert!(a.replying_to().is_some());
         // Sent or cancelled: back to play and record.
