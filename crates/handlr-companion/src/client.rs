@@ -1729,7 +1729,8 @@ impl State {
                 }
             },
             Sent::Summarize(serial) => match parse::<common::SpeechSummarizeResult>(result) {
-                Ok(r) => self.summarized(serial, r.spoken, out),
+                // Gemini's version when there is one, else the rules'.
+                Ok(r) => self.summarized(serial, r.summary.or(Some(r.read)), out),
                 Err(e) => {
                     log::warn!("a bad speech.summarize result: {e}");
                     self.summarized(serial, None, out);
@@ -3699,7 +3700,7 @@ mod tests {
         let (mut s, asked, _) = reading(&[PATHS]);
         let out = s.incoming(response(
             asked[0].id.clone(),
-            json!({"spoken": "I changed three files: the speech the mod the common", "complex": true}),
+            json!({"read": "I changed three files: the speech the mod the common", "complex": true}),
         ));
         assert_eq!(
             said(&out),
@@ -3758,7 +3759,7 @@ mod tests {
         assert!(said(&out).is_empty());
         let out = s.incoming(response(
             asked[0].id.clone(),
-            json!({"spoken": PLAIN, "complex": false}),
+            json!({"read": PLAIN, "complex": false}),
         ));
         assert_eq!(said(&out), [PLAIN]);
     }
@@ -3772,12 +3773,12 @@ mod tests {
         // The second answers first: it waits for the first.
         let out = s.incoming(response(
             asked[1].id.clone(),
-            json!({"spoken": "Three files changed.", "complex": true}),
+            json!({"read": "I changed three files.", "summary": "Three files changed.", "complex": true}),
         ));
         assert!(said(&out).is_empty(), "{out:?}");
         let out = s.incoming(response(
             asked[0].id.clone(),
-            json!({"spoken": "Reply text now joins the parts.", "complex": true}),
+            json!({"read": "Done: reply text joins.", "summary": "Reply text now joins the parts.", "complex": true}),
         ));
         assert_eq!(
             said(&out),
@@ -3803,7 +3804,7 @@ mod tests {
         // The second is ready; the first holds it.
         let out = s.incoming(response(
             asked[1].id.clone(),
-            json!({"spoken": PLAIN, "complex": false}),
+            json!({"read": PLAIN, "complex": false}),
         ));
         assert!(said(&out).is_empty());
         assert!(said(&s.input(Input::Tick(secs(209.0)))).is_empty());
@@ -3813,7 +3814,7 @@ mod tests {
         // Its summary arriving late is not read again.
         let out = s.incoming(response(
             asked[0].id.clone(),
-            json!({"spoken": "Three files changed.", "complex": true}),
+            json!({"read": "I changed three files.", "summary": "Three files changed.", "complex": true}),
         ));
         assert!(said(&out).is_empty());
     }
@@ -3982,7 +3983,7 @@ mod tests {
         let asked = requests(&out, "speech.summarize")[0].clone();
         s.incoming(response(
             asked.id,
-            json!({"spoken": "Built it. Install it on the S23?", "complex": false}),
+            json!({"read": "Built it. Install it on the S23?", "complex": false}),
         ));
         s
     }
