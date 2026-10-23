@@ -2258,8 +2258,8 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmorph"
-version = "0.3.1"
-source = "git+https://github.com/tmzt/libmorph?rev=568cf953f4e3de823f9d44cc58275d334265607a#568cf953f4e3de823f9d44cc58275d334265607a"
+version = "0.3.2"
+source = "git+https://github.com/tmzt/libmorph?rev=cda1be7a73698825239d7c611e1a2aedc2e6d862#cda1be7a73698825239d7c611e1a2aedc2e6d862"
 dependencies = [
  "block2 0.5.1",
  "libdevice",
