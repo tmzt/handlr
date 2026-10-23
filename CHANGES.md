@@ -564,3 +564,50 @@ build on their own: they need the workspace commit that follows them,
 which moves the manifest's paths.
 
 **Still to check live** (step 3), with the owner's Gemini key.
+
+## 2026-10-22 23:53 EDT — plan 20261022_04, step 4 begun: apps/companion on the S23
+
+`apps/companion` is built from libvoicexn's `examples/voicexn` UI, as the
+owner asked. It's a separate workspace, so the root build skips it.
+
+**What it uses:**
+- `handlr-companion` for the connection;
+- `handlr-audio` for speech: cpal on the desktop, libmorph on Android;
+- libmorph's key store for the Noise key, under the name `noise.static`
+  with flags 0, which is StrongBox on the S23;
+- its secure store for the server record.
+
+**What was checked on the S23:**
+- it installs and starts;
+- it makes a key in the key store and keeps it across restarts;
+- it shows and logs its device code.
+
+**Departures from plan 04:**
+- **handlr-audio's `morph` feature** uses its own libmorph Sink/Source
+  adapter, copied from libvoicexn v0.2.0. It no longer turns on
+  `libvoicexn/morph`, which pinned libmorph 0.3.0. The app then has one
+  libmorph, 0.3.1, which has the key store.
+- **Typing the pairing input.** libmorph has no text input on Android,
+  and no paste or Backspace on the desktop. The input therefore comes from
+  `pair.txt` in the app's files directory (read once, then deleted),
+  `--pair` on the desktop, or the on-screen field for typed characters.
+- **No Copy button.** There is no clipboard API in libmorph, libmobile or
+  libcontrols. The device code is on screen and in logcat; it is a public
+  key.
+- **`handlr://` links can't open the app yet.** libmobile already passes
+  the launch Intent on, but libmorph 0.3.1's Android runner drops it.
+  `App::open_url` is ready for libmorph's URL-schemes plan (libmorph
+  20261022_07, Draft).
+- **X25519 in the key store** uses curve25519-dalek 4.1.3, already in the
+  lock, rather than snow's resolver, whose key array is never cleared.
+- **The device name** on Android is `ro.product.model` (`sm-s918u`).
+
+**Not yet checked:**
+- **Desktop:** the Mac's screen was locked and it has no microphone.
+- **S23:** a pairing with a real daemon, a turn, an approval and an
+  interrupt. The phone holds a throwaway server record (`127.0.0.1:9`)
+  from the key test, which a real pairing replaces.
+
+**Google Lens** reads `https` QR codes but ignored `handlr://` ones, and
+also a plain-text one. The owner chose to wait for the scheme
+registration.
