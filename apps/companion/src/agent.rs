@@ -24,7 +24,7 @@
 
 use std::time::Duration;
 
-use handlr_companion::{AgentCard, CardKind};
+use handlr_companion::{AgentCard, CardKind, Suggestion};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
 use libhandlr_proto::common::{Entry, EntryKind, Role};
 use libmorph::TouchPhase;
@@ -40,6 +40,7 @@ pub const FG: [f32; 4] = [0.94, 0.95, 0.96, 1.0];
 pub const DIM: [f32; 4] = [0.50, 0.53, 0.58, 1.0];
 pub const GREEN: [f32; 4] = [0.36, 0.93, 0.45, 1.0];
 pub const RED: [f32; 4] = [1.0, 0.40, 0.40, 1.0];
+pub const YELLOW: [f32; 4] = [1.0, 0.82, 0.30, 1.0];
 pub const BAND: [f32; 4] = [0.18, 0.19, 0.21, 1.0];
 const CARD_BG: [f32; 4] = [0.11, 0.12, 0.17, 1.0];
 const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
@@ -75,6 +76,19 @@ const ACTION_H: f32 = 44.0;
 const BUTTON_H: f32 = 52.0;
 const HEADER_H: f32 = 64.0;
 const BAR_H: f32 = 40.0;
+/// The suggestion row's height and type size, and the back glyph's tap
+/// width at the header's left.
+const SUGGEST_H: f32 = 36.0;
+const SUGGEST_PT: f32 = 18.0;
+const BACK_W: f32 = 44.0;
+/// The take-a-message button's width at the bottom right, and its record
+/// dot. A centred dot stands in for a microphone glyph, which no bundled
+/// atlas has yet (a microphone icon is for later).
+const MIC_W: f32 = 96.0;
+const DOT: f32 = 18.0;
+const DOT_RED: [f32; 4] = [0.95, 0.25, 0.25, 1.0];
+/// The back glyph, from the terminal face (Roboto here is ASCII only).
+const BACK_GLYPH: &str = "\u{2039}";
 /// Lines of a tool result shown: one, or a diff's or an error's first few.
 const RESULT_LINES: usize = 12;
 const ERROR_LINES: usize = 4;
@@ -192,6 +206,8 @@ pub enum AgentHit {
     Message,
     Approve(u64),
     Deny(u64),
+    /// A suggested response, in the row above the buttons or a card.
+    Suggest(Suggestion),
     /// The pinned bar: jump to its card.
     Pin,
     /// The dictation buttons, while a message is taken from the view.
@@ -321,7 +337,11 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
             (AgentHit::Approve(id), "Approve", APPROVE_BG),
             (AgentHit::Deny(id), "Deny", DENY_BG),
         ],
-        (CardKind::Question, _) => vec![(AgentHit::Message, "Take a message", MESSAGE_BG)],
+        (CardKind::Question, _) => vec![
+            (AgentHit::Suggest(Suggestion::Yes), "Yes", APPROVE_BG),
+            (AgentHit::Suggest(Suggestion::No), "No", DENY_BG),
+            (AgentHit::Message, "", MESSAGE_BG),
+        ],
         _ => vec![],
     }
 }
@@ -522,6 +542,28 @@ pub struct Frame {
     /// The dictation card, while a message is taken from the view.
     pub dictation: Option<Flow>,
     pub buttons: Vec<FlowButton>,
+    /// The back glyph's tap area, at the header's left.
+    pub back: Rect,
+    /// The suggested responses, as plain coloured text above the buttons.
+    pub suggestions: Vec<Suggested>,
+}
+
+/// A suggested response as placed: its tap area and its text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Suggested {
+    pub hit: AgentHit,
+    pub rect: Rect,
+    pub label: &'static str,
+    pub color: [f32; 4],
+}
+
+/// A suggestion's colour: yes green, no red, the commands yellow.
+pub fn suggestion_colour(s: Suggestion) -> [f32; 4] {
+    match s {
+        Suggestion::Yes => GREEN,
+        Suggestion::No => RED,
+        Suggestion::Continue | Suggestion::Compact => YELLOW,
+    }
 }
 
 /// The pinned card as placed.
@@ -717,31 +759,51 @@ impl AgentScreen {
         let header = Rect::new(0.0, 0.0, l.w, l.top + HEADER_H * s);
         let buttons_top = l.h - l.bottom - 16.0 * s - BUTTON_H * s;
         let gap = 12.0 * s;
-        let row: Vec<(AgentHit, &'static str, [f32; 4])> = if self.dictation.is_some() {
-            vec![
+        // The take-a-message button, always at the bottom right; while
+        // dictating, Submit, Scratch and Clear share the rest of the row.
+        let mic_w = MIC_W * s;
+        let mut buttons = vec![FlowButton {
+            hit: AgentHit::Message,
+            rect: Rect::new(l.w - pad - mic_w, buttons_top, mic_w, BUTTON_H * s),
+            label: "",
+            bg: MESSAGE_BG,
+        }];
+        if self.dictation.is_some() {
+            let row = [
                 (AgentHit::Submit, "Submit", APPROVE_BG),
                 (AgentHit::Scratch, "Scratch", BACK_BG),
                 (AgentHit::Clear, "Clear", DENY_BG),
-            ]
-        } else {
-            vec![
-                (AgentHit::Back, "Back", BACK_BG),
-                (AgentHit::Message, "Take a message", MESSAGE_BG),
-            ]
-        };
-        let n = row.len() as f32;
-        let w = (l.w - 2.0 * pad - gap * (n - 1.0)) / n;
-        let buttons = row
+            ];
+            let n = row.len() as f32;
+            let w = (l.w - 2.0 * pad - mic_w - gap * n) / n;
+            for (i, (hit, label, bg)) in row.into_iter().enumerate() {
+                buttons.push(FlowButton {
+                    hit,
+                    rect: Rect::new(pad + i as f32 * (w + gap), buttons_top, w, BUTTON_H * s),
+                    label,
+                    bg,
+                });
+            }
+        }
+        let back = Rect::new(0.0, l.top, BACK_W * s, HEADER_H * s);
+        let mut above = buttons_top - 12.0 * s;
+        // The suggestions, just above the buttons.
+        let offered = self.suggestions();
+        let slot = (l.w - 2.0 * pad) / 4.0;
+        let row_top = buttons_top - 8.0 * s - SUGGEST_H * s;
+        let suggestions: Vec<Suggested> = offered
             .into_iter()
             .enumerate()
-            .map(|(i, (hit, label, bg))| FlowButton {
-                hit,
-                rect: Rect::new(pad + i as f32 * (w + gap), buttons_top, w, BUTTON_H * s),
-                label,
-                bg,
+            .map(|(i, sg)| Suggested {
+                hit: AgentHit::Suggest(sg),
+                rect: Rect::new(pad + i as f32 * slot, row_top, slot, SUGGEST_H * s),
+                label: sg.label(),
+                color: suggestion_colour(sg),
             })
             .collect();
-        let mut above = buttons_top - 12.0 * s;
+        if !suggestions.is_empty() {
+            above = row_top - 8.0 * s;
+        }
         // The dictation card, above the buttons.
         let dictation = self.dictation.as_ref().map(|lines| {
             let inner = l.w - 4.0 * pad;
@@ -857,6 +919,21 @@ impl AgentScreen {
             pin,
             dictation,
             buttons,
+            back,
+            suggestions,
+        }
+    }
+
+    /// The suggested responses for the row, by the pinned card and the
+    /// status. Those that belong to a card are in it: a question's yes and
+    /// no, an approval's own buttons. None while working or dictating.
+    pub fn suggestions(&self) -> Vec<Suggestion> {
+        if self.dictation.is_some() || self.status == "working" {
+            return Vec::new();
+        }
+        match self.pinned_card().filter(|c| c.live).map(|c| c.kind) {
+            Some(CardKind::Broke | CardKind::Finished) => vec![Suggestion::Continue],
+            _ => Vec::new(),
         }
     }
 
@@ -866,6 +943,10 @@ impl AgentScreen {
         self.hits.clear();
         for b in &self.frame.buttons {
             self.hits.push((b.hit, b.rect));
+        }
+        self.hits.push((AgentHit::Back, self.frame.back));
+        for g in &self.frame.suggestions {
+            self.hits.push((g.hit, g.rect));
         }
         if let Some(p) = &self.frame.pin {
             if p.compact {
@@ -1073,11 +1154,22 @@ impl AgentScreen {
         fill(list, self.frame.header, HEADER_BG, 0.0);
         let name_px = NAME_PT * s;
         let top = l.top + 8.0 * s;
-        ctx.draw_text(list, &self.name, [PAD * s, top], name_px, FG);
+        let back = Row {
+            text: if term.is_some() { BACK_GLYPH } else { "<" }.to_string(),
+            x: 0.0,
+            y: 0.0,
+            px: 1.6 * name_px,
+            color: FG,
+            mono: true,
+        };
+        let back_y = l.top + (HEADER_H * s - term_h(back.px)) * 0.5;
+        draw_row(list, ctx, term, &back, [PAD * s, back_y]);
+        let name_x = BACK_W * s;
+        ctx.draw_text(list, &self.name, [name_x, top], name_px, FG);
         ctx.draw_text(
             list,
             &self.status,
-            [PAD * s, top + line_h(name_px)],
+            [name_x, top + line_h(name_px)],
             TOOL_PT * s,
             DIM,
         );
@@ -1101,6 +1193,11 @@ impl AgentScreen {
             for b in &p.flow.buttons {
                 button(list, ctx, b.label, b.rect, b.bg, s);
             }
+        }
+        let sg_px = SUGGEST_PT * s;
+        for g in &self.frame.suggestions {
+            let y = g.rect.y + (g.rect.h - line_h(sg_px)) * 0.5;
+            ctx.draw_text(list, g.label, [g.rect.x + 4.0 * s, y], sg_px, g.color);
         }
         for b in &self.frame.buttons {
             button(list, ctx, b.label, b.rect, b.bg, s);
@@ -1131,6 +1228,19 @@ fn fill(list: &mut DrawList, rect: Rect, color: [f32; 4], radius: f32) {
 }
 
 fn button(list: &mut DrawList, ctx: &DrawContext, label: &str, rect: Rect, bg: [f32; 4], s: f32) {
+    if label.is_empty() {
+        // The take-a-message button: its shape, and the record dot centred.
+        fill(list, rect, bg, 10.0 * s);
+        let d = DOT * s;
+        let dot = Rect::new(
+            rect.x + (rect.w - d) * 0.5,
+            rect.y + (rect.h - d) * 0.5,
+            d,
+            d,
+        );
+        fill(list, dot, DOT_RED, d * 0.5);
+        return;
+    }
     let mut b = Button::new(label, rect)
         .with_bg(bg)
         .with_text_color(FG)
@@ -1314,7 +1424,15 @@ mod tests {
         assert!(flow.card_y[1] > *flow.entry_y.last().unwrap());
 
         let asking = lay_out_flow(&entries, &[card(CardKind::Question, 4, true)], 1080.0, 2.0);
-        assert_eq!(asking.buttons[0].hit, AgentHit::Message);
+        let hits: Vec<AgentHit> = asking.buttons.iter().map(|b| b.hit).collect();
+        assert_eq!(
+            hits,
+            [
+                AgentHit::Suggest(Suggestion::Yes),
+                AgentHit::Suggest(Suggestion::No),
+                AgentHit::Message
+            ]
+        );
         let finished = lay_out_flow(&entries, &[card(CardKind::Finished, 4, true)], 1080.0, 2.0);
         assert!(finished.buttons.is_empty());
     }
@@ -1587,7 +1705,15 @@ mod tests {
         ];
         a.set_dictation(Some(lines));
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(hits, [AgentHit::Submit, AgentHit::Scratch, AgentHit::Clear]);
+        assert_eq!(
+            hits,
+            [
+                AgentHit::Message,
+                AgentHit::Submit,
+                AgentHit::Scratch,
+                AgentHit::Clear
+            ]
+        );
         let card = a.frame().dictation.clone().expect("the card");
         assert!(card.rows.iter().any(|r| r.text == "please go on"));
         let v = a.frame().viewport;
@@ -1667,5 +1793,72 @@ mod tests {
             None,
         );
         assert!(a.draw(&mut list, &ctx, None));
+    }
+
+    #[test]
+    fn back_is_in_the_header_and_the_message_button_bottom_right() {
+        let a = screen(conversation(3), vec![], None);
+        let f = a.frame();
+        assert!(f.back.y + f.back.h <= f.header.y + f.header.h + 0.5);
+        assert_eq!(
+            a.hit(f.back.x + 10.0, f.back.y + 10.0),
+            Some(AgentHit::Back)
+        );
+        assert_eq!(f.buttons.len(), 1);
+        let mic = f.buttons[0].rect;
+        assert_eq!(f.buttons[0].hit, AgentHit::Message);
+        assert!((mic.x + mic.w - (PHONE.w - PAD * PHONE.scale)).abs() < 0.5);
+        assert!(mic.y + mic.h <= PHONE.h - PHONE.bottom);
+    }
+
+    #[test]
+    fn suggestions_follow_the_pinned_card() {
+        // Finished: cont, in yellow, above the buttons.
+        let mut a = screen(
+            conversation(3),
+            vec![card(CardKind::Finished, 3, true)],
+            Some(0),
+        );
+        a.status = "idle".into();
+        a.settle();
+        let row = &a.frame().suggestions;
+        assert_eq!(row.len(), 1);
+        assert_eq!(row[0].hit, AgentHit::Suggest(Suggestion::Continue));
+        assert_eq!((row[0].label, row[0].color), ("cont", YELLOW));
+        assert!(row[0].rect.y + row[0].rect.h <= a.frame().buttons[0].rect.y);
+        let r = row[0].rect;
+        assert_eq!(
+            a.hit(r.x + 5.0, r.y + 5.0),
+            Some(AgentHit::Suggest(Suggestion::Continue))
+        );
+        // A question's yes and no are in its card, not the row.
+        let a = screen(
+            conversation(3),
+            vec![card(CardKind::Question, 3, true)],
+            Some(0),
+        );
+        assert!(a.frame().suggestions.is_empty());
+        // Working: none.
+        let mut a = screen(
+            conversation(3),
+            vec![card(CardKind::Broke, 3, true)],
+            Some(0),
+        );
+        assert_eq!(a.suggestions(), [Suggestion::Continue]);
+        a.status = "working".into();
+        assert!(a.suggestions().is_empty());
+        assert_eq!(suggestion_colour(Suggestion::Yes), GREEN);
+        assert_eq!(suggestion_colour(Suggestion::No), RED);
+    }
+
+    #[test]
+    fn the_back_glyph_is_in_the_terminal_face() {
+        use libmsdf::font::{FontAtlas, NOTO_SANS_MONO_ATLAS, TERMINAL_SYMBOLS_ATLAS};
+        let text = FontAtlas::from_bytes(NOTO_SANS_MONO_ATLAS).expect("parses");
+        let page = FontAtlas::from_bytes(TERMINAL_SYMBOLS_ATLAS).expect("parses");
+        let shaper = TerminalShaper::new(&text, &page).expect("the atlases agree");
+        let line = shaper.line(BACK_GLYPH, GlyphStyle::Regular);
+        assert_eq!(line.columns, 1);
+        assert!(!line.segments.is_empty(), "{BACK_GLYPH} has a glyph");
     }
 }

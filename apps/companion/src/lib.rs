@@ -481,6 +481,7 @@ impl App {
                     agent.jump_to_pin();
                 }
             }
+            AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
             AgentHit::Submit => self.send(Input::Submit),
             AgentHit::Scratch => self.send(Input::Scratch),
             AgentHit::Clear => self.send(Input::Clear),
