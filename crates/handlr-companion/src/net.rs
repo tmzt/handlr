@@ -34,7 +34,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-use crate::client::{Event, Input, Output, State};
+use crate::client::{Event, Input, Output, State, TICK};
 use crate::keys::{KeyStore, ServerRecord};
 use crate::scan::{self, Pairing};
 use crate::CompanionConfig;
@@ -102,8 +102,11 @@ pub(crate) fn run(
             return;
         }
     };
+    let mut state = State::new(config.client.clone());
+    state.set_dictation_silence(config.dictation_silence);
     let net = Net {
-        state: State::new(config.client.clone()),
+        state,
+        start: tokio::time::Instant::now(),
         backoff: Backoff::new(config.backoff_initial, config.backoff_max),
         config,
         keys,
@@ -122,6 +125,8 @@ struct Net {
     /// `None` on the local socket.
     server: Option<ServerRecord>,
     state: State,
+    /// The clock [`Input::Tick`] carries: the time since the thread began.
+    start: tokio::time::Instant,
     backoff: Backoff,
     /// While pairing: until when to retry at [`PAIRING_RETRY`].
     pairing_until: Option<tokio::time::Instant>,
@@ -218,7 +223,8 @@ impl Net {
                             }
                         }
                         Some(input) => {
-                            let outputs = self.state.input(input);
+                            let mut outputs = self.state.input(self.tick());
+                            outputs.extend(self.state.input(input));
                             self.emit_offline(outputs);
                         }
                         None => return,
@@ -226,6 +232,12 @@ impl Net {
                 }
             }
         }
+    }
+
+    /// The clock now, as an input. Given before every input and message,
+    /// so the state's times are those of what it is told.
+    fn tick(&self) -> Input {
+        Input::Tick(self.start.elapsed())
     }
 
     fn emit(&self, event: Event) {
@@ -459,17 +471,24 @@ impl Net {
                 end = Some(End::Closed);
             }
         }
+        let mut ticks = tokio::time::interval(TICK);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         while end.is_none() {
             tokio::select! {
+                _ = ticks.tick() => {
+                    let outputs = self.state.input(self.tick());
+                    end = self.carry_out(outputs, &mut write).await;
+                }
                 message = messages.recv() => match message {
                     Some(message) => match serde_json::from_slice::<Incoming>(&message) {
                         Ok(message) => {
+                            let mut outputs = self.state.input(self.tick());
                             if is_paired_hello(&message) {
                                 self.emit(Event::Paired {
                                     name: self.config.device_name.clone(),
                                 });
                             }
-                            let outputs = self.state.incoming(message);
+                            outputs.extend(self.state.incoming(message));
                             self.persist_session();
                             end = self.carry_out(outputs, &mut write).await;
                         }
@@ -484,7 +503,8 @@ impl Net {
                         }
                     }
                     Some(input) => {
-                        let outputs = self.state.input(input);
+                        let mut outputs = self.state.input(self.tick());
+                        outputs.extend(self.state.input(input));
                         end = self.carry_out(outputs, &mut write).await;
                     }
                     None => end = Some(End::AppGone),

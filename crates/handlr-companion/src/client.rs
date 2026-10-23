@@ -6,8 +6,15 @@
 //! app, a message from the daemon, or the connection opening or closing,
 //! and carries out the [`Output`]s it returns: events for the app, requests
 //! for the daemon, and closing the connection.
+//!
+//! Time comes in as data too: [`Input::Tick`] carries the driver's
+//! monotonic clock, which the dictation mode's silence timer reads (plan
+//! 20261023_02, the 01:57 EDT amendment). The `net` thread ticks before
+//! every input and message and every [`TICK`]; a test gives any times it
+//! likes.
 
 use std::collections::{HashMap, VecDeque};
+use std::time::Duration;
 
 use libhandlr_proto::common::{self, methods, protocols};
 use libhandlr_proto::{Id, Incoming, Notification, Request, Response};
@@ -36,6 +43,70 @@ pub enum Input {
     Speaking(bool),
     /// The STT gate opened (`true`) or went idle (`false`).
     Listening(bool),
+    /// The driver's monotonic clock: the time since any fixed start. It
+    /// never goes back; an earlier time is taken as the latest one.
+    Tick(Duration),
+    /// The Start button: take a message (plan 20261023_02, decision 2).
+    StartDictation,
+    /// The Submit button: submit the message now.
+    Submit,
+    /// The Clear button: discard the message and leave the mode.
+    Clear,
+    /// The Scratch button: remove the last utterance.
+    Scratch,
+}
+
+/// How often the `net` thread ticks while connected.
+pub const TICK: Duration = Duration::from_millis(250);
+
+/// The silence that submits a dictated message by default, and the least
+/// it may be set to (plan 20261023_02, the 01:57 EDT amendment).
+pub const DICTATION_SILENCE: Duration = Duration::from_secs(8);
+/// The longest dictated message, in characters (decision 1).
+pub const MESSAGE_CAP: usize = 4000;
+/// The countdown shown before a silence submits, in seconds.
+pub const COUNTDOWN_SECS: u64 = 3;
+
+/// Where a dictated message stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictationPhase {
+    /// Utterances are added to the message.
+    Collecting,
+    /// Submitted: `agents.send` is on its way.
+    Submitting,
+    /// The daemon asks for approval; "deny" resumes collecting.
+    Confirming,
+}
+
+/// The dictation card (plan 20261023_02, decisions 3–5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dictation {
+    /// The mode is on. Off, the rest is empty and the card goes away.
+    pub active: bool,
+    /// The message so far: the utterances, joined with a space.
+    pub text: String,
+    /// The agent it goes to, fixed when the mode started. `None` (or one
+    /// without an agent) and Submit is refused.
+    pub target: Option<common::FocusInfo>,
+    /// The shown name of herdr's focus, when it has moved off the target.
+    pub focus_moved: Option<String>,
+    pub phase: DictationPhase,
+    /// Seconds left before the silence submits, for the last
+    /// [`COUNTDOWN_SECS`].
+    pub submit_in: Option<u32>,
+}
+
+impl Dictation {
+    fn off() -> Self {
+        Dictation {
+            active: false,
+            text: String::new(),
+            target: None,
+            focus_moved: None,
+            phase: DictationPhase::Collecting,
+            submit_in: None,
+        }
+    }
 }
 
 /// What the client tells the app.
@@ -108,6 +179,10 @@ pub enum Event {
     },
     /// The STT vocabulary.
     Vocabulary(Vec<String>),
+    /// herdr's focus changed, or was first learned.
+    Focus(Option<common::FocusInfo>),
+    /// The dictation card changed.
+    Dictation(Dictation),
     Error(String),
 }
 
@@ -137,6 +212,61 @@ pub fn is_approval(utterance: &str) -> bool {
     matches!(kept.trim(), "approve" | "approved")
 }
 
+/// An utterance as control words are matched (plan 20261023_02, decision
+/// 2, as "approve" is): lowercased, everything but letters, digits and
+/// spaces dropped, spaces folded.
+pub fn control_words(utterance: &str) -> String {
+    utterance
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Whether an utterance starts dictation: "take a message" or "dictate".
+pub fn is_dictation_start(utterance: &str) -> bool {
+    matches!(
+        control_words(utterance).as_str(),
+        "take a message" | "dictate"
+    )
+}
+
+/// A dictated message's handle, under plan 20261023_01's rules: `message`,
+/// the agent, its project and the message's first two words, lowercased,
+/// joined with `-`, as many whole words as fit in 64 characters. The daemon
+/// settles it as any other.
+pub fn message_handle(target: &common::FocusInfo, text: &str) -> String {
+    let mut words: Vec<String> = vec!["message".to_string()];
+    let split = |s: &str| -> Vec<String> {
+        s.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect()
+    };
+    for part in [target.agent.as_deref(), target.project.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        words.extend(split(part));
+    }
+    words.extend(split(text).into_iter().take(2));
+    let mut out = String::new();
+    for w in words {
+        let extra = if out.is_empty() { w.len() } else { w.len() + 1 };
+        if out.len() + extra > 64 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push('-');
+        }
+        out.push_str(&w);
+    }
+    out
+}
+
 /// "Stopped the handlr agent.", "Stopped A and B.", "Stopped A, B and C."
 pub fn stopped_sentence(names: &[String]) -> String {
     let joined = match names {
@@ -148,12 +278,18 @@ pub fn stopped_sentence(names: &[String]) -> String {
 }
 
 /// What a request we sent was, so its response can be read.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Sent {
     Hello,
     Turn(u64),
     Interrupt,
     ConfirmReply(u64),
+    /// `agents.list`, for herdr's focus.
+    List,
+    /// `agents.focus`, from "focus <agent>" while dictating.
+    Focus(String),
+    /// `agents.send` of a dictated message.
+    Message,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -184,6 +320,44 @@ struct Confirmation {
     project: Option<String>,
 }
 
+/// What [`Input::Speaking`] means for a "read it back".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadBack {
+    No,
+    /// Said; the speech has not started.
+    Asked,
+    Speaking,
+}
+
+/// The dictation mode (plan 20261023_02).
+#[derive(Debug, Clone)]
+struct Dictating {
+    parts: Vec<String>,
+    target: Option<common::FocusInfo>,
+    /// The target is the focus as last known; the `agents.list` asked for
+    /// at the start will fix it.
+    refresh_target: bool,
+    phase: DictationPhase,
+    /// The own message's confirmation, once `agents.send` answered.
+    confirm_id: Option<u64>,
+    /// Since when the gate has been closed, for the silence timer. `None`
+    /// while it is open, and after a refused or denied submit until the
+    /// next change.
+    quiet_from: Option<Duration>,
+    read_back: ReadBack,
+}
+
+impl Dictating {
+    fn text(&self) -> String {
+        self.parts.join(" ")
+    }
+
+    /// A target that can be sent to: a pane with an agent.
+    fn has_target(&self) -> bool {
+        self.target.as_ref().is_some_and(|t| t.agent.is_some())
+    }
+}
+
 /// The client's state (decision 3). The plan's states map onto it as:
 /// - `Idle`: online, no turn, no confirmation;
 /// - `Waiting`: a turn is running and no confirmation is pending;
@@ -208,6 +382,15 @@ pub struct State {
     speaking: bool,
     listening: bool,
     notices: VecDeque<String>,
+    /// The driver's clock, as last ticked.
+    now: Duration,
+    /// herdr's focus, as last learned.
+    focus: Option<common::FocusInfo>,
+    dictation: Option<Dictating>,
+    /// The silence that submits a message; at least [`DICTATION_SILENCE`].
+    silence: Duration,
+    /// The dictation card as last given.
+    shown: Dictation,
 }
 
 impl State {
@@ -226,7 +409,23 @@ impl State {
             speaking: false,
             listening: false,
             notices: VecDeque::new(),
+            now: Duration::ZERO,
+            focus: None,
+            dictation: None,
+            silence: DICTATION_SILENCE,
+            shown: Dictation::off(),
         }
+    }
+
+    /// Sets the silence that submits a dictated message, raised to
+    /// [`DICTATION_SILENCE`] if shorter.
+    pub fn set_dictation_silence(&mut self, silence: Duration) {
+        self.silence = silence.max(DICTATION_SILENCE);
+    }
+
+    /// The silence that submits a dictated message.
+    pub fn dictation_silence(&self) -> Duration {
+        self.silence
     }
 
     /// Whether `hello` has been answered on the current connection.
@@ -269,6 +468,14 @@ impl State {
         self.sent.clear();
         self.confirms.clear();
         self.deferred = None;
+        // The daemon withdraws what this connection opened; the message is
+        // kept to be submitted again.
+        if let Some(d) = self.dictation.as_mut() {
+            d.phase = DictationPhase::Collecting;
+            d.confirm_id = None;
+            d.quiet_from = None;
+        }
+        self.show_dictation(&mut out);
         if self.turn.take().is_some() {
             out.push(Output::Event(Event::Error(
                 "the connection closed during the turn".to_string(),
@@ -292,18 +499,290 @@ impl State {
             ))),
             Input::Speaking(on) => {
                 self.speaking = on;
+                self.read_back_speaking(on, &mut out);
                 self.flush_notices(&mut out);
             }
             Input::Listening(on) => {
                 self.listening = on;
+                let now = self.now;
+                if let Some(d) = self.dictation.as_mut() {
+                    d.quiet_from = (!on).then_some(now);
+                }
+                self.show_dictation(&mut out);
                 self.flush_notices(&mut out);
             }
+            Input::Tick(now) => self.tick(now, &mut out),
             Input::Tap => self.tap(&mut out),
             Input::Utterance(text) => self.utterance(text, &mut out),
             Input::Approve => self.answer(true, None, &mut out),
             Input::Deny => self.answer(false, None, &mut out),
+            Input::StartDictation => self.start_dictation(&mut out),
+            Input::Submit => self.submit(&mut out),
+            Input::Clear => self.clear_dictation(&mut out),
+            Input::Scratch => self.scratch(&mut out),
         }
         out
+    }
+
+    /// The dictation card as it stands now.
+    pub fn dictation(&self) -> Dictation {
+        let Some(d) = &self.dictation else {
+            return Dictation::off();
+        };
+        let focus_moved = match (&d.target, &self.focus) {
+            (Some(target), Some(focus)) if focus.pane_id != target.pane_id => {
+                Some(focus.name.clone())
+            }
+            _ => None,
+        };
+        let submit_in = self.deadline().and_then(|deadline| {
+            let left = deadline.saturating_sub(self.now);
+            (left <= Duration::from_secs(COUNTDOWN_SECS))
+                .then(|| left.as_millis().div_ceil(1000) as u32)
+        });
+        Dictation {
+            active: true,
+            text: d.text(),
+            target: d.target.clone(),
+            focus_moved,
+            phase: d.phase,
+            submit_in,
+        }
+    }
+
+    /// Gives the dictation card if it changed.
+    fn show_dictation(&mut self, out: &mut Vec<Output>) {
+        let view = self.dictation();
+        if view != self.shown {
+            self.shown = view.clone();
+            out.push(event(Event::Dictation(view)));
+        }
+    }
+
+    /// When the silence submits the message, if it is running: collecting,
+    /// something to submit, the gate closed, and not reading it back.
+    fn deadline(&self) -> Option<Duration> {
+        let d = self.dictation.as_ref()?;
+        let running = d.phase == DictationPhase::Collecting
+            && !d.parts.is_empty()
+            && !self.listening
+            && d.read_back == ReadBack::No;
+        running.then_some(d.quiet_from? + self.silence)
+    }
+
+    fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
+        self.now = self.now.max(now);
+        if self.deadline().is_some_and(|deadline| self.now >= deadline) {
+            log::info!(
+                "dictation: {} s of silence; submitting",
+                self.silence.as_secs()
+            );
+            self.submit(out);
+        }
+        self.show_dictation(out);
+    }
+
+    fn start_dictation(&mut self, out: &mut Vec<Output>) {
+        if self.dictation.is_some() {
+            return;
+        }
+        self.dictation = Some(Dictating {
+            parts: Vec::new(),
+            target: self.focus.clone(),
+            refresh_target: self.online(),
+            phase: DictationPhase::Collecting,
+            confirm_id: None,
+            quiet_from: None,
+            read_back: ReadBack::No,
+        });
+        if self.online() {
+            out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+        }
+        self.show_dictation(out);
+        out.push(event(Event::Arm));
+    }
+
+    fn clear_dictation(&mut self, out: &mut Vec<Output>) {
+        if self.dictation.take().is_some() {
+            self.show_dictation(out);
+        }
+    }
+
+    fn scratch(&mut self, out: &mut Vec<Output>) {
+        let now = self.now;
+        let listening = self.listening;
+        if let Some(d) = self.dictation.as_mut() {
+            d.parts.pop();
+            if !listening {
+                d.quiet_from = Some(now);
+            }
+        }
+        self.show_dictation(out);
+    }
+
+    fn read_back(&mut self, out: &mut Vec<Output>) {
+        let Some(d) = self.dictation.as_mut() else {
+            return;
+        };
+        if d.parts.is_empty() {
+            out.push(event(Event::Say("The message is empty.".to_string())));
+            return;
+        }
+        d.read_back = ReadBack::Asked;
+        let text = d.text();
+        out.push(event(Event::Say(text)));
+        self.show_dictation(out);
+    }
+
+    /// Speech started or ended: a "read it back" ends, the timer starts
+    /// again from its end, and the gate is armed for more.
+    fn read_back_speaking(&mut self, on: bool, out: &mut Vec<Output>) {
+        let now = self.now;
+        let Some(d) = self.dictation.as_mut() else {
+            return;
+        };
+        match (d.read_back, on) {
+            (ReadBack::Asked, true) => d.read_back = ReadBack::Speaking,
+            (ReadBack::Asked | ReadBack::Speaking, false) => {
+                d.read_back = ReadBack::No;
+                d.quiet_from = Some(now);
+                out.push(event(Event::Arm));
+            }
+            _ => {}
+        }
+        self.show_dictation(out);
+    }
+
+    /// Submits the message (decision 5): one `agents.send` of kind
+    /// `message`, which the daemon confirms.
+    fn submit(&mut self, out: &mut Vec<Output>) {
+        let online = self.online();
+        let Some(d) = self.dictation.as_mut() else {
+            return;
+        };
+        if d.phase != DictationPhase::Collecting {
+            return;
+        }
+        // A refused submit waits for the next change before the silence
+        // tries again.
+        d.quiet_from = None;
+        let refusal = if d.parts.is_empty() {
+            Some("The message is empty.")
+        } else if !online {
+            Some("I'm not connected to handlr.")
+        } else {
+            match &d.target {
+                None => Some("No agent is focused. Say focus, and the agent's name."),
+                Some(t) if t.agent.is_none() => {
+                    Some("The focused pane has no agent. Say focus, and the agent's name.")
+                }
+                Some(_) => None,
+            }
+        };
+        if let Some(why) = refusal {
+            out.push(event(Event::Say(why.to_string())));
+            self.show_dictation(out);
+            return;
+        }
+        let target = d.target.clone().expect("checked above");
+        let text = d.text();
+        d.phase = DictationPhase::Submitting;
+        let params = serde_json::json!({
+            "pane_id": target.pane_id,
+            "text": text,
+            "kind": common::SendKind::Message,
+            "handle": message_handle(&target, &text),
+        });
+        out.push(self.request(methods::AGENTS_SEND, params, Sent::Message));
+        self.show_dictation(out);
+    }
+
+    /// An utterance while dictating (decision 2, as amended).
+    fn dictation_utterance(&mut self, text: String, out: &mut Vec<Output>) {
+        let words = control_words(&text);
+        match words.as_str() {
+            "cancel" | "clear" => return self.clear_dictation(out),
+            "scratch that" => return self.scratch(out),
+            "read it back" => return self.read_back(out),
+            "use the focus" => {
+                let focus = self.focus.clone();
+                if let Some(d) = self.dictation.as_mut() {
+                    d.target = focus;
+                    d.refresh_target = false;
+                }
+                self.show_dictation(out);
+                out.push(event(Event::Arm));
+                return;
+            }
+            // Answers with nothing to answer, and the start words again:
+            // never text.
+            "approve" | "approved" | "deny" | "take a message" | "dictate" => return,
+            _ => {}
+        }
+        let Some(d) = self.dictation.as_mut() else {
+            return;
+        };
+        if !d.has_target() && words.starts_with("focus ") && self.link == Link::Online {
+            // "focus <agent>" sets a missing target, through agents.focus.
+            let target = text.trim()[text.trim().find(char::is_whitespace).unwrap_or(0)..]
+                .trim()
+                .trim_end_matches(['.', '?', '!'])
+                .to_string();
+            let params = common::AgentsFocusParams {
+                target_id: target.clone(),
+            };
+            out.push(self.request(methods::AGENTS_FOCUS, params, Sent::Focus(target)));
+            return;
+        }
+        if d.phase == DictationPhase::Submitting {
+            log::debug!("dictation: dropping an utterance while submitting");
+            return;
+        }
+        let joined = d.text().chars().count();
+        let added = text.chars().count() + usize::from(joined > 0);
+        if joined + added > MESSAGE_CAP {
+            out.push(event(Event::Say("The message is full.".to_string())));
+            return;
+        }
+        d.parts.push(text);
+        if !self.listening && d.quiet_from.is_none() {
+            d.quiet_from = Some(self.now);
+        }
+        self.show_dictation(out);
+        // Hands free: listen for the next sentence.
+        out.push(event(Event::Arm));
+    }
+
+    /// herdr's focus, learned from `agents.list` or `focus.changed`. A
+    /// message with no target takes it.
+    fn set_focus(&mut self, focus: Option<common::FocusInfo>, out: &mut Vec<Output>) {
+        if focus != self.focus {
+            self.focus = focus.clone();
+            out.push(event(Event::Focus(focus.clone())));
+        }
+        if let Some(d) = self.dictation.as_mut() {
+            if !d.has_target() || d.refresh_target {
+                d.target = focus;
+            }
+        }
+        self.show_dictation(out);
+    }
+
+    /// The own message's confirmation ended.
+    fn message_resolved(&mut self, outcome: &str, out: &mut Vec<Output>) {
+        if outcome == "sent" {
+            self.dictation = None;
+        } else if let Some(d) = self.dictation.as_mut() {
+            // Denied, expired, failed: the text is kept to be fixed and
+            // submitted again, after the next change.
+            d.phase = DictationPhase::Collecting;
+            d.confirm_id = None;
+            d.quiet_from = None;
+            if outcome == "failed" {
+                out.push(event(Event::Say("Sending the message failed.".to_string())));
+            }
+        }
+        self.show_dictation(out);
     }
 
     /// A message from the daemon.
@@ -345,7 +824,20 @@ impl State {
             out.push(event(Event::Error("not connected to handlr".to_string())));
         } else if !self.confirms.is_empty() {
             let approve = is_approval(&text);
-            self.answer(approve, (!approve).then_some(text), out);
+            if self.dictation.is_some() {
+                // "approve" and "deny" answer; anything else denies, then
+                // is dictation.
+                self.answer(approve, None, out);
+                if !approve && control_words(&text) != "deny" {
+                    self.dictation_utterance(text, out);
+                }
+            } else {
+                self.answer(approve, (!approve).then_some(text), out);
+            }
+        } else if self.dictation.is_some() {
+            self.dictation_utterance(text, out);
+        } else if self.turn.is_none() && is_dictation_start(&text) {
+            self.start_dictation(out);
         } else if self.turn.is_some() {
             // The gate is closed while waiting: this can only be late.
             log::debug!("ignoring an utterance during a turn: {text:?}");
@@ -415,6 +907,25 @@ impl State {
                     confirm_id,
                     message,
                 })),
+                Sent::List => log::warn!("agents.list: {message}"),
+                Sent::Focus(target) => {
+                    log::info!("dictation: focus {target:?}: {message}");
+                    out.push(event(Event::Say(format!("I couldn't focus {target}."))));
+                }
+                Sent::Message => {
+                    // Refused, such as a character outside the filter: the
+                    // message is kept to be fixed.
+                    if let Some(d) = self.dictation.as_mut() {
+                        d.phase = DictationPhase::Collecting;
+                        d.quiet_from = None;
+                    }
+                    out.push(event(Event::Error(message)));
+                    out.push(event(Event::Say(format!(
+                        "I can't send that message. {}",
+                        error.message
+                    ))));
+                    self.show_dictation(out);
+                }
             }
             return;
         }
@@ -430,6 +941,8 @@ impl State {
                         server: hello.server,
                     }));
                     out.push(event(Event::Vocabulary(hello.vocabulary)));
+                    // herdr's focus, for the dictation mode's target.
+                    out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
                 }
                 Err(e) => {
                     let message = format!("a bad hello result: {e}");
@@ -445,6 +958,36 @@ impl State {
                 Err(e) => {
                     out.push(event(Event::Error(format!("a bad turn result: {e}"))));
                     self.end_turn(id, "error".to_string(), Vec::new(), out);
+                }
+            },
+            Sent::List => match parse::<common::AgentsListResult>(result) {
+                Ok(list) => {
+                    self.set_focus(list.focus, out);
+                    if let Some(d) = self.dictation.as_mut() {
+                        d.refresh_target = false;
+                    }
+                }
+                Err(e) => log::warn!("a bad agents.list result: {e}"),
+            },
+            // Focused: learn the focus, which a message without a target
+            // takes.
+            Sent::Focus(_) => {
+                out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+            }
+            Sent::Message => match parse::<common::AgentsSendResult>(result) {
+                Ok(common::AgentsSendResult::Pending { confirm_id, .. }) => {
+                    if let Some(d) = self.dictation.as_mut() {
+                        d.phase = DictationPhase::Confirming;
+                        d.confirm_id = Some(confirm_id);
+                    }
+                    self.show_dictation(out);
+                }
+                Ok(common::AgentsSendResult::Sent) => self.message_resolved("sent", out),
+                Err(e) => {
+                    out.push(event(Event::Error(format!(
+                        "a bad agents.send result: {e}"
+                    ))));
+                    self.message_resolved("failed", out);
                 }
             },
             Sent::Interrupt | Sent::ConfirmReply(_) => {}
@@ -508,6 +1051,11 @@ impl State {
                     out.push(event(Event::Vocabulary(v.vocabulary)));
                 }
             }
+            wire::methods::FOCUS_CHANGED => {
+                if let Some(f) = parse_or_log::<wire::FocusChanged>(note) {
+                    self.set_focus(f.focus, out);
+                }
+            }
             other => log::debug!("ignoring the notification {other}"),
         }
     }
@@ -539,8 +1087,15 @@ impl State {
             .unwrap_or_default();
         out.push(event(Event::Resolved {
             confirm_id: r.confirm_id,
-            outcome,
+            outcome: outcome.clone(),
         }));
+        let own = self
+            .dictation
+            .as_ref()
+            .is_some_and(|d| d.confirm_id == Some(r.confirm_id));
+        if own {
+            self.message_resolved(&outcome, out);
+        }
         if was_asked {
             self.ask_next(out);
         }
@@ -1104,6 +1659,420 @@ mod tests {
             events(&s.input(Input::Pair("handlr1abc".into())))[..],
             [Event::PairFailed(_)]
         ));
+    }
+
+    // ── Dictation (plan 20261023_02, step 3) ─────────────────────────────
+
+    fn secs(s: f64) -> Duration {
+        Duration::from_secs_f64(s)
+    }
+
+    fn focus(pane: &str, agent: Option<&str>, name: &str) -> Value {
+        let mut f = json!({"pane_id": pane, "project": "libmorph", "tab_label": "-ad",
+                           "tab_number": 4, "name": name, "spoken": name});
+        if let Some(agent) = agent {
+            f["agent"] = json!(agent);
+        }
+        f
+    }
+
+    fn claude() -> Value {
+        focus("w2:p4", Some("Claude"), "Claude in libmorph")
+    }
+
+    fn dictation_of(out: &[Output]) -> Option<Dictation> {
+        events(out).into_iter().rev().find_map(|e| match e {
+            Event::Dictation(d) => Some(d),
+            _ => None,
+        })
+    }
+
+    /// Answers the `agents.list` in `out` with `focus`.
+    fn list_answer(s: &mut State, out: &[Output], focus: Value) -> Vec<Output> {
+        let list = sent(out)
+            .into_iter()
+            .find(|r| r.method == "agents.list")
+            .expect("an agents.list")
+            .clone();
+        s.incoming(response(list.id, json!({"agents": [], "focus": focus})))
+    }
+
+    /// Online, focused on Claude in libmorph, dictating, the gate closed at
+    /// 10 s; the clock at 10 s.
+    fn dictating() -> State {
+        let mut s = online();
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        s.input(Input::Tick(secs(10.0)));
+        let out = s.input(Input::Utterance("Take a message.".into()));
+        assert!(events(&out).contains(&Event::Arm), "{out:?}");
+        assert!(!sent(&out).iter().any(|r| r.method == "turn.start"));
+        let card = dictation_of(&out).unwrap();
+        assert!(card.active);
+        assert_eq!(card.target.unwrap().name, "Claude in libmorph");
+        list_answer(&mut s, &out, claude());
+        s
+    }
+
+    /// Says `text` as the audio does: the gate opens at `from`, closes at
+    /// `to`, and the utterance follows.
+    fn speak(s: &mut State, from: f64, to: f64, text: &str) -> Vec<Output> {
+        let mut out = s.input(Input::Tick(secs(from)));
+        out.extend(s.input(Input::Listening(true)));
+        out.extend(s.input(Input::Tick(secs(to))));
+        out.extend(s.input(Input::Listening(false)));
+        out.extend(s.input(Input::Utterance(text.into())));
+        out
+    }
+
+    fn message_send(out: &[Output]) -> Option<Request> {
+        sent(out)
+            .into_iter()
+            .find(|r| r.method == "agents.send")
+            .cloned()
+    }
+
+    #[test]
+    fn utterances_collect_into_one_message() {
+        let mut s = dictating();
+        let out = speak(&mut s, 10.0, 12.0, "Please run the tests.");
+        assert!(sent(&out).is_empty(), "nothing reaches the daemon: {out:?}");
+        // Re-armed for the next sentence.
+        assert!(events(&out).contains(&Event::Arm));
+        speak(&mut s, 13.0, 15.0, "Then send it to me.");
+        let card = s.dictation();
+        assert_eq!(card.text, "Please run the tests. Then send it to me.");
+        assert_eq!(card.phase, DictationPhase::Collecting);
+        // "send it" is only text: there is no spoken submit.
+        assert!(s.dictation().active);
+    }
+
+    #[test]
+    fn the_control_words() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 11.0, "one");
+        speak(&mut s, 11.5, 12.0, "two");
+        speak(&mut s, 12.5, 13.0, "Scratch that.");
+        assert_eq!(s.dictation().text, "one");
+        let out = s.input(Input::Utterance("read it back".into()));
+        assert_eq!(events(&out), vec![say("one")]);
+        assert_eq!(s.dictation().text, "one", "reading changes nothing");
+        // Buttons do the same.
+        s.input(Input::Utterance("three".into()));
+        s.input(Input::Scratch);
+        assert_eq!(s.dictation().text, "one");
+        let out = s.input(Input::Utterance("Cancel".into()));
+        assert_eq!(dictation_of(&out).map(|d| d.active), Some(false));
+        // The mode is over: the next utterance is a turn.
+        start(&mut s, "what is claude doing");
+    }
+
+    #[test]
+    fn clear_and_the_start_button() {
+        let mut s = online();
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        let out = s.input(Input::StartDictation);
+        assert!(dictation_of(&out).unwrap().active);
+        s.input(Input::Utterance("hello there".into()));
+        let out = s.input(Input::Clear);
+        assert_eq!(dictation_of(&out), Some(Dictation::off()));
+        s.input(Input::StartDictation);
+        let out = s.input(Input::Utterance("clear".into()));
+        assert!(!dictation_of(&out).unwrap().active);
+    }
+
+    #[test]
+    fn eight_seconds_of_silence_submit_and_7_9_do_not() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "Please run the tests.");
+        assert!(message_send(&s.input(Input::Tick(secs(19.9)))).is_none());
+        let out = s.input(Input::Tick(secs(20.0)));
+        let send = message_send(&out).expect("submitted at 8.0 s");
+        assert_eq!(
+            send.params,
+            json!({"pane_id": "w2:p4", "text": "Please run the tests.", "kind": "message",
+                   "handle": "message-claude-libmorph-please-run"})
+        );
+        assert_eq!(s.dictation().phase, DictationPhase::Submitting);
+        // Submitted once.
+        assert!(message_send(&s.input(Input::Tick(secs(40.0)))).is_none());
+    }
+
+    #[test]
+    fn speech_before_the_silence_runs_out_resets_it() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        // Speech at 7 s: the gate opens at 19 and closes at 21.
+        let out = speak(&mut s, 19.0, 21.0, "two");
+        assert!(message_send(&out).is_none());
+        assert!(message_send(&s.input(Input::Tick(secs(28.9)))).is_none());
+        let send = message_send(&s.input(Input::Tick(secs(29.0)))).unwrap();
+        assert_eq!(send.params["text"], "one two");
+    }
+
+    #[test]
+    fn the_silence_is_at_least_8_s() {
+        let mut s = State::new("t");
+        s.set_dictation_silence(secs(5.0));
+        assert_eq!(s.dictation_silence(), secs(8.0));
+        let mut s = dictating();
+        s.set_dictation_silence(secs(12.0));
+        speak(&mut s, 10.0, 12.0, "one");
+        assert!(message_send(&s.input(Input::Tick(secs(23.9)))).is_none());
+        assert!(message_send(&s.input(Input::Tick(secs(24.0)))).is_some());
+    }
+
+    #[test]
+    fn the_card_counts_down_the_last_3_seconds() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        let mut shown = Vec::new();
+        for tenth in 121..=199 {
+            let out = s.input(Input::Tick(secs(tenth as f64 / 10.0)));
+            if let Some(d) = dictation_of(&out) {
+                shown.push(d.submit_in);
+            }
+        }
+        assert_eq!(shown, vec![Some(3), Some(2), Some(1)]);
+        // Scratch cancels the countdown, and the timer starts again.
+        let out = s.input(Input::Scratch);
+        assert_eq!(dictation_of(&out).unwrap().submit_in, None);
+    }
+
+    #[test]
+    fn the_submit_button_submits_at_once() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        let send = message_send(&s.input(Input::Submit)).expect("submitted");
+        assert_eq!(send.params["text"], "one");
+        // An empty message is not submitted.
+        let mut s = dictating();
+        let out = s.input(Input::Submit);
+        assert!(message_send(&out).is_none());
+        assert_eq!(events(&out), vec![say("The message is empty.")]);
+    }
+
+    #[test]
+    fn reading_it_back_pauses_the_timer() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        s.input(Input::Tick(secs(13.0)));
+        let out = s.input(Input::Utterance("Read it back.".into()));
+        assert_eq!(events(&out), vec![say("one")]);
+        s.input(Input::Speaking(true));
+        assert!(message_send(&s.input(Input::Tick(secs(30.0)))).is_none());
+        s.input(Input::Tick(secs(31.0)));
+        let out = s.input(Input::Speaking(false));
+        assert!(events(&out).contains(&Event::Arm));
+        // Counted again from the end of the reading.
+        assert!(message_send(&s.input(Input::Tick(secs(38.9)))).is_none());
+        assert!(message_send(&s.input(Input::Tick(secs(39.0)))).is_some());
+    }
+
+    /// Submits "one" from [`dictating`] and answers it as pending,
+    /// confirmation 9, asked as the daemon asks it.
+    fn confirming_message() -> State {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        let send = message_send(&s.input(Input::Submit)).unwrap();
+        let out = s.incoming(note(
+            "confirm.requested",
+            json!({"confirm_id": 9, "pane_id": "w2:p4", "agent": "claude",
+                   "name": "Claude in libmorph", "command": "one",
+                   "requested_by": "companion:test",
+                   "handle": "message-claude-libmorph-one",
+                   "text": "Approve sending your message to Claude in libmorph?"}),
+        ));
+        assert!(events(&out).contains(&say("Approve sending your message to Claude in libmorph?")));
+        s.incoming(response(
+            send.id,
+            json!({"status": "pending", "confirm_id": 9,
+                   "handle": "message-claude-libmorph-one"}),
+        ));
+        assert_eq!(s.dictation().phase, DictationPhase::Confirming);
+        s
+    }
+
+    #[test]
+    fn deny_resumes_the_mode_with_the_text_kept() {
+        let mut s = confirming_message();
+        let out = s.input(Input::Utterance("deny".into()));
+        let reqs = sent(&out);
+        assert_eq!(reqs.len(), 1, "only the reply: {out:?}");
+        assert_eq!(reqs[0].params, json!({"confirm_id": 9, "approve": false}));
+        let out = s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 9, "outcome": "denied"}),
+        ));
+        let card = dictation_of(&out).unwrap();
+        assert!(card.active);
+        assert_eq!(card.text, "one");
+        assert_eq!(card.phase, DictationPhase::Collecting);
+        // Not asked again by the silence alone.
+        assert!(message_send(&s.input(Input::Tick(secs(100.0)))).is_none());
+        // Edited, it is submitted again after the silence.
+        speak(&mut s, 101.0, 102.0, "two");
+        let send = message_send(&s.input(Input::Tick(secs(110.0)))).unwrap();
+        assert_eq!(send.params["text"], "one two");
+    }
+
+    #[test]
+    fn approve_during_dictation_sends_and_ends_the_mode() {
+        let mut s = confirming_message();
+        let out = s.input(Input::Utterance("Approve.".into()));
+        assert_eq!(
+            sent(&out)[0].params,
+            json!({"confirm_id": 9, "approve": true})
+        );
+        assert_eq!(s.dictation().text, "one", "not added to the message");
+        let out = s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 9, "outcome": "sent"}),
+        ));
+        assert_eq!(dictation_of(&out), Some(Dictation::off()));
+    }
+
+    #[test]
+    fn approve_during_dictation_answers_another_confirmation() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "one");
+        s.incoming(confirm_requested(7));
+        let out = s.input(Input::Utterance("approve".into()));
+        assert_eq!(
+            sent(&out)[0].params,
+            json!({"confirm_id": 7, "approve": true})
+        );
+        assert_eq!(s.dictation().text, "one");
+        // With nothing to answer, approve and deny are not text either.
+        s.input(Input::Utterance("approve".into()));
+        s.input(Input::Utterance("deny".into()));
+        assert_eq!(s.dictation().text, "one");
+        // Anything else while a confirmation waits denies it, and is text.
+        s.incoming(confirm_requested(8));
+        let out = s.input(Input::Utterance("and two".into()));
+        assert_eq!(
+            sent(&out)[0].params,
+            json!({"confirm_id": 8, "approve": false})
+        );
+        assert!(!sent(&out).iter().any(|r| r.method == "turn.start"));
+        assert_eq!(s.dictation().text, "one and two");
+    }
+
+    #[test]
+    fn a_refused_message_is_kept_and_the_reason_said() {
+        let mut s = dictating();
+        speak(&mut s, 10.0, 12.0, "see src/main.rs");
+        let send = message_send(&s.input(Input::Submit)).unwrap();
+        let refusal = Response::err(
+            Some(send.id),
+            libhandlr_proto::ErrorObject::new(
+                -32001,
+                "Message rejected: the character '/' is not permitted.",
+            ),
+        );
+        let out = s.incoming(Incoming::Response(refusal));
+        assert!(events(&out)
+            .iter()
+            .any(|e| matches!(e, Event::Say(t) if t.contains("the character '/'"))));
+        let card = s.dictation();
+        assert_eq!(card.phase, DictationPhase::Collecting);
+        assert_eq!(card.text, "see src/main.rs");
+        s.input(Input::Utterance("scratch that".into()));
+        assert_eq!(s.dictation().text, "");
+    }
+
+    #[test]
+    fn the_message_is_capped_at_4000_characters() {
+        let mut s = dictating();
+        s.input(Input::Utterance("a".repeat(3990)));
+        s.input(Input::Utterance("b".repeat(9)));
+        assert_eq!(s.dictation().text.len(), 4000);
+        let out = s.input(Input::Utterance("c".into()));
+        assert_eq!(events(&out), vec![say("The message is full.")]);
+        assert_eq!(s.dictation().text.len(), 4000);
+    }
+
+    #[test]
+    fn the_target_is_fixed_and_a_moved_focus_is_shown() {
+        let mut s = dictating();
+        let elsewhere = focus("w2:p9", Some("Claude"), "Claude in keypad");
+        let out = s.incoming(note("focus.changed", json!({"focus": elsewhere})));
+        let card = dictation_of(&out).unwrap();
+        assert_eq!(card.target.as_ref().unwrap().pane_id, "w2:p4");
+        assert_eq!(card.focus_moved.as_deref(), Some("Claude in keypad"));
+        s.input(Input::Utterance("Use the focus.".into()));
+        let card = s.dictation();
+        assert_eq!(card.target.unwrap().pane_id, "w2:p9");
+        assert_eq!(card.focus_moved, None);
+        assert_eq!(card.text, "", "not text");
+    }
+
+    #[test]
+    fn without_a_target_submit_is_refused_until_focus_sets_one() {
+        let mut s = online();
+        let out = s.input(Input::Utterance("dictate".into()));
+        // Nothing focused, nor in the fresh list.
+        list_answer(&mut s, &out, Value::Null);
+        assert_eq!(s.dictation().target, None);
+        speak(&mut s, 10.0, 11.0, "one");
+        let out = s.input(Input::Tick(secs(19.0)));
+        assert!(message_send(&out).is_none());
+        assert!(events(&out)
+            .iter()
+            .any(|e| matches!(e, Event::Say(t) if t.starts_with("No agent is focused"))));
+        // Said once, not on every tick.
+        assert!(events(&s.input(Input::Tick(secs(30.0)))).is_empty());
+
+        // "focus Claude in libmorph" focuses it through the daemon.
+        let out = s.input(Input::Utterance("Focus Claude in libmorph.".into()));
+        let focus_req = sent(&out)[0].clone();
+        assert_eq!(focus_req.method, "agents.focus");
+        assert_eq!(focus_req.params, json!({"target_id": "Claude in libmorph"}));
+        assert_eq!(s.dictation().text, "one", "not text");
+        let out = s.incoming(response(focus_req.id, json!({})));
+        list_answer(&mut s, &out, claude());
+        assert_eq!(s.dictation().target.unwrap().pane_id, "w2:p4");
+        assert!(message_send(&s.input(Input::Submit)).is_some());
+
+        // A focused pane with no agent is no target either.
+        let mut s = online();
+        let shell = focus("w1:p1", None, "the home shell");
+        s.incoming(note("focus.changed", json!({"focus": shell})));
+        s.input(Input::StartDictation);
+        s.input(Input::Utterance("one".into()));
+        let out = s.input(Input::Submit);
+        assert!(message_send(&out).is_none());
+        assert!(events(&out)
+            .iter()
+            .any(|e| matches!(e, Event::Say(t) if t.starts_with("The focused pane has no agent"))));
+        // Focus moving to an agent sets it.
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        assert_eq!(s.dictation().target.unwrap().pane_id, "w2:p4");
+    }
+
+    #[test]
+    fn the_focus_is_learned_after_hello() {
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(id, json!({"server": "handlr", "vocabulary": []})));
+        let out = list_answer(&mut s, &out, claude());
+        assert!(matches!(&events(&out)[..], [Event::Focus(Some(f))] if f.pane_id == "w2:p4"));
+    }
+
+    #[test]
+    fn message_handles() {
+        let target: common::FocusInfo = serde_json::from_value(claude()).unwrap();
+        assert_eq!(
+            message_handle(&target, "Please run the tests."),
+            "message-claude-libmorph-please-run"
+        );
+        let long = common::FocusInfo {
+            project: Some("a-very-long-project-name-that-goes-on-and-on".into()),
+            ..target
+        };
+        let h = message_handle(&long, "Please run");
+        assert!(h.len() <= 64, "{h}");
+        assert!(h.starts_with("message-claude-a-very-long"), "{h}");
     }
 
     #[test]

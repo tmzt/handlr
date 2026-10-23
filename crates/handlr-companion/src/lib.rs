@@ -28,7 +28,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-pub use client::{Event, Input};
+pub use client::{Dictation, DictationPhase, Event, Input, DICTATION_SILENCE};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
 
@@ -48,6 +48,10 @@ pub struct CompanionConfig {
     pub backoff_initial: Duration,
     /// The longest delay before reconnecting.
     pub backoff_max: Duration,
+    /// The silence after which a dictated message is submitted (plan
+    /// 20261023_02, the 01:57 EDT amendment). Shorter than
+    /// [`DICTATION_SILENCE`] is raised to it.
+    pub dictation_silence: Duration,
 }
 
 impl CompanionConfig {
@@ -61,6 +65,7 @@ impl CompanionConfig {
             socket: default_socket_path(),
             backoff_initial: Duration::from_secs(1),
             backoff_max: Duration::from_secs(30),
+            dictation_silence: DICTATION_SILENCE,
         }
     }
 }

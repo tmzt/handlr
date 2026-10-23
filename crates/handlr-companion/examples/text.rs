@@ -1,6 +1,7 @@
 //! The companion without audio (plan 20261022_04, step 2 of the 18:10 EDT
 //! amendment): each typed line is an utterance, an empty line is the tap,
-//! and `pair <URL, handlr1… or data: URL>` pairs. Events are printed as
+//! and `pair <URL, handlr1… or data: URL>` pairs. `/start`, `/submit`,
+//! `/clear` and `/scratch` are the dictation buttons. Events are printed as
 //! they arrive.
 //!
 //! ```text
@@ -26,7 +27,8 @@ use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input};
 
 const USAGE: &str = "usage: text [--keys <dir>] [--socket <path>] [--client <name>] \
      [--name <device name>] [--pair <pairing URL, string or data URL>]\n\
-     Lines are utterances, an empty line is the tap, `pair <…>` pairs.";
+     Lines are utterances, an empty line is the tap, `pair <…>` pairs,\n\
+     /start, /submit, /clear and /scratch are the dictation buttons.";
 
 fn main() {
     let mut keys = FileKeyStore::default_dir();
@@ -91,6 +93,14 @@ fn input(line: &str) -> Input {
     let line = line.trim();
     if line.is_empty() {
         Input::Tap
+    } else if line == "/start" {
+        Input::StartDictation
+    } else if line == "/submit" {
+        Input::Submit
+    } else if line == "/clear" {
+        Input::Clear
+    } else if line == "/scratch" {
+        Input::Scratch
     } else if let Some(string) = line.strip_prefix("pair ") {
         Input::Pair(string.trim().to_string())
     } else {
@@ -135,6 +145,29 @@ fn print_event(event: Event) {
             }
         }
         Event::Vocabulary(words) => println!("* vocabulary: {}", words.join(", ")),
+        Event::Focus(focus) => match focus {
+            Some(f) => println!("* focus: {}", f.name),
+            None => println!("* focus: none"),
+        },
+        Event::Dictation(d) if !d.active => println!("* message: off"),
+        Event::Dictation(d) => {
+            let target = d
+                .target
+                .map(|t| t.name)
+                .unwrap_or_else(|| "no agent".into());
+            let moved = d
+                .focus_moved
+                .map(|m| format!(" (focus moved to {m})"))
+                .unwrap_or_default();
+            let countdown = d
+                .submit_in
+                .map(|s| format!(" submitting in {s} s"))
+                .unwrap_or_default();
+            println!(
+                "* message for {target}{moved} [{:?}]{countdown}: {}",
+                d.phase, d.text
+            );
+        }
         Event::Error(e) => println!("! {e}"),
     }
 }
