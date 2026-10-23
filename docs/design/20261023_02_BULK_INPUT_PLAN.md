@@ -195,3 +195,58 @@ approve it once, and your own words arrive.
 2. Should `allow_messages` default to `true` for the built-in agents, as
    proposed, or `false`, like `allow_arbitrary_commands`?
 3. Is 4000 characters the right cap?
+
+## Amendment — 2026-10-23 01:57 EDT: the VAD decides when the message is done
+
+On the owner's instruction: "use the vad to decide when done, at least 8
+seconds (configurable) or button pressed".
+
+This replaces three things:
+- the "submit" and "send it" rows of decision 2's table;
+- decision 2's 10-minute time-out and draft;
+- open question 1.
+
+Everything else stands.
+
+**When the message is done.** The message is finished, and submitted as in
+decision 5, when either of these happens:
+1. **Silence:** the voice-activity gate stays closed for the silence time
+   after the last utterance, with no speech in between. The companion
+   already gets the gate as `Input::Listening(bool)` from `handlr-audio`'s
+   earshot gate. `State` starts the timer when the gate closes, resets it
+   when the gate opens, and needs no new audio input. A timer tick
+   (`Input::Tick`, or the net thread's clock) fires the submit.
+2. **The Submit button** is pressed.
+
+**There is no spoken submit word,** so "send it" inside a message is just
+text.
+
+**The silence time:**
+- **Default 8 seconds.** It's configurable as
+  `CompanionConfig::dictation_silence` (a `Duration`), and set in the app
+  with `--dictation-silence <seconds>` on the desktop and a setting on
+  Android.
+- **Minimum 8 seconds.** Values below 8 s are raised to 8 s, so a breath
+  between sentences never submits.
+- **Counted from the gate closing,** so time spent speaking never counts.
+  Speech that comes back before it runs out continues the same message.
+- **The card counts down.** It shows "Submitting in 3 s…" for the last 3
+  seconds. Any speech, Scratch or Clear cancels the countdown.
+
+**What still works during the mode:**
+- "cancel", "clear", "scratch that" and "read it back", and the buttons;
+- "approve" and "deny" still answer a pending confirmation.
+
+Saying "read it back" pauses the timer until the reading ends.
+
+**Submit is still not a send.** Whether by silence or by button, it opens
+the single approval of decision 5. "deny" keeps the text, and the mode
+resumes, so the message can be fixed and submitted again.
+
+**Tests, added to step 3** (driven with a scripted gate and a fake clock):
+- 7.9 s of silence does not submit, and 8.0 s does;
+- speech at 7 s resets the timer;
+- a configured 5 s is raised to 8 s, and 12 s is honoured;
+- the Submit button submits at once;
+- "read it back" pauses the timer;
+- "deny" resumes the mode with the text kept.
