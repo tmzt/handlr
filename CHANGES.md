@@ -681,3 +681,30 @@ only inside this repository.
   fields;
 - step 4, which waits on its open question;
 - step 7, the live S23 check.
+
+## 2026-10-23 02:15 EDT — plan 20261023_02, steps 1 to 4: dictated messages
+
+The work is built, with its tests. The live S23 check is next.
+
+**Departures, Rule 1.7:**
+- **Step 1, the protocol.** `focus.changed` is a companion-protocol
+  notification. `agents.send`'s `command` field also reads as `text`,
+  so the companion sends `{pane_id, text, kind: "message", handle}` as the
+  plan writes it. Adding fields to `AgentsListResult` and
+  `AgentsSendParams` breaks callers that build them as struct literals.
+  `libhandlr_proto` stays at 0.1.0, since it is used only inside this
+  repository.
+- **Step 2, the confirmation's lifetime.** A companion's message opens a
+  `VoiceTurn` confirmation, because only a voice turn lets the requester
+  approve its own send. So `agents.send` sends the approval question
+  itself, and the confirmation expires after 60 s, or at the session's next
+  turn. On a harness connection it is `Standing`.
+- **Step 3, the silence is longer than planned.** The client re-arms the
+  voice gate after each dictated utterance, so dictation is hands-free. The
+  armed gate counts as listening for its 6 s arm time-out, so the silence
+  that submits is about 14 s (6 + 8), not 8. This is raised with the owner.
+- **Step 4, the Android setting.** The app has no settings screen, so the
+  silence time on Android comes from `dictation_silence.txt` in its data
+  directory.
+
+**Also:** `config.default.toml` does not yet mention `allow_messages`.
