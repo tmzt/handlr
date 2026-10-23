@@ -4,7 +4,9 @@
 //! pending question when:
 //! - the paragraph ends with `?`, or has a line that does;
 //! - no user entry follows that entry; and
-//! - the pane's `agent_status` is `idle` or `blocked`.
+//! - the pane's `agent_status` is `idle`, `blocked` or `done` (herdr marks a
+//!   pane `done` when its agent has finished a turn the user has not yet
+//!   looked at, which is when a question asked at the end of a task waits).
 //!
 //! The question is redacted, then cut to `PENDING_QUESTION_MAX`
 //! characters.
@@ -17,7 +19,10 @@ use super::{EntryKind, Item, PENDING_QUESTION_MAX, PendingQuestion, Role, cut};
 /// The pending question in `items` (oldest first) for an agent whose
 /// status is `status`, if it has one.
 pub fn pending_question(items: &[Item], status: &AgentStatus) -> Option<PendingQuestion> {
-    if !matches!(status, AgentStatus::Idle | AgentStatus::Blocked) {
+    if !matches!(
+        status,
+        AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Done
+    ) {
         return None;
     }
     let last = items
@@ -106,10 +111,11 @@ mod tests {
             "Should the notices wait for the phone to finish speaking, or interrupt it?"
         );
         assert_eq!(q.ts, "2026-01-04T07:15:00.000Z");
-        // Blocked counts too; working and done do not.
+        // Blocked counts too; working does not.
         assert!(pending_question(&items, &AgentStatus::Blocked).is_some());
         assert!(pending_question(&items, &AgentStatus::Working).is_none());
-        assert!(pending_question(&items, &AgentStatus::Done).is_none());
+        // A task that ends with a question: herdr says done until it is seen.
+        assert!(pending_question(&items, &AgentStatus::Done).is_some());
     }
 
     #[test]
