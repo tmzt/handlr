@@ -745,3 +745,20 @@ client's rules, so a turn that ended without a question while a background
 agent runs shows no Finished card. That needs the daemon to tell the
 client the turn ended, a protocol field, which waits for
 libhandlr_proto's next release.
+
+## Amendment — 2026-10-23 16:39 EDT: a tapped answer dismisses its card and shows as typed input (living section L3)
+
+The owner (2026-10-23), after a second tap on a card that was still shown
+sent a plain "yes": "tapping yes/no on a card should dismiss the card on
+the phone side (so immediate) after the tap animation plays. let's convert
+the responses to typed amber text with the input box".
+- A tapped Yes or No dismisses its Question card at once, on the phone,
+  before the daemon or the session has answered; a second tap has no card
+  to land on. If the send is refused, the card comes back.
+- Every response sent from the view (Yes, No, cont) shows as typed input:
+  amber text on the terminal grid after a `›` prompt, in a bordered input
+  box above the controls (`apps/companion/src/agent/input_box.rs`), at
+  most three lines. It goes when the session shows it as the user's entry,
+  when the agent works, or when the send is refused.
+- "after the tap animation plays": the press effect is libcontrols' to plan
+  (the 16:23 EDT amendment); until it ships, the card goes on the tap.
