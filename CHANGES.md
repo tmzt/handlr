@@ -463,3 +463,20 @@ The handshakes took the raw private key, so they could not use it.
 A locked key store fails the handshake with `LinkError::Noise`. Telling
 "locked, retry" apart from "re-pair needed" is left to the store, which
 plan 04 step 4 implements on libmorph's `Vault` with flags 0.
+
+## 2026-10-22 22:40 EDT — the Gemini key comes from `.private` (plan 20261022_01)
+
+**On the owner's instruction.** The Gemini key is never kept in code, in git
+history, in shell history or in an LLM session.
+
+- `[gemini] api_key` is removed. `[gemini] api_key_file` replaces it. It
+  defaults to `.private/gemini_api_key`, relative to the daemon's working
+  directory, and `.private` is gitignored.
+- The file holds the key alone. Surrounding whitespace is ignored.
+- A file with any group or other permission is refused, like the link key.
+- The turn service reads the file on the first turn that needs Gemini, so a
+  key added later needs no restart.
+- Errors name the file but never its contents, and are spoken as "the
+  server can't read its Gemini key".
+- With no file, or an empty one, libinfer still falls back to
+  `GEMINI_API_KEY`.
