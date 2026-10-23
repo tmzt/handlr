@@ -17,8 +17,10 @@
 //!
 //! **The pinned card** (the highest live one) sits above the buttons. At
 //! the bottom it shows in full; while the finger scrolls back, or the view
-//! is scrolled back, it is a one-line bar, and tapping the bar jumps to the
-//! card in the flow. The pin never moves the flow: the flow's bottom is
+//! is scrolled back, it is a one-line bar, and tapping the bar goes back to
+//! the bottom. It is shown only there, never also in the flow (owner,
+//! 2026-10-23: "got two cards instead of one with the same content"); the
+//! flow keeps its place. The pin never moves the flow: the flow's bottom is
 //! always laid out above the full card, so changing between the card and
 //! the bar only uncovers or covers space below the flow.
 
@@ -450,7 +452,15 @@ fn card_block(
 
 /// Lays out `entries` and `cards` (in flow order, as the client gives
 /// them) at `width` pixels and scale `s`.
-pub fn lay_out_flow(entries: &[Entry], cards: &[AgentCard], width: f32, s: f32) -> Flow {
+/// The pinned card (`pinned`, an index into `cards`) is not drawn in the
+/// flow: it shows once, at the bottom, and keeps only its place here.
+pub fn lay_out_flow(
+    entries: &[Entry],
+    cards: &[AgentCard],
+    pinned: Option<usize>,
+    width: f32,
+    s: f32,
+) -> Flow {
     let mut flow = Flow::default();
     let pad = PAD * s;
     let text_w = width - 2.0 * pad;
@@ -460,7 +470,9 @@ pub fn lay_out_flow(entries: &[Entry], cards: &[AgentCard], width: f32, s: f32) 
     for i in 0..=entries.len() {
         while let Some(card) = cards.get(next_card).filter(|c| c.at <= i) {
             flow.card_y.push(y);
-            if card.live {
+            if card.live && pinned == Some(next_card) {
+                // Shown at the bottom instead.
+            } else if card.live {
                 y += 8.0 * s;
                 *flow.card_y.last_mut().expect("pushed") = y;
                 y += card_block(card, pad, y, text_w, s, usize::MAX, &mut flow) + 12.0 * s;
@@ -818,7 +830,13 @@ impl AgentScreen {
     }
 
     fn relayout(&mut self) {
-        self.flow = lay_out_flow(&self.entries, &self.cards, self.layout.w, self.scale());
+        self.flow = lay_out_flow(
+            &self.entries,
+            &self.cards,
+            self.pinned,
+            self.layout.w,
+            self.scale(),
+        );
     }
 
     fn scale(&self) -> f32 {
@@ -1073,12 +1091,13 @@ impl AgentScreen {
     /// Jumps to the pinned card in the flow: its top a third of the way
     /// down the window.
     pub fn jump_to_pin(&mut self) {
-        let Some(y) = self.pinned.and_then(|i| self.flow.card_y.get(i).copied()) else {
+        if self.pinned.is_none() {
             return;
-        };
+        }
+        // The pinned card is shown only at the bottom: go back there.
         self.fling = 0.0;
-        let target = y - self.frame.viewport.h / 3.0;
-        self.scroll_to(target);
+        let bottom = self.max_offset();
+        self.scroll_to(bottom);
     }
 
     /// A touch at `now` (any monotonic clock). Returns the control tapped,
@@ -1456,7 +1475,7 @@ mod tests {
                 "Fixed:\n```diff\n-a\n+b\n```\n- a bullet",
             ),
         ];
-        let flow = lay_out_flow(&entries, &[], 1080.0, 2.0);
+        let flow = lay_out_flow(&entries, &[], None, 1080.0, 2.0);
         let colour = |text: &str| {
             flow.rows
                 .iter()
@@ -1503,7 +1522,7 @@ mod tests {
             card(CardKind::Question, 4, false),
             card(CardKind::Approval, 4, true),
         ];
-        let flow = lay_out_flow(&entries, &cards, 1080.0, 2.0);
+        let flow = lay_out_flow(&entries, &cards, None, 1080.0, 2.0);
         assert_eq!(flow.card_y.len(), 2);
         // The resolved one: a dim line, no panel.
         let faded = flow
@@ -1531,7 +1550,13 @@ mod tests {
         // After the last entry.
         assert!(flow.card_y[1] > *flow.entry_y.last().unwrap());
 
-        let asking = lay_out_flow(&entries, &[card(CardKind::Question, 4, true)], 1080.0, 2.0);
+        let asking = lay_out_flow(
+            &entries,
+            &[card(CardKind::Question, 4, true)],
+            None,
+            1080.0,
+            2.0,
+        );
         let hits: Vec<AgentHit> = asking.buttons.iter().map(|b| b.hit).collect();
         assert_eq!(
             hits,
@@ -1541,7 +1566,13 @@ mod tests {
                 AgentHit::Reply
             ]
         );
-        let finished = lay_out_flow(&entries, &[card(CardKind::Finished, 4, true)], 1080.0, 2.0);
+        let finished = lay_out_flow(
+            &entries,
+            &[card(CardKind::Finished, 4, true)],
+            None,
+            1080.0,
+            2.0,
+        );
         assert!(finished.buttons.is_empty());
     }
 
@@ -1712,7 +1743,7 @@ mod tests {
         let f = a.frame().clone();
         assert!(f.viewport.y + f.viewport.h > pin.rect.y);
 
-        // Tapping the bar jumps to the card in the flow.
+        // Tapping the bar goes back to the bottom, where the card is.
         let bar_rect = a.rect_of(AgentHit::Pin).expect("the bar");
         let tapped = a.touch(
             2,
@@ -1731,12 +1762,15 @@ mod tests {
         );
         assert_eq!(tap, Some(AgentHit::Pin));
         a.jump_to_pin();
-        let card_y = a.flow().card_y[0];
-        let v = a.frame().viewport;
-        let on_screen = v.y + card_y - a.offset();
+        assert!(a.following());
+        assert!(!a.frame().pin.as_ref().unwrap().compact, "in full");
+        // Shown once: the flow has no panel for it.
         assert!(
-            on_screen >= v.y && on_screen < v.y + v.h,
-            "the card is in the window"
+            !a.flow()
+                .fills
+                .iter()
+                .any(|f| f.color == accent(CardKind::Approval)),
+            "not also in the flow"
         );
     }
 
