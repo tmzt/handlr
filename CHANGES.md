@@ -498,3 +498,13 @@ detected.
 
 Step 4, the phone's scan and deep link, is plan 04's. The deep link was
 requested from libmorph, for its own plan.
+
+## 2026-10-22 23:21 EDT — plan 20261022_07: libinfer providers (Draft)
+
+New plan, written on the owner's instruction:
+`docs/design/20261022_07_LIBINFER_PROVIDERS_PLAN.md`. It replaces the
+libinfer provider split that was earlier called "plan 05", and builds plan
+20260831_02's missing routing engine and the `[gemini] model` setting.
+OpenAI support is left to its own plan. libgenai turned out to supply only
+`gemini-rust` re-exports to libinfer, so `libinfer-gemini` depends on
+`gemini-rust` directly.
