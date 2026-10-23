@@ -741,3 +741,20 @@ sends `lines` as well, so the 50 lines Gemini was given were really
 herdr's default all along.
 
 **Still to check live:** step 2's question to the phone.
+
+## 2026-10-23 03:11 EDT — plan 20261022_03, step 4: the agent view; a correction
+
+**Step 4 is built:** `session.peek`, the agent's session on `agents.list`,
+and the app's agent view.
+- Terminal-style scrollback, with the app's own finger scrolling.
+- Priority cards by the four rules.
+- The pinned card, which shrinks to a bar while scrolled back.
+
+How it behaves is recorded in plan 03's L3. `AgentInfo` gained a field,
+which breaks callers that build it as a struct literal. `libhandlr_proto`
+stays at 0.1.0, as it is used only inside this repository.
+
+**Correction to the entry for steps 1 to 3.** It said the 50 lines Gemini
+was given "were really herdr's default all along". That isn't verified.
+`pane.read` sent `count`, which herdr's schema does not define, so herdr
+**probably** used its own default. The read now sends `lines` too.
