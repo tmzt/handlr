@@ -1,7 +1,7 @@
 ---
 title: Spoken summaries of complex replies, from structured prompts
 date: 2026-10-23
-status: In implementation
+status: Implemented
 covers:
   - "Read aloud (the agent view's play button) sends a reply that is
     complex, by a basic coding measure or because it has backquotes, to
@@ -364,3 +364,27 @@ additive, so 0.1.2, with its VERSIONS.md entry and the tag
    reply read from `spoken`.
 
 Step 5 (the S23 check) now follows step 9.
+
+## Amendment — 2026-10-23 16:55 EDT: implemented
+
+Every step is done and its **Done when:** holds. Step 5 was checked on the
+S23 by the owner ("that worked") and logged in
+`out/speech/LOG.md` (run `out/speech/20261023_01_spoken_summaries/`),
+which shows a plain reply read through the rules and a complex one
+summarised by Gemini only with spoken output on. The commits:
+
+| Step | Commits |
+|---|---|
+| 1. ADDITIONAL_PROMPTS.md and `src/prompts.rs` | `296f4d3` |
+| 2. libhandlr_proto 0.1.1 | `505f408` (tag `libhandlr_proto-v0.1.1`) |
+| 3. The daemon's `speech.summarize` | `e23fc10`; CHANGES.md `a1d3d2a` |
+| 4. The client | `1c94817` |
+| 6. `crates/handlr-speech` | `42e9ffc` |
+| 7. libhandlr_proto 0.1.2 | `4e3d562` (tag `libhandlr_proto-v0.1.2`) |
+| 8. The daemon on handlr-speech, `client.options` | `12a4fee`; CHANGES.md `68aaa2b` |
+| 9. The client on `client.options` | `3a59fde` |
+| 5. On the S23 | this amendment |
+
+Still open from section 6 and the amendments: the prompt's temperature is
+not applied (libinfer-gemini has no setting yet); the thresholds and a cap
+on Gemini calls are the owner's to revisit.
