@@ -1,11 +1,16 @@
 //! The overview, the home screen (plan 20261023_04, as amended at 17:04
-//! EDT). From the top: the title and the status lines; then two halves
-//! that scroll on their own, the agent cards above ([`CardGrid`]) and the
-//! Gemini turns below ([`TurnLog`]); then, above the bottom row, the
-//! confirmation card while one is shown and the dictation card while a
-//! message is taken; and the bottom row of the agent view (decision 5):
-//! play at the left, record at the right, record becoming send with a
-//! cancel in the middle while a message is taken.
+//! and 18:07 EDT). From the top: the title and the status lines; then the
+//! agent cards ([`CardGrid`]), scrolling as one list; then the newest
+//! Gemini line ([`TurnStrip`]) while there is one; then, above the bottom
+//! row, the confirmation card while one is shown and the dictation card
+//! while a message is taken; and the bottom row of the agent view
+//! (decision 5): play at the left, record at the right, record becoming
+//! send with a cancel in the middle while a message is taken.
+//!
+//! A tap on the strip slides the Gemini turns up over the cards
+//! ([`TurnOverlay`]); a tap on the dimmed cards above it, a swipe down on
+//! it, or Back ([`Overview::back`]) closes it. The bottom row, and the
+//! confirmation and dictation cards over it, stay live while it is open.
 //!
 //! Tapping a card opens the agent view on that pane (decision 4). Play
 //! reads replies from an agent view's pane only, so it is dim and does
@@ -15,6 +20,8 @@
 pub mod agent_card;
 pub mod card_grid;
 pub mod turn_log;
+pub mod turn_overlay;
+pub mod turn_strip;
 
 use std::time::Duration;
 
@@ -25,14 +32,16 @@ use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
 use crate::agent::{
-    ACTION_H, APPROVE_BG, AgentHit, BAND, BG, BUTTON_H, CARD_BG, DENY_BG, Fill, Flow, FlowButton,
-    PAD, Row, Terminal, columns, fill, line_h,
+    ACTION_H, APPROVE_BG, AgentHit, BG, BUTTON_H, CARD_BG, DENY_BG, Fill, Flow, FlowButton, PAD,
+    Row, Terminal, columns, fill, line_h,
 };
 use crate::controls::scroll::Touched;
 use crate::controls::{ControlRow, SquareButton};
 use crate::ui::{Layout, Line, MUTED, TEXT, wrap};
 pub use card_grid::CardGrid;
 pub use turn_log::TurnLog;
+pub use turn_overlay::TurnOverlay;
+pub use turn_strip::TurnStrip;
 
 /// What a touch on the overview did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,8 +66,13 @@ pub struct Panel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Target {
     Grid,
-    Log,
-    /// A control, or no half.
+    /// The strip: a tap opens the overlay.
+    Strip,
+    /// The overlay's sheet.
+    Sheet,
+    /// The dimmed cards above the open overlay: a tap closes it.
+    Shade,
+    /// A control, or nothing.
     Other,
 }
 
@@ -82,7 +96,8 @@ pub struct Overview {
     agents: Vec<AgentInfo>,
     pending: Vec<String>,
     grid: CardGrid,
-    log: TurnLog,
+    strip: TurnStrip,
+    overlay: TurnOverlay,
     card: Option<Panel>,
     dictation: Option<Vec<Line>>,
     read_aloud: bool,
@@ -93,8 +108,6 @@ pub struct Overview {
     /// The confirmation and dictation cards as placed.
     panels: Vec<Flow>,
     buttons: Vec<FlowButton>,
-    /// The line between the halves.
-    divider: Rect,
     hits: Vec<(AgentHit, Rect)>,
     touch: Option<(u64, Target)>,
     loaded: bool,
@@ -116,7 +129,8 @@ impl Overview {
             agents: Vec::new(),
             pending: Vec::new(),
             grid: CardGrid::new(),
-            log: TurnLog::new(),
+            strip: TurnStrip::new(),
+            overlay: TurnOverlay::new(),
             card: None,
             dictation: None,
             read_aloud: false,
@@ -125,7 +139,6 @@ impl Overview {
             headings: Vec::new(),
             panels: Vec::new(),
             buttons: Vec::new(),
-            divider: Rect::default(),
             hits: Vec::new(),
             touch: None,
             loaded: false,
@@ -192,13 +205,28 @@ impl Overview {
 
     /// A line of the conversation with Gemini.
     pub fn push_turn(&mut self, speaker: Speaker, text: String) {
-        self.log.push(speaker, text);
-        self.dirty = true;
+        let shown = self.strip.visible();
+        self.strip.push(speaker, &text);
+        self.overlay.log_mut().push(speaker, text);
+        self.strip_changed(shown);
     }
 
-    /// What STT is hearing, at the end of the conversation.
+    /// What STT is hearing, at the end of the conversation and on the
+    /// strip.
     pub fn set_partial(&mut self, partial: Option<String>) {
-        if self.log.set_partial(partial) {
+        let shown = self.strip.visible();
+        let strip = self.strip.set_partial(partial.clone());
+        if self.overlay.log_mut().set_partial(partial) || strip {
+            self.strip_changed(shown);
+        }
+    }
+
+    /// The strip may have changed: when it shows or hides, the cards' room
+    /// changes with it.
+    fn strip_changed(&mut self, shown: bool) {
+        if self.strip.visible() != shown {
+            self.settle();
+        } else {
             self.dirty = true;
         }
     }
@@ -207,8 +235,33 @@ impl Overview {
         &self.grid
     }
 
+    pub fn strip(&self) -> &TurnStrip {
+        &self.strip
+    }
+
+    pub fn overlay(&self) -> &TurnOverlay {
+        &self.overlay
+    }
+
     pub fn log(&self) -> &TurnLog {
-        &self.log
+        self.overlay.log()
+    }
+
+    /// Opens the overlay, as a tap on the strip does.
+    pub fn open_turns(&mut self) {
+        if self.overlay.open() {
+            self.dirty = true;
+        }
+    }
+
+    /// The system Back: closes the overlay. Returns whether it was open;
+    /// if not, Back is not the overview's.
+    pub fn back(&mut self) -> bool {
+        let was = self.overlay.close();
+        if was {
+            self.dirty = true;
+        }
+        was
     }
 
     fn scale(&self) -> f32 {
@@ -265,17 +318,24 @@ impl Overview {
         }
         self.panels = panels;
 
-        // The halves, split in the middle.
+        // The strip above them while it shows, and the cards on the rest.
         let bottom = above.max(top);
-        let mid = (top + bottom) * 0.5;
-        let gap = 4.0 * s;
+        let strip_h = if self.strip.visible() {
+            TurnStrip::HEIGHT * s
+        } else {
+            0.0
+        };
+        let cards_bottom = (bottom - strip_h).max(top);
+        self.strip
+            .set_rect(Rect::new(0.0, cards_bottom, l.w, bottom - cards_bottom), s);
         self.grid
-            .set_viewport(Rect::new(0.0, top, l.w, (mid - gap - top).max(0.0)), s);
-        self.log.set_viewport(
-            Rect::new(0.0, mid + gap, l.w, (bottom - mid - gap).max(0.0)),
-            s,
-        );
-        self.divider = Rect::new(pad, mid, l.w - 2.0 * pad, 1.0);
+            .set_viewport(Rect::new(0.0, top, l.w, cards_bottom - top), s);
+
+        // The overlay, over the cards and the strip: two thirds of the
+        // screen, or what there is under the status lines.
+        let sheet_top = (l.h * (1.0 - TurnOverlay::SHARE)).max(top).min(bottom);
+        self.overlay
+            .set_area(Rect::new(0.0, sheet_top, l.w, bottom - sheet_top), s);
 
         self.hits = self
             .buttons
@@ -299,8 +359,9 @@ impl Overview {
         self.hits.iter().find(|(h, _)| *h == hit).map(|&(_, r)| r)
     }
 
-    /// A touch at `now` (any monotonic clock). A drag scrolls the half it
-    /// started in; a tap returns what it hit.
+    /// A touch at `now` (any monotonic clock). A drag scrolls the cards,
+    /// or the overlay while it is open; a tap returns what it hit. The
+    /// controls come first, so the bottom row works under the overlay.
     pub fn touch(
         &mut self,
         id: u64,
@@ -312,10 +373,18 @@ impl Overview {
         if phase == TouchPhase::Started {
             let target = if self.hit(x, y).is_some() {
                 Target::Other
+            } else if self.overlay.is_open() {
+                if self.overlay.contains(x, y) {
+                    Target::Sheet
+                } else if y < self.overlay.rect().y {
+                    Target::Shade
+                } else {
+                    Target::Other
+                }
+            } else if self.strip.contains(x, y) {
+                Target::Strip
             } else if self.grid.viewport().contains([x, y]) {
                 Target::Grid
-            } else if self.log.viewport().contains([x, y]) {
-                Target::Log
             } else {
                 Target::Other
             };
@@ -330,8 +399,8 @@ impl Overview {
         }
         let touched = match target {
             Target::Grid => self.grid.touch(id, phase, x, y, now),
-            Target::Log => self.log.touch(id, phase, x, y, now),
-            Target::Other => match phase {
+            Target::Sheet => self.overlay.touch(id, phase, x, y, now),
+            Target::Strip | Target::Shade | Target::Other => match phase {
                 TouchPhase::Ended => Touched::Tap,
                 _ => Touched::Nothing,
             },
@@ -348,7 +417,15 @@ impl Overview {
                         .pane_at(x, y)
                         .map_or(OverviewHit::Tap, |p| OverviewHit::Agent(p.to_string())),
                 ),
-                Target::Log => Some(OverviewHit::Tap),
+                Target::Strip => {
+                    self.open_turns();
+                    None
+                }
+                Target::Shade => {
+                    self.back();
+                    None
+                }
+                Target::Sheet => Some(OverviewHit::Tap),
                 Target::Other => match self.hit(x, y) {
                     // Nothing to read until a view has been opened.
                     Some(AgentHit::ReadAloud) if !self.play_live => None,
@@ -359,9 +436,10 @@ impl Overview {
         }
     }
 
-    /// Carries the halves' flings on. Returns whether either moved.
+    /// Carries the cards' fling, and the overlay's slide and fling, on.
+    /// Returns whether anything moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
-        let moved = self.grid.tick(dt) | self.log.tick(dt);
+        let moved = self.grid.tick(dt) | self.overlay.tick(dt);
         if moved {
             self.dirty = true;
         }
@@ -393,8 +471,8 @@ impl Overview {
             ctx.draw_text(list, &h.text, [(l.w - w) * 0.5, h.y], h.px, h.color);
         }
         self.grid.draw(list, ctx);
-        fill(list, self.divider, BAND, 0.0);
-        self.log.draw(list, ctx);
+        self.strip.draw(list, ctx);
+        self.overlay.draw(list, ctx, l.w);
         let recording = self.dictation.is_some();
         let read_aloud = self.read_aloud && self.play_live;
         let draw_button = |list: &mut DrawList, b: &FlowButton| {
@@ -574,31 +652,115 @@ mod tests {
             tap(&mut o, yes.x + 5.0, yes.y + dy + 5.0),
             Some(OverviewHit::Agent("p2".into()))
         );
-        // Between the halves is no card: a tap.
-        let divider = o.divider;
-        assert_eq!(tap(&mut o, 540.0, divider.y + 1.0), Some(OverviewHit::Tap));
+        // Between the cards is no card: a tap.
+        let r = o.grid().card_rect("p1").unwrap();
+        assert_eq!(
+            tap(&mut o, r.x + r.w + 4.0, r.y + 10.0),
+            Some(OverviewHit::Tap)
+        );
     }
 
-    #[test]
-    fn the_two_halves_scroll_apart() {
-        let mut o = overview(16);
-        for i in 0..30 {
+    /// Some turns of the conversation.
+    fn talk(o: &mut Overview, turns: usize) {
+        for i in 0..turns {
             o.push_turn(Speaker::User, format!("question {i}"));
             o.push_turn(Speaker::Gemini, format!("Answer {i}, at some length."));
         }
+    }
+
+    /// Opens the overlay with a tap on the strip, and lets it slide.
+    fn open(o: &mut Overview) {
+        let strip = o.strip().rect();
+        assert_eq!(tap(o, 540.0, strip.y + strip.h * 0.5), None);
+        assert!(o.overlay().is_open());
+        o.tick(TurnOverlay::SLIDE);
+    }
+
+    #[test]
+    fn the_cards_fill_the_screen_and_scroll_as_one_list() {
+        let mut o = overview(24);
+        let record = o.rect_of(AgentHit::Message).unwrap();
         let grid = o.grid().viewport();
-        let log = o.log().viewport();
-        assert!(grid.y + grid.h <= log.y, "cards above the turns");
-        assert!(o.grid().scroll().max() > 0.0 && o.log().scroll().max() > 0.0);
-        let log_at = o.log().scroll().offset();
-        assert_eq!(log_at, o.log().scroll().max(), "following the newest");
-        // A drag in the cards moves only the cards; ending on a card, it
-        // is a scroll, not a tap.
+        // From under the status lines to above the bottom row: no half.
+        let status = o.headings.last().unwrap();
+        assert!(grid.y > status.y && grid.y < status.y + 100.0);
+        assert!((record.y - (grid.y + grid.h) - 12.0 * 2.0).abs() < 0.01);
+        assert!(grid.h > 0.75 * PHONE.h);
+        assert!(o.grid().scroll().max() > 0.0);
+        // A drag moves the cards; ending on a card, it is a scroll, not a
+        // tap.
         assert_eq!(drag_up(&mut o, 540.0, grid.y + grid.h - 40.0, 250.0), None);
         assert!((o.grid().scroll().offset() - 250.0).abs() < 1.0);
-        assert_eq!(o.log().scroll().offset(), log_at);
-        // One in the turns moves only the turns, back from the newest.
-        o.touch(2, TouchPhase::Started, 540.0, log.y + 40.0, Duration::ZERO);
+        // With turns, the strip takes one line off their bottom.
+        talk(&mut o, 1);
+        let strip = o.strip().rect();
+        let grid = o.grid().viewport();
+        assert_eq!(strip.h, TurnStrip::HEIGHT * 2.0);
+        assert_eq!(grid.y + grid.h, strip.y);
+        assert!(strip.y + strip.h <= record.y);
+    }
+
+    #[test]
+    fn the_strip_shows_the_newest_line_and_hides_with_no_turns() {
+        let mut o = overview(2);
+        let mut list = DrawList::new();
+        let ctx = DrawContext::default();
+        o.draw(&mut list, &ctx, None);
+        assert!(!o.strip().visible());
+        let full = o.grid().viewport();
+        // A tap where the strip would be is a card's place, not the strip.
+        assert_eq!(
+            tap(&mut o, 540.0, full.y + full.h - 10.0),
+            Some(OverviewHit::Tap)
+        );
+        assert!(!o.overlay().is_open());
+        o.push_turn(Speaker::User, "what is claude doing".into());
+        assert!(!o.strip().visible(), "the strip is Gemini's");
+        o.push_turn(Speaker::Gemini, "Claude is running the tests.".into());
+        assert_eq!(
+            o.strip().line().as_deref(),
+            Some("< Claude is running the tests.")
+        );
+        assert!(o.draw(&mut list, &ctx, None));
+        // The live words while speaking, then Gemini's line again.
+        o.set_partial(Some("and co".into()));
+        assert_eq!(o.strip().line().as_deref(), Some("> and co\u{2026}"));
+        assert!(o.draw(&mut list, &ctx, None));
+        o.set_partial(None);
+        assert_eq!(
+            o.strip().line().as_deref(),
+            Some("< Claude is running the tests.")
+        );
+        // Above the confirmation and dictation cards' place.
+        o.set_dictation(Some(vec![Line {
+            text: "Taking a message".into(),
+            size: 15.0,
+            color: MUTED,
+            gap: 28.0,
+        }]));
+        let card = &o.panels[0].fills[0].rect;
+        let strip = o.strip().rect();
+        assert!(strip.y + strip.h <= card.y);
+    }
+
+    #[test]
+    fn a_tap_on_the_strip_opens_the_overlay() {
+        let mut o = overview(6);
+        talk(&mut o, 30);
+        open(&mut o);
+        let sheet = o.overlay().rect();
+        let record = o.rect_of(AgentHit::Message).unwrap();
+        // About two thirds of the screen, over the cards and the strip,
+        // ending above the bottom row; the log in it, newest at the bottom.
+        assert!((sheet.y - PHONE.h / 3.0).abs() < 1.0);
+        assert!(sheet.y + sheet.h <= record.y);
+        assert!(sheet.y + sheet.h >= o.strip().rect().y + o.strip().rect().h);
+        let log = o.log().viewport();
+        assert!(sheet.contains([log.x + 1.0, log.y + 1.0]));
+        assert!(o.log().scroll().max() > 0.0);
+        assert_eq!(o.log().scroll().offset(), o.log().scroll().max());
+        // A drag on it scrolls the turns, not the cards, and leaves it open.
+        o.touch(2, TouchPhase::Started, 540.0, log.y + 200.0, Duration::ZERO);
         let mut now = Duration::ZERO;
         for i in 1..=10 {
             now += MS;
@@ -606,7 +768,7 @@ mod tests {
                 2,
                 TouchPhase::Moved,
                 540.0,
-                log.y + 40.0 + 30.0 * i as f32,
+                log.y + 200.0 + 30.0 * i as f32,
                 now,
             );
         }
@@ -614,11 +776,113 @@ mod tests {
             2,
             TouchPhase::Ended,
             540.0,
-            log.y + 340.0,
+            log.y + 500.0,
             now + Duration::from_millis(300),
         );
-        assert!((log_at - o.log().scroll().offset() - 300.0).abs() < 1.0);
-        assert!((o.grid().scroll().offset() - 250.0).abs() < 1.0);
+        assert!(o.overlay().is_open());
+        assert!((o.log().scroll().max() - o.log().scroll().offset() - 300.0).abs() < 1.0);
+        assert_eq!(o.grid().scroll().offset(), 0.0);
+        // A card under it is not a tap away.
+        let under = o.grid().card_rect("p5").unwrap();
+        assert!(sheet.contains([under.x + 5.0, under.y + 5.0]));
+        assert_eq!(
+            tap(&mut o, under.x + 5.0, under.y + 5.0),
+            Some(OverviewHit::Tap)
+        );
+        // It never opens by itself: Gemini speaking leaves it closed.
+        let mut o = overview(2);
+        talk(&mut o, 3);
+        o.tick(TurnOverlay::SLIDE);
+        assert!(!o.overlay().is_shown());
+    }
+
+    #[test]
+    fn each_way_of_closing_the_overlay() {
+        let mut o = overview(2);
+        talk(&mut o, 1);
+        // A tap on the dimmed cards above it.
+        open(&mut o);
+        let sheet = o.overlay().rect();
+        let above = o.grid().card_rect("p1").unwrap();
+        assert!(above.y + 5.0 < sheet.y);
+        assert_eq!(tap(&mut o, above.x + 5.0, above.y + 5.0), None);
+        assert!(!o.overlay().is_open());
+        o.tick(TurnOverlay::SLIDE);
+        assert!(!o.overlay().is_shown());
+        // A swipe down on it.
+        open(&mut o);
+        o.touch(
+            1,
+            TouchPhase::Started,
+            540.0,
+            sheet.y + 100.0,
+            Duration::ZERO,
+        );
+        let mut now = Duration::ZERO;
+        for i in 1..=10 {
+            now += MS;
+            o.touch(
+                1,
+                TouchPhase::Moved,
+                540.0,
+                sheet.y + 100.0 + 40.0 * i as f32,
+                now,
+            );
+        }
+        assert_eq!(
+            o.touch(1, TouchPhase::Ended, 540.0, sheet.y + 500.0, now + MS),
+            None
+        );
+        assert!(!o.overlay().is_open());
+        o.tick(TurnOverlay::SLIDE);
+        assert!(!o.overlay().is_shown());
+        // Back; and Back with it closed is not the overview's.
+        open(&mut o);
+        assert!(o.back());
+        o.tick(TurnOverlay::SLIDE);
+        assert!(!o.overlay().is_shown());
+        assert!(!o.back());
+        // Closed, the cards are a tap away again.
+        assert_eq!(
+            tap(&mut o, above.x + 5.0, above.y + 5.0),
+            Some(OverviewHit::Agent("p1".into()))
+        );
+    }
+
+    #[test]
+    fn the_bottom_row_works_with_the_overlay_open() {
+        let mut o = overview(2);
+        talk(&mut o, 1);
+        o.set_play(false, false, true);
+        open(&mut o);
+        let play = o.rect_of(AgentHit::ReadAloud).unwrap();
+        let record = o.rect_of(AgentHit::Message).unwrap();
+        assert_eq!(
+            tap(&mut o, record.x + 5.0, record.y + 5.0),
+            Some(OverviewHit::Bottom(AgentHit::Message))
+        );
+        assert_eq!(
+            tap(&mut o, play.x + 5.0, play.y + 5.0),
+            Some(OverviewHit::Bottom(AgentHit::ReadAloud))
+        );
+        assert!(o.overlay().is_open(), "the row leaves it open");
+        // Taking a message: the dictation card and send are live too, the
+        // sheet ending above the card.
+        o.set_dictation(Some(vec![Line {
+            text: "Taking a message".into(),
+            size: 15.0,
+            color: MUTED,
+            gap: 28.0,
+        }]));
+        let card = o.panels[0].fills[0].rect;
+        let sheet = o.overlay().rect();
+        assert!(sheet.y + sheet.h <= card.y);
+        let send = o.rect_of(AgentHit::Submit).unwrap();
+        assert_eq!(
+            tap(&mut o, send.x + 5.0, send.y + 5.0),
+            Some(OverviewHit::Bottom(AgentHit::Submit))
+        );
+        assert!(o.overlay().is_open());
     }
 
     #[test]
@@ -630,7 +894,7 @@ mod tests {
         assert!(play.x < 100.0 && record.x + record.w > 980.0);
         assert_eq!(play.w, play.h);
         assert!(record.y + record.h <= PHONE.h - PHONE.bottom);
-        assert!(o.log().viewport().y + o.log().viewport().h <= record.y);
+        assert!(o.grid().viewport().y + o.grid().viewport().h <= record.y);
         assert_eq!(
             tap(&mut o, record.x + 5.0, record.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::Message))
@@ -656,7 +920,7 @@ mod tests {
         assert!(o.rect_of(AgentHit::Message).is_none());
         let card = &o.panels[0].fills[0].rect;
         assert!(card.y + card.h <= send.y);
-        assert!(o.log().viewport().y + o.log().viewport().h <= card.y);
+        assert!(o.grid().viewport().y + o.grid().viewport().h <= card.y);
     }
 
     #[test]

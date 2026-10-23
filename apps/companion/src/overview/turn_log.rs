@@ -1,8 +1,11 @@
-//! The overview's lower half: the conversation with Gemini as plain text
-//! (plan 20261023_04, the 17:04 EDT amendment, A5), the main screen's
-//! conversation moved here. The user's words and Gemini's replies, oldest
-//! at the top, with what STT is hearing last; it follows the newest until
-//! scrolled back, as the agent view's flow does, and scrolls on its own.
+//! The conversation with Gemini as plain text (plan 20261023_04, the 17:04
+//! EDT amendment, A5), the main screen's conversation moved here; since
+//! the 18:07 EDT amendment it is held by the overlay ([`TurnOverlay`]).
+//! The user's words and Gemini's replies, oldest at the top, with what STT
+//! is hearing last; it follows the newest until scrolled back, as the
+//! agent view's flow does, and scrolls on its own.
+//!
+//! [`TurnOverlay`]: super::turn_overlay::TurnOverlay
 
 use std::time::Duration;
 
@@ -150,7 +153,14 @@ impl TurnLog {
     }
 
     pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
+        self.draw_moved(list, ctx, 0.0);
+    }
+
+    /// Draws it, window and all, moved down by `down` pixels: as it slides
+    /// in with the overlay.
+    pub fn draw_moved(&self, list: &mut DrawList, ctx: &DrawContext, down: f32) {
         let v = self.viewport;
+        let v = Rect::new(v.x, v.y + down, v.w, v.h);
         list.push_clip(v.pos(), v.size());
         let dy = v.y - self.scroll.offset();
         for r in &self.rows {
@@ -167,7 +177,7 @@ impl TurnLog {
 mod tests {
     use super::*;
 
-    /// The lower half of the phone.
+    /// A window on the phone.
     const HALF: Rect = Rect {
         x: 0.0,
         y: 1120.0,

@@ -20,9 +20,10 @@
 //! start.
 //!
 //! The home screen is the overview (plan 20261023_04, `overview.rs`): the
-//! agents' cards above and the conversation with Gemini below, each
-//! scrolling on its own, with the confirmation and dictation cards and the
-//! bottom row under them. The pairing screen (`ui.rs`) shows instead while
+//! agents' cards on the whole screen, the newest Gemini line in a strip
+//! under them, and the confirmation and dictation cards and the bottom row
+//! under that. A tap on the strip slides the conversation with Gemini up
+//! over the cards; the system Back closes it. The pairing screen (`ui.rs`) shows instead while
 //! the phone is neither paired nor connected, or shows its device code.
 //!
 //! Dictation (plan 20261023_02): "take a message" or the record button
@@ -989,6 +990,14 @@ impl MorphApp for App {
         // The system Back closes the agent view.
         if self.agent.is_some() && matches!(key, Key::Back | Key::Escape) {
             self.close_agent();
+            return KeyStatus::Handled;
+        }
+        // On the overview, it closes the Gemini turns' overlay.
+        if self.agent.is_none()
+            && !self.pairing()
+            && matches!(key, Key::Back | Key::Escape)
+            && self.overview.back()
+        {
             return KeyStatus::Handled;
         }
         if !self.field_focused {

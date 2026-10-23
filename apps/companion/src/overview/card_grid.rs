@@ -1,5 +1,7 @@
-//! The overview's upper half: one card per agent pane, two per row, in tab
-//! order (plan 20261023_04, the 17:04 EDT amendment, A2). Shells are left
+//! The overview's cards: one card per agent pane, two per row, in tab
+//! order (plan 20261023_04, the 17:04 EDT amendment, A2), on the whole
+//! screen between the status lines and the bottom row (the 18:07 EDT
+//! amendment, 1). Shells are left
 //! out. The order is by `(workspace_id, tab_number)` and never changes as
 //! turns change: a card that needs input is marked where it is. Cards are
 //! equal width, 12 pt apart and from the edges, at least 112 pt high; the
@@ -247,7 +249,7 @@ mod tests {
     use crate::overview::agent_card::tests::{agent, asking};
     use libhandlr_proto::common::Turn;
 
-    /// The upper half of the phone (1080 × 2340 at scale 2.0).
+    /// A window on the phone (1080 × 2340 at scale 2.0).
     const HALF: Rect = Rect {
         x: 0.0,
         y: 300.0,
