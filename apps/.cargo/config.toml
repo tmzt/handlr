@@ -1,0 +1,11 @@
+# Copied from libvoicexn's .cargo/config.toml (v0.2.0). xn picks its kernels
+# at compile time: ARMv8.2 dotprod and fp16 for the fast q8_0 kernels, and
+# 16 KB page alignment for Android 15. aarch64-apple-darwin needs nothing.
+# Cargo reads this from the working directory, so
+# companion/scripts/android.sh builds from apps/.
+[target.aarch64-linux-android]
+rustflags = [
+  "-C", "target-cpu=generic",
+  "-C", "target-feature=+dotprod,+fp16",
+  "-C", "link-arg=-Wl,-z,max-page-size=16384",
+]

@@ -1,0 +1,12 @@
+# The companion front ends, a workspace of their own so that `cargo build`
+# at the repository root never builds them, their ML stack or the Android
+# tooling (docs/design/20261022_04_COMPANION_APP_PLAN.md, decision 1 and
+# the 18:10 EDT amendment).
+[workspace]
+members = ["companion"]
+resolver = "2"
+
+# The STT and TTS models are far too slow unoptimized, as in libvoicexn's
+# own workspace.
+[profile.dev.package."*"]
+opt-level = 2

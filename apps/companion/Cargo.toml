@@ -1,0 +1,57 @@
+[package]
+name = "companion"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "handlr's companion app: a libmorph window on the desktop and on Android, on handlr-companion and handlr-audio"
+
+# Started as a copy of libvoicexn's examples/voicexn at v0.2.0
+# (32b8032082997a34190b458f79716d998a0d850a); plan 20261022_04, decision 8.
+
+[lib]
+name = "companion"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "companion"
+path = "src/main.rs"
+
+[dependencies]
+handlr-companion = { path = "../../crates/handlr-companion" }
+handlr-audio = { path = "../../crates/handlr-audio" }
+# `StaticKey`, which the key store's Noise key implements.
+libhandlr_proto = { path = "../../crates/libhandlr_proto", features = ["link"] }
+# libmorph 0.3.1: the key store and the secure store (`secure-store`).
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, features = ["secure-store"] }
+# The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
+libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "b48d0664a4222ffd1fe505962d13459fbadb5034", features = ["font-apache-roboto-regular"] }
+libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "ccb783dd64b88d3d7ad20d07b7919a5177ab332d" }
+log = "0.4"
+# The key store's Noise key (src/keys.rs): cleared on drop, X25519 with the
+# curve25519-dalek snow already uses, and a random key from the OS.
+zeroize = { version = "1.8", features = ["derive"] }
+curve25519-dalek = "4.1.3"
+getrandom = "0.2"
+# The server record, a TOML blob in the secure store, in FileKeyStore's layout.
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+base64 = "0.22"
+
+# The desktop window: the default devices through cpal, logs to stderr.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+handlr-audio = { path = "../../crates/handlr-audio", features = ["cpal"] }
+env_logger = "0.11"
+
+# Android: libmorph's audio and libmobile, and libmorph's Sink and Source.
+[target.'cfg(target_os = "android")'.dependencies]
+handlr-audio = { path = "../../crates/handlr-audio", features = ["morph"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, features = ["audio", "mobile", "secure-store"] }
+android_logger = "0.14"
+
+# Generates the Gradle project when building for Android; a no-op on the host.
+[build-dependencies]
+libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a" }
+
+# The key tests use libdevice's memory vault, through libmorph's `script`.
+[target.'cfg(not(target_os = "android"))'.dev-dependencies]
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, features = ["secure-store", "script"] }

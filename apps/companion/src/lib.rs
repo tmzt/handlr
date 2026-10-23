@@ -1,0 +1,698 @@
+//! handlr's companion app (docs/design/20261022_04_COMPANION_APP_PLAN.md,
+//! decision 8 and step 4 of the 18:10 EDT amendment): one libmorph app for
+//! a desktop window and for Android, started as a copy of libvoicexn's
+//! `examples/voicexn` at v0.2.0.
+//!
+//! - `handlr-companion` is the client: pairing, the link, turns and
+//!   confirmations. The app sends it [`Input`]s and shows its [`Event`]s.
+//! - `handlr-audio` is the voice: libvoicexn's STT and TTS, with cpal on the
+//!   desktop and libmorph's audio on Android. Every event is handed to it,
+//!   and its `Utterance`, `Listening` and `Speaking` go back to the client.
+//! - Keys are in libmorph's key store and secure store (`keys.rs`). Where
+//!   libmorph has neither (Linux), the desktop uses `FileKeyStore`; Android
+//!   never falls back, and shows an error instead.
+//!
+//! A tap on no control is [`Input::Tap`]. Pairing takes a `handlr://` URL,
+//! a `handlr1…` string or a `data:image/png;base64,` URL, through
+//! [`App::open_url`]: typed into the field (desktop), given as `--pair`
+//! (desktop), or pushed as `pair.txt` into the data directory (Android,
+//! the plan's 16:23 EDT amendment), which the app reads and deletes at
+//! start.
+
+pub mod keys;
+pub mod ui;
+
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use handlr_audio::libvoicexn::config::SttQuant;
+use handlr_audio::libvoicexn::vad::GateState;
+use handlr_audio::{AudioConfig, AudioEvent, AudioSession};
+use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input, KeyStore};
+use libcontrols::DrawContext;
+use libmorph::{
+    AudioSetup, Frame, Key, KeyStatus, LimitsRequest, MorphApp, MorphContext, Touch, TouchPhase,
+    wgpu,
+};
+use libmsdf::GpuSdfRenderer;
+use libmsdf::drawlist::DrawList;
+use libmsdf::font::{
+    BUNDLED_ATLAS_PX_RANGE, FontAtlas, ROBOTO_REGULAR_ASCII, ROBOTO_REGULAR_ATLAS, TextShaper,
+};
+
+use crate::keys::VaultKeyStore;
+use crate::ui::{CODE, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN, chunk, wrap};
+
+/// The frame rate: enough for text, and far less heat than the display's
+/// 120 Hz while STT listens.
+const FPS: u32 = 15;
+
+/// The longest pairing input the field takes: a data URL of a QR code PNG
+/// is a few kilobytes.
+const FIELD_MAX: usize = 16 * 1024;
+
+/// The name the client gives in `hello`.
+const CLIENT: &str = "companion";
+
+/// The desktop's command line (Android has none).
+#[derive(Debug, Default)]
+struct Args {
+    models: Option<PathBuf>,
+    quant: Option<SttQuant>,
+    voice: Option<String>,
+    pair: Option<String>,
+    keys: Option<PathBuf>,
+    name: Option<String>,
+}
+
+impl Args {
+    fn parse(args: &[String]) -> Self {
+        let mut out = Self::default();
+        let mut args = args.iter().skip(1);
+        while let Some(arg) = args.next() {
+            let mut value = || args.next().cloned();
+            match arg.as_str() {
+                "--models" => out.models = value().map(PathBuf::from),
+                "--quant" => {
+                    out.quant = value().and_then(|q| {
+                        let quant = SttQuant::parse(&q);
+                        if quant.is_none() {
+                            log::error!("--quant {q:?}: one of q4k, q4_0, q8");
+                        }
+                        quant
+                    })
+                }
+                "--voice" => out.voice = value(),
+                "--pair" => out.pair = value(),
+                "--keys" => out.keys = value().map(PathBuf::from),
+                "--name" => out.name = value(),
+                other => log::warn!("unknown argument {other:?}"),
+            }
+        }
+        out
+    }
+}
+
+pub struct App {
+    atlas: FontAtlas,
+    shaper: TextShaper,
+    sdf: GpuSdfRenderer,
+    list: DrawList,
+    screen: Screen,
+    next_frame: Instant,
+    /// `None` when there is no key storage (Android without a key store).
+    companion: Option<Companion>,
+    /// Started at init on the desktop, and once capture opens on Android.
+    audio: Option<AudioSession>,
+    audio_config: AudioConfig,
+    /// The microphone's end when the desktop has no input device: kept, and
+    /// never fed.
+    #[cfg(not(target_os = "android"))]
+    _mic: Option<handlr_audio::libvoicexn::capture::Mic>,
+    /// The connection, for the first status line.
+    link: String,
+    /// The audio, for the second.
+    sound: String,
+    /// A server is stored, so a disconnect is a retry, not "not paired".
+    paired: bool,
+    heard: String,
+    partial: String,
+    said: String,
+    /// The waiting confirmation's text and label.
+    confirm: Option<(String, Option<String>)>,
+    /// The device code to paste into `handlr pair`, and the server's name.
+    code: Option<(String, String)>,
+    /// A pairing note or an error, and its colour.
+    note: Option<(String, [f32; 4])>,
+    field: String,
+    field_focused: bool,
+}
+
+/// The models: `<data dir>/<name>` on Android, `--models <dir>` (default
+/// `models/`) on the desktop.
+fn audio_config(ctx: &MorphContext, args: &Args) -> AudioConfig {
+    let models = match ctx.data_dir() {
+        Some(dir) => dir.to_path_buf(),
+        None => args
+            .models
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("models")),
+    };
+    let mut config = AudioConfig::new(&models);
+    if let Some(dir) = ctx.data_dir() {
+        // Next to the keys, which on Android are not files.
+        config.vocab_file = Some(dir.join("vocab.txt"));
+    }
+    if let Some(quant) = args.quant {
+        config.stt.quant = quant;
+    }
+    config.voice = args.voice.clone();
+    config
+}
+
+/// The key storage, and the name of the paired server if there is one.
+fn key_store(
+    ctx: &MorphContext,
+    args: &Args,
+) -> Result<(Box<dyn KeyStore>, Option<String>), String> {
+    let mut keys: Box<dyn KeyStore> = match (ctx.key_store(), ctx.secure_store(), &args.keys) {
+        // `--keys <dir>` (desktop only: Android has no arguments).
+        (_, _, Some(dir)) => {
+            log::info!("keys: files in {}", dir.display());
+            Box::new(FileKeyStore::new(dir))
+        }
+        (Some(vault), Some(store), None) => {
+            let keys = VaultKeyStore::new(vault.clone(), store.clone());
+            log::info!("keys: key store and secure store ({})", keys.describe());
+            Box::new(keys)
+        }
+        _ if cfg!(target_os = "android") => {
+            return Err("this device has no key store; the companion cannot keep its key".into());
+        }
+        _ => {
+            let dir = FileKeyStore::default_dir();
+            log::info!(
+                "keys: no key store on this host; files in {}",
+                dir.display()
+            );
+            Box::new(FileKeyStore::new(dir))
+        }
+    };
+    let server = keys.server()?.map(|s| s.name);
+    let key = keys.static_key()?.is_some();
+    log::info!(
+        "keys: static key {}, paired server {}",
+        if key { "present" } else { "none yet" },
+        if server.is_some() { "present" } else { "none" },
+    );
+    Ok((keys, server))
+}
+
+/// The device name to pair as: the phone's model on Android, the hostname
+/// on the desktop.
+fn device_name(args: &Args) -> String {
+    if let Some(name) = &args.name {
+        return name.clone();
+    }
+    if cfg!(target_os = "android") {
+        let model = std::process::Command::new("getprop")
+            .arg("ro.product.model")
+            .output()
+            .ok()
+            .and_then(|out| String::from_utf8(out.stdout).ok());
+        if let Some(name) = model
+            .as_deref()
+            .and_then(handlr_companion::device_name_from)
+        {
+            return name;
+        }
+    }
+    handlr_companion::default_device_name()
+}
+
+impl App {
+    /// The app's handling of a pairing URL, however it arrives: the field,
+    /// `--pair`, `pair.txt`, and, once libmorph has URL schemes, an opened
+    /// `handlr://` link. The text is never logged.
+    pub fn open_url(&mut self, url: &str) {
+        let text = url.trim();
+        if text.is_empty() {
+            return;
+        }
+        match &self.companion {
+            Some(companion) => {
+                companion.send(Input::Pair(text.to_string()));
+                self.note = Some(("pairing\u{2026}".into(), MUTED));
+            }
+            None => self.note = Some(("no key storage: cannot pair".into(), WARN)),
+        }
+    }
+
+    fn send(&self, input: Input) {
+        if let Some(companion) = &self.companion {
+            companion.send(input);
+        }
+    }
+
+    /// Starts the audio on libmorph's capture and output (Android).
+    #[cfg(target_os = "android")]
+    fn start_morph_audio(&mut self, ctx: &mut MorphContext) {
+        let (Some(capture), Some(output)) = (ctx.audio().capture_format(), ctx.audio().format())
+        else {
+            log::warn!("audio: no capture or no output");
+            self.sound = "no audio device".into();
+            return;
+        };
+        log::info!(
+            "audio: capture {} Hz, {} channels; playback {} Hz, {} channels",
+            capture.sample_rate,
+            capture.channels,
+            output.sample_rate,
+            output.channels
+        );
+        let output = handlr_audio::Format {
+            rate: output.sample_rate,
+            channels: output.channels,
+        };
+        let (session, sink, source) =
+            AudioSession::spawn_morph(self.audio_config.clone(), capture, output);
+        ctx.audio().add_sink(sink);
+        ctx.audio().add_source(source);
+        self.audio = Some(session);
+        self.sound = "loading the voice\u{2026}".into();
+    }
+
+    fn on_event(&mut self, event: Event) {
+        if let Some(audio) = &mut self.audio {
+            audio.handle(&event);
+        }
+        match event {
+            Event::Connected { server } => {
+                log::info!("link: connected to {server}");
+                self.link = format!("connected to {server}");
+            }
+            Event::Disconnected { retry_in_ms } => {
+                self.link = if self.paired {
+                    format!(
+                        "disconnected \u{b7} retrying in {} s",
+                        retry_in_ms.div_ceil(1000)
+                    )
+                } else {
+                    "not paired \u{b7} paste a pairing URL below".into()
+                };
+            }
+            Event::PairingCode { code, server } => {
+                // A public key, safe to log, and readable over adb.
+                log::info!("pairing: device code {code}");
+                self.paired = true;
+                self.code = Some((code, server));
+                self.note = None;
+            }
+            Event::Paired { name } => {
+                log::info!("pairing: paired as {name}");
+                self.code = None;
+                self.note = Some((format!("paired as {name}"), MUTED));
+            }
+            Event::PairFailed(why) => {
+                log::warn!("pairing: refused");
+                self.note = Some((format!("pairing failed: {why}"), WARN));
+            }
+            Event::Say(text) => self.said = text,
+            Event::Confirm { text, label, .. } => self.confirm = Some((text, label)),
+            Event::Resolved { outcome } => {
+                log::info!("confirmation: {outcome}");
+                self.confirm = None;
+            }
+            Event::TurnEnded { outcome, .. } => log::info!("turn: {outcome}"),
+            Event::Error(e) => {
+                log::warn!("companion: {e}");
+                self.note = Some((e, WARN));
+            }
+            Event::StopSpeaking | Event::Arm | Event::Vocabulary(_) => {}
+        }
+    }
+
+    fn on_audio(&mut self, event: AudioEvent) {
+        match event {
+            AudioEvent::Input(input) => {
+                match &input {
+                    Input::Utterance(text) => {
+                        self.heard = text.clone();
+                        self.partial.clear();
+                    }
+                    Input::Listening(false) => self.partial.clear(),
+                    _ => {}
+                }
+                self.send(input);
+            }
+            AudioEvent::SttLoaded { load_ms } => {
+                log::info!("audio: STT loaded in {load_ms} ms");
+                self.sound = "tap to talk".into();
+            }
+            AudioEvent::SttLoadFailed(e) => {
+                log::error!("audio: STT: {e}");
+                self.sound = format!("STT model missing: {e}");
+            }
+            AudioEvent::TtsLoaded { load_ms, voices } => {
+                log::info!("audio: TTS loaded in {load_ms} ms, {voices} voices");
+            }
+            AudioEvent::TtsLoadFailed(e) => {
+                log::error!("audio: TTS: {e}");
+                self.sound = format!("TTS model missing: {e}");
+            }
+            AudioEvent::Partial(text) => self.partial = text,
+            AudioEvent::Gate(state) => {
+                self.sound = match state {
+                    GateState::Idle => "tap to talk",
+                    GateState::Armed => "listening\u{2026}",
+                    GateState::Open => "hearing",
+                    GateState::Closing => "finishing",
+                }
+                .into();
+            }
+            AudioEvent::Speed { step_ms, dropped } => {
+                log::debug!("audio: STT step {step_ms:.1} ms, dropped {dropped}");
+            }
+            AudioEvent::Spoken { audio_ms, synth_ms } => {
+                log::info!("audio: said {audio_ms} ms in {synth_ms} ms");
+            }
+            AudioEvent::SpeakFailed(e) => log::warn!("audio: TTS: {e}"),
+            AudioEvent::VocabularySaved { phrases, .. } => {
+                log::info!("audio: vocabulary of {phrases} phrases, for the next start");
+            }
+            AudioEvent::VocabularyFailed(e) => log::warn!("audio: vocabulary: {e}"),
+        }
+    }
+
+    fn pair(&mut self) {
+        let text = std::mem::take(&mut self.field);
+        self.field_focused = false;
+        self.open_url(&text);
+    }
+
+    /// Gives the screen what it shows now; it changes only what differs.
+    fn lay_out(&mut self, ctx: &MorphContext) {
+        let (w, h) = ctx.surface_size();
+        let safe = ctx.safe_area();
+        let layout = Layout {
+            w: w as f32,
+            h: h as f32,
+            scale: ctx.scale_factor(),
+            top: safe.top,
+            bottom: safe.bottom,
+        };
+        let line = |text: String, size: f32, color, gap| Line {
+            text,
+            size,
+            color,
+            gap,
+        };
+        let mut body = Vec::new();
+        let mut push = |text: &str, size: f32, color, gap: f32| {
+            for (i, t) in wrap(text, layout.columns(size)).into_iter().enumerate() {
+                body.push(line(t, size, color, if i == 0 { gap } else { 0.0 }));
+            }
+        };
+        if !self.partial.is_empty() {
+            push(&format!("> {}\u{2026}", self.partial), 20.0, MUTED, 24.0);
+        } else if !self.heard.is_empty() {
+            push(&format!("> {}", self.heard), 20.0, TEXT, 24.0);
+        }
+        if !self.said.is_empty() {
+            push(&format!("< {}", self.said), 19.0, SPOKEN, 18.0);
+        }
+        if let Some((text, label)) = &self.confirm {
+            let label = label.as_deref().unwrap_or("confirm");
+            push(&format!("? {label}"), 15.0, MUTED, 28.0);
+            push(text, 22.0, TEXT, 4.0);
+        }
+
+        let mut code = Vec::new();
+        if let Some((device_code, server)) = &self.code {
+            code.push(line(
+                format!("Paste this code into handlr pair on {server}:"),
+                15.0,
+                MUTED,
+                0.0,
+            ));
+            // Base58 is mostly capitals and wide letters: wider than the
+            // half an em `columns` assumes.
+            for part in chunk(device_code, layout.columns(26.0 * 1.3)) {
+                code.push(line(part, 26.0, CODE, 4.0));
+            }
+        }
+        if let Some((note, color)) = &self.note {
+            for (i, t) in wrap(note, layout.columns(15.0)).into_iter().enumerate() {
+                code.push(line(t, 15.0, *color, if i == 0 { 8.0 } else { 0.0 }));
+            }
+        }
+
+        let view = View {
+            status: vec![self.link.clone(), self.sound.clone()],
+            body,
+            confirm: self.confirm.is_some(),
+            code,
+            field: self.field.clone(),
+            field_focused: self.field_focused,
+        };
+        self.screen.set(layout, view);
+    }
+}
+
+impl MorphApp for App {
+    /// The namespace of the key store and the secure store:
+    /// `libmorph.handlr-companion`, on Android and in the macOS Keychain.
+    const SECURE_STORE_ID: &'static str = "handlr-companion";
+
+    /// libmsdf's fragment stage binds five storage buffers; the downlevel
+    /// defaults allow four.
+    fn limits(base: &wgpu::Limits) -> LimitsRequest {
+        let required = wgpu::Limits {
+            max_storage_buffers_per_shader_stage: base.max_storage_buffers_per_shader_stage.max(8),
+            ..base.clone()
+        };
+        LimitsRequest {
+            preferred: required.clone(),
+            required,
+        }
+    }
+
+    /// On Android, the microphone, in the preset for speech recognition.
+    /// The desktop opens its devices with cpal instead.
+    fn audio_setup(setup: &mut AudioSetup) {
+        #[cfg(target_os = "android")]
+        {
+            setup.capture = true;
+            setup.capture_mode = libmorph::CaptureMode::VoiceRecognition;
+        }
+        #[cfg(not(target_os = "android"))]
+        let _ = setup;
+    }
+
+    fn init(ctx: &mut MorphContext) -> Self {
+        let atlas = FontAtlas::from_bytes(ROBOTO_REGULAR_ATLAS).expect("bundled atlas parses");
+        let shaper = TextShaper::new(ROBOTO_REGULAR_ASCII.to_vec()).expect("bundled face parses");
+        let sdf = GpuSdfRenderer::new_with_msdf_layers(
+            ctx.device(),
+            ctx.surface_format(),
+            atlas.width,
+            atlas.height,
+            atlas.layer_count(),
+        );
+        sdf.upload_msdf_atlas(
+            ctx.queue(),
+            atlas.width,
+            atlas.height,
+            &atlas.to_rgba_bytes(),
+        );
+        sdf.upload_glyph_table(ctx.queue(), &atlas.glyph_table_u32s());
+
+        let args = Args::parse(ctx.args());
+        let audio_config = audio_config(ctx, &args);
+        let mut app = Self {
+            atlas,
+            shaper,
+            sdf,
+            list: DrawList::new(),
+            screen: Screen::new(),
+            next_frame: Instant::now(),
+            companion: None,
+            audio: None,
+            audio_config,
+            #[cfg(not(target_os = "android"))]
+            _mic: None,
+            link: "starting\u{2026}".into(),
+            sound: "waiting for the microphone\u{2026}".into(),
+            paired: false,
+            heard: String::new(),
+            partial: String::new(),
+            said: String::new(),
+            confirm: None,
+            code: None,
+            note: None,
+            field: String::new(),
+            field_focused: false,
+        };
+
+        match key_store(ctx, &args) {
+            Ok((keys, server)) => {
+                app.paired = server.is_some();
+                app.link = match server {
+                    Some(name) => format!("connecting to {name}\u{2026}"),
+                    None => "not paired \u{b7} paste a pairing URL below".into(),
+                };
+                let mut config = CompanionConfig::new(CLIENT);
+                config.device_name = device_name(&args);
+                config.voice = args.voice.clone();
+                log::info!("companion: device name {}", config.device_name);
+                app.companion = Some(Companion::spawn(config, keys));
+            }
+            Err(e) => {
+                log::error!("keys: {e}");
+                app.link = "no key storage".into();
+                app.note = Some((e, WARN));
+            }
+        }
+
+        #[cfg(not(target_os = "android"))]
+        match AudioSession::open_default(app.audio_config.clone()) {
+            Ok(session) => {
+                app.audio = Some(session);
+                app.sound = "loading the voice\u{2026}".into();
+            }
+            // No microphone (a Mac mini): the replies can still be heard.
+            Err(e) => {
+                log::error!("audio: {e}; trying the speaker alone");
+                let silent = handlr_audio::Format {
+                    rate: 24_000,
+                    channels: 1,
+                };
+                match AudioSession::open_default_output(app.audio_config.clone(), silent) {
+                    Ok((session, mic)) => {
+                        app.audio = Some(session);
+                        app._mic = Some(mic);
+                        app.sound = format!("no microphone ({e})");
+                    }
+                    Err(e) => {
+                        log::error!("audio: {e}");
+                        app.sound = format!("no audio: {e}");
+                    }
+                }
+            }
+        }
+
+        if let Some(text) = args.pair.as_deref() {
+            app.open_url(text);
+        }
+        // Android: a pairing input pushed with scripts/push-pair.sh. It is
+        // read once and deleted, whatever comes of it.
+        if let Some(path) = ctx.data_dir().map(|dir| dir.join("pair.txt"))
+            && let Ok(text) = std::fs::read_to_string(&path)
+        {
+            log::info!("pairing: read {}", path.display());
+            if let Err(e) = std::fs::remove_file(&path) {
+                log::warn!("pairing: deleting {}: {e}", path.display());
+            }
+            app.open_url(&text);
+        }
+        // The launch Intent's data (`am start -d <url>`) cannot reach the app
+        // yet: libmobile delivers it as `MobileEvent::Intent`, but libmorph
+        // 0.3.1's Android runner drops that event. Once libmorph releases its
+        // URL schemes (plan 20261022_07, Draft), `on_open_url` calls
+        // `open_url`, and build.rs adds `.url_scheme("handlr")`.
+        app
+    }
+
+    #[cfg(target_os = "android")]
+    fn on_capture_ready(&mut self, ctx: &mut MorphContext) {
+        self.start_morph_audio(ctx);
+    }
+
+    fn update(&mut self, ctx: &mut MorphContext, _dt: Duration) {
+        // Hold the frame: libmorph renders as fast as presentation allows,
+        // and the CPU and GPU heat the phone.
+        let now = Instant::now();
+        if now < self.next_frame {
+            std::thread::sleep(self.next_frame - now);
+        }
+        self.next_frame = self.next_frame.max(now) + Duration::from_secs(1) / FPS;
+
+        let events: Vec<Event> = match &self.companion {
+            Some(companion) => companion.poll().collect(),
+            None => Vec::new(),
+        };
+        for event in events {
+            self.on_event(event);
+        }
+        let sounds = match &mut self.audio {
+            Some(audio) => audio.poll(),
+            None => Vec::new(),
+        };
+        for event in sounds {
+            self.on_audio(event);
+        }
+        self.lay_out(ctx);
+    }
+
+    /// The buttons and the field, and a tap anywhere else.
+    fn on_touch(&mut self, _ctx: &mut MorphContext, touch: Touch) {
+        if touch.phase != TouchPhase::Ended {
+            return;
+        }
+        match self.screen.hit(touch.x, touch.y) {
+            Some(Hit::Approve) => self.send(Input::Approve),
+            Some(Hit::Deny) => self.send(Input::Deny),
+            Some(Hit::Field) => self.field_focused = true,
+            Some(Hit::Pair) => self.pair(),
+            None => {
+                self.field_focused = false;
+                self.send(Input::Tap);
+            }
+        }
+    }
+
+    /// Typing into the focused field (desktop): Enter pairs, Escape clears.
+    /// libmorph has no Backspace, paste or on-screen keyboard yet.
+    fn on_key(&mut self, _ctx: &mut MorphContext, key: Key) -> KeyStatus {
+        if !self.field_focused {
+            return KeyStatus::Unhandled;
+        }
+        match key {
+            Key::Character('\r' | '\n') => self.pair(),
+            Key::Character('\u{8}' | '\u{7f}') => {
+                self.field.pop();
+            }
+            Key::Character(c) if !c.is_control() => {
+                if self.field.len() < FIELD_MAX {
+                    self.field.push(c);
+                }
+            }
+            Key::Escape | Key::Back => {
+                self.field.clear();
+                self.field_focused = false;
+            }
+            _ => return KeyStatus::Unhandled,
+        }
+        KeyStatus::Handled
+    }
+
+    fn render(&mut self, ctx: &mut MorphContext, frame: &Frame<'_>) {
+        let draw = DrawContext {
+            px_range: BUNDLED_ATLAS_PX_RANGE,
+            ..DrawContext::new(Some(&self.atlas), Some(&self.shaper))
+        };
+        self.screen.draw(&mut self.list, &draw);
+        let (w, h) = frame.size;
+        self.sdf.render_draw_list(
+            ctx.device(),
+            ctx.queue(),
+            frame.view,
+            w,
+            h,
+            1.0,
+            &self.list,
+            0.0,
+        );
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(app: libmorph::AndroidApp) {
+    android_logger::init_once(
+        android_logger::Config::default()
+            .with_max_level(log::LevelFilter::Info)
+            .with_tag("handlr"),
+    );
+    // Before any worker starts: rayon's default of one thread per core is
+    // too many on phones that mix fast and slow cores, and STT needs 4 on
+    // the S23 to keep up with 80 ms frames (as voicexn).
+    // SAFETY: no other thread has started yet.
+    unsafe {
+        std::env::set_var(
+            "RAYON_NUM_THREADS",
+            option_env!("VOICEXN_THREADS").unwrap_or("4"),
+        )
+    };
+    libmorph::run_android::<App>(app);
+}
