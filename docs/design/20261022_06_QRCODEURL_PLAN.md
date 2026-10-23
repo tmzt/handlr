@@ -191,3 +191,32 @@ earlier is replaced.
     shown (for example "herdr's kitty_graphics is off").
 - Without `--qr-inline`, nothing changes. The image carries the same
   pairing URL as the text code, so decision 6 applies to it unchanged.
+
+## Amendment — 2026-10-22 22:55 EDT: handlr pair prints the pairing URL and the data URL
+
+The owner gave these instructions after a live test. A kitty image sent
+through herdr `--remote` did not appear; the data URL pasted into a
+browser did show the code. The owner then said: "just print the base58
+string or url and qr data url on handlr pair".
+
+- **Replaces step 3's output and part of decision 6.** `handlr pair`
+  prints the following, and nothing else, besides warnings and the waiting
+  and result lines:
+  - the pairing URL (decision 1), on its own line;
+  - the `data:` URL of the QR code of that pairing URL, on its own line;
+  - the expiry line, which says "single use, expires in N s".
+- **Removed:**
+  - the terminal QR code and the plain `handlr1…` line;
+  - `--qr-url`, since the data URL is always printed.
+
+  The pairing URL holds the `handlr1…` string in its fragment, and
+  `PairingPayload::decode` accepts either form, so pasting either one
+  pairs.
+- **Exposure:** the secret appears twice in scrollback, in the pairing URL
+  and inside the image. That is as before, when the string and the
+  terminal QR code were printed.
+- **Replaces the `handlr pair --qr-inline` part of the 22:43 EDT
+  amendment.** `handlr pair` prints no inline images. `qrcodeurl` keeps
+  `Inline`, `Qr::inline` and `Qr::terminal`, with their tests, for later
+  use.
+- **Unchanged:** `--qr-png <path>` stays as decision 6 describes it.
