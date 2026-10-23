@@ -6,7 +6,11 @@
 //! - no user entry follows that entry; and
 //! - the pane's `agent_status` is `idle`, `blocked` or `done` (herdr marks a
 //!   pane `done` when its agent has finished a turn the user has not yet
-//!   looked at, which is when a question asked at the end of a task waits).
+//!   looked at, which is when a question asked at the end of a task waits);
+//!   or, whatever herdr says, the turn has visibly ended: that reply is the
+//!   session's last entry and the file has been quiet for [`TURN_QUIET`]
+//!   (herdr reports a Claude Code pane `working` while a background agent
+//!   of its runs, after its turn has ended).
 //!
 //! The question is redacted, then cut to `PENDING_QUESTION_MAX`
 //! characters.
@@ -16,18 +20,29 @@ use libherdr::protocol::AgentStatus;
 use super::redact::redact;
 use super::{EntryKind, Item, PENDING_QUESTION_MAX, PendingQuestion, Role, cut};
 
+/// How long the session file must be unwritten before a final reply counts
+/// as the end of the turn whatever herdr's status.
+pub const TURN_QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The pending question in `items` (oldest first) for an agent whose
-/// status is `status`, if it has one.
-pub fn pending_question(items: &[Item], status: &AgentStatus) -> Option<PendingQuestion> {
-    if !matches!(
-        status,
-        AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Done
-    ) {
-        return None;
-    }
+/// status is `status`, if it has one. `quiet` is whether the session file
+/// has been unwritten for [`TURN_QUIET`].
+pub fn pending_question(
+    items: &[Item],
+    status: &AgentStatus,
+    quiet: bool,
+) -> Option<PendingQuestion> {
     let last = items
         .iter()
         .rposition(|i| i.role == Role::Assistant && i.kind == EntryKind::Text)?;
+    let waiting = matches!(
+        status,
+        AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Done
+    );
+    let ended = quiet && last + 1 == items.len();
+    if !waiting && !ended {
+        return None;
+    }
     if items[last + 1..].iter().any(|i| i.role == Role::User) {
         return None;
     }
@@ -105,17 +120,17 @@ mod tests {
         // last paragraph asks.
         let path = fixture("claude_question.jsonl");
         let items = ClaudeCode::new(fixture("x")).tail(&path, 50).unwrap();
-        let q = pending_question(&items, &AgentStatus::Idle).unwrap();
+        let q = pending_question(&items, &AgentStatus::Idle, false).unwrap();
         assert_eq!(
             q.text,
             "Should the notices wait for the phone to finish speaking, or interrupt it?"
         );
         assert_eq!(q.ts, "2026-01-04T07:15:00.000Z");
         // Blocked counts too; working does not.
-        assert!(pending_question(&items, &AgentStatus::Blocked).is_some());
-        assert!(pending_question(&items, &AgentStatus::Working).is_none());
+        assert!(pending_question(&items, &AgentStatus::Blocked, false).is_some());
+        assert!(pending_question(&items, &AgentStatus::Working, false).is_none());
         // A task that ends with a question: herdr says done until it is seen.
-        assert!(pending_question(&items, &AgentStatus::Done).is_some());
+        assert!(pending_question(&items, &AgentStatus::Done, false).is_some());
     }
 
     #[test]
@@ -124,13 +139,13 @@ mod tests {
             text(Role::User, "t1", "do it"),
             text(Role::Assistant, "t2", "Done.\n\nShall I push?"),
         ];
-        assert!(pending_question(&items, &AgentStatus::Idle).is_some());
+        assert!(pending_question(&items, &AgentStatus::Idle, false).is_some());
         // Tool entries after it do not clear it.
         items.push(tool(Role::Assistant, EntryKind::ToolUse));
         items.push(tool(Role::Tool, EntryKind::ToolResult));
-        assert!(pending_question(&items, &AgentStatus::Idle).is_some());
+        assert!(pending_question(&items, &AgentStatus::Idle, false).is_some());
         items.push(text(Role::User, "t3", "yes"));
-        assert_eq!(pending_question(&items, &AgentStatus::Idle), None);
+        assert_eq!(pending_question(&items, &AgentStatus::Idle, false), None);
     }
 
     #[test]
@@ -140,7 +155,10 @@ mod tests {
             "t",
             "Did that work?\n\nIt did. Everything is committed.",
         )];
-        assert_eq!(pending_question(&asked_earlier, &AgentStatus::Idle), None);
+        assert_eq!(
+            pending_question(&asked_earlier, &AgentStatus::Idle, false),
+            None
+        );
         // A line of the final paragraph that asks, with markdown after it.
         let list = vec![text(
             Role::Assistant,
@@ -148,17 +166,20 @@ mod tests {
             "Summary.\n\n1. **Keep the old name?**\n2. Rename it everywhere.",
         )];
         assert_eq!(
-            pending_question(&list, &AgentStatus::Blocked).unwrap().text,
+            pending_question(&list, &AgentStatus::Blocked, false)
+                .unwrap()
+                .text,
             "1. **Keep the old name?**\n2. Rename it everywhere."
         );
         assert_eq!(
             pending_question(
                 &[text(Role::Assistant, "t", "\n\n  \n")],
-                &AgentStatus::Idle
+                &AgentStatus::Idle,
+                false
             ),
             None
         );
-        assert_eq!(pending_question(&[], &AgentStatus::Idle), None);
+        assert_eq!(pending_question(&[], &AgentStatus::Idle, false), None);
     }
 
     #[test]
@@ -170,15 +191,40 @@ mod tests {
             &format!("Is {key} the key you meant? {}", "x".repeat(600)),
         )];
         // The `?` is mid-line: this line does not end with one.
-        assert_eq!(pending_question(&items, &AgentStatus::Idle), None);
+        assert_eq!(pending_question(&items, &AgentStatus::Idle, false), None);
         let items = vec![text(
             Role::Assistant,
             "t",
             &format!("Is {key} the key? {} Or another?", "x".repeat(600)),
         )];
-        let q = pending_question(&items, &AgentStatus::Idle).unwrap();
+        let q = pending_question(&items, &AgentStatus::Idle, false).unwrap();
         assert!(!q.text.contains(key));
         assert_eq!(q.text.chars().count(), PENDING_QUESTION_MAX);
         assert!(q.text.ends_with('…'));
+    }
+
+    #[test]
+    fn a_question_ending_a_quiet_turn_is_pending_while_herdr_says_working() {
+        // herdr says working while a background agent runs; the session
+        // shows the turn ended on a question.
+        let asked = [
+            text(Role::User, "1", "go"),
+            text(Role::Assistant, "2", "Built it.\n\nInstall it on the S23?"),
+        ];
+        assert_eq!(
+            pending_question(&asked, &AgentStatus::Working, true)
+                .unwrap()
+                .text,
+            "Install it on the S23?"
+        );
+        // Not quiet yet: still working, maybe.
+        assert!(pending_question(&asked, &AgentStatus::Working, false).is_none());
+        // Quiet, but the reply is not the last entry: the agent went on.
+        let went_on = [
+            asked[0].clone(),
+            asked[1].clone(),
+            tool(Role::Assistant, EntryKind::ToolUse),
+        ];
+        assert!(pending_question(&went_on, &AgentStatus::Working, true).is_none());
     }
 }

@@ -1160,7 +1160,10 @@ async fn session_peek_gives_the_agent_view_its_entries_and_question() {
         "Should the notices wait for the phone to finish speaking, or interrupt it?"
     );
 
-    // Fewer entries: the newest. Working, there is no pending question.
+    // Fewer entries: the newest. herdr says working, but the fixture has
+    // not been written for long and ends on the reply: the turn visibly
+    // ended, so the question is still pending (the not-quiet case is
+    // `pending.rs`'s test).
     set_status(&env.daemon, AgentStatus::Working).await;
     let r = c
         .call("session.peek", json!({"pane_id": "p1", "entries": 2}))
@@ -1169,7 +1172,7 @@ async fn session_peek_gives_the_agent_view_its_entries_and_question() {
     assert_eq!(entries.len(), 2, "{r}");
     assert_eq!(entries[0]["kind"], "tool_result");
     assert!(
-        r["result"]["session"].get("pending_question").is_none(),
+        r["result"]["session"].get("pending_question").is_some(),
         "{r}"
     );
     assert_eq!(r["result"]["status"], "working");

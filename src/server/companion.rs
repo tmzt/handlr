@@ -1036,7 +1036,7 @@ fn pending_question(
             .iter()
             .any(|i| i.is_text() && i.role == crate::sessions::Role::Assistant)
     })?;
-    crate::sessions::pending::pending_question(&read.items, status)
+    crate::sessions::pending::pending_question(&read.items, status, read.located.quiet())
 }
 
 /// Send the held notices, oldest first, unless a confirmation this

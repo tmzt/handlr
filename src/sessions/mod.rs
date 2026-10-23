@@ -103,6 +103,19 @@ pub struct Located {
     pub matched: Matched,
 }
 
+impl Located {
+    /// Whether the session file has been unwritten for
+    /// [`pending::TURN_QUIET`], so a final reply ended the turn whatever
+    /// herdr's status.
+    pub fn quiet(&self) -> bool {
+        std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= pending::TURN_QUIET)
+    }
+}
+
 /// One agent's session format (decision 3).
 pub trait SessionReader: Send + Sync {
     /// `claude_code` or `codex`.
@@ -312,7 +325,8 @@ impl Sessions {
                     .iter()
                     .any(|i| i.is_text() && i.role == Role::Assistant)
         })?;
-        let pending_question = pending::pending_question(&read.items, &pane.status);
+        let pending_question =
+            pending::pending_question(&read.items, &pane.status, read.located.quiet());
         let skip = read.items.len().saturating_sub(n);
         Some(Peeked {
             located: read.located,

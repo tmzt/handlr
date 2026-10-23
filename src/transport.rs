@@ -468,7 +468,8 @@ impl HerdrContextContributor {
             }) else {
                 continue;
             };
-            let question = pending::pending_question(&read.items, &agent.status);
+            let question =
+                pending::pending_question(&read.items, &agent.status, read.located.quiet());
             let priority = match (is_focused, is_named) {
                 (true, _) => 0,
                 (false, true) => 1,
