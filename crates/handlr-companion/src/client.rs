@@ -491,6 +491,8 @@ enum Sent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Reading {
     serial: u64,
+    /// The reply's time, which names it.
+    ts: String,
     /// The reply as the view has it, read through `handlr_speech` when the
     /// daemon does not say how to read it.
     text: String,
@@ -621,6 +623,11 @@ pub struct State {
     /// or ready.
     reading: VecDeque<Reading>,
     next_reading: u64,
+    /// The replies moved to the notices, by time, and those given to be
+    /// said since the speaker was last quiet: so answering a question can
+    /// skip its reading.
+    read_replies: VecDeque<(String, String)>,
+    saying: Vec<String>,
     /// Suggestions tapped and sent, until their confirmation is approved.
     tapped: Vec<Tapped>,
     notices: VecDeque<String>,
@@ -691,6 +698,8 @@ impl State {
             read_aloud: false,
             reading: VecDeque::new(),
             next_reading: 1,
+            read_replies: VecDeque::new(),
+            saying: Vec::new(),
             tapped: Vec::new(),
             notices: VecDeque::new(),
             now: Duration::ZERO,
@@ -806,6 +815,9 @@ impl State {
             ))),
             Input::Speaking(on) => {
                 self.speaking = on;
+                if !on {
+                    self.saying.clear();
+                }
                 self.read_back_speaking(on, &mut out);
                 self.flush_notices(&mut out);
             }
@@ -1309,6 +1321,10 @@ impl State {
             }
             v.typed = Some(text.clone());
         }
+        // An answer to a question being read aloud skips its reading.
+        if let Some(ts) = self.view.as_ref().and_then(|v| v.replied_to.clone()) {
+            self.skip_reading(&ts, out);
+        }
         self.recompute_view(out);
         let agent = self.agents.iter().find(|a| a.pane_id == pane_id);
         let target = common::FocusInfo {
@@ -1740,7 +1756,7 @@ impl State {
         let ready = if self.online() {
             let params = common::SpeechSummarizeParams {
                 pane_id: pane_id.to_string(),
-                ts,
+                ts: ts.clone(),
                 text: text.clone(),
             };
             out.push(self.request(methods::SPEECH_SUMMARIZE, params, Sent::Summarize(serial)));
@@ -1750,6 +1766,7 @@ impl State {
         };
         self.reading.push_back(Reading {
             serial,
+            ts,
             text,
             asked_at: self.now,
             ready,
@@ -1788,8 +1805,12 @@ impl State {
                 }
                 None => break,
             };
-            self.reading.pop_front();
+            let ts = self.reading.pop_front().map(|r| r.ts).unwrap_or_default();
             if !text.is_empty() {
+                self.read_replies.push_back((ts, text.clone()));
+                while self.read_replies.len() > NOTICE_CAP {
+                    self.read_replies.pop_front();
+                }
                 self.notices.push_back(text);
             }
         }
@@ -2079,7 +2100,30 @@ impl State {
         if self.speaking || self.listening || !self.confirms.is_empty() {
             return;
         }
-        out.extend(self.notices.drain(..).map(|text| event(Event::Say(text))));
+        for text in self.notices.drain(..) {
+            if let Some((ts, _)) = self.read_replies.iter().find(|(_, t)| *t == text) {
+                self.saying.push(ts.clone());
+            }
+            out.push(event(Event::Say(text)));
+        }
+    }
+
+    /// The reply at `ts` is answered: it is not read, and if it is being
+    /// read, that stops (owner, 2026-10-23: "if an answer is to a spoke
+    /// question, it should skip the question playback").
+    fn skip_reading(&mut self, ts: &str, out: &mut Vec<Output>) {
+        self.reading.retain(|r| r.ts != ts);
+        let texts: Vec<String> = self
+            .read_replies
+            .iter()
+            .filter(|(t, _)| t == ts)
+            .map(|(_, text)| text.clone())
+            .collect();
+        self.notices.retain(|n| !texts.contains(n));
+        if self.speaking && self.saying.iter().any(|t| t == ts) {
+            log::info!("read aloud: the question is answered; skipping it");
+            out.push(event(Event::StopSpeaking));
+        }
     }
 
     fn request(&mut self, method: &str, params: impl serde::Serialize, sent: Sent) -> Output {
@@ -3918,5 +3962,51 @@ mod tests {
                 .iter()
                 .any(|c| c.live && c.kind == crate::view::CardKind::Question)
         );
+    }
+
+    /// Read aloud on, and a new reply asking a question, its summary
+    /// answered with `spoken`.
+    fn asked_aloud(speaking_first: bool) -> State {
+        let mut s = viewing("working", asking());
+        s.input(Input::ReadAloud(true));
+        if speaking_first {
+            s.input(Input::Speaking(true));
+        }
+        let out = s.input(Input::Tick(secs(200.0)));
+        let mut entries = asking()["entries"].as_array().unwrap().clone();
+        entries.push(json!({"ts": "10", "role": "assistant", "kind": "text",
+                            "summary": "Built it.\n\nInstall it on the S23?"}));
+        let session = json!({"session_id": "s1", "matched": "id", "entries": entries,
+                             "pending_question": {"text": "Install it on the S23?", "ts": "10"}});
+        let out = peek_answer(&mut s, &out, "idle", session);
+        let asked = requests(&out, "speech.summarize")[0].clone();
+        s.incoming(response(
+            asked.id,
+            json!({"spoken": "Built it. Install it on the S23?", "complex": false}),
+        ));
+        s
+    }
+
+    #[test]
+    fn answering_a_question_being_read_stops_its_reading() {
+        let mut s = asked_aloud(false);
+        s.input(Input::Speaking(true));
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        assert!(events(&out).contains(&Event::StopSpeaking), "{out:?}");
+        assert_eq!(
+            requests(&out, "agents.send")[0].params["text"],
+            "Yes, install it on the S23"
+        );
+    }
+
+    #[test]
+    fn answering_a_question_still_queued_drops_its_reading() {
+        // Something else is being said, so the question waits.
+        let mut s = asked_aloud(true);
+        assert_eq!(s.held_notices(), 1);
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        assert!(!events(&out).contains(&Event::StopSpeaking), "not this one");
+        assert_eq!(s.held_notices(), 0);
+        assert!(events(&s.input(Input::Speaking(false))).is_empty());
     }
 }
