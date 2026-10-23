@@ -72,6 +72,9 @@ pub enum Input {
     /// A suggested response under the agent view: sent to the view's pane
     /// with `agents.send`, which the daemon confirms as any other.
     Respond(Suggestion),
+    /// The play button: read the agent's new replies aloud, or stop. Only
+    /// its prose is read, never tool calls, their output or code blocks.
+    ReadAloud(bool),
 }
 
 /// The agent view's suggested responses.
@@ -488,6 +491,8 @@ pub struct State {
     /// When the voice last ended with no utterance since: STT may still be
     /// working on it.
     voice_ended: Option<Duration>,
+    /// The play button: the agent view's new replies are read aloud.
+    read_aloud: bool,
     notices: VecDeque<String>,
     /// The driver's clock, as last ticked.
     now: Duration,
@@ -520,6 +525,9 @@ struct AgentView {
     wanted: bool,
     /// The event as last given.
     shown: Option<Event>,
+    /// The newest reply already read aloud or seen before reading began:
+    /// its time.
+    read_upto: Option<String>,
 }
 
 impl State {
@@ -540,6 +548,7 @@ impl State {
             voice: false,
             voice_reported: false,
             voice_ended: None,
+            read_aloud: false,
             notices: VecDeque::new(),
             now: Duration::ZERO,
             focus: None,
@@ -685,6 +694,13 @@ impl State {
                 approve,
             } => self.answer_id(confirm_id, approve, &mut out),
             Input::Respond(response) => self.respond(response, &mut out),
+            Input::ReadAloud(on) => {
+                self.read_aloud = on;
+                // From now: what is already in the view is not read.
+                if let Some(v) = self.view.as_mut() {
+                    v.read_upto = newest_reply(&v.entries);
+                }
+            }
         }
         out
     }
@@ -747,6 +763,7 @@ impl State {
             peeked_at: None,
             wanted: true,
             shown: None,
+            read_upto: None,
         });
         if self.online() {
             // Names and statuses, for the view's title and its target.
@@ -1457,6 +1474,7 @@ impl State {
         };
         v.peeking = false;
         v.status = peek.status;
+        let first = v.entries.is_empty() && v.read_upto.is_none();
         match peek.session {
             Some(session) => {
                 v.entries = session.entries;
@@ -1467,7 +1485,33 @@ impl State {
                 v.pending_question = None;
             }
         }
+        // The replies after the last one read, read aloud; the first
+        // peek's backfill is not.
+        let newest = newest_reply(&v.entries);
+        if self.read_aloud && !first {
+            let after = match &v.read_upto {
+                None => 0,
+                Some(ts) => v
+                    .entries
+                    .iter()
+                    .rposition(|e| is_reply(e) && e.ts == *ts)
+                    .map_or(v.entries.len(), |i| i + 1),
+            };
+            for e in v.entries[after..].iter().filter(|e| is_reply(e)) {
+                let text = speakable(&e.summary);
+                if !text.is_empty() {
+                    self.notices.push_back(text);
+                }
+            }
+            while self.notices.len() > NOTICE_CAP {
+                self.notices.pop_front();
+            }
+        }
+        if newest.is_some() {
+            v.read_upto = newest;
+        }
         self.recompute_view(out);
+        self.flush_notices(out);
     }
 
     /// `agents.list` answered: the view's status, and a message target
@@ -1682,6 +1726,48 @@ impl State {
         self.sent.insert(id.clone(), sent);
         Output::Send(Request::new(id, method, params))
     }
+}
+
+/// An agent's reply: its prose, which is what reading aloud reads.
+fn is_reply(e: &common::Entry) -> bool {
+    e.role == common::Role::Assistant && e.kind == common::EntryKind::Text
+}
+
+/// The time of the newest reply in `entries`.
+fn newest_reply(entries: &[common::Entry]) -> Option<String> {
+    entries
+        .iter()
+        .rev()
+        .find(|e| is_reply(e))
+        .map(|e| e.ts.clone())
+}
+
+/// A reply as it is read aloud: without code blocks, inline code marks,
+/// Markdown emphasis, headings or list bullets, on one line.
+pub fn speakable(text: &str) -> String {
+    let mut lines = Vec::new();
+    let mut in_code = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || t.is_empty() {
+            continue;
+        }
+        let t = t.trim_start_matches('#').trim_start();
+        let t = t
+            .strip_prefix("- ")
+            .or_else(|| t.strip_prefix("* "))
+            .unwrap_or(t);
+        lines.push(t.replace(['`', '*'], ""));
+    }
+    lines
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// An agent of `agents.list` as a message target, as the focus names it.
@@ -3117,5 +3203,41 @@ mod tests {
         assert!(events(&out)
             .iter()
             .any(|e| matches!(e, Event::Say(t) if t == "The message is empty.")));
+    }
+
+    #[test]
+    fn replies_are_read_aloud_from_when_play_is_on() {
+        let mut s = viewing("working", asking());
+        s.input(Input::ReadAloud(true));
+        // A later peek with a tool call, its output, and a new reply.
+        let out = s.input(Input::Tick(secs(200.0)));
+        let session = json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text", "summary": "Done.\n\nShall I go on?"},
+                {"ts": "3", "role": "assistant", "kind": "tool_use", "tool": "Bash", "summary": "cargo test"},
+                {"ts": "4", "role": "tool", "kind": "tool_result", "summary": "test result: ok"},
+                {"ts": "5", "role": "assistant", "kind": "text",
+                 "summary": "## Result\n\nThe **tests** pass:\n```\nok\n```\n- `fmt` is clean"}
+            ]
+        });
+        let out = peek_answer(&mut s, &out, "idle", session);
+        let said: Vec<String> = events(&out)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Say(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["Result The tests pass: fmt is clean"]);
+    }
+
+    #[test]
+    fn nothing_is_read_with_play_off() {
+        let mut s = viewing("working", asking());
+        let out = s.input(Input::Tick(secs(200.0)));
+        let out = peek_answer(&mut s, &out, "idle", asking());
+        assert!(!events(&out).iter().any(|e| matches!(e, Event::Say(_))));
     }
 }
