@@ -925,3 +925,14 @@ member is read and kept in the prompt's settings, as decision 7 keeps any
 member the daemon does not use, and Gemini runs at its default
 temperature. Passing it on needs a generation-settings option in
 libinfer-gemini, left to a later change.
+
+## 2026-10-23 16:00 EDT — plan 20261022_03, decision 8: a question at the end of a task is pending when the pane is done
+
+The owner: "you're install question didn't get a card. if the question stops
+as a task, it should be a pinned card". Decision 8 counted a reply's final
+question as pending only while herdr says the pane is `idle` or
+`blocked`. herdr says `done` when an agent has finished a turn the user
+has not yet looked at, which is exactly when a question at the end of a
+task waits, so no Question card (and no Yes or No) appeared. `done` now
+counts too (`src/sessions/pending.rs`). The client's rules are unchanged:
+the Question card is the highest live card, so it is the pinned one.
