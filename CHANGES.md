@@ -1049,3 +1049,16 @@ main screen's place:
   `Event::Say`, which also carries notices and replies read aloud; the
   lower half shows `Event::Conversation` (see the 17:31 EDT entry), with
   what STT is hearing as its last, dim line.
+
+## 2026-10-23 17:58 EDT — plan 20261022_02, liveness: the phone pings a quiet link
+
+The owner (2026-10-23), after the phone sat on "(loading session)" over a
+half-open link (the daemon had closed it at 17:36:27; the phone never
+noticed, so the view's peek never came back): "ping 30s is fine, but
+should only be sent if nothing received for that time". Plan 20261022_02
+left liveness to `SO_KEEPALIVE`, whose Android timers run for hours, and
+said "not `ping`". Now the companion client sends `ping` after 30 s
+(`PING_IDLE`) with nothing at all from the daemon, and closes the link to
+make it again when the ping goes unanswered for 10 s (`PING_WAIT`). Any
+message from the daemon counts as heard, so a busy link is never pinged.
+The daemon already answers `ping`; nothing else changes on its side.
