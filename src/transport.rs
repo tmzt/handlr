@@ -16,7 +16,7 @@ pub use libherdr::{
 
 use crate::config::{AgentConfig, NamingConfig};
 use crate::core::agents;
-use crate::core::confirm::{Broker, Lifetime};
+use crate::core::confirm::{self, Broker, ConfirmError, HandleRequest, Lifetime};
 use crate::core::naming::Names;
 use crate::core::policy;
 use crate::core::principal::Principal;
@@ -43,6 +43,9 @@ pub struct TurnLog {
 pub struct VoiceTurn {
     pub broker: Arc<Broker>,
     pub log: Arc<TurnLog>,
+    /// What the user said in this turn: a confirmation's handle must come
+    /// from it (plan 20261022_08, 23:44 EDT amendment).
+    pub utterance: Option<String>,
 }
 
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
@@ -239,31 +242,60 @@ impl HerdrToolExecutor {
                     final_cmd, pane_id
                 ));
             };
-            let confirm_id = turn
-                .broker
-                .request(
+            let named = snapshot
+                .as_ref()
+                .zip(self.naming.as_ref())
+                .and_then(|(snap, naming)| {
+                    Names::from_snapshot(snap, naming).get(&pane_id).cloned()
+                });
+            let spoken = named
+                .as_ref()
+                .map(|a| a.spoken.clone())
+                .unwrap_or_else(|| crate::core::naming::capitalise(&agent_name));
+            // The agent's tab code spelled out: the first distinguishing word.
+            let tab_code = named
+                .as_ref()
+                .zip(self.naming.as_ref())
+                .and_then(|(a, naming)| {
+                    a.tab.as_ref().map(|tab| {
+                        if tab.word_form.is_empty() {
+                            tab.spoken.clone()
+                        } else {
+                            crate::core::naming::spell(&tab.word_form, naming)
+                        }
+                    })
+                });
+            let request = HandleRequest {
+                given: args.get("handle").and_then(|v| v.as_str()),
+                utterance: turn.utterance.as_deref(),
+                command: &final_cmd,
+                agent: &spoken,
+                tab_code: tab_code.as_deref(),
+            };
+            // A handle taken between settling it and asking is settled again.
+            let mut attempt = 0;
+            let (confirm_id, handle) = loop {
+                let pending = turn.broker.pending_handles(&self.principal.id);
+                let handle = confirm::settle_handle(&request, &pending, confirm::random_word);
+                match turn.broker.request(
                     &self.principal,
                     &pane_id,
                     &agent_name,
                     &final_cmd,
-                    None,
+                    Some(&handle),
                     Lifetime::VoiceTurn,
-                )
-                .map_err(|e| e.to_string())?;
+                ) {
+                    Ok(id) => break (id, handle),
+                    Err(ConfirmError::DuplicateHandle(_)) if attempt < 3 => attempt += 1,
+                    Err(e) => return Err(e.to_string()),
+                }
+            };
             turn.log.confirmations.lock().unwrap().push(confirm_id);
-            let spoken = snapshot
-                .as_ref()
-                .zip(self.naming.as_ref())
-                .and_then(|(snap, naming)| {
-                    Names::from_snapshot(snap, naming)
-                        .get(&pane_id)
-                        .map(|a| a.spoken.clone())
-                })
-                .unwrap_or_else(|| crate::core::naming::capitalise(&agent_name));
             return Ok(serde_json::json!({
                 "status": "awaiting_user_approval",
                 "command": final_cmd,
                 "agent": spoken,
+                "handle": handle,
                 "note": format!(
                     "Not sent yet. Right after your reply, handlr itself asks the user to approve sending '{final_cmd}' to {spoken}, and sends it only if they approve. Do not ask for confirmation yourself and do not call run_command again for this; say in a few words that it is waiting for their approval."
                 ),
@@ -798,6 +830,74 @@ mod tests {
             )
             .await;
         assert!(res.unwrap_err().contains("confirmation unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_voice_turn_confirmations_carry_a_settled_handle() {
+        use crate::core::confirm::{StatusKey, DEFAULT_TTL};
+        let client = HerdrClient::mock();
+        let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+        let executor = |utterance: &str| {
+            HerdrToolExecutor::new(
+                client.clone(),
+                vec![AgentConfig::new(
+                    "claude",
+                    vec!["continue".to_string(), "/usage".to_string()],
+                    true,
+                )],
+            )
+            .with_voice_turn(VoiceTurn {
+                broker: Arc::clone(&broker),
+                log: Arc::clone(&log),
+                utterance: Some(utterance.to_string()),
+            })
+        };
+        let run = |handle: &'static str, command: &'static str| json!({ "pane_id": "p1", "command": command, "handle": handle });
+
+        // The model's handle, from the user's words, normalised.
+        let said = "send usage to claude in high bay";
+        let res = executor(said)
+            .execute_tool("run_command", &run("Send-Usage-Claude-Highbay", "/usage"))
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "awaiting_user_approval");
+        assert_eq!(res["handle"], "send-usage-claude-highbay");
+        // The same again while pending: `-2`.
+        let res = executor(said)
+            .execute_tool("run_command", &run("send-usage-claude-highbay", "/usage"))
+            .await
+            .unwrap();
+        assert_eq!(res["handle"], "send-usage-claude-highbay-2");
+        // A handle not drawn from what the user said is replaced.
+        let res = executor("continue claude please")
+            .execute_tool("run_command", &run("restart-everything-now", "continue"))
+            .await
+            .unwrap();
+        assert_eq!(res["handle"], "continue-claude-please");
+
+        assert_eq!(log.confirmations.lock().unwrap().len(), 3);
+        let principal = Principal::local("handlr");
+        let (view, _) = broker
+            .status(
+                &principal,
+                &StatusKey::Handle("continue-claude-please".to_string()),
+            )
+            .unwrap();
+        assert_eq!(view.command, "continue");
+        assert_eq!(
+            broker.pending_handles(&principal.id),
+            [
+                "send-usage-claude-highbay",
+                "send-usage-claude-highbay-2",
+                "continue-claude-please"
+            ]
+        );
+        assert!(match &client.transport() {
+            libherdr::transport::HerdrTransport::Mock { state } =>
+                state.read().await.command_log.is_empty(),
+            _ => unreachable!(),
+        });
     }
 
     #[tokio::test]

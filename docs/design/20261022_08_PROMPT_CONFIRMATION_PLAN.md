@@ -1,7 +1,7 @@
 ---
 title: PROMPT.md and daemon-side approval
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - "An analysis of `PROMPT.md`, the runtime system prompt, against the
     daemon as it is now (plans 20261022_01, 02 and 05)"
@@ -275,3 +275,32 @@ the token.
 **Step 2's live turn** checks:
 - the question has no "For …" ending;
 - the `handle` in `confirm.requested` uses the user's words.
+
+## Amendment — 2026-10-23 01:08 EDT: item 1's wording; implementation started
+
+On the owner's approval. Item 1 of the gate block, as the 23:40 EDT
+amendment wrote it, said "handlr reads the handle to the user". The later
+amendment made the handle unspoken and drawn from the user's words, so
+item 1 is:
+
+```markdown
+  1. When the user asks to send a command to an agent, call `run_command` in that turn, with a `handle`: a short name for this action in lowercase words joined by `-`, taken from the user's own words (e.g. `send-usage-claude-highbay`). handlr matches the approval to it. Do not ask "Should I send…?" yourself.
+```
+
+Step 1 is implemented in the commit that adds this amendment. The status is
+now `In implementation`, and this document is immutable (AGENTS.md, Rule
+1.5).
+
+**Decided during implementation:**
+- **Exact first.** An exactly equal handle, after normalising, wins before
+  loose matching, so a pending `X` and `X-2` can be told apart.
+- **What "stands apart" means.** A new handle gets a distinguishing word
+  unless it would be chosen by loose matching alone among the pending
+  handles and itself. The earlier wording, "would match a pending one",
+  can never be met by adding words.
+- **Where loose matching applies.** Only to `confirm.status` by handle:
+  none of Gemini's tools take a handle back yet. A `confirm.status` by
+  handle that finds nothing now lists the requester's pending handles.
+
+**Step 2,** the live turn, follows with the daemon on the owner's live
+herdr.

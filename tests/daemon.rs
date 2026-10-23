@@ -212,6 +212,25 @@ async fn a_confirmed_send_runs_once() {
         .await;
     assert_eq!(r["error"]["code"], -32007);
 
+    // A handle returned slightly wrong finds it while pending; one that
+    // matches nothing is told which handles are pending.
+    let r = mcp
+        .call("confirm.status", json!({"handle": "Kep Going"}))
+        .await;
+    assert_eq!(r["result"]["handle"], "keep-going", "{r}");
+    assert_eq!(r["result"]["outcome"], "pending");
+    let r = mcp
+        .call("confirm.status", json!({"handle": "compact-codex"}))
+        .await;
+    assert_eq!(r["error"]["code"], -32006, "{r}");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .ends_with("pending: keep-going"),
+        "{r}"
+    );
+
     // A local client approves with the nonce; the token itself is never sent.
     let mut ctl = Client::hello(&socket, "ctl").await;
     let r = ctl

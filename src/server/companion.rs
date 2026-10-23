@@ -309,7 +309,9 @@ impl Drop for AbortOnDrop {
 }
 
 /// `Approve sending "<command>" to <spoken>?`, then ` For <handle, with "-"
-/// read as spaces>.` when there is a handle (12:06 EDT amendment).
+/// read as spaces>.` when a handle is given (12:06 EDT amendment). A
+/// companion's own voice turn gives none: its handle is not spoken (plan
+/// 20261022_08, 23:44 EDT amendment).
 pub fn confirm_text(command: &str, spoken: &str, handle: Option<&str>) -> String {
     let mut text = format!("Approve sending \"{command}\" to {spoken}?");
     if let Some(handle) = handle.filter(|h| !h.is_empty()) {
@@ -414,7 +416,13 @@ pub(super) fn confirm_requested(
         handle: view.handle.clone(),
         token: token.reveal_to(principal).map(str::to_string),
         reminder,
-        text: confirm_text(&view.command, &say, view.handle.as_deref()),
+        text: confirm_text(
+            &view.command,
+            &say,
+            view.handle
+                .as_deref()
+                .filter(|_| view.lifetime != Lifetime::VoiceTurn),
+        ),
     }
 }
 
@@ -768,6 +776,7 @@ async fn work(
         .with_voice_turn(VoiceTurn {
             broker: Arc::clone(&daemon.broker),
             log: Arc::clone(&log),
+            utterance: Some(text.clone()),
         });
     // Subscribed before any confirmation can be opened, so no resolution
     // is missed.

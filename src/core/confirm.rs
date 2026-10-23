@@ -188,6 +188,268 @@ pub fn validate_handle(handle: &str) -> Result<(), ConfirmError> {
     }
 }
 
+// ── Handles written by the model (plan 20261022_08, amendments) ─────────
+
+/// Words dropped when a handle is built from what the user said.
+const ARTICLES: [&str; 6] = ["a", "an", "the", "to", "in", "on"];
+/// The fewest words a handle may have.
+pub const MIN_HANDLE_WORDS: usize = 3;
+const MAX_HANDLE_LEN: usize = 64;
+
+/// A handle as the broker stores it: lowercased, every run of anything
+/// other than `a-z` and `0-9` folded to one `-`, leading and trailing `-`
+/// trimmed, cut to 64 characters. `Usage Claude!` -> `usage-claude`.
+pub fn normalise_handle(raw: &str) -> String {
+    let mut out = String::new();
+    for c in raw.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.truncate(MAX_HANDLE_LEN);
+    out.trim_matches('-').to_string()
+}
+
+/// `words` joined by `-`, as many whole words as fit in 64 characters.
+fn join_handle<S: AsRef<str>>(words: &[S]) -> String {
+    let mut out = String::new();
+    for w in words {
+        let w = w.as_ref();
+        let extra = if out.is_empty() { w.len() } else { w.len() + 1 };
+        if out.len() + extra > MAX_HANDLE_LEN {
+            break;
+        }
+        if !out.is_empty() {
+            out.push('-');
+        }
+        out.push_str(w);
+    }
+    out
+}
+
+/// The words of a normalised handle.
+fn handle_words(handle: &str) -> Vec<&str> {
+    handle.split('-').filter(|w| !w.is_empty()).collect()
+}
+
+const DIGIT_WORDS: [&str; 10] = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+];
+
+/// The words loose matching compares: lowercased, split on `-`, spaces,
+/// punctuation and between letters and digits, every digit written as a
+/// word. `kp-2 High bay` -> `kp two high bay`.
+pub fn match_words(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut word = String::new();
+    for c in text.chars().flat_map(char::to_lowercase) {
+        if c.is_ascii_lowercase() {
+            word.push(c);
+        } else {
+            if !word.is_empty() {
+                out.push(std::mem::take(&mut word));
+            }
+            if let Some(d) = c.to_digit(10) {
+                out.push(DIGIT_WORDS[d as usize].to_string());
+            }
+        }
+    }
+    if !word.is_empty() {
+        out.push(word);
+    }
+    out
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let substitute = prev[j] + usize::from(ca != cb);
+            cur[j + 1] = substitute.min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// The word rule: an edit distance of at most 1, or 2 when both words have
+/// 6 letters or more.
+pub fn words_match(a: &str, b: &str) -> bool {
+    let allowed = if a.len().min(b.len()) >= 6 { 2 } else { 1 };
+    a == b || edit_distance(a, b) <= allowed
+}
+
+/// How many of `stored`'s words `returned` matches, in any order: a stored
+/// word matches a returned word, or two adjacent returned words joined
+/// ("high bay" for `highbay`); two adjacent stored words both match a
+/// returned word that matches them joined.
+fn matched_words(returned: &[String], stored: &[String]) -> usize {
+    let mut matched = vec![false; stored.len()];
+    for (i, s) in stored.iter().enumerate() {
+        matched[i] = returned.iter().any(|r| words_match(r, s))
+            || returned
+                .windows(2)
+                .any(|pair| words_match(&format!("{}{}", pair[0], pair[1]), s));
+    }
+    for i in 0..stored.len().saturating_sub(1) {
+        let joined = format!("{}{}", stored[i], stored[i + 1]);
+        if returned.iter().any(|r| words_match(r, &joined)) {
+            matched[i] = true;
+            matched[i + 1] = true;
+        }
+    }
+    matched.iter().filter(|m| **m).count()
+}
+
+/// `(matched, total)`: how many of `stored`'s words `returned` matches,
+/// and how many words `stored` has. The score is their ratio.
+pub fn handle_score(returned: &str, stored: &str) -> (usize, usize) {
+    let stored = match_words(stored);
+    (matched_words(&match_words(returned), &stored), stored.len())
+}
+
+fn scores_two_thirds((matched, total): (usize, usize)) -> bool {
+    total > 0 && 3 * matched >= 2 * total
+}
+
+/// Which of `stored` a `returned` handle loosely means, by index: the best
+/// score, if it is at least 2/3 and matches at least one more word than the
+/// second best. A returned handle equal to a stored one, once normalised,
+/// is that one.
+pub fn best_handle_match<S: AsRef<str>>(returned: &str, stored: &[S]) -> Option<usize> {
+    let exact = normalise_handle(returned);
+    if let Some(i) = stored.iter().position(|s| s.as_ref() == exact) {
+        return Some(i);
+    }
+    loose_match(returned, stored)
+}
+
+fn loose_match<S: AsRef<str>>(returned: &str, stored: &[S]) -> Option<usize> {
+    let mut scored: Vec<(usize, (usize, usize))> = stored
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (i, handle_score(returned, s.as_ref())))
+        .collect();
+    // Best score first (compared as fractions), then most words matched.
+    scored.sort_by(|(_, (am, at)), (_, (bm, bt))| (bm * at).cmp(&(am * bt)).then(bm.cmp(am)));
+    let (best, score) = *scored.first()?;
+    let second = scored.get(1).map_or(0, |(_, (m, _))| *m);
+    (scores_two_thirds(score) && score.0 > second).then_some(best)
+}
+
+/// Whether a new `handle` stays apart from the `pending` ones: returned as
+/// written, it would be the one meant by loose matching alone.
+fn stands_apart(handle: &str, pending: &[String]) -> bool {
+    let mut all: Vec<&str> = pending.iter().map(String::as_str).collect();
+    all.push(handle);
+    loose_match(handle, &all) == Some(all.len() - 1)
+}
+
+/// A random word of the BIP-39 list.
+pub fn random_word() -> String {
+    let words: Vec<&str> = WORDS.lines().collect();
+    let mut bytes = [0u8; 2];
+    getrandom::getrandom(&mut bytes).expect("the OS random source is unavailable");
+    words[(u16::from_be_bytes(bytes) & 0x7ff) as usize].to_string()
+}
+
+/// What the daemon knows when the model asks for a confirmation, to settle
+/// its handle (plan 20261022_08, 23:40 and 23:44 EDT amendments).
+#[derive(Debug, Clone, Default)]
+pub struct HandleRequest<'a> {
+    /// The handle the model gave, if any.
+    pub given: Option<&'a str>,
+    /// What the user said in this turn.
+    pub utterance: Option<&'a str>,
+    /// The command and the agent's spoken name, used when neither the
+    /// handle nor the utterance gives three words.
+    pub command: &'a str,
+    pub agent: &'a str,
+    /// The agent's tab code spelled out ("em bee"), the first distinguishing
+    /// word to try.
+    pub tab_code: Option<&'a str>,
+}
+
+/// The handle to store for `req`, given the requester's `pending` handles:
+/// * the model's handle, normalised, if at least 2/3 of its words match
+///   what the user said (always, when the utterance is unknown);
+/// * otherwise the utterance's words without articles; otherwise the
+///   command and the agent;
+/// * at least [`MIN_HANDLE_WORDS`] words;
+/// * `-2`, `-3`, ... when it equals a pending handle;
+/// * a distinguishing word (the tab code, then words from `extra_word`)
+///   when it would be confused with a pending handle.
+pub fn settle_handle(
+    req: &HandleRequest<'_>,
+    pending: &[String],
+    mut extra_word: impl FnMut() -> String,
+) -> String {
+    let without_articles = |text: &str| -> Vec<String> {
+        handle_words(&normalise_handle(text))
+            .into_iter()
+            .filter(|w| !ARTICLES.contains(w))
+            .map(str::to_string)
+            .collect()
+    };
+    let from_user = |handle: &str| match req.utterance {
+        Some(u) => scores_two_thirds(handle_score(u, handle)),
+        None => true,
+    };
+    let long_enough = |handle: &str| handle_words(handle).len() >= MIN_HANDLE_WORDS;
+
+    let given = req.given.map(normalise_handle).unwrap_or_default();
+    let mut handle = if !given.is_empty() && from_user(&given) && long_enough(&given) {
+        given
+    } else {
+        let spoken = req.utterance.map(without_articles).unwrap_or_default();
+        if spoken.len() >= MIN_HANDLE_WORDS {
+            join_handle(&spoken)
+        } else {
+            let mut words = without_articles(&format!("{} {}", req.command, req.agent));
+            words.dedup();
+            join_handle(&words)
+        }
+    };
+    let mut tab_code = req.tab_code.map(normalise_handle).filter(|t| !t.is_empty());
+    let mut add_word = |handle: &str| -> String {
+        let word = normalise_handle(&tab_code.take().unwrap_or_else(&mut extra_word));
+        // Keep the new word even when 64 characters would cut it off.
+        let mut words: Vec<&str> = handle_words(handle);
+        while !words.is_empty() && words.join("-").len() + 1 + word.len() > MAX_HANDLE_LEN {
+            words.pop();
+        }
+        words.push(&word);
+        words.join("-")
+    };
+    while !long_enough(&handle) {
+        handle = add_word(&handle);
+    }
+    for _ in 0..16 {
+        if pending.contains(&handle) {
+            let base = handle.clone();
+            handle = (2..)
+                .map(|n| {
+                    let suffix = format!("-{n}");
+                    let mut stem = base.clone();
+                    stem.truncate(MAX_HANDLE_LEN - suffix.len());
+                    format!("{}{suffix}", stem.trim_end_matches('-'))
+                })
+                .find(|h| !pending.contains(h))
+                .expect("some suffix is free");
+        }
+        if stands_apart(&handle, pending) {
+            break;
+        }
+        handle = add_word(&handle);
+    }
+    handle
+}
+
 /// What everyone may know about a confirmation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmView {
@@ -552,7 +814,9 @@ impl Broker {
     }
 
     /// Find one of `requester`'s own confirmations, pending or resolved
-    /// within `RESOLVED_KEPT`.
+    /// within `RESOLVED_KEPT`. A handle not found as written is matched
+    /// loosely against the requester's pending handles
+    /// ([`best_handle_match`]).
     pub fn status(&self, requester: &Principal, key: &StatusKey) -> Option<(ConfirmView, Outcome)> {
         let mut state = self.state.lock().unwrap();
         state.prune();
@@ -565,10 +829,37 @@ impl Broker {
                 StatusKey::Handle(h) => e.view.handle.as_deref() == Some(h.as_str()),
             })
             .collect();
+        if found.is_empty() {
+            if let StatusKey::Handle(returned) = key {
+                let pending: Vec<&Entry> = state
+                    .entries
+                    .values()
+                    .filter(|e| e.outcome.is_open() && e.view.requested_by == requester.id)
+                    .filter(|e| e.view.handle.is_some())
+                    .collect();
+                let handles: Vec<&str> = pending
+                    .iter()
+                    .filter_map(|e| e.view.handle.as_deref())
+                    .collect();
+                found.extend(best_handle_match(returned, &handles).map(|i| pending[i]));
+            }
+        }
         // A handle can be reused once its confirmation is resolved: the
         // newest one is the one meant.
         found.sort_by_key(|e| e.view.confirm_id);
         found.last().map(|e| (e.view.clone(), e.outcome))
+    }
+
+    /// The handles of `principal_id`'s pending confirmations, oldest first.
+    pub fn pending_handles(&self, principal_id: &str) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let mut open: Vec<&Entry> = state
+            .entries
+            .values()
+            .filter(|e| e.outcome.is_open() && e.view.requested_by == principal_id)
+            .collect();
+        open.sort_by_key(|e| e.view.confirm_id);
+        open.iter().filter_map(|e| e.view.handle.clone()).collect()
     }
 
     fn pending_of(&self, principal_id: &str, lifetime: Option<Lifetime>) -> Vec<u64> {
@@ -1069,5 +1360,216 @@ mod tests {
             .status(&mcp(), &StatusKey::Handle("keep-going".to_string()))
             .unwrap();
         assert_eq!(view.confirm_id, second);
+    }
+
+    // ── Handles written by the model (plan 20261022_08) ─────────────────
+
+    fn no_word() -> String {
+        panic!("no extra word expected")
+    }
+
+    fn req<'a>(given: Option<&'a str>, utterance: Option<&'a str>) -> HandleRequest<'a> {
+        HandleRequest {
+            given,
+            utterance,
+            command: "/usage",
+            agent: "Claude",
+            tab_code: None,
+        }
+    }
+
+    #[test]
+    fn handles_are_normalised() {
+        assert_eq!(normalise_handle("Usage Claude!"), "usage-claude");
+        assert_eq!(normalise_handle("--send__usage  to--"), "send-usage-to");
+        assert_eq!(normalise_handle(&"a".repeat(80)).len(), 64);
+        assert_eq!(match_words("kp-2 High,bay"), ["kp", "two", "high", "bay"]);
+    }
+
+    #[test]
+    fn the_word_rule() {
+        assert!(words_match("claude", "claud"));
+        assert!(words_match("highbay", "hihbay"));
+        assert!(words_match("compact", "compcat")); // two edits, 6+ letters
+        assert!(!words_match("send", "seen")); // two edits, short words
+        assert!(!words_match("usage", "continue"));
+    }
+
+    #[test]
+    fn returned_handles_match_loosely() {
+        let stored = ["send-usage-claude-highbay"];
+        for returned in [
+            "send usage claude high bay",
+            "usage-claude-highbay",
+            "Send-Usage-Claud-Highbay",
+        ] {
+            assert_eq!(best_handle_match(returned, &stored), Some(0), "{returned}");
+        }
+        assert_eq!(
+            handle_score("send usage claude high bay", stored[0]),
+            (4, 4)
+        );
+        // "high-bay" stored, "highbay" returned: the joined word counts for both.
+        assert_eq!(
+            handle_score("send-usage-highbay", "send-usage-high-bay"),
+            (4, 4)
+        );
+        assert_eq!(best_handle_match("compact-codex", &stored), None);
+    }
+
+    #[test]
+    fn an_ambiguous_handle_matches_neither() {
+        let pending = ["send-usage-claude-highbay", "send-continue-claude-highbay"];
+        assert_eq!(best_handle_match("send claude highbay", &pending), None);
+        assert_eq!(
+            best_handle_match("send continue claude highbay", &pending),
+            Some(1)
+        );
+        // An exact match always wins, so `x` and `x-2` stay apart.
+        let pending = ["send-usage-claude-highbay", "send-usage-claude-highbay-2"];
+        assert_eq!(
+            best_handle_match("send-usage-claude-highbay", &pending),
+            Some(0)
+        );
+        assert_eq!(
+            best_handle_match("Send Usage Claude Highbay 2", &pending),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn a_handle_from_the_users_words_is_kept() {
+        let r = req(
+            Some("send-usage-claude-highbay"),
+            Some("send usage to claude in high bay"),
+        );
+        assert_eq!(settle_handle(&r, &[], no_word), "send-usage-claude-highbay");
+    }
+
+    #[test]
+    fn a_handle_not_from_the_utterance_is_replaced() {
+        let r = req(
+            Some("restart-codex-server"),
+            Some("Send usage to Claude in Highbay."),
+        );
+        assert_eq!(settle_handle(&r, &[], no_word), "send-usage-claude-highbay");
+        // Missing, or too short, the same.
+        let r = req(None, Some("send usage to claude in highbay"));
+        assert_eq!(settle_handle(&r, &[], no_word), "send-usage-claude-highbay");
+        let r = req(Some("usage"), Some("send usage to claude in highbay"));
+        assert_eq!(settle_handle(&r, &[], no_word), "send-usage-claude-highbay");
+    }
+
+    #[test]
+    fn without_words_the_handle_comes_from_the_command_and_agent() {
+        let r = HandleRequest {
+            tab_code: Some("em bee"),
+            ..req(None, None)
+        };
+        assert_eq!(settle_handle(&r, &[], no_word), "usage-claude-em-bee");
+        assert_eq!(
+            settle_handle(&req(Some("Usage Claude!"), None), &[], || "zebra".into()),
+            "usage-claude-zebra"
+        );
+    }
+
+    #[test]
+    fn a_pending_handle_gets_a_number() {
+        let pending = vec!["send-usage-claude-highbay".to_string()];
+        let r = req(
+            Some("send-usage-claude-highbay"),
+            Some("send usage to claude in highbay"),
+        );
+        assert_eq!(
+            settle_handle(&r, &pending, no_word),
+            "send-usage-claude-highbay-2"
+        );
+        let pending = vec![
+            "send-usage-claude-highbay".to_string(),
+            "send-usage-claude-highbay-2".to_string(),
+        ];
+        assert_eq!(
+            settle_handle(&r, &pending, no_word),
+            "send-usage-claude-highbay-3"
+        );
+    }
+
+    #[test]
+    fn a_handle_too_close_to_a_pending_one_gets_a_distinguishing_word() {
+        let pending = vec!["send-usage-claude-highbay".to_string()];
+        let r = HandleRequest {
+            tab_code: Some("em bee"),
+            ..req(Some("send-usage-claude"), Some("send usage to claude"))
+        };
+        let handle = settle_handle(&r, &pending, no_word);
+        assert_eq!(handle, "send-usage-claude-em-bee");
+        assert_eq!(
+            best_handle_match(&handle, &[pending[0].as_str(), &handle]),
+            Some(1)
+        );
+        // No tab code: a BIP-39 word.
+        let r = req(Some("send-usage-claude"), Some("send usage to claude"));
+        assert_eq!(
+            settle_handle(&r, &pending, || "zebra".into()),
+            "send-usage-claude-zebra"
+        );
+        let word = random_word();
+        assert!(WORDS.lines().any(|w| w == word), "{word}");
+        // Far enough apart already: nothing added.
+        let r = req(
+            Some("send-continue-claude-highbay"),
+            Some("send continue to claude in highbay"),
+        );
+        assert_eq!(
+            settle_handle(&r, &pending, no_word),
+            "send-continue-claude-highbay"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_nonce_is_over_the_stored_handle_after_a_loose_match() {
+        let (broker, client) = broker();
+        let mut events = broker.subscribe();
+        let ctl = Principal::local("ctl");
+        let stored = "send-usage-claude-highbay";
+        let id = broker
+            .request(
+                &mcp(),
+                "p1",
+                "claude",
+                "/usage",
+                Some(stored),
+                Lifetime::Standing,
+            )
+            .unwrap();
+        let token = token_of(events.recv().await.unwrap());
+        assert_eq!(broker.pending_handles(&mcp().id), vec![stored.to_string()]);
+
+        let returned = "send usage claude high bay";
+        let (view, outcome) = broker
+            .status(&mcp(), &StatusKey::Handle(returned.to_string()))
+            .unwrap();
+        assert_eq!((view.confirm_id, outcome), (id, Outcome::Pending));
+        assert_eq!(view.handle.as_deref(), Some(stored));
+        // Only the requester's pending handles are matched loosely.
+        assert!(broker
+            .status(&ctl, &StatusKey::Handle(returned.to_string()))
+            .is_none());
+
+        let over_returned = nonce(&token, id, Some(&normalise_handle(returned)));
+        assert_eq!(
+            broker.reply(&ctl, id, true, Some(&over_returned)).await,
+            Err(ConfirmError::BadNonce { remaining: 4 })
+        );
+        let over_stored = nonce(&token, id, view.handle.as_deref());
+        assert_eq!(
+            broker.reply(&ctl, id, true, Some(&over_stored)).await,
+            Ok(Outcome::Sent)
+        );
+        assert_eq!(
+            sent(&client).await,
+            vec![("p1".to_string(), "/usage".to_string())]
+        );
+        assert!(broker.pending_handles(&mcp().id).is_empty());
     }
 }

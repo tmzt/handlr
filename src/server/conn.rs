@@ -663,10 +663,23 @@ async fn call(
                     ))
                 }
             };
-            let (view, outcome) = daemon
-                .broker
-                .status(conn.principal(), &key)
-                .ok_or_else(|| confirm_error(ConfirmError::NotFound))?;
+            let (view, outcome) =
+                daemon
+                    .broker
+                    .status(conn.principal(), &key)
+                    .ok_or_else(|| {
+                        let not_found = ConfirmError::NotFound;
+                        let pending = daemon.broker.pending_handles(&conn.principal().id);
+                        match key {
+                            // Say which handles are pending (plan 20261022_08,
+                            // 23:44 EDT amendment).
+                            StatusKey::Handle(_) if !pending.is_empty() => ErrorObject::new(
+                                not_found.code(),
+                                format!("{not_found}; pending: {}", pending.join(", ")),
+                            ),
+                            _ => confirm_error(not_found),
+                        }
+                    })?;
             ok(common::ConfirmStatusResult {
                 confirm_id: view.confirm_id,
                 handle: view.handle,

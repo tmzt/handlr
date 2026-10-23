@@ -112,13 +112,22 @@ pub struct RunCommandParams {
     pub pane_id: String,
     /// The shell command string to execute.
     pub command: String,
+    /// Required. A short name for this action in lowercase words joined by
+    /// '-', from the user's own words, naming the command and the agent
+    /// (e.g. send-usage-claude-highbay).
+    pub handle: String,
 }
 
 impl RunCommandParams {
-    pub fn new(pane_id: impl Into<String>, command: impl Into<String>) -> Self {
+    pub fn new(
+        pane_id: impl Into<String>,
+        command: impl Into<String>,
+        handle: impl Into<String>,
+    ) -> Self {
         Self {
             pane_id: pane_id.into(),
             command: command.into(),
+            handle: handle.into(),
         }
     }
 }
@@ -208,7 +217,7 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
         .with_parameters::<FocusParams>(),
         FunctionDeclaration::new(
             "run_command",
-            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. Requires explicit vocal confirmation from the user if configured for that agent.",
+            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. handlr asks the user to approve it when that agent requires approval.",
             None,
         )
         .with_parameters::<RunCommandParams>(),
@@ -286,6 +295,26 @@ mod tests {
     }
 
     #[test]
+    fn test_prompt_leaves_approval_to_handlr() {
+        let prompt = default_system_prompt().expect("embedded prompt");
+        assert!(prompt.contains("awaiting_user_approval"));
+        assert!(!prompt.contains("NEVER** execute"));
+    }
+
+    #[test]
+    fn test_run_command_declares_a_required_handle() {
+        let schema = serde_json::to_value(schemars::schema_for!(RunCommandParams)).unwrap();
+        assert!(schema["properties"]["handle"].is_object());
+        let required: Vec<&str> = schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"handle"), "{required:?}");
+    }
+
+    #[test]
     fn test_parse_system_prompt_custom() {
         let sample = "Header\n<system_prompt>\nCustom prompt here\n</system_prompt>\nFooter";
         let parsed = parse_system_prompt(sample).expect("should parse tag content");
@@ -329,10 +358,11 @@ mod tests {
         assert_eq!(ip_json["lines"], 20);
 
         // 3. RunCommandParams
-        let rc = RunCommandParams::new("p1", "cargo check");
+        let rc = RunCommandParams::new("p1", "cargo check", "send-check-claude");
         let rc_json = serde_json::to_value(&rc).unwrap();
         assert_eq!(rc_json["pane_id"], "p1");
         assert_eq!(rc_json["command"], "cargo check");
+        assert_eq!(rc_json["handle"], "send-check-claude");
 
         // 4. SendKeysParams
         let sk = SendKeysParams::new("p1", "ctrl+c");

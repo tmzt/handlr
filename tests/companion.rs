@@ -26,6 +26,7 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// The engine's script, keyed on the user's text:
 /// * `send <command> to <target>`: `run_command`, then a short reply;
+/// * `send <command> to <target> as <handle>`: the same, with that handle;
 /// * `... then slow`: the same, then a call that never ends in time;
 /// * `watch <target> then slow`: `watch_pane`, then the slow call;
 /// * `slow`: only the slow call;
@@ -46,12 +47,11 @@ impl MockHandler for Script {
         let mut reply = format!("You said {text}.");
         if let Some(rest) = text.strip_prefix("send ") {
             let (command, target) = rest.split_once(" to ").expect("send <command> to <target>");
-            let result = executor
-                .execute_tool(
-                    "run_command",
-                    &json!({"pane_id": target, "command": command}),
-                )
-                .await?;
+            let mut args = json!({"pane_id": target, "command": command});
+            if let Some((target, handle)) = target.split_once(" as ") {
+                args = json!({"pane_id": target, "command": command, "handle": handle});
+            }
+            let result = executor.execute_tool("run_command", &args).await?;
             reply = if result["status"] == "awaiting_user_approval" {
                 "That needs your approval.".to_string()
             } else {
@@ -362,6 +362,9 @@ async fn approve_sends_once_and_ran_lists_it() {
         "{asked}"
     );
     assert_eq!(asked["params"]["spoken"], "Claude");
+    // With no handle from the model, one is made from the user's words; it
+    // is not spoken.
+    assert_eq!(asked["params"]["handle"], "send-continue-claude", "{asked}");
     assert!(
         c.position(|m| m["method"] == "turn.say")
             < c.position(|m| m["method"] == "confirm.requested")
@@ -401,6 +404,36 @@ async fn approve_sends_once_and_ran_lists_it() {
     let h = history(&env, "companion:local:t");
     assert_eq!(h[0]["content"], "send continue to claude");
     assert_eq!(h[1]["content"], "That needs your approval.");
+}
+
+#[tokio::test]
+async fn the_models_handle_reaches_the_companion_but_is_not_spoken() {
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let id = c
+        .request(
+            "turn.start",
+            turn(1, "send continue to claude as Claude_Continue Send"),
+        )
+        .await;
+    let asked = c.note("confirm.requested").await;
+    assert_eq!(asked["params"]["handle"], "claude-continue-send", "{asked}");
+    let text = asked["params"]["text"].as_str().unwrap();
+    assert_eq!(text, "Approve sending \"continue\" to Claude?");
+    assert!(!text.contains("For"), "{text}");
+    let confirm_id = asked["params"]["confirm_id"].as_u64().unwrap();
+    let r = c
+        .call(
+            "confirm.reply",
+            json!({"confirm_id": confirm_id, "approve": true}),
+        )
+        .await;
+    assert_eq!(r["result"]["outcome"], "sent", "{r}");
+    assert_eq!(c.response(id).await["result"]["outcome"], "done");
+    assert_eq!(
+        mock_logs(&env.daemon).await.0,
+        vec![("p1".to_string(), "continue".to_string())]
+    );
 }
 
 #[tokio::test]
