@@ -714,3 +714,16 @@ press effect)". This withdraws the previous amendment, "buttons press in":
 its code (`b54544b`) is reverted, and a pressed look is recommended to
 libcontrols to plan as its own feature. The app takes it from a libcontrols
 release when there is one.
+
+## Amendment — 2026-10-23 16:25 EDT: when continue is suggested (living section L3)
+
+The owner (2026-10-23), asking why `cont` showed after a finished turn: "got
+it, it should probably also show after an idle period has passed, such as
+30s". This replaces the 16:02 EDT amendment's "the row … shows `cont`
+while the pinned live card is Something broke or Finished":
+- with a live **Something broke** card, `cont` shows at once;
+- after a **Finished** turn, or with no live card, it shows only once the
+  agent has been quiet for 30 s (no new entries and no change of status),
+  so a turn that simply finished is not offered a continue;
+- never while working, taking a message, or when the pinned card has its
+  own buttons (a question's Yes and No, an approval's Approve and Deny).
