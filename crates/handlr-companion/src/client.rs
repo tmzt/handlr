@@ -69,6 +69,41 @@ pub enum Input {
     /// A card's Approve or Deny: answers this confirmation, whichever is
     /// being asked.
     Answer { confirm_id: u64, approve: bool },
+    /// A suggested response under the agent view: sent to the view's pane
+    /// with `agents.send`, which the daemon confirms as any other.
+    Respond(Suggestion),
+}
+
+/// The agent view's suggested responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Suggestion {
+    Yes,
+    No,
+    Continue,
+    Compact,
+}
+
+impl Suggestion {
+    /// The row's short label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Suggestion::Yes => "yes",
+            Suggestion::No => "no",
+            Suggestion::Continue => "cont",
+            Suggestion::Compact => "cmpct",
+        }
+    }
+
+    /// What is sent: the text, and whether it is a message (typed as the
+    /// user's reply) or one of the agent's allowed commands.
+    pub fn send(self) -> (&'static str, common::SendKind) {
+        match self {
+            Suggestion::Yes => ("yes", common::SendKind::Message),
+            Suggestion::No => ("no", common::SendKind::Message),
+            Suggestion::Continue => ("continue", common::SendKind::Command),
+            Suggestion::Compact => ("/compact", common::SendKind::Command),
+        }
+    }
 }
 
 /// How often the `net` thread ticks while connected.
@@ -269,6 +304,13 @@ pub fn is_dictation_start(utterance: &str) -> bool {
     )
 }
 
+/// A suggested response's handle: `reply`, the agent, its project and the
+/// response, as [`message_handle`] builds them.
+pub fn response_handle(target: &common::FocusInfo, response: Suggestion) -> String {
+    let handle = message_handle(target, response.label());
+    format!("reply{}", &handle["message".len()..])
+}
+
 /// A dictated message's handle, under plan 20261023_01's rules: `message`,
 /// the agent, its project and the message's first two words, lowercased,
 /// joined with `-`, as many whole words as fit in 64 characters. The daemon
@@ -327,6 +369,8 @@ enum Sent {
     Message,
     /// `session.peek` for the agent view of this pane.
     Peek(String),
+    /// `agents.send` of a suggested response.
+    Respond(Suggestion),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -622,6 +666,7 @@ impl State {
                 confirm_id,
                 approve,
             } => self.answer_id(confirm_id, approve, &mut out),
+            Input::Respond(response) => self.respond(response, &mut out),
         }
         out
     }
@@ -986,6 +1031,40 @@ impl State {
         self.show_dictation(out);
     }
 
+    /// Sends a suggested response to the open view's pane. The daemon
+    /// confirms it as any other send; the tap is not the confirmation.
+    fn respond(&mut self, response: Suggestion, out: &mut Vec<Output>) {
+        let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
+            return;
+        };
+        if !self.online() {
+            out.push(event(Event::Say(
+                "I'm not connected to handlr.".to_string(),
+            )));
+            return;
+        }
+        let (text, kind) = response.send();
+        let agent = self.agents.iter().find(|a| a.pane_id == pane_id);
+        let target = common::FocusInfo {
+            pane_id: pane_id.clone(),
+            project: agent.and_then(|a| a.project.clone()),
+            agent: agent.map(|a| a.agent.clone()),
+            tab_label: None,
+            tab_number: None,
+            name: String::new(),
+            spoken: String::new(),
+        };
+        let mut params = serde_json::json!({
+            "pane_id": pane_id,
+            "text": text,
+            "handle": response_handle(&target, response),
+        });
+        if kind == common::SendKind::Message {
+            params["kind"] = serde_json::json!(kind);
+        }
+        out.push(self.request(methods::AGENTS_SEND, params, Sent::Respond(response)));
+    }
+
     /// An utterance while dictating (decision 2, as amended).
     fn dictation_utterance(&mut self, text: String, out: &mut Vec<Output>) {
         let words = control_words(&text);
@@ -1211,6 +1290,14 @@ impl State {
                     log::info!("dictation: focus {target:?}: {message}");
                     out.push(event(Event::Say(format!("I couldn't focus {target}."))));
                 }
+                Sent::Respond(response) => {
+                    out.push(event(Event::Error(message)));
+                    out.push(event(Event::Say(format!(
+                        "I can't send {}. {}",
+                        response.label(),
+                        error.message
+                    ))));
+                }
                 Sent::Message => {
                     // Refused, such as a character outside the filter: the
                     // message is kept to be fixed.
@@ -1299,6 +1386,13 @@ impl State {
                     ))));
                     self.message_resolved("failed", out);
                 }
+            },
+            Sent::Respond(response) => match parse::<common::AgentsSendResult>(result) {
+                // Pending: its confirmation arrives as any other.
+                Ok(r) => log::info!("agent view: {}: {r:?}", response.label()),
+                Err(e) => out.push(event(Event::Error(format!(
+                    "a bad agents.send result: {e}"
+                )))),
             },
             Sent::Peek(pane_id) => match parse::<common::SessionPeekResult>(result) {
                 Ok(peek) => self.peeked(&pane_id, peek, out),
@@ -2904,5 +2998,50 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         let out = s.incoming(response(id, json!({"server": "handlr"})));
         assert_eq!(requests(&out, "session.peek").len(), 1, "{out:?}");
+    }
+
+    #[test]
+    fn a_suggestion_is_sent_to_the_views_pane() {
+        let mut s = viewing("idle", asking());
+        let out = s.input(Input::Respond(Suggestion::Continue));
+        let sends = requests(&out, "agents.send");
+        assert_eq!(sends.len(), 1, "{out:?}");
+        // A command: no kind, so the daemon reads it as one.
+        assert_eq!(
+            sends[0].params,
+            json!({"pane_id": "w2:pZ", "text": "continue",
+                   "handle": "reply-claude-handlr-cont"})
+        );
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        assert_eq!(
+            requests(&out, "agents.send")[0].params,
+            json!({"pane_id": "w2:pZ", "text": "yes", "kind": "message",
+                   "handle": "reply-claude-handlr-yes"})
+        );
+        // Pending: the tap is not the confirmation.
+        let id = requests(&out, "agents.send")[0].id.clone();
+        let out = s.incoming(response(id, json!({"status": "pending", "confirm_id": 9})));
+        assert!(requests(&out, "confirm.reply").is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_refused_suggestion_is_said() {
+        let mut s = viewing("idle", asking());
+        let out = s.input(Input::Respond(Suggestion::Compact));
+        let id = requests(&out, "agents.send")[0].id.clone();
+        let refusal = Response::err(
+            Some(id),
+            libhandlr_proto::ErrorObject::new(-32003, "not allowed"),
+        );
+        let out = s.incoming(Incoming::Response(refusal));
+        assert!(events(&out)
+            .iter()
+            .any(|e| matches!(e, Event::Say(t) if t.starts_with("I can't send cmpct"))));
+    }
+
+    #[test]
+    fn no_view_no_suggestion() {
+        let mut s = online();
+        assert!(s.input(Input::Respond(Suggestion::Yes)).is_empty());
     }
 }
