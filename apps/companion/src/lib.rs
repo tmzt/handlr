@@ -446,6 +446,8 @@ impl App {
                 }
             }
             Event::StopSpeaking | Event::Arm | Event::Vocabulary(_) => {}
+            // For the overview (plan 20261023_04), which is not built yet.
+            Event::Agents(_) | Event::PendingPanes(_) | Event::Conversation { .. } => {}
         }
     }
 
