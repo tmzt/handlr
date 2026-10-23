@@ -206,3 +206,15 @@ The owner (2026-10-23): "use a dot to the left instead of underline". This
 replaces the previous amendment's underline: the name being viewed (main
 or a subagent) has a small dot to its left, in its own cyan; the others
 have none.
+
+## Amendment — 2026-10-23 17:49 EDT: approved
+
+The owner approved the plan on 2026-10-23 ("approve the subagents plan").
+It stays `Draft` until its first implementing commit, which sets `In
+implementation` (Rule 1.5). It is built after two things it needs: the
+overview's libhandlr_proto 0.3.0 (plan 20261023_04, being built) and the
+agnostic trait (plan 20261023_06, step 2), whose `children` it extends.
+Open questions 1 (nested subagents) and 2 (how long finished ones are
+listed) stay open; until the owner answers, nested subagents are listed
+flat under the pane and finished ones for the session's life, as the
+smallest choices, and either can change by amendment.
