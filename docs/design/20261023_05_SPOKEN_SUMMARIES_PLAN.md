@@ -267,3 +267,100 @@ with step 1, `ADDITIONAL_PROMPTS.md` and `src/prompts.rs`. The open
 questions of section 6 stay open; the plan's values (the thresholds of
 decision 2, no cap on calls, one prompt) are used as written. From here
 the document changes only by amendment on the owner's instruction.
+
+## Amendment — 2026-10-23 16:28 EDT: reading rules first, relative times, and Gemini only in speaking mode
+
+On the owner's instruction (2026-10-23): "we jumped right to sending long
+messages to be summarized, we should look at a heuristic version for the
+paths, and adjust times (at hh:mm:ss) to relative"; "it should only invoke
+an LLM if the phone's flag says it's in speaking mode (spoken output
+enabled)"; and earlier, "the read-aloud flag will have to be sent back as a
+flag/options". Agreed in discussion the same day. This replaces, where
+they disagree: decision 2's length rule and the order of measuring; the
+15:45 EDT amendment's "Not complex: `spoken` is `None` … the client reads
+the reply through `speakable`"; and the client's role as the reader of
+plain replies. The steps below are added to section 5.
+
+**A1. The reading rules first, then the measure.** The daemon applies the
+reading rules to every reply (links as their text; a path as "the" and the
+English words of its last part; inline code as its words; a commit hash
+dropped; no code blocks, Markdown marks, headings or bullets), then
+measures what is left. Complex is now only:
+- code-like words still at least 10% of the words, or at least 4 of them;
+- 3 or more list items, or a table row, in the reply as written.
+
+Length alone is no longer complex, and a backquote alone is not either:
+backquoted code is read as its words. The 600-character rule and the
+backquote rule of decision 2 are dropped.
+
+**A2. Clock times are read as relative.** A clock time (`16:13:48`,
+`16:13`, "at 16:13:48", `20:02:49 UTC`, `20:02:49Z`, `4:13 PM`,
+`4:13 PM EDT`) is read relative to when it is spoken:
+
+| Difference | Read as |
+|---|---|
+| under 10 s | "just now" |
+| under a minute | "N seconds ago" |
+| under an hour | "N minutes ago" ("a minute ago" for one) |
+| under 12 hours | "about N hours ago" ("about an hour ago" for one) |
+| 12 hours or more, or not a time today | the clock time, as "four thirteen PM" |
+
+A future time reads "in N minutes" and so on. "at" before a relative time
+is dropped ("at 16:13:48" is "three minutes ago"). A time with no zone is
+the daemon's local time today; `UTC`, `Z` and the US zone abbreviations
+(`EDT`, `EST`, `CDT`, `CST`, `MDT`, `MST`, `PDT`, `PST`) are
+converted. Dates and durations ("3 s", "10 seconds") are left alone.
+
+**A3. The daemon always says what to read.** `speech.summarize`'s result
+`{spoken, complex}` keeps its type, but `spoken` is always set: Gemini's
+summary when the reply is complex and spoken output is on (A4), otherwise
+the reply under the reading rules. The client reads `spoken`, and uses
+its own copy of the rules only when the daemon cannot be reached or does
+not answer within the timeout.
+
+**A4. Gemini only in speaking mode.** A new companion method
+`client.options` `{spoken_output: bool}`, answered `{}`, sets a flag on
+the connection. It starts off. The client sends it when read aloud is
+turned on or off, and again after every `hello`. While it is off,
+`speech.summarize` makes no Gemini call, whatever the reply; it answers
+with the reading rules and `complex` as measured. Unknown options are
+ignored, so more can be added. This also answers "the read-aloud flag will
+have to be sent back as a flag/options".
+
+**A5. One copy of the rules.** The reading rules and the relative times
+move to a new crate, `crates/handlr-speech` (no dependencies beyond
+`std`; times take "now" as a parameter so tests are fixed):
+
+```rust
+pub fn read_aloud(text: &str, now: LocalTime) -> String;   // the reading rules and A2
+pub fn complexity(text: &str) -> Complexity;              // A1, on the reply as written
+pub struct LocalTime { pub hour: u8, pub minute: u8, pub second: u8, pub utc_offset_minutes: i16 }
+```
+
+The daemon and `handlr-companion` both use it; `speakable` and the
+daemon's own `complexity` are replaced by it.
+
+**A6. Versions.** libhandlr_proto gains `CLIENT_OPTIONS`,
+`ClientOptionsParams { spoken_output: bool }` (unknown fields ignored):
+additive, so 0.1.2, with its VERSIONS.md entry and the tag
+`libhandlr_proto-v0.1.2`.
+
+**Steps added:**
+6. **`crates/handlr-speech`**, with the rules and A2, added to the
+   workspace in its first commit. **Done when:** tests on recorded replies
+   show a long plain reply and a reply full of paths read through the
+   rules and not complex, a list of changes complex, and each time form
+   of A2 read relative to a fixed now, with the 12-hour and future cases.
+7. **libhandlr_proto 0.1.2: `client.options`.** **Done when:** it
+   round-trips, and an unknown option is ignored.
+8. **The daemon:** `client.options`, the flag, `speech.summarize` on
+   `handlr-speech` with `spoken` always set. **Done when:** tests show a
+   complex reply with the flag off making no engine call and answering
+   with the rules, the flag on making one call, and a new connection
+   starting off.
+9. **The client:** `client.options` on read aloud and after `hello`;
+   reading `spoken`; `handlr-speech` as the fallback. **Done when:**
+   tests show the option sent on toggling and after a reconnect, and a
+   reply read from `spoken`.
+
+Step 5 (the S23 check) now follows step 9.
