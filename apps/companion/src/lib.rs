@@ -556,6 +556,11 @@ impl App {
                 confirm_id,
                 approve: false,
             }),
+            AgentHit::Expand => {
+                if let Some(agent) = &mut self.agent {
+                    agent.toggle_expand();
+                }
+            }
             AgentHit::Pin => {
                 if let Some(agent) = &mut self.agent {
                     agent.jump_to_pin();

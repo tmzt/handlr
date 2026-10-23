@@ -228,6 +228,9 @@ pub enum AgentHit {
     Reply,
     /// The pinned bar: jump to its card.
     Pin,
+    /// The pinned card's text, cut to its first lines: show it all, or
+    /// fold it again.
+    Expand,
     /// The dictation buttons, while a message is taken from the view.
     Submit,
     Scratch,
@@ -673,6 +676,9 @@ pub struct AgentScreen {
     speaking: bool,
     /// The session has not answered yet.
     loading: bool,
+    /// The pinned card shows all its text (owner, 2026-10-23: "clicking an
+    /// abbreviated question should expand the text and card").
+    pin_expanded: bool,
     /// Seconds since the entries or the status last changed.
     quiet_for: f32,
     /// The response just sent, until the session shows it.
@@ -723,6 +729,14 @@ impl AgentScreen {
         self.name = name;
         self.status = status;
         self.entries = entries;
+        // A different pinned card starts folded.
+        let pinned_card =
+            |cards: &[AgentCard], i: Option<usize>| i.and_then(|i| cards.get(i)).cloned();
+        if pinned_card(&self.cards, self.pinned).map(|c| (c.kind, c.text))
+            != pinned_card(&cards, pinned).map(|c| (c.kind, c.text))
+        {
+            self.pin_expanded = false;
+        }
         self.cards = cards;
         self.pinned = pinned;
         self.relayout();
@@ -824,6 +838,23 @@ impl AgentScreen {
             self.typed = typed;
             self.settle();
         }
+    }
+
+    /// Shows all of the pinned card's text, or folds it to its first lines.
+    pub fn toggle_expand(&mut self) {
+        self.pin_expanded = !self.pin_expanded;
+        self.settle();
+    }
+
+    /// Whether the pinned card's text is longer than its first lines.
+    fn pin_is_cut(&self) -> bool {
+        let Some(card) = self.pinned_card() else {
+            return false;
+        };
+        let s = self.scale();
+        let w = self.layout.w - 2.0 * PAD * s;
+        let inner_w = w - EDGE * s - 2.0 * CARD_PAD * s;
+        wrap_hard(card.text.trim(), columns(inner_w, CARD_PT * s)).len() > PIN_LINES
     }
 
     /// Whether something is being said; with read aloud on, the play button
@@ -964,9 +995,18 @@ impl AgentScreen {
         let mut pin = None;
         // While a message is taken, the pinned card makes way for it.
         if let Some(card) = self.pinned_card().filter(|_| !dictating) {
+            // Expanded, as many lines as leave the flow 120 pt; else the
+            // first PIN_LINES.
+            let view_top = header.y + header.h;
+            let fit = ((above - view_top - 120.0 * s - 80.0 * s) / line_h(CARD_PT * s)).max(0.0);
+            let max_lines = if self.pin_expanded {
+                (fit as usize).max(PIN_LINES)
+            } else {
+                PIN_LINES
+            };
             // The full card, laid out once to know its height.
             let mut full = Flow::default();
-            let h = card_block(card, pad, 0.0, l.w - 2.0 * pad, s, PIN_LINES, &mut full);
+            let h = card_block(card, pad, 0.0, l.w - 2.0 * pad, s, max_lines, &mut full);
             full_top = above - h;
             if compact {
                 let bar = Rect::new(pad, above - BAR_H * s, l.w - 2.0 * pad, BAR_H * s);
@@ -1004,7 +1044,7 @@ impl AgentScreen {
                     full_top,
                     l.w - 2.0 * pad,
                     s,
-                    PIN_LINES,
+                    max_lines,
                     &mut flow,
                 );
                 pin = Some(Pinned {
@@ -1079,6 +1119,10 @@ impl AgentScreen {
             } else {
                 for b in &p.flow.buttons {
                     self.hits.push((b.hit, b.rect));
+                }
+                // The rest of the card, when its text is cut or shown all.
+                if self.pin_expanded || self.pin_is_cut() {
+                    self.hits.push((AgentHit::Expand, p.rect));
                 }
             }
         }
@@ -2224,5 +2268,47 @@ mod tests {
         assert!(f.viewport.y + f.viewport.h <= typed.fills[0].rect.y);
         a.set_typed(None);
         assert!(a.frame().typed.is_none());
+    }
+
+    #[test]
+    fn a_cut_question_expands_when_tapped_and_folds_again() {
+        let long = "Should I go on with the next step, which moves the readers onto the record trait, \
+                    changes every test fixture's loader, and then rebuilds the daemon and the app \
+                    before the check on the phone, or stop here so you can look first?";
+        let mut asked = card(CardKind::Question, 12, true);
+        asked.text = long.to_string();
+        let mut a = screen(conversation(3), vec![asked], Some(0));
+        let text_rows = |a: &AgentScreen| {
+            a.frame()
+                .pin
+                .as_ref()
+                .unwrap()
+                .flow
+                .rows
+                .iter()
+                .filter(|r| (r.px - CARD_PT * PHONE.scale).abs() < 0.01)
+                .count()
+        };
+        assert_eq!(text_rows(&a), PIN_LINES, "cut to its first lines");
+        // A tap on the card's text, not its buttons, expands it.
+        let pin = a.frame().pin.as_ref().unwrap().rect;
+        assert_eq!(a.hit(pin.x + 40.0, pin.y + 40.0), Some(AgentHit::Expand));
+        a.toggle_expand();
+        assert!(text_rows(&a) > PIN_LINES, "all of it");
+        let taller = a.frame().pin.as_ref().unwrap().rect;
+        assert!(taller.h > pin.h);
+        // The buttons still answer.
+        let yes = a.frame().pin.as_ref().unwrap().flow.buttons[0].clone();
+        assert_eq!(a.hit(yes.rect.x + 5.0, yes.rect.y + 5.0), Some(yes.hit));
+        a.toggle_expand();
+        assert_eq!(text_rows(&a), PIN_LINES);
+        // A short question has nothing to expand.
+        let a = screen(
+            conversation(3),
+            vec![card(CardKind::Question, 12, true)],
+            Some(0),
+        );
+        let pin = a.frame().pin.as_ref().unwrap().rect;
+        assert_ne!(a.hit(pin.x + 40.0, pin.y + 40.0), Some(AgentHit::Expand));
     }
 }
