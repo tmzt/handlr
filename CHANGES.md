@@ -508,3 +508,32 @@ libinfer provider split that was earlier called "plan 05", and builds plan
 OpenAI support is left to its own plan. libgenai turned out to supply only
 `gemini-rust` re-exports to libinfer, so `libinfer-gemini` depends on
 `gemini-rust` directly.
+
+## 2026-10-22 23:21 EDT — pairing by public keys (plans 20261022_02 and 20261022_06)
+
+Implements both amendments of 23:2x EDT. Pairing now moves only public keys.
+
+- **The pairing URL** carries the server's public key and its addresses.
+- **The device** shows its code (`handlrkey1…`), and the user pastes it
+  into `handlr pair`.
+- **The handshake.** Every connection, the first one included, uses `IK`.
+- **Removed:** `XXpsk3`, pairing ids, pairing secrets and their expiry.
+
+Choices the amendments left open:
+
+- **When the first connection counts.** `paired: true` and
+  `link.pair_done` are given when a `hello` is accepted, not at the
+  handshake. A `hello` refused for its protocol doesn't use them up.
+- **Devices not yet heard from** are kept in memory only, so a daemon
+  restart forgets them. The `auth.toml` entry stays.
+- **Name lengths.** A `--name` override follows the existing `auth.toml`
+  rule of up to 64 characters. A device's own name in its code is at most
+  32.
+- **The device's default name** is the first label of its hostname,
+  cleaned and lowercased, or "companion".
+- **The client's retries** come every 2 s for 10 minutes after any failed
+  connect.
+- **Data URLs.** The client's reader also accepts RGB and RGBA PNGs, such
+  as screenshots, and refuses data URLs over 4 MiB.
+
+Still to check by hand: pairing from another machine on the tailnet.
