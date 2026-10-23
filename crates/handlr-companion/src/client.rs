@@ -273,6 +273,9 @@ pub enum Event {
         cards: Vec<AgentCard>,
         pinned: Option<usize>,
         loading: bool,
+        /// A response sent from the view that the session has not shown
+        /// yet, shown as typed input.
+        typed: Option<String>,
     },
     Error(String),
 }
@@ -647,6 +650,11 @@ struct AgentView {
     peeked_at: Option<Duration>,
     /// The session has answered at least once.
     answered: bool,
+    /// The time of the pending question a tapped Yes or No answered: its
+    /// card goes at once, before the session shows the answer.
+    replied_to: Option<String>,
+    /// The response sent, until the session shows it or the agent works.
+    typed: Option<String>,
     /// A notice or a status change asks for a peek as soon as allowed.
     wanted: bool,
     /// The event as last given.
@@ -856,6 +864,7 @@ impl State {
             cards,
             pinned,
             loading: !v.answered,
+            typed: v.typed.clone(),
         })
     }
 
@@ -903,6 +912,8 @@ impl State {
             peeking: false,
             peeked_at: None,
             answered: false,
+            replied_to: None,
+            typed: None,
             wanted: true,
             shown: None,
             read_upto: None,
@@ -967,11 +978,16 @@ impl State {
             })
             .collect();
         let v = self.view.as_mut().expect("checked above");
+        // A question answered from the view is no longer asked.
+        let pending_question = v
+            .pending_question
+            .as_ref()
+            .filter(|q| v.replied_to.as_deref() != Some(q.ts.as_str()));
         let facts = Facts {
             name: &name,
             status: &v.status,
             entries: &v.entries,
-            pending_question: v.pending_question.as_ref(),
+            pending_question,
             confirms: &confirms,
         };
         v.cards.update(&facts);
@@ -1265,6 +1281,17 @@ impl State {
             }
             _ => word.to_string(),
         };
+        // The card goes at once, and the answer shows as typed input until
+        // the session has it (owner, 2026-10-23: "tapping yes/no on a card
+        // should dismiss the card on the phone side (so immediate)"; "convert
+        // the responses to typed amber text with the input box").
+        if let Some(v) = self.view.as_mut() {
+            if matches!(response, Suggestion::Yes | Suggestion::No) {
+                v.replied_to = v.pending_question.as_ref().map(|q| q.ts.clone());
+            }
+            v.typed = Some(text.clone());
+        }
+        self.recompute_view(out);
         let agent = self.agents.iter().find(|a| a.pane_id == pane_id);
         let target = common::FocusInfo {
             pane_id: pane_id.clone(),
@@ -1526,6 +1553,12 @@ impl State {
                     out.push(event(Event::Say(format!("I couldn't focus {target}."))));
                 }
                 Sent::Respond(response, text) => {
+                    // Not sent: the card comes back and the input goes.
+                    if let Some(v) = self.view.as_mut() {
+                        v.replied_to = None;
+                        v.typed = None;
+                    }
+                    self.recompute_view(out);
                     self.tapped
                         .retain(|t| t.confirm_id.is_some() || t.text != text);
                     out.push(event(Event::Error(message)));
@@ -1749,6 +1782,17 @@ impl State {
             None => {
                 v.entries.clear();
                 v.pending_question = None;
+            }
+        }
+        // The typed response goes once the session shows it as the user's,
+        // or the agent works on it.
+        if let Some(t) = v.typed.as_deref() {
+            let shown = v
+                .entries
+                .iter()
+                .any(|e| e.role == common::Role::User && same_message(&e.summary, t));
+            if shown || v.status == "working" {
+                v.typed = None;
             }
         }
         // The replies after the last one read, read aloud in order, each
@@ -3860,6 +3904,68 @@ mod tests {
         assert_eq!(
             requests(&out, "agents.send")[0].params["text"],
             "Yes, go on"
+        );
+    }
+
+    #[test]
+    fn a_tapped_yes_dismisses_its_card_at_once_and_shows_as_typed() {
+        let mut s = viewing("idle", asking());
+        let card_kinds = |out: &[Output]| {
+            view_of(out).map(|(_, cards, _)| {
+                cards
+                    .iter()
+                    .filter(|c| c.live)
+                    .map(|c| c.kind)
+                    .collect::<Vec<_>>()
+            })
+        };
+        let typed = |out: &[Output]| {
+            out.iter().rev().find_map(|o| match o {
+                Output::Event(Event::AgentView { typed, .. }) => Some(typed.clone()),
+                _ => None,
+            })
+        };
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        // No Question card any more, before the daemon has answered.
+        assert!(
+            !card_kinds(&out)
+                .unwrap()
+                .contains(&crate::view::CardKind::Question),
+            "{out:?}"
+        );
+        assert_eq!(typed(&out), Some(Some("Yes, go on".to_string())));
+        // A second tap has no card to answer: plain yes, not the question.
+        // The session shows it as the user's: the typed input goes.
+        let send = requests(&out, "agents.send")[0].clone();
+        s.incoming(response(send.id, json!({"status": "sent"})));
+        let out = s.input(Input::Tick(secs(200.0)));
+        let session = json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text", "summary": "Done.\n\nShall I go on?"},
+                {"ts": "3", "role": "user", "kind": "text", "summary": "Yes, go on"}
+            ]
+        });
+        let out = peek_answer(&mut s, &out, "idle", session);
+        assert_eq!(typed(&out), Some(None));
+    }
+
+    #[test]
+    fn a_refused_yes_brings_its_card_back() {
+        let mut s = viewing("idle", asking());
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        let id = requests(&out, "agents.send")[0].id.clone();
+        let refusal = Response::err(
+            Some(id),
+            libhandlr_proto::ErrorObject::new(-32003, "not allowed"),
+        );
+        let out = s.incoming(Incoming::Response(refusal));
+        let (_, cards, _) = view_of(&out).expect("the view again");
+        assert!(
+            cards
+                .iter()
+                .any(|c| c.live && c.kind == crate::view::CardKind::Question)
         );
     }
 }

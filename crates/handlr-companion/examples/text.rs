@@ -180,7 +180,11 @@ fn print_event(event: Event) {
             cards,
             pinned,
             loading,
+            typed,
         } => {
+            if let Some(t) = typed {
+                println!("* typed: {t}");
+            }
             let loading = if loading { ", loading" } else { "" };
             println!(
                 "* view of {name} ({status}{loading}): {} entries",
