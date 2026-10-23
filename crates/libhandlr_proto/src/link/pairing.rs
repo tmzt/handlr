@@ -6,6 +6,10 @@
 //! UTF-8), and a checksum: the first 4 bytes of BLAKE2s-256 over every
 //! field before it. The text form is `handlr1` followed by the payload in
 //! base58 with the Bitcoin alphabet.
+//!
+//! The pairing URL (plan 20261022_06, decision 1) is
+//! `handlr://<host>:<port>/pair#<pairing string>`: the address a phone
+//! reaches the server at, and the string. A QR code carries it.
 
 use std::fmt;
 
@@ -15,6 +19,11 @@ use super::KEY_LEN;
 
 /// The text form's prefix.
 pub const PAIRING_PREFIX: &str = "handlr1";
+/// The pairing URL's scheme.
+pub const PAIRING_URL_SCHEME: &str = "handlr";
+/// The pairing URL's path.
+const PAIRING_URL_PATH: &str = "/pair";
+
 /// The payload version this crate writes and reads.
 pub const PAIRING_VERSION: u8 = 1;
 
@@ -79,6 +88,9 @@ pub enum PairingStringError {
     TooManyAddresses,
     /// Encoding: an address longer than 255 bytes.
     AddressTooLong,
+    /// A pairing URL that is not `handlr://<host>:<port>/pair#<string>`
+    /// with a host the payload carries, or a payload with no address.
+    BadUrl,
 }
 
 impl fmt::Display for PairingStringError {
@@ -94,6 +106,9 @@ impl fmt::Display for PairingStringError {
             PairingStringError::NameTooLong => "the name is longer than 255 bytes",
             PairingStringError::TooManyAddresses => "there are more than 255 addresses",
             PairingStringError::AddressTooLong => "an address is longer than 255 bytes",
+            PairingStringError::BadUrl => {
+                "it is not a handlr://<host>:<port>/pair# URL for one of its addresses"
+            }
         };
         write!(f, "invalid pairing string: {what}")
     }
@@ -178,11 +193,52 @@ impl PairingPayload {
         ))
     }
 
-    /// Reads the text form. Surrounding whitespace, as from a paste, is
-    /// ignored.
+    /// The pairing URL: `handlr://<host>:<port>/pair#<string>`, where
+    /// `<host>:<port>` is the first address that is not loopback (with
+    /// `tailscale serve`, the Tailscale name), or the first address if all
+    /// are.
+    pub fn url(&self) -> Result<String, PairingStringError> {
+        let address = self
+            .addresses
+            .iter()
+            .find(|a| !is_loopback(a))
+            .or_else(|| self.addresses.first())
+            .ok_or(PairingStringError::BadUrl)?;
+        Ok(format!(
+            "{PAIRING_URL_SCHEME}://{address}{PAIRING_URL_PATH}#{}",
+            self.encode()?
+        ))
+    }
+
+    /// Whether any address can be reached from another machine.
+    pub fn has_remote_address(&self) -> bool {
+        self.addresses.iter().any(|a| !is_loopback(a))
+    }
+
+    /// Reads the text form or the pairing URL. Surrounding whitespace, as
+    /// from a paste or a scan, is ignored. A URL's host must be one of the
+    /// payload's addresses.
     pub fn decode(s: &str) -> Result<Self, PairingStringError> {
+        let s = s.trim();
+        let Some(rest) = s
+            .strip_prefix(PAIRING_URL_SCHEME)
+            .and_then(|r| r.strip_prefix("://"))
+        else {
+            return Self::decode_string(s);
+        };
+        let (before, string) = rest.split_once('#').ok_or(PairingStringError::BadUrl)?;
+        let address = before
+            .strip_suffix(PAIRING_URL_PATH)
+            .ok_or(PairingStringError::BadUrl)?;
+        let payload = Self::decode_string(string)?;
+        if !payload.addresses.iter().any(|a| a == address) {
+            return Err(PairingStringError::BadUrl);
+        }
+        Ok(payload)
+    }
+
+    fn decode_string(s: &str) -> Result<Self, PairingStringError> {
         let rest = s
-            .trim()
             .strip_prefix(PAIRING_PREFIX)
             .ok_or(PairingStringError::BadPrefix)?;
         let bytes = bs58::decode(rest)
@@ -198,6 +254,17 @@ impl std::str::FromStr for PairingPayload {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::decode(s)
     }
+}
+
+/// Whether `host:port` names this machine only: `localhost`, `127.0.0.0/8`
+/// or `[::1]`.
+fn is_loopback(address: &str) -> bool {
+    let host = address.rsplit_once(':').map_or(address, |(host, _)| host);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 fn blake2s_prefix(data: &[u8]) -> [u8; 4] {

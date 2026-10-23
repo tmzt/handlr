@@ -33,7 +33,10 @@ mod tests;
 
 pub use handshake::{accept, pair, reconnect, Accepted, AcceptedMode};
 pub use keys::{generate_keypair, generate_secret, public_key, StaticKey, StaticKeypair};
-pub use pairing::{PairingId, PairingPayload, PairingStringError, PAIRING_PREFIX, PAIRING_VERSION};
+pub use pairing::{
+    PairingId, PairingPayload, PairingStringError, PAIRING_PREFIX, PAIRING_URL_SCHEME,
+    PAIRING_VERSION,
+};
 pub use stream::{LinkReader, LinkStream, LinkWriter};
 
 use std::fmt;

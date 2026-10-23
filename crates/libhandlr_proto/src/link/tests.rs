@@ -399,3 +399,61 @@ fn encoding_refuses_oversized_fields() {
     p.name = "x".repeat(256);
     assert_eq!(p.encode(), Err(PairingStringError::NameTooLong));
 }
+
+#[test]
+fn the_pairing_url_names_the_remote_address_and_round_trips() {
+    let server = generate_keypair().unwrap();
+    let mut p = payload(&server, generate_secret().unwrap());
+    p.addresses = vec!["127.0.0.1:7347".into(), "box.tail1234.ts.net:7347".into()];
+    let url = p.url().unwrap();
+    assert_eq!(
+        url,
+        format!(
+            "handlr://box.tail1234.ts.net:7347/pair#{}",
+            p.encode().unwrap()
+        )
+    );
+    assert!(p.has_remote_address());
+    assert_eq!(PairingPayload::decode(&format!("  {url}\n")).unwrap(), p);
+
+    // Loopback alone: the first address, and nothing remote.
+    p.addresses = vec![
+        "127.0.0.1:7347".into(),
+        "[::1]:7347".into(),
+        "localhost:7347".into(),
+    ];
+    assert!(p
+        .url()
+        .unwrap()
+        .starts_with("handlr://127.0.0.1:7347/pair#handlr1"));
+    assert!(!p.has_remote_address());
+
+    p.addresses.clear();
+    assert_eq!(p.url(), Err(PairingStringError::BadUrl));
+}
+
+#[test]
+fn a_pairing_url_must_match_its_payload() {
+    let server = generate_keypair().unwrap();
+    let p = payload(&server, generate_secret().unwrap());
+    let s = p.encode().unwrap();
+    for bad in [
+        format!("handlr://other.ts.net:7347/pair#{s}"),
+        format!("handlr://box.tail1234.ts.net:7347/join#{s}"),
+        "handlr://box.tail1234.ts.net:7347/pair".to_string(),
+        format!(
+            "handlr://box.tail1234.ts.net:7347/pair#{}",
+            &s[..s.len() - 1]
+        ),
+    ] {
+        assert!(PairingPayload::decode(&bad).is_err(), "{bad}");
+    }
+    assert_eq!(
+        PairingPayload::decode(&format!("handlr://other.ts.net:7347/pair#{s}")),
+        Err(PairingStringError::BadUrl)
+    );
+    assert_eq!(
+        PairingPayload::decode(&format!("https://box.tail1234.ts.net:7347/pair#{s}")),
+        Err(PairingStringError::BadPrefix)
+    );
+}
