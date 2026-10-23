@@ -812,3 +812,36 @@ step 4, whose bottom row was Back and Take a message:
   which the daemon does not report. It waits for that data (to be
   proposed for plan 20261023_03). **For later:** Claude's numbered
   question options (`1.`, `2.`, …) detected and made tappable.
+
+## 2026-10-23 15:11 EDT — plans 20261022_03 step 4 and 20261023_02: scroll hold, Submit waits, read aloud, the play and record buttons
+
+Asked by the owner on 2026-10-23, after trying the 15:01 build: "if I'm
+scrolled back, don't force the scroll"; "it got it but said the message
+was empty, that's why I repeated it"; "change the record button to white
+on blue, and add a play button (dull/bright) on the left, this will play
+or not the incoming white text boxes as voice using Gradium. it won't
+attempt to speak the terminal output from Claude (bash tool etc.)".
+
+* **Scrolled back, the view holds** (plan 20261022_03, step 4, L3-1).
+  When the entry at the window's top leaves the 200-entry window, the
+  view now stays on the next entry still there, instead of keeping its
+  old offset into the new content, which moved it. Entries are matched
+  by time, role and kind, so a summary that changes between peeks (a
+  result linked to its call) no longer loses the place.
+* **A Submit waits for speech still in STT** (plan 20261023_02). A
+  Submit while the voice is on, or less than 3 s (`HEARD_WAIT`) after it
+  ended with no utterance since, waits for the utterance and then
+  submits, instead of saying "The message is empty." while the sentence
+  was still being transcribed (the sentence then started a Gemini turn
+  of its own). With nothing heard by then, it is refused as before. Only
+  front ends that report voice (a VAD) wait.
+* **Read aloud** (`Input::ReadAloud`): the play button, at the bottom
+  left, dull when off and bright when on, reads the agent view's new
+  replies with the app's TTS (Gradium's Phonon, on the device). Only
+  replies (assistant text) are read, from when it is turned on; never
+  tool calls, their output, or code blocks within a reply, and Markdown
+  marks are dropped. They are said as notices are, after speaking,
+  listening and confirmations. The setting is kept while the view is
+  closed, not across restarts.
+* **The record button** is a white dot on blue, at the bottom right. While
+  dictating, Submit, Scratch and Clear sit between the two buttons.
