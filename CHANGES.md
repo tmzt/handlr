@@ -663,3 +663,21 @@ wording the owner approved is recorded in the plan.
 Step 2's live turn uses the daemon on the owner's live herdr, without
 `--mock`, by the owner's choice. Nothing reaches a pane without approval
 on the phone.
+
+## 2026-10-23 01:48 EDT — plan 20261023_01: confirmation handles, steps 1, 2, 3, 5 and 6
+
+**What changed:**
+- Gemini's handle is trusted within the turn, so a misheard "sin" no
+  longer replaces "send".
+- Handles that come back later are matched by entropy.
+- PROMPT.md's three must-fix lines are applied: 11, 19 and 35.
+- The companion app shows a confirmation card.
+
+**Breaking:** `handlr-companion`'s `Event` changed. The crate is used
+only inside this repository.
+
+**Still to do:**
+- `libhandlr_proto` constants for `-32009` and the new `confirm.status`
+  fields;
+- step 4, which waits on its open question;
+- step 7, the live S23 check.
