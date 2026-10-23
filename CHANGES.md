@@ -776,3 +776,39 @@ companion client (`crates/handlr-companion/src/view.rs`). Under plan
 (`src/sessions/sections.rs`), and the client receives cards as sections.
 Discussed with and agreed by the owner on 2026-10-23 (Rule 2). Plan
 20261022_03 is not edited.
+
+## 2026-10-23 15:01 EDT — plan 20261022_03, step 4: the agent view's controls and suggested responses
+
+Asked by the owner on 2026-10-23: "move the back to a glyph on the title
+row, add a \"suggested response\" row with yes, no, continue, compact (if
+needed), etc."; "just above the bottom buttons, plain text in a different
+color (green/red/yellow)"; "suggestions that belong in a card can go
+there (like if Claude is asking a question)"; "replace take a message
+with the mic glyph but keep the button shape, always in the bottom
+right"; "(if we don't have mic, us a centered \"record\" dot but note it
+for later)".
+
+This departs from the agent view of plan 20261022_03 (In implementation),
+step 4, whose bottom row was Back and Take a message:
+
+* **Back** is a `‹` glyph (U+2039, from the terminal face; the bundled
+  Roboto is ASCII only) at the left of the title row; the left 44 pt of
+  the header is its tap area.
+* **Take a message** is a button at the bottom right, 96 pt wide, with a
+  centred red record dot in place of a microphone glyph, which no bundled
+  atlas has yet. **For later:** a microphone icon. While dictating,
+  Submit, Scratch and Clear share the rest of the row; the button stays.
+* **Suggested responses** (`handlr_companion::Suggestion`: `yes`, `no`,
+  `cont`, `cmpct`): plain text just above the bottom row, yes green, no
+  red, the commands yellow. Those that belong to a card are in it: a
+  Question card's actions are Yes, No and the message button. The row
+  shows `cont` when the pinned live card is Something broke or Finished,
+  and nothing while working, dictating, or when the card has its own
+  buttons. A tap is `Input::Respond`, one `agents.send` to the view's
+  pane: `yes` and `no` as messages, `continue` and `/compact` as
+  commands. The daemon confirms it as any other send; the tap is not the
+  confirmation, and a refusal is said.
+* **`cmpct` is not shown yet:** "if needed" needs the context's use,
+  which the daemon does not report. It waits for that data (to be
+  proposed for plan 20261023_03). **For later:** Claude's numbered
+  question options (`1.`, `2.`, …) detected and made tappable.
