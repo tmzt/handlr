@@ -9,9 +9,9 @@ use std::io::Write;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
-use libhandlr_proto::link::{generate_keypair, StaticKeypair, KEY_LEN};
+use base64::engine::general_purpose::STANDARD;
+use libhandlr_proto::link::{KEY_LEN, StaticKeypair, generate_keypair};
 
 /// Whether a file mode is 0600 or stricter: no access for group or others.
 pub fn mode_is_private(mode: u32) -> bool {
@@ -58,11 +58,12 @@ pub fn load(path: &Path) -> Result<StaticKeypair, String> {
 }
 
 fn create(path: &Path) -> Result<StaticKeypair, String> {
-    if let Some(dir) = path.parent() {
-        if !dir.as_os_str().is_empty() && !dir.exists() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+        && !dir.exists()
+    {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     let keypair = generate_keypair().map_err(|e| format!("generate the link key: {e}"))?;
     let mut file = std::fs::OpenOptions::new()

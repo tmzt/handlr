@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{cut, first_line, safe_id, EntryKind, Item, Located, Matched, Role, SessionReader};
+use super::{EntryKind, Item, Located, Matched, Role, SessionReader, cut, first_line, safe_id};
 use super::{TEXT_MAX, TOOL_TEXT_MAX};
 
 /// How many day directories are searched, newest first.
@@ -48,7 +48,7 @@ impl Codex {
 
     /// Every rollout in the searched days, newest first by name (names
     /// start with their timestamp).
-    fn rollouts(&self) -> impl Iterator<Item = PathBuf> {
+    fn rollouts(&self) -> impl Iterator<Item = PathBuf> + use<> {
         self.days().into_iter().flat_map(|day| {
             let mut files: Vec<PathBuf> = std::fs::read_dir(&day)
                 .into_iter()
@@ -291,10 +291,11 @@ mod tests {
             .locate(None, Some("00000000-0000-7000-8000-0000000000c3"))
             .unwrap();
         assert_eq!(l.matched, Matched::Id);
-        assert!(l
-            .path
-            .to_string_lossy()
-            .ends_with("-00000000-0000-7000-8000-0000000000c3.jsonl"));
+        assert!(
+            l.path
+                .to_string_lossy()
+                .ends_with("-00000000-0000-7000-8000-0000000000c3.jsonl")
+        );
         assert_eq!(
             r.locate(None, Some("00000000-0000-7000-8000-00000000ffff")),
             None
@@ -324,8 +325,9 @@ mod tests {
         let r = Codex::new(dir.path().to_path_buf());
         assert!(r.locate(Some(Path::new("/w/2")), None).is_some());
         assert!(r.locate(Some(Path::new("/w/1")), None).is_none());
-        assert!(r
-            .locate(None, Some("00000000-0000-7000-8000-000000000001"))
-            .is_none());
+        assert!(
+            r.locate(None, Some("00000000-0000-7000-8000-000000000001"))
+                .is_none()
+        );
     }
 }

@@ -384,14 +384,13 @@ impl AppConfig {
 
     /// Find an active transport by name/remote string or default flag.
     pub fn find_transport(&self, name_or_target: Option<&str>) -> Option<&TransportConfig> {
-        if let Some(target) = name_or_target {
-            if let Some(t) = self
+        if let Some(target) = name_or_target
+            && let Some(t) = self
                 .transports
                 .iter()
                 .find(|t| t.name.as_deref() == Some(target) || t.remote.as_deref() == Some(target))
-            {
-                return Some(t);
-            }
+        {
+            return Some(t);
         }
         // Look for explicitly marked default: true
         if let Some(t) = self.transports.iter().find(|t| t.default == Some(true)) {
@@ -529,10 +528,12 @@ interrupt_key = "ctrl+c"
         assert_eq!(cfg.find_agent("claude").unwrap().interrupt_key, "esc");
         assert_eq!(cfg.find_agent("omp").unwrap().interrupt_key, "");
         assert_eq!(cfg.find_agent("codex").unwrap().interrupt_key, "ctrl+c");
-        assert!(AppConfig::default()
-            .agents
-            .iter()
-            .all(|a| a.interrupt_key == DEFAULT_INTERRUPT_KEY));
+        assert!(
+            AppConfig::default()
+                .agents
+                .iter()
+                .all(|a| a.interrupt_key == DEFAULT_INTERRUPT_KEY)
+        );
 
         for good in [
             "esc",

@@ -319,12 +319,12 @@ fn agent_name_of(pane: &serde_json::Value) -> Option<String> {
             return Some(lower);
         }
     }
-    if let Some(extra) = pane.get("extra").and_then(|e| e.as_object()) {
-        if let Some(agent) = extra.get("agent").and_then(|a| a.as_str()) {
-            let lower = agent.trim().to_lowercase();
-            if !lower.is_empty() {
-                return Some(lower);
-            }
+    if let Some(extra) = pane.get("extra").and_then(|e| e.as_object())
+        && let Some(agent) = extra.get("agent").and_then(|a| a.as_str())
+    {
+        let lower = agent.trim().to_lowercase();
+        if !lower.is_empty() {
+            return Some(lower);
         }
     }
     if let Some(title) = pane.get("terminal_title").and_then(|t| t.as_str()) {

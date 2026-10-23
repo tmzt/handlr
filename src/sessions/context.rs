@@ -9,7 +9,7 @@
 //! the pending question is always kept.
 
 use super::redact::redact;
-use super::{cut, EntryKind, Item, PendingQuestion, Role};
+use super::{EntryKind, Item, PendingQuestion, Role, cut};
 
 /// Text entries per agent.
 pub const ENTRIES_PER_AGENT: usize = 6;

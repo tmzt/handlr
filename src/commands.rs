@@ -349,16 +349,22 @@ mod tests {
 
     #[test]
     fn test_validate_arbitrary_command_rejects_empty_and_overlong() {
-        assert!(validate_arbitrary_command("   ")
-            .unwrap_err()
-            .contains("empty"));
-        assert!(validate_arbitrary_command(" . , ")
-            .unwrap_err()
-            .contains("empty"));
+        assert!(
+            validate_arbitrary_command("   ")
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert!(
+            validate_arbitrary_command(" . , ")
+                .unwrap_err()
+                .contains("empty")
+        );
         let long = "a ".repeat(MAX_ARBITRARY_COMMAND_LEN);
-        assert!(validate_arbitrary_command(&long)
-            .unwrap_err()
-            .contains("exceeds"));
+        assert!(
+            validate_arbitrary_command(&long)
+                .unwrap_err()
+                .contains("exceeds")
+        );
     }
 
     #[test]

@@ -6,11 +6,11 @@ pub use libherdr::{
     client::HerdrClient,
     error::{HerdrError, HerdrResult},
     protocol::{
-        AgentSession, AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction,
-        PaneInfo, ReadSource, TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
+        AgentSession, AgentStatus, DEFAULT_INSPECT_LINES, EnvironmentSnapshot, HerdrRequest,
+        HerdrResponse, LayoutAction, PaneInfo, ReadSource, TabInfo, WorkspaceInfo,
     },
     transport::{
-        default_local_socket_path, HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod,
+        HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod, default_local_socket_path,
     },
 };
 
@@ -21,7 +21,7 @@ use crate::core::naming::Names;
 use crate::core::policy;
 use crate::core::principal::Principal;
 use crate::sessions::context::{self as session_context, AgentContext};
-use crate::sessions::{pending, Sessions};
+use crate::sessions::{Sessions, pending};
 use crate::watch::WatchRegistry;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -609,20 +609,22 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                     last_user_query,
                 );
 
-                if should_include && !pane_id.is_empty() && tail_wanted(pane_id, status) {
-                    if let Some(buffer) = self.pane_tail(pane_id).await {
-                        let trimmed = buffer.trim();
-                        if !trimmed.is_empty() {
-                            pane_details.push(format!(
+                if should_include
+                    && !pane_id.is_empty()
+                    && tail_wanted(pane_id, status)
+                    && let Some(buffer) = self.pane_tail(pane_id).await
+                {
+                    let trimmed = buffer.trim();
+                    if !trimmed.is_empty() {
+                        pane_details.push(format!(
                                 "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\nRecent {} Lines of Output:\n```\n{}\n```",
                                 idx + 1, pane_id, agent, status, focused, cwd, CONTEXT_TAIL_LINES, trimmed
                             ));
-                        } else {
-                            pane_details.push(format!(
+                    } else {
+                        pane_details.push(format!(
                                 "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\n(Buffer is idle/empty)",
                                 idx + 1, pane_id, agent, status, focused, cwd
                             ));
-                        }
                     }
                 }
             }
@@ -673,15 +675,16 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                         last_user_query,
                                     );
 
-                                    if should_include && tail_wanted(pane_id, status) {
-                                        if let Some(buffer) = self.pane_tail(pane_id).await {
-                                            let trimmed = buffer.trim();
-                                            if !trimmed.is_empty() {
-                                                pane_details.push(format!(
+                                    if should_include
+                                        && tail_wanted(pane_id, status)
+                                        && let Some(buffer) = self.pane_tail(pane_id).await
+                                    {
+                                        let trimmed = buffer.trim();
+                                        if !trimmed.is_empty() {
+                                            pane_details.push(format!(
                                                     "#### Pane {} (ID: {}) [Workspace: {}, Title: '{}', Status: {}, Focused: {}]:\nRecent {} Lines of Output:\n```\n{}\n```",
                                                     global_idx, pane_id, ws_name, title, status, focused, CONTEXT_TAIL_LINES, trimmed
                                                 ));
-                                            }
                                         }
                                     }
                                     global_idx += 1;
@@ -696,7 +699,9 @@ impl libinfer::TurnContributor for HerdrContextContributor {
         // 3. Format overall RAG payload with buffers placed prominently
         let mut content = format!(
             "### Herdr Multiplexer State\n- Active Workspace: {}\n- Focused Pane: {}\n\nPanes Overview:\n{}\n\n### Recent Terminal Output (Active / Working / Requested Panes)\n\n",
-            focused_ws_id, focused_pane_id, pane_summaries.join("\n")
+            focused_ws_id,
+            focused_pane_id,
+            pane_summaries.join("\n")
         );
 
         if !pane_details.is_empty() {
@@ -827,10 +832,10 @@ fn should_include_pane_buffer(
             10 => Some("tenth"),
             _ => None,
         };
-        if let Some(ord) = ordinal {
-            if q.contains(&format!("{} pane", ord)) || q.contains(&format!("{} pain", ord)) {
-                return true;
-            }
+        if let Some(ord) = ordinal
+            && (q.contains(&format!("{} pane", ord)) || q.contains(&format!("{} pain", ord)))
+        {
+            return true;
         }
 
         // Check pane ID (e.g. "w1:p1", "p1")
@@ -844,15 +849,13 @@ fn should_include_pane_buffer(
         }
 
         // Check directory name if user mentioned it
-        if !cwd.is_empty() {
-            if let Some(dir_name) = std::path::Path::new(cwd)
+        if !cwd.is_empty()
+            && let Some(dir_name) = std::path::Path::new(cwd)
                 .file_name()
                 .and_then(|f| f.to_str())
-            {
-                if q.contains(&dir_name.to_lowercase()) {
-                    return true;
-                }
-            }
+            && q.contains(&dir_name.to_lowercase())
+        {
+            return true;
         }
 
         // Check workspace ID (e.g. "w1", "workspace 1", "workspace one")
@@ -910,9 +913,11 @@ mod tests {
             )
             .await;
         assert!(err_res.is_err());
-        assert!(err_res
-            .unwrap_err()
-            .contains("not permitted for agent 'claude'"));
+        assert!(
+            err_res
+                .unwrap_err()
+                .contains("not permitted for agent 'claude'")
+        );
     }
 
     #[tokio::test]
@@ -936,7 +941,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_voice_turn_confirmations_carry_a_settled_handle() {
-        use crate::core::confirm::{StatusKey, DEFAULT_TTL};
+        use crate::core::confirm::{DEFAULT_TTL, StatusKey};
         let client = HerdrClient::mock();
         let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
         let log = Arc::new(TurnLog::default());
@@ -1230,9 +1235,11 @@ mod tests {
             )
             .await;
         assert!(slash_res.is_err());
-        assert!(slash_res
-            .unwrap_err()
-            .contains("'/' and '-' are not permitted"));
+        assert!(
+            slash_res
+                .unwrap_err()
+                .contains("'/' and '-' are not permitted")
+        );
 
         // Attempting a command with hyphen '-' must be rejected
         let dash_res = executor
@@ -1242,9 +1249,11 @@ mod tests {
             )
             .await;
         assert!(dash_res.is_err());
-        assert!(dash_res
-            .unwrap_err()
-            .contains("'/' and '-' are not permitted"));
+        assert!(
+            dash_res
+                .unwrap_err()
+                .contains("'/' and '-' are not permitted")
+        );
 
         // Non-ASCII command must be rejected
         let non_ascii_res = executor

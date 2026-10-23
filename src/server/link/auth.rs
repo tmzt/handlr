@@ -20,8 +20,8 @@ use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use libhandlr_proto::common::protocols;
 use libhandlr_proto::link::KEY_LEN;
 use serde::{Deserialize, Serialize};
@@ -203,10 +203,10 @@ pub fn add(path: &Path, entry: AuthEntry, replace: bool) -> Result<Option<AuthEn
     let key = entry
         .public_key()
         .ok_or_else(|| AddError::File("malformed key".to_string()))?;
-    if let Some(other) = file.find_key(&key) {
-        if other.name != entry.name || !replace {
-            return Err(AddError::KeyInUse(other.name.clone()));
-        }
+    if let Some(other) = file.find_key(&key)
+        && (other.name != entry.name || !replace)
+    {
+        return Err(AddError::KeyInUse(other.name.clone()));
     }
     let Some(index) = file.clients.iter().position(|c| c.name == entry.name) else {
         append(path, &entry).map_err(AddError::File)?;
@@ -237,11 +237,12 @@ fn open_private(path: &Path, append: bool) -> std::io::Result<std::fs::File> {
 }
 
 fn ensure_dir(path: &Path) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        if !dir.as_os_str().is_empty() && !dir.exists() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-            let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-        }
+    if let Some(dir) = path.parent()
+        && !dir.as_os_str().is_empty()
+        && !dir.exists()
+    {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     Ok(())
 }

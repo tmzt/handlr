@@ -21,7 +21,7 @@
 use std::path::Path;
 
 use futures_util::StreamExt;
-use libhandlr_proto::common::{methods, protocols, HelloParams};
+use libhandlr_proto::common::{HelloParams, methods, protocols};
 use libhandlr_proto::{Id, Incoming, Request};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;

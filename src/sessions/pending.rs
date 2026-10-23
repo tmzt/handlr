@@ -12,7 +12,7 @@
 use libherdr::protocol::AgentStatus;
 
 use super::redact::redact;
-use super::{cut, EntryKind, Item, PendingQuestion, Role, PENDING_QUESTION_MAX};
+use super::{EntryKind, Item, PENDING_QUESTION_MAX, PendingQuestion, Role, cut};
 
 /// The pending question in `items` (oldest first) for an agent whose
 /// status is `status`, if it has one.
@@ -68,9 +68,9 @@ fn asks(paragraph: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::SessionReader;
     use crate::sessions::claude::ClaudeCode;
     use crate::sessions::test_support::fixture;
-    use crate::sessions::SessionReader;
 
     fn text(role: Role, ts: &str, text: &str) -> Item {
         Item {

@@ -23,7 +23,7 @@ use tokio::sync::broadcast;
 
 use crate::config::{AgentConfig, AppConfig, NamingConfig};
 use crate::core::agents;
-use crate::core::confirm::{Broker, ConfirmEvent, ConfirmView, WordPriors, DEFAULT_TTL};
+use crate::core::confirm::{Broker, ConfirmEvent, ConfirmView, DEFAULT_TTL, WordPriors};
 use crate::core::naming::{self, Names};
 use crate::sessions::Sessions;
 use crate::watch::WatchRegistry;

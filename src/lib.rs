@@ -13,13 +13,13 @@ pub mod transport;
 pub mod watch;
 
 pub use commands::{
-    confirmation_match_candidates, normalize_command_for_match, parse_confirmation_request,
-    validate_arbitrary_command, validate_message, ConfirmationRequest,
+    ConfirmationRequest, confirmation_match_candidates, normalize_command_for_match,
+    parse_confirmation_request, validate_arbitrary_command, validate_message,
 };
 pub use config::AppConfig;
 pub use reasoning::{
-    declare_gemini_tools, default_system_prompt, GeminiReasoningEngine, MockReasoningEngine,
-    ReasoningEngine, ToolExecutor,
+    GeminiReasoningEngine, MockReasoningEngine, ReasoningEngine, ToolExecutor,
+    declare_gemini_tools, default_system_prompt,
 };
 pub use transport::HerdrClient;
 pub use watch::WatchRegistry;

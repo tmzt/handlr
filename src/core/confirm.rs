@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use blake2::digest::{KeyInit, Mac};
 use blake2::Blake2sMac256;
+use blake2::digest::{KeyInit, Mac};
 use libherdr::client::HerdrClient;
 use tokio::sync::broadcast;
 use tokio::time::Instant;
@@ -1199,42 +1199,42 @@ impl Broker {
             StatusKey::Id(_) => Matched::Id,
             StatusKey::Handle(_) => Matched::Exact,
         };
-        if found.is_empty() {
-            if let StatusKey::Handle(returned) = key {
-                let mut pending: Vec<&Entry> = state
-                    .entries
-                    .values()
-                    .filter(|e| e.outcome.is_open() && e.view.requested_by == requester.id)
-                    .filter(|e| e.view.handle.is_some())
-                    .collect();
-                pending.sort_by_key(|e| e.view.confirm_id);
-                let candidates: Vec<HandleInfo> = pending
-                    .iter()
-                    .map(|e| HandleInfo {
-                        handle: e.view.handle.clone().unwrap_or_default(),
-                        distinguisher: e.distinguisher.clone(),
-                    })
-                    .collect();
-                match entropy_match(returned, &candidates, &priors) {
-                    HandleMatch::Exact(i) => found.push(pending[i]),
-                    HandleMatch::Coverage(i) => {
-                        matched = Matched::Coverage;
-                        found.push(pending[i]);
-                    }
-                    HandleMatch::Entropy(i, bits) => {
-                        matched = Matched::Entropy(bits);
-                        found.push(pending[i]);
-                    }
-                    HandleMatch::Ambiguous(listed) => {
-                        return Err(ConfirmError::AmbiguousHandle(
-                            listed
-                                .into_iter()
-                                .map(|i| candidates[i].handle.clone())
-                                .collect(),
-                        ))
-                    }
-                    HandleMatch::None => {}
+        if found.is_empty()
+            && let StatusKey::Handle(returned) = key
+        {
+            let mut pending: Vec<&Entry> = state
+                .entries
+                .values()
+                .filter(|e| e.outcome.is_open() && e.view.requested_by == requester.id)
+                .filter(|e| e.view.handle.is_some())
+                .collect();
+            pending.sort_by_key(|e| e.view.confirm_id);
+            let candidates: Vec<HandleInfo> = pending
+                .iter()
+                .map(|e| HandleInfo {
+                    handle: e.view.handle.clone().unwrap_or_default(),
+                    distinguisher: e.distinguisher.clone(),
+                })
+                .collect();
+            match entropy_match(returned, &candidates, &priors) {
+                HandleMatch::Exact(i) => found.push(pending[i]),
+                HandleMatch::Coverage(i) => {
+                    matched = Matched::Coverage;
+                    found.push(pending[i]);
                 }
+                HandleMatch::Entropy(i, bits) => {
+                    matched = Matched::Entropy(bits);
+                    found.push(pending[i]);
+                }
+                HandleMatch::Ambiguous(listed) => {
+                    return Err(ConfirmError::AmbiguousHandle(
+                        listed
+                            .into_iter()
+                            .map(|i| candidates[i].handle.clone())
+                            .collect(),
+                    ));
+                }
+                HandleMatch::None => {}
             }
         }
         // A handle can be reused once its confirmation is resolved: the
@@ -1709,12 +1709,14 @@ mod tests {
             .status(&mcp(), &StatusKey::Handle("keep-going".to_string()))
             .unwrap();
         assert_eq!((view.confirm_id, outcome), (id, Outcome::Pending));
-        assert!(broker
-            .status(
-                &paired_phone(),
-                &StatusKey::Handle("keep-going".to_string())
-            )
-            .is_none());
+        assert!(
+            broker
+                .status(
+                    &paired_phone(),
+                    &StatusKey::Handle("keep-going".to_string())
+                )
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -1754,16 +1756,18 @@ mod tests {
             Err(ConfirmError::DuplicateHandle("keep-going".to_string()))
         );
         // Another requester may use the same handle.
-        assert!(broker
-            .request(
-                &Principal::local("t3"),
-                "p1",
-                "claude",
-                "continue",
-                Some("keep-going"),
-                Lifetime::Standing
-            )
-            .is_ok());
+        assert!(
+            broker
+                .request(
+                    &Principal::local("t3"),
+                    "p1",
+                    "claude",
+                    "continue",
+                    Some("keep-going"),
+                    Lifetime::Standing
+                )
+                .is_ok()
+        );
         // Once resolved, the requester may reuse it, and status finds the newest.
         broker.cancel(&mcp(), first).unwrap();
         let second = broker
@@ -2177,9 +2181,11 @@ mod tests {
         );
         assert_eq!(found.view.handle.as_deref(), Some(stored));
         // Only the requester's pending handles are matched loosely.
-        assert!(broker
-            .status(&ctl, &StatusKey::Handle(returned.to_string()))
-            .is_none());
+        assert!(
+            broker
+                .status(&ctl, &StatusKey::Handle(returned.to_string()))
+                .is_none()
+        );
 
         let over_returned = nonce(&token, id, Some(&normalise_handle(returned)));
         assert_eq!(

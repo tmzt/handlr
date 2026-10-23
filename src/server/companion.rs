@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use libhandlr_proto::common::methods as common_methods;
-use libhandlr_proto::companion::{self, methods, TurnOutcome};
+use libhandlr_proto::companion::{self, TurnOutcome, methods};
 use libhandlr_proto::envelope::codes;
 use libhandlr_proto::{ErrorObject, Id, Notification};
 use libherdr::events::PaneAgentStatusChanged;
@@ -27,8 +27,8 @@ use serde_json::Value;
 use tokio::sync::{broadcast, watch};
 use tokio_util::sync::CancellationToken;
 
-use super::conn::Conn;
 use super::Daemon;
+use super::conn::Conn;
 use crate::config::AppConfig;
 use crate::core::agents::extract_agent_name_for_pane;
 use crate::core::confirm::{ConfirmEvent, ConfirmView, Lifetime, Outcome, StatusKey, Token};
@@ -36,8 +36,8 @@ use crate::core::naming::{self, Names};
 use crate::core::policy::Denied;
 use crate::core::principal::Principal;
 use crate::reasoning::{
-    declare_gemini_tools, default_system_prompt, with_handlr_routes, GeminiReasoningEngine,
-    Message, ReasoningEngine, SessionManager,
+    GeminiReasoningEngine, Message, ReasoningEngine, SessionManager, declare_gemini_tools,
+    default_system_prompt, with_handlr_routes,
 };
 use crate::transport::{HerdrContextContributor, HerdrToolExecutor, TurnLog, VoiceTurn};
 
@@ -808,7 +808,7 @@ async fn work(
             return WorkEnd::Error(format!(
                 "the reasoning engine took too long (over {} s)",
                 ENGINE_TIMEOUT.as_secs()
-            ))
+            ));
         }
     };
 

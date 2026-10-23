@@ -491,7 +491,7 @@ impl Names {
                     return Err(ResolveError::Ambiguous {
                         target: raw.to_string(),
                         candidates: many.iter().map(|a| a.shown.clone()).collect(),
-                    })
+                    });
                 }
             }
         }
@@ -692,24 +692,24 @@ fn ladder_name(target: &NamedAgent, peers: &[&NamedAgent]) -> (String, String) {
     };
 
     // 4. The tab.
-    if let Some(tab) = target.tab.as_ref() {
-        if !group.iter().any(|p| same(p.tab.as_ref(), Some(tab))) {
-            return (
-                format!("{base_shown}, tab {}", tab.shown),
-                format!("{base_spoken}, tab {}", tab.spoken),
-            );
-        }
+    if let Some(tab) = target.tab.as_ref()
+        && !group.iter().any(|p| same(p.tab.as_ref(), Some(tab)))
+    {
+        return (
+            format!("{base_shown}, tab {}", tab.shown),
+            format!("{base_spoken}, tab {}", tab.spoken),
+        );
     }
 
     // 5. The tab number.
     let number = target.agent.tab_number;
-    if let Some(n) = number {
-        if !group.iter().any(|p| p.agent.tab_number == Some(n)) {
-            return (
-                format!("{base_shown}, tab {n}"),
-                format!("{base_spoken}, tab {n}"),
-            );
-        }
+    if let Some(n) = number
+        && !group.iter().any(|p| p.agent.tab_number == Some(n))
+    {
+        return (
+            format!("{base_shown}, tab {n}"),
+            format!("{base_spoken}, tab {n}"),
+        );
     }
 
     // Past the ladder (two such agents in one tab): their order among the
@@ -734,7 +734,7 @@ fn ladder_name(target: &NamedAgent, peers: &[&NamedAgent]) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     /// The shape of the 2026-10-22 snapshot: all 11 Claude panes in
     /// workspace w2, "cc-highbay", with top-level tabs. Plus one shell.

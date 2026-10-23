@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use futures_util::StreamExt;
 use handlr::config::{AgentConfig, AppConfig};
 use handlr::reasoning::{MockHandler, MockReasoningEngine, ReasoningEngine, ToolExecutor};
-use handlr::server::companion::{TurnOptions, INTERRUPTED_ENTRY};
+use handlr::server::companion::{INTERRUPTED_ENTRY, TurnOptions};
 use handlr::server::link::{Link, LinkSettings};
 use handlr::server::{self, CoreEvent, Daemon, ServeOptions};
 use handlr::sessions::Sessions;
 use handlr::transport::{AgentSession, AgentStatus, HerdrClient, HerdrTransport};
-use libhandlr_proto::link::{generate_keypair, reconnect, DeviceCode, LinkStream, PairingPayload};
-use serde_json::{json, Value};
+use libhandlr_proto::link::{DeviceCode, LinkStream, PairingPayload, generate_keypair, reconnect};
+use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UnixStream};
@@ -94,12 +94,9 @@ fn confirming() -> AppConfig {
 
 /// claude takes `continue` directly, with interrupt key `key`.
 fn direct(key: &str) -> AppConfig {
-    config(vec![AgentConfig::new(
-        "claude",
-        vec!["continue".to_string()],
-        false,
-    )
-    .with_interrupt_key(key)])
+    config(vec![
+        AgentConfig::new("claude", vec!["continue".to_string()], false).with_interrupt_key(key),
+    ])
 }
 
 async fn start_with(config: AppConfig, engine: Arc<dyn ReasoningEngine>, with_link: bool) -> Env {
@@ -775,10 +772,12 @@ async fn an_engine_error_is_a_spoken_error_outcome() {
     let (mut c, _) = Client::companion(&env).await;
     let r = c.call("turn.start", turn(1, "hello")).await;
     assert_eq!(r["result"]["outcome"], "error", "{r}");
-    assert!(r["result"]["detail"]
-        .as_str()
-        .unwrap()
-        .contains("GEMINI_API_KEY"));
+    assert!(
+        r["result"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("GEMINI_API_KEY")
+    );
     let say = c.note("turn.say").await;
     assert_eq!(
         say["params"]["text"],
@@ -1062,12 +1061,9 @@ async fn messages_are_always_confirmed_and_strictly_filtered() {
     assert!(mock_logs(&env.daemon).await.0.is_empty());
 
     // `allow_messages = false` refuses them.
-    let off = config(vec![AgentConfig::new(
-        "claude",
-        vec!["continue".to_string()],
-        true,
-    )
-    .with_messages(false)]);
+    let off = config(vec![
+        AgentConfig::new("claude", vec!["continue".to_string()], true).with_messages(false),
+    ]);
     let env = start(off).await;
     let (mut c, _) = Client::companion(&env).await;
     let r = c.call("agents.send", message("claude", "keep going")).await;

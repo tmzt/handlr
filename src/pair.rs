@@ -14,15 +14,15 @@ use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
 use libhandlr_proto::common::{
-    methods, protocols, HelloParams, LinkPairAddParams, LinkPairAddResult, LinkPairBeginParams,
-    LinkPairBeginResult, LinkPairDone,
+    HelloParams, LinkPairAddParams, LinkPairAddResult, LinkPairBeginParams, LinkPairBeginResult,
+    LinkPairDone, methods, protocols,
 };
-use libhandlr_proto::link::{PairingPayload, PAIRING_PREFIX, PAIRING_URL_SCHEME};
+use libhandlr_proto::link::{PAIRING_PREFIX, PAIRING_URL_SCHEME, PairingPayload};
 use libhandlr_proto::{ErrorObject, Id, Incoming, Notification, Request};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
-use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio_util::codec::{FramedRead, LinesCodec};
 
 use crate::server::conn::MAX_LINE;
@@ -265,7 +265,7 @@ pub async fn run(socket: &Path, options: PairOptions) -> Result<i32, String> {
         match daemon.call(methods::LINK_PAIR_ADD, params).await? {
             Ok(result) => {
                 break serde_json::from_value::<LinkPairAddResult>(result)
-                    .map_err(|e| format!("unexpected reply: {e}"))?
+                    .map_err(|e| format!("unexpected reply: {e}"))?;
             }
             Err(error) => {
                 eprintln!("handlr pair: {}", error.message);
@@ -366,9 +366,11 @@ mod tests {
         );
         assert!(shown.remote);
         assert_eq!(shown.png, qrcodeurl::png(&shown.url).unwrap());
-        assert!(shown
-            .data_url()
-            .starts_with("data:image/png;base64,iVBORw0KGgo"));
+        assert!(
+            shown
+                .data_url()
+                .starts_with("data:image/png;base64,iVBORw0KGgo")
+        );
         assert_eq!(
             PairingPayload::decode(&shown.url).unwrap(),
             PairingPayload::decode(&pairing).unwrap()

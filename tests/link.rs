@@ -9,14 +9,14 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use handlr::config::AppConfig;
-use handlr::server::link::auth::{format_key, AuthFile};
+use handlr::server::link::auth::{AuthFile, format_key};
 use handlr::server::link::{Link, LinkSettings};
 use handlr::server::{self, Daemon, ServeOptions};
 use handlr::transport::HerdrClient;
 use libhandlr_proto::link::{
-    generate_keypair, reconnect, DeviceCode, LinkStream, PairingPayload, StaticKeypair,
+    DeviceCode, LinkStream, PairingPayload, StaticKeypair, generate_keypair, reconnect,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UnixStream};
@@ -270,9 +270,11 @@ async fn pairing_reconnecting_and_revoking() {
 
     // Before its code is added, the device's IK gets no reply.
     let (keypair, code) = device(&payload.server_key, "s23");
-    assert!(reconnect_with(&env, &keypair.private, &hello_bytes())
-        .await
-        .is_err());
+    assert!(
+        reconnect_with(&env, &keypair.private, &hello_bytes())
+            .await
+            .is_err()
+    );
 
     let r = local
         .add(json!({"code": code, "protocols": ["harness"]}))
@@ -323,17 +325,21 @@ async fn pairing_reconnecting_and_revoking() {
 
     // A key that is not paired gets no reply.
     let stranger = generate_keypair().unwrap();
-    assert!(reconnect_with(&env, &stranger.private, &hello_bytes())
-        .await
-        .is_err());
+    assert!(
+        reconnect_with(&env, &stranger.private, &hello_bytes())
+            .await
+            .is_err()
+    );
 
     // Deleting the entry closes the open connection.
     std::fs::write(env.auth_path(), "").unwrap();
     assert!(closes(&mut stream, Duration::from_secs(3)).await);
     assert_eq!(env.link.open_connections(), 0);
-    assert!(reconnect_with(&env, &keypair.private, &hello_bytes())
-        .await
-        .is_err());
+    assert!(
+        reconnect_with(&env, &keypair.private, &hello_bytes())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -450,10 +456,12 @@ async fn a_name_in_use_is_refused_and_replace_swaps_it() {
         .add(json!({"code": code, "protocols": ["harness"]}))
         .await;
     assert_eq!(r["error"]["code"], -32602, "{r}");
-    assert!(r["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("already paired"));
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already paired")
+    );
     assert_eq!(std::fs::read_to_string(env.auth_path()).unwrap(), before);
 
     // With it, the new key replaces the old, whose connection closes.
@@ -468,9 +476,11 @@ async fn a_name_in_use_is_refused_and_replace_swaps_it() {
         file.find_name("s23").unwrap().key,
         format_key(&new_key.public)
     );
-    assert!(reconnect_with(&env, &old_key.private, &hello_bytes())
-        .await
-        .is_err());
+    assert!(
+        reconnect_with(&env, &old_key.private, &hello_bytes())
+            .await
+            .is_err()
+    );
     let _new = first_connect(&env, &new_key).await;
     let done = local.note("link.pair_done").await;
     assert_eq!(done["params"], json!({"name": "s23", "paired": true}));

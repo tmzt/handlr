@@ -99,10 +99,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
 
 fn expand_tilde(p: impl AsRef<Path>) -> PathBuf {
     let p = p.as_ref();
-    if let Ok(stripped) = p.strip_prefix("~") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(stripped);
-        }
+    if let Ok(stripped) = p.strip_prefix("~")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(stripped);
     }
     p.to_path_buf()
 }
@@ -144,7 +144,11 @@ fn select_transport(args: &AppArgs, config: &handlr::config::AppConfig) -> Herdr
             ));
         }
         let socket_path = handlr::transport::default_local_socket_path();
-        log::warn!("Config transport '{}' mode is 'remote' but 'remote' string is missing; falling back to local socket: {:?}", transport_name, socket_path);
+        log::warn!(
+            "Config transport '{}' mode is 'remote' but 'remote' string is missing; falling back to local socket: {:?}",
+            transport_name,
+            socket_path
+        );
         return HerdrTransport::local(socket_path);
     }
     let socket_path = t

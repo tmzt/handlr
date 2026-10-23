@@ -14,7 +14,7 @@ use libherdr::events::PaneAgentStatusChanged;
 use libherdr::protocol::AgentStatus;
 
 use crate::config::NamingConfig;
-use crate::core::naming::{capitalise, Names};
+use crate::core::naming::{Names, capitalise};
 
 /// Most announcements to hold while a confirmation is in flight. A confirmation
 /// exchange is short; if it somehow is not, stale "needs input" notices are
@@ -219,28 +219,33 @@ mod tests {
     #[test]
     fn test_repeated_status_is_noted_once() {
         let mut a = Announcer::new();
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
-            .is_some());
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
-            .is_none());
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Blocked))
+                .is_some()
+        );
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Blocked))
+                .is_none()
+        );
 
         // Leaving and re-entering the state does qualify again.
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Working))
-            .is_none());
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
-            .is_some());
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Working))
+                .is_none()
+        );
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Blocked))
+                .is_some()
+        );
     }
 
     #[test]
     fn test_panes_are_tracked_independently() {
         let mut a = Announcer::new();
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Done))
-            .is_some());
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Done))
+                .is_some()
+        );
         assert!(a.note(&change("w1:p1", "agy", AgentStatus::Done)).is_some());
     }
 
@@ -291,16 +296,19 @@ mod tests {
     #[test]
     fn test_forget_allows_reannouncing() {
         let mut a = Announcer::new();
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
-            .is_some());
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
-            .is_none());
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Blocked))
+                .is_some()
+        );
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Blocked))
+                .is_none()
+        );
 
         a.forget("w1:p6");
-        assert!(a
-            .note(&change("w1:p6", "claude", AgentStatus::Blocked))
-            .is_some());
+        assert!(
+            a.note(&change("w1:p6", "claude", AgentStatus::Blocked))
+                .is_some()
+        );
     }
 }

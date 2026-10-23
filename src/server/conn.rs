@@ -8,7 +8,7 @@ use futures_util::{Stream, StreamExt};
 use libhandlr_proto::common::{self, methods, protocols, topics};
 use libhandlr_proto::companion;
 use libhandlr_proto::envelope::codes;
-use libhandlr_proto::link::{LinkError, LinkStream, KEY_LEN};
+use libhandlr_proto::link::{KEY_LEN, LinkError, LinkStream};
 use libhandlr_proto::{ErrorObject, Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -314,16 +314,16 @@ async fn serve<S>(
 async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), ErrorObject> {
     let origin = &conn.origin;
     let params: common::HelloParams = params(request.params.clone())?;
-    if let Origin::Link { entry, .. } = origin {
-        if !entry.allows(&params.protocol) {
-            return Err(ErrorObject::new(
-                codes::NOT_PERMITTED,
-                format!(
-                    "'{}' is not paired for {}; it may use {:?}",
-                    entry.name, params.protocol, entry.protocols
-                ),
-            ));
-        }
+    if let Origin::Link { entry, .. } = origin
+        && !entry.allows(&params.protocol)
+    {
+        return Err(ErrorObject::new(
+            codes::NOT_PERMITTED,
+            format!(
+                "'{}' is not paired for {}; it may use {:?}",
+                entry.name, params.protocol, entry.protocols
+            ),
+        ));
     }
     let served = (params.protocol == protocols::HARNESS && params.version == HARNESS_VERSION)
         || (params.protocol == protocols::COMPANION && params.version == COMPANION_VERSION);
@@ -390,10 +390,10 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: HARNESS_VERSION,
     })?;
-    if first_hello() {
-        if let Value::Object(map) = &mut result {
-            map.insert("paired".to_string(), Value::Bool(true));
-        }
+    if first_hello()
+        && let Value::Object(map) = &mut result
+    {
+        map.insert("paired".to_string(), Value::Bool(true));
     }
     Ok((principal, result))
 }
@@ -747,7 +747,7 @@ async fn call(
                     return Err(ErrorObject::new(
                         codes::INVALID_PARAMS,
                         "give exactly one of confirm_id and handle",
-                    ))
+                    ));
                 }
             };
             let found = daemon.broker.find(conn.principal(), &key).map_err(|e| {
@@ -835,13 +835,13 @@ async fn call(
             let out = conn.out.downgrade();
             let done = added.done;
             tokio::spawn(async move {
-                if let Ok(done) = done.await {
-                    if let (Some(out), Ok(line)) = (
+                if let Ok(done) = done.await
+                    && let (Some(out), Ok(line)) = (
                         out.upgrade(),
                         serde_json::to_string(&Notification::new(methods::LINK_PAIR_DONE, done)),
-                    ) {
-                        let _ = out.send(line);
-                    }
+                    )
+                {
+                    let _ = out.send(line);
                 }
             });
             ok(added.result)
@@ -918,19 +918,19 @@ async fn send_message(
         }
     };
     conn.opened.lock().unwrap().insert(confirm_id);
-    if lifetime == Lifetime::VoiceTurn {
-        if let Some((view, token)) = daemon.broker.pending(confirm_id) {
-            let pane_names = named.map(|a| super::PaneNames {
-                name: a.shown.clone(),
-                spoken: a.spoken.clone(),
-                project: a.agent.project.clone(),
-                tab: a.tab.as_ref().map(|t| t.shown.clone()),
-            });
-            conn.send(&Notification::new(
-                methods::CONFIRM_REQUESTED,
-                turns::confirm_requested(&view, &token, principal, false, pane_names),
-            ));
-        }
+    if lifetime == Lifetime::VoiceTurn
+        && let Some((view, token)) = daemon.broker.pending(confirm_id)
+    {
+        let pane_names = named.map(|a| super::PaneNames {
+            name: a.shown.clone(),
+            spoken: a.spoken.clone(),
+            project: a.agent.project.clone(),
+            tab: a.tab.as_ref().map(|t| t.shown.clone()),
+        });
+        conn.send(&Notification::new(
+            methods::CONFIRM_REQUESTED,
+            turns::confirm_requested(&view, &token, principal, false, pane_names),
+        ));
     }
     log::info!(
         "Message confirmation {confirm_id} handle '{handle}' for pane '{pane_id}' ({} characters)",

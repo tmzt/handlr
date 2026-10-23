@@ -15,8 +15,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    cut, jsonl_newest_first, safe_id, EntryKind, Item, Located, Matched, Role, SessionReader,
-    TEXT_MAX, TOOL_TEXT_MAX,
+    EntryKind, Item, Located, Matched, Role, SessionReader, TEXT_MAX, TOOL_TEXT_MAX, cut,
+    jsonl_newest_first, safe_id,
 };
 
 /// How much of a file's start is searched for its `cwd`.
@@ -267,7 +267,7 @@ pub(crate) fn is_harness_text(text: &str) -> bool {
 mod tests {
     use super::*;
     use crate::sessions::test_support::fixture;
-    use crate::sessions::{read_tail, Sessions};
+    use crate::sessions::{Sessions, read_tail};
 
     fn reader() -> ClaudeCode {
         ClaudeCode::new(fixture("home/.claude/projects"))
@@ -383,9 +383,10 @@ mod tests {
             .locate(Some(cwd), Some("00000000-0000-4000-8000-0000000000a1"))
             .unwrap();
         assert_eq!(l.matched, Matched::Id);
-        assert!(l
-            .path
-            .ends_with("-work-example/00000000-0000-4000-8000-0000000000a1.jsonl"));
+        assert!(
+            l.path
+                .ends_with("-work-example/00000000-0000-4000-8000-0000000000a1.jsonl")
+        );
         // By id, after the cwd changed: found in another directory.
         let l = r
             .locate(
@@ -393,9 +394,10 @@ mod tests {
                 Some("00000000-0000-4000-8000-0000000000b2"),
             )
             .unwrap();
-        assert!(l
-            .path
-            .ends_with("-work-moved/00000000-0000-4000-8000-0000000000b2.jsonl"));
+        assert!(
+            l.path
+                .ends_with("-work-moved/00000000-0000-4000-8000-0000000000b2.jsonl")
+        );
         // An id with no file is no session, not the cwd's newest.
         assert_eq!(
             r.locate(Some(cwd), Some("00000000-0000-4000-8000-0000000000ff")),
@@ -423,9 +425,10 @@ mod tests {
         let l = r
             .locate(Some(Path::new("/work/renamed.dir")), None)
             .unwrap();
-        assert!(l
-            .path
-            .ends_with("-work-moved/00000000-0000-4000-8000-0000000000b2.jsonl"));
+        assert!(
+            l.path
+                .ends_with("-work-moved/00000000-0000-4000-8000-0000000000b2.jsonl")
+        );
         assert_eq!(r.locate(Some(Path::new("/nowhere")), None), None);
     }
 

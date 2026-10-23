@@ -64,7 +64,10 @@ impl fmt::Display for Denied {
             ),
             Denied::Invalid(reason) => f.write_str(reason),
             Denied::MessagesOff { agent } => {
-                write!(f, "Messages are not permitted for agent '{agent}' (allow_messages is off)")
+                write!(
+                    f,
+                    "Messages are not permitted for agent '{agent}' (allow_messages is off)"
+                )
             }
         }
     }
@@ -236,9 +239,10 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("not permitted for agent 'claude'"));
         let err = check(&Principal::local("t"), &agents(), "codex", "p3", "continue").unwrap_err();
-        assert!(err
-            .to_string()
-            .starts_with("Agent 'codex' (in pane 'p3') is not configured in [[agents]]"));
+        assert!(
+            err.to_string()
+                .starts_with("Agent 'codex' (in pane 'p3') is not configured in [[agents]]")
+        );
     }
 
     #[test]

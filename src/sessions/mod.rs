@@ -23,7 +23,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub use libhandlr_proto::common::{
-    Entry, EntryKind, PendingQuestion, Role, ENTRY_SUMMARY_MAX, PENDING_QUESTION_MAX,
+    ENTRY_SUMMARY_MAX, Entry, EntryKind, PENDING_QUESTION_MAX, PendingQuestion, Role,
 };
 
 use crate::core::agents::AgentRef;

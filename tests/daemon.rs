@@ -8,14 +8,14 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use handlr::config::AppConfig;
-use handlr::core::confirm::{nonce, ConfirmEvent};
+use handlr::core::confirm::{ConfirmEvent, nonce};
 use handlr::core::principal::Principal;
 use handlr::server::{self, Daemon, ServeOptions};
 use handlr::transport::{HerdrClient, HerdrTransport};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
-use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixStream;
+use tokio::net::unix::OwnedWriteHalf;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
 struct Client {
@@ -288,10 +288,12 @@ async fn unconfirmed_agents_are_sent_to_directly_and_refusals_say_why() {
         )
         .await;
     assert_eq!(r["error"]["code"], -32001);
-    assert!(r["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("not permitted for agent 'claude'"));
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not permitted for agent 'claude'")
+    );
     let r = c
         .call(
             "agents.send",

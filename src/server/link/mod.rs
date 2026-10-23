@@ -37,7 +37,7 @@ use libhandlr_proto::common::{
     LinkPairAddParams, LinkPairAddResult, LinkPairBeginResult, LinkPairDone,
 };
 use libhandlr_proto::link::{
-    accept, DeviceCode, PairingPayload, PairingStringError, StaticKeypair, KEY_LEN,
+    DeviceCode, KEY_LEN, PairingPayload, PairingStringError, StaticKeypair, accept,
 };
 use libhandlr_proto::{Incoming, Request};
 use tokio::net::{TcpListener, TcpStream};
@@ -309,11 +309,11 @@ impl Link {
             let _guard = self.auth_lock.lock().unwrap();
             auth::add(&self.settings.auth_path, entry, params.replace).map_err(|e| e.to_string())?
         };
-        if let Some(old) = replaced.and_then(|old| old.public_key()) {
-            if old != code.key {
-                self.close_where(|c| c.key == old, "its entry was replaced");
-                self.awaiting.lock().unwrap().remove(&old);
-            }
+        if let Some(old) = replaced.and_then(|old| old.public_key())
+            && old != code.key
+        {
+            self.close_where(|c| c.key == old, "its entry was replaced");
+            self.awaiting.lock().unwrap().remove(&old);
         }
         let (done_tx, done) = oneshot::channel();
         self.awaiting.lock().unwrap().insert(
@@ -470,14 +470,14 @@ async fn handle(daemon: Arc<Daemon>, stream: TcpStream, peer: SocketAddr) {
     };
 
     // Only hello may ride in a handshake: anything else could be a replay.
-    if let Some(first) = &accepted.first_message {
-        if !is_hello(first) {
-            log::warn!(
-                "Closed the link connection of '{}' from {peer}: its first message was not hello",
-                entry.name
-            );
-            return;
-        }
+    if let Some(first) = &accepted.first_message
+        && !is_hello(first)
+    {
+        log::warn!(
+            "Closed the link connection of '{}' from {peer}: its first message was not hello",
+            entry.name
+        );
+        return;
     }
 
     let (conn_id, close) = link.register(accepted.peer_key, &entry.name);
