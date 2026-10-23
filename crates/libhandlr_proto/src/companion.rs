@@ -21,6 +21,8 @@ pub mod methods {
     pub const TURN_SAY: &str = "turn.say";
     pub const NOTICE: &str = "notice";
     pub const VOCABULARY_CHANGED: &str = "vocabulary.changed";
+    /// herdr's focus changed (plan 20261023_02, decision 4).
+    pub const FOCUS_CHANGED: &str = "focus.changed";
 }
 
 /// `notice.kind` values.
@@ -201,6 +203,15 @@ pub struct VocabularyChanged {
     pub vocabulary: Vec<String>,
 }
 
+/// `focus.changed`: herdr's focused pane, sent when it changes, alongside
+/// `vocabulary.changed` after the daemon's snapshot polls. `None` when
+/// nothing is focused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusChanged {
+    #[serde(default)]
+    pub focus: Option<crate::common::FocusInfo>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,6 +290,18 @@ mod tests {
         round_trip(VocabularyChanged {
             vocabulary: vec!["claude".into()],
         });
+        round_trip(FocusChanged {
+            focus: Some(crate::common::FocusInfo {
+                pane_id: "w2:p4".into(),
+                project: Some("libmorph".into()),
+                agent: Some("Claude".into()),
+                tab_label: Some("-ad".into()),
+                tab_number: Some(4),
+                name: "Claude in libmorph".into(),
+                spoken: "Claude in libmorph".into(),
+            }),
+        });
+        round_trip(FocusChanged { focus: None });
     }
 
     #[test]
@@ -304,6 +327,13 @@ mod tests {
         .unwrap();
         assert_eq!(c.handle.as_deref(), Some("keep-going"));
         assert_eq!(c.token.as_deref(), Some("copper-lantern-ninety"));
+        // Nothing focused: `focus` is null, and an empty object reads too.
+        assert_eq!(
+            serde_json::to_value(FocusChanged { focus: None }).unwrap(),
+            json!({"focus": null})
+        );
+        let f: FocusChanged = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(f.focus, None);
         let h = HelloParams {
             protocol: "handlr.companion".into(),
             version: VERSION,

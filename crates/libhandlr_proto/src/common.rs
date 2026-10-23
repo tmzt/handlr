@@ -104,9 +104,40 @@ pub struct AgentInfo {
     pub focused: bool,
 }
 
+/// The pane herdr reports as focused, named as `AgentInfo` names it
+/// (plan 20261023_02, decision 4).
+///
+/// `pane_id` is a handle for later requests and is never shown or spoken.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FocusInfo {
+    pub pane_id: String,
+    /// The base name: the workspace label, or the cwd's basename (plan
+    /// 20261022_05, decision 3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// The agent as shown, such as "Claude"; `None` for a pane without an
+    /// agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The tab's label as the user typed it (`-ad`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_number: Option<u32>,
+    /// The shown name (see `AgentInfo::name`).
+    #[serde(default)]
+    pub name: String,
+    /// The spoken name (see `AgentInfo::spoken`).
+    #[serde(default)]
+    pub spoken: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentsListResult {
     pub agents: Vec<AgentInfo>,
+    /// herdr's focused pane, if any (plan 20261023_02, decision 4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<FocusInfo>,
 }
 
 /// Lines read by default, and the most that may be asked for.
@@ -130,10 +161,33 @@ pub struct AgentsReadResult {
     pub text: String,
 }
 
+/// What `agents.send` sends (plan 20261023_02, decision 6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendKind {
+    /// An allowed or arbitrary command, as before.
+    #[default]
+    Command,
+    /// A dictated message: the strict character filter, at most 4000
+    /// characters, always confirmed, gated by `allow_messages`.
+    Message,
+}
+
+impl SendKind {
+    pub fn is_command(&self) -> bool {
+        *self == SendKind::Command
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentsSendParams {
     pub pane_id: String,
+    /// The command, or a message's text; also read as `text`.
+    #[serde(alias = "text")]
     pub command: String,
+    /// `command` (the default) or `message`.
+    #[serde(default, skip_serializing_if = "SendKind::is_command")]
+    pub kind: SendKind,
     /// The confirmation handle: describes the action, 3-64 of `a-z`, `0-9`
     /// and `-`. Required by `handlr.harness`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -395,6 +449,19 @@ mod tests {
                 status: "working".to_string(),
                 focused: true,
             }],
+            focus: Some(FocusInfo {
+                pane_id: "w2:pZ".to_string(),
+                project: Some("handlr".to_string()),
+                agent: Some("Claude".to_string()),
+                tab_label: Some("17-hr".to_string()),
+                tab_number: Some(17),
+                name: "the handlr agent".to_string(),
+                spoken: "the handlr agent".to_string(),
+            }),
+        });
+        round_trip(AgentsListResult {
+            agents: vec![],
+            focus: None,
         });
         round_trip(AgentsReadParams {
             pane_id: "p1".to_string(),
@@ -406,7 +473,14 @@ mod tests {
         round_trip(AgentsSendParams {
             pane_id: "p1".to_string(),
             command: "continue".to_string(),
+            kind: SendKind::Command,
             handle: Some("keep-going".to_string()),
+        });
+        round_trip(AgentsSendParams {
+            pane_id: "w2:pZ".to_string(),
+            command: "please run the tests".to_string(),
+            kind: SendKind::Message,
+            handle: Some("message-claude-handlr-please-run".to_string()),
         });
         round_trip(AgentsSendResult::Sent);
         round_trip(AgentsSendResult::Pending {
@@ -559,6 +633,34 @@ mod tests {
         assert_eq!(named["tab_label"], "-mb");
         assert_eq!(named["tab_number"], 4);
         assert_eq!(serde_json::to_value(Empty {}).unwrap(), json!({}));
+
+        // Focus is additive: a list without it reads, and none is left out.
+        let list: AgentsListResult = serde_json::from_value(json!({"agents": []})).unwrap();
+        assert_eq!(list.focus, None);
+        assert_eq!(serde_json::to_value(&list).unwrap(), json!({"agents": []}));
+        let focus: FocusInfo = serde_json::from_value(json!({"pane_id": "p1"})).unwrap();
+        assert_eq!((focus.agent, focus.name.as_str()), (None, ""));
+
+        // `kind` defaults to a command and is left out for one; a message
+        // may give its text as `text`.
+        let send: AgentsSendParams =
+            serde_json::from_value(json!({"pane_id": "p1", "command": "continue"})).unwrap();
+        assert_eq!(send.kind, SendKind::Command);
+        assert_eq!(
+            serde_json::to_value(&send).unwrap(),
+            json!({"pane_id": "p1", "command": "continue"})
+        );
+        let message: AgentsSendParams = serde_json::from_value(json!({
+            "pane_id": "p1", "text": "please run the tests", "kind": "message",
+            "handle": "message-claude-please-run"
+        }))
+        .unwrap();
+        assert_eq!(message.kind, SendKind::Message);
+        assert_eq!(message.command, "please run the tests");
+        assert_eq!(
+            serde_json::to_value(&message).unwrap()["kind"],
+            json!("message")
+        );
 
         // link.pair_begin takes nothing; link.pair_add needs only the code.
         assert_eq!(
