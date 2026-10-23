@@ -768,3 +768,11 @@ the responses to typed amber text with the input box".
 The previous amendment cites "the 16:23 EDT amendment" for the press
 effect; the amendment it means is "buttons press in, withdrawn", at 16:19
 EDT.
+
+## Amendment — 2026-10-23 16:44 EDT: answering a question skips its reading (living section L3)
+
+The owner (2026-10-23): "if an answer is to a spoke question, it should
+skip the question playback". When a Yes or No answers the pending
+question, the reply it belongs to is not read aloud: if it is waiting to be
+read (for its summary or behind other speech) it is dropped, and if it is
+being read, the speech stops (`Event::StopSpeaking`), as skip does.
