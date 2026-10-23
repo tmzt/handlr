@@ -426,3 +426,25 @@ the readers, herdr's status. Nothing extra is computed.
   terminal format;
 - a pending confirmation and a pending question each show as a live card
   in the flow, and fade when resolved.
+
+## Amendment — 2026-10-23 02:34 EDT: L3-1 settled: pinned to the bottom, scrolling overrides (living section L3)
+
+On the owner's answer: "pinned to bottom but scroll overrides". This
+settles open question L3-1.
+
+- **Pinned to the bottom.** The highest-priority live card is pinned to the
+  bottom of the agent view, above the buttons, whether or not its place in
+  the flow is on screen. With several live cards, only the highest is
+  pinned; the others stay in the flow.
+- **Scrolling overrides.** The pin never moves the view or takes a scroll.
+  While the user's finger is scrolling back, the pinned card shrinks to a
+  one-line bar (its kind and summary), so it doesn't cover the
+  scrollback. Tapping the bar jumps to the card in the flow. Once the view
+  is back at the bottom, the card shows in full again. New entries never
+  pull the view down while the user is scrolled back.
+- **When it goes:** when the card is resolved, it leaves the pin, and the
+  next live card, if any, takes its place.
+
+Step 4's "Done when" gains:
+- with a live card and the view scrolled back, the bar shows, scrolling is
+  never interrupted, and tapping the bar jumps to the card.
