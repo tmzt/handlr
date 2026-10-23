@@ -21,10 +21,7 @@ pub enum HerdrError {
     Ssh(String),
 
     #[error("Invalid tool arguments for '{tool}': {details}")]
-    InvalidArguments {
-        tool: String,
-        details: String,
-    },
+    InvalidArguments { tool: String, details: String },
 
     #[error("Unknown tool: '{0}'")]
     UnknownTool(String),

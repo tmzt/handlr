@@ -149,7 +149,9 @@ impl HerdrEvent {
             match serde_json::from_value::<PaneAgentStatusChanged>(data.clone()) {
                 Ok(changed) => return Some(Self::AgentStatusChanged(changed)),
                 Err(e) => {
-                    log::warn!("libherdr: agent status event did not deserialize: {e}; data={data}");
+                    log::warn!(
+                        "libherdr: agent status event did not deserialize: {e}; data={data}"
+                    );
                 }
             }
         }
@@ -174,7 +176,10 @@ mod tests {
     #[test]
     fn test_parse_subscription_ack() {
         let line = r#"{"id":"sub-1","result":{"type":"subscription_started"}}"#;
-        assert_eq!(HerdrEvent::from_line(line), Some(HerdrEvent::SubscriptionStarted));
+        assert_eq!(
+            HerdrEvent::from_line(line),
+            Some(HerdrEvent::SubscriptionStarted)
+        );
     }
 
     #[test]
@@ -209,7 +214,8 @@ mod tests {
 
     #[test]
     fn test_parse_unmodelled_event_is_preserved() {
-        let line = r#"{"event":"pane_updated","data":{"type":"pane_updated","pane":{"pane_id":"w1:p6"}}}"#;
+        let line =
+            r#"{"event":"pane_updated","data":{"type":"pane_updated","pane":{"pane_id":"w1:p6"}}}"#;
         match HerdrEvent::from_line(line).expect("should decode") {
             HerdrEvent::Other { event, .. } => assert_eq!(event, "pane_updated"),
             other => panic!("expected passthrough, got {other:?}"),
@@ -218,7 +224,8 @@ mod tests {
 
     #[test]
     fn test_parse_error_and_junk_lines() {
-        let line = r#"{"id":"","error":{"code":"invalid_request","message":"missing field `pane_id`"}}"#;
+        let line =
+            r#"{"id":"","error":{"code":"invalid_request","message":"missing field `pane_id`"}}"#;
         match HerdrEvent::from_line(line).expect("should decode") {
             HerdrEvent::Error(msg) => assert!(msg.contains("pane_id")),
             other => panic!("expected error, got {other:?}"),

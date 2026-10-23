@@ -14,12 +14,12 @@ pub use client::HerdrClient;
 pub use error::{HerdrError, HerdrResult};
 pub use events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
 pub use protocol::{
-    AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction, PaneInfo,
-    TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
+    AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction, PaneInfo, TabInfo,
+    WorkspaceInfo, DEFAULT_INSPECT_LINES,
 };
 pub use transport::{
-    HerdrEventStream, HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod,
-    default_local_socket_path,
+    default_local_socket_path, HerdrEventStream, HerdrTransport, MockState, RemoteSshConfig,
+    SshInvocationMethod,
 };
 
 #[cfg(test)]
@@ -269,7 +269,10 @@ mod tests {
             buf_reader.read_line(&mut line).await.unwrap();
             let req: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
             assert_eq!(req["method"], "events.subscribe");
-            assert_eq!(req["params"]["subscriptions"][0]["type"], "pane.agent_status_changed");
+            assert_eq!(
+                req["params"]["subscriptions"][0]["type"],
+                "pane.agent_status_changed"
+            );
             assert_eq!(req["params"]["subscriptions"][0]["pane_id"], "w1:p6");
 
             for payload in [
@@ -293,7 +296,10 @@ mod tests {
             .await
             .expect("open event stream");
 
-        assert_eq!(stream.next_event().await, Some(HerdrEvent::SubscriptionStarted));
+        assert_eq!(
+            stream.next_event().await,
+            Some(HerdrEvent::SubscriptionStarted)
+        );
         match stream.next_event().await.expect("blocked event") {
             HerdrEvent::AgentStatusChanged(c) => {
                 assert_eq!(c.agent_status, AgentStatus::Blocked);

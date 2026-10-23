@@ -1,11 +1,11 @@
 //! Transport implementations for `herdr` (Local Unix Domain Socket, Remote SSH, and Mock).
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 use log::trace;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
@@ -20,7 +20,10 @@ use crate::protocol::{
 /// Default socket path on local Unix systems.
 pub fn default_local_socket_path() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".config").join("herdr").join("herdr.sock")
+        PathBuf::from(home)
+            .join(".config")
+            .join("herdr")
+            .join("herdr.sock")
     } else {
         PathBuf::from("/tmp/herdr.sock")
     }
@@ -152,7 +155,10 @@ pub struct MockState {
 impl Default for MockState {
     fn default() -> Self {
         let mut extra = serde_json::Map::new();
-        extra.insert("agent".to_string(), serde_json::Value::String("claude".to_string()));
+        extra.insert(
+            "agent".to_string(),
+            serde_json::Value::String("claude".to_string()),
+        );
         let default_pane = PaneInfo {
             pane_id: "p1".to_string(),
             terminal_title: Some("claude-worker".to_string()),
@@ -181,7 +187,8 @@ impl Default for MockState {
             "p1".to_string(),
             vec![
                 "Compiling handlr v0.1.0 (/Users/tmeade/src/handlr)".to_string(),
-                "   Compiling libherdr v0.1.0 (/Users/tmeade/src/handlr/crates/libherdr)".to_string(),
+                "   Compiling libherdr v0.1.0 (/Users/tmeade/src/handlr/crates/libherdr)"
+                    .to_string(),
                 "    Finished dev [unoptimized + debuginfo] target(s) in 1.42s".to_string(),
             ],
         );
@@ -229,17 +236,11 @@ impl Drop for HerdrEventStream {
 #[derive(Clone)]
 pub enum HerdrTransport {
     /// Connects to a local Unix Domain Socket.
-    LocalSocket {
-        socket_path: PathBuf,
-    },
+    LocalSocket { socket_path: PathBuf },
     /// Executes requests remotely over SSH using multiplexed connection channels.
-    RemoteSsh {
-        config: RemoteSshConfig,
-    },
+    RemoteSsh { config: RemoteSshConfig },
     /// In-memory mock transport for testing and deterministic simulation.
-    Mock {
-        state: Arc<RwLock<MockState>>,
-    },
+    Mock { state: Arc<RwLock<MockState>> },
 }
 
 impl HerdrTransport {
@@ -371,8 +372,10 @@ impl HerdrTransport {
     }
 
     /// Decode lines off a subscription connection until it closes.
-    async fn pump_event_lines<R>(mut lines: tokio::io::Lines<BufReader<R>>, tx: mpsc::Sender<HerdrEvent>)
-    where
+    async fn pump_event_lines<R>(
+        mut lines: tokio::io::Lines<BufReader<R>>,
+        tx: mpsc::Sender<HerdrEvent>,
+    ) where
         R: tokio::io::AsyncRead + Unpin,
     {
         loop {
@@ -403,19 +406,15 @@ impl HerdrTransport {
             Self::LocalSocket { socket_path } => {
                 Self::execute_local_socket(socket_path, request).await
             }
-            Self::RemoteSsh { config } => {
-                Self::execute_remote_ssh(config, request).await
-            }
-            Self::Mock { state } => {
-                Self::execute_mock(state, request).await
-            }
+            Self::RemoteSsh { config } => Self::execute_remote_ssh(config, request).await,
+            Self::Mock { state } => Self::execute_mock(state, request).await,
         }
     }
 
     /// Execute a raw JSON `Value` directly.
     pub async fn send_raw(&self, raw: &Value) -> HerdrResult<Value> {
-        let request: HerdrRequest = serde_json::from_value(raw.clone())
-            .map_err(|e| HerdrError::InvalidArguments {
+        let request: HerdrRequest =
+            serde_json::from_value(raw.clone()).map_err(|e| HerdrError::InvalidArguments {
                 tool: "raw".to_string(),
                 details: e.to_string(),
             })?;
@@ -429,11 +428,20 @@ impl HerdrTransport {
     ) -> HerdrResult<Value> {
         let rpc = request.to_jsonrpc();
         let req_json = serde_json::to_string(&rpc).unwrap_or_default();
-        log::info!("libherdr: Connecting to Unix socket at {:?} (method: '{}', id: {})", socket_path, rpc.method, rpc.id);
+        log::info!(
+            "libherdr: Connecting to Unix socket at {:?} (method: '{}', id: {})",
+            socket_path,
+            rpc.method,
+            rpc.id
+        );
         log::debug!("libherdr: Sending JSON-RPC payload to socket: {}", req_json);
 
         let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
-            log::warn!("libherdr: Failed connecting to Unix socket at {:?}: {}", socket_path, e);
+            log::warn!(
+                "libherdr: Failed connecting to Unix socket at {:?}: {}",
+                socket_path,
+                e
+            );
             HerdrError::Socket(format!(
                 "Failed to connect to herdr socket at {:?}: {}",
                 socket_path, e
@@ -454,23 +462,28 @@ impl HerdrTransport {
 
         let mut reader = BufReader::new(stream);
         let mut response_line = String::new();
-        reader
-            .read_line(&mut response_line)
-            .await
-            .map_err(|e| {
-                log::warn!("libherdr: Failed reading response from socket: {}", e);
-                HerdrError::Socket(format!("Failed to read response from socket: {}", e))
-            })?;
+        reader.read_line(&mut response_line).await.map_err(|e| {
+            log::warn!("libherdr: Failed reading response from socket: {}", e);
+            HerdrError::Socket(format!("Failed to read response from socket: {}", e))
+        })?;
 
         let trimmed_resp = response_line.trim();
-        log::debug!("libherdr: Raw response line from socket: '{}'", trimmed_resp);
+        log::debug!(
+            "libherdr: Raw response line from socket: '{}'",
+            trimmed_resp
+        );
         if trimmed_resp.is_empty() {
             log::warn!("libherdr: Received empty response from socket");
-            return Err(HerdrError::Socket("Received empty response from socket".to_string()));
+            return Err(HerdrError::Socket(
+                "Received empty response from socket".to_string(),
+            ));
         }
 
         let parsed = Self::parse_herdr_response_json(trimmed_resp)?;
-        log::info!("libherdr: Successfully received and parsed socket response for method '{}'", rpc.method);
+        log::info!(
+            "libherdr: Successfully received and parsed socket response for method '{}'",
+            rpc.method
+        );
         Ok(parsed)
     }
 
@@ -562,9 +575,10 @@ impl HerdrTransport {
             stdin.write_all(b"\n").await.map_err(|e| {
                 HerdrError::Ssh(format!("Failed writing newline to SSH stdin: {}", e))
             })?;
-            stdin.flush().await.map_err(|e| {
-                HerdrError::Ssh(format!("Failed flushing SSH stdin: {}", e))
-            })?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| HerdrError::Ssh(format!("Failed flushing SSH stdin: {}", e)))?;
         }
 
         let timeout_duration = Duration::from_secs(config.timeout_secs.unwrap_or(15));
@@ -620,7 +634,9 @@ impl HerdrTransport {
                     "buffer": joined,
                 }))
             }
-            HerdrRequest::RunCommand { pane_id, command, .. } => {
+            HerdrRequest::RunCommand {
+                pane_id, command, ..
+            } => {
                 state.command_log.push((pane_id.clone(), command.clone()));
                 if let Some(buf) = state.pane_buffers.get_mut(pane_id) {
                     buf.push(format!("$ {}", command));

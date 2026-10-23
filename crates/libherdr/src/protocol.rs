@@ -298,9 +298,7 @@ impl HerdrRequest {
     pub fn from_tool_call(name: &str, args: &Value) -> Result<Self, String> {
         match name {
             "list_panes" => {
-                let workspace_id = args
-                    .get("workspace_id")
-                    .and_then(|v| v.as_str());
+                let workspace_id = args.get("workspace_id").and_then(|v| v.as_str());
                 if let Some(ws_id) = workspace_id {
                     Ok(Self::list_panes_scoped(ws_id))
                 } else {
@@ -378,9 +376,7 @@ impl HerdrRequest {
 
                 Ok(Self::focus(target_id))
             }
-            custom_name => {
-                Err(format!("Unknown tool name '{custom_name}'"))
-            }
+            custom_name => Err(format!("Unknown tool name '{custom_name}'")),
         }
     }
 
@@ -400,19 +396,21 @@ impl HerdrRequest {
                     params,
                 }
             }
-            HerdrRequest::InspectPane { id, pane_id, lines } => {
-                HerdrJsonRpcRequest {
-                    jsonrpc: "2.0".to_string(),
-                    id: id.clone(),
-                    method: "pane.read".to_string(),
-                    params: serde_json::json!({
-                        "pane_id": pane_id,
-                        "source": "recent",
-                        "count": lines,
-                    }),
-                }
-            }
-            HerdrRequest::RunCommand { id, pane_id, command } => {
+            HerdrRequest::InspectPane { id, pane_id, lines } => HerdrJsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: id.clone(),
+                method: "pane.read".to_string(),
+                params: serde_json::json!({
+                    "pane_id": pane_id,
+                    "source": "recent",
+                    "count": lines,
+                }),
+            },
+            HerdrRequest::RunCommand {
+                id,
+                pane_id,
+                command,
+            } => {
                 let trimmed = command.trim_end_matches('\n');
                 HerdrJsonRpcRequest {
                     jsonrpc: "2.0".to_string(),
@@ -442,7 +440,11 @@ impl HerdrRequest {
                     }),
                 }
             }
-            HerdrRequest::ManageLayout { id, layout_action, target_id } => {
+            HerdrRequest::ManageLayout {
+                id,
+                layout_action,
+                target_id,
+            } => {
                 let (method, params) = match layout_action.as_str() {
                     "zoom" | "unzoom" => (
                         "pane.zoom".to_string(),
@@ -494,11 +496,20 @@ impl HerdrRequest {
             }
             HerdrRequest::Focus { id, target_id } => {
                 let (method, params) = if target_id.starts_with('w') && !target_id.contains(':') {
-                    ("workspace.focus".to_string(), serde_json::json!({ "workspace_id": target_id }))
+                    (
+                        "workspace.focus".to_string(),
+                        serde_json::json!({ "workspace_id": target_id }),
+                    )
                 } else if target_id.contains(":t") && !target_id.contains(":p") {
-                    ("tab.focus".to_string(), serde_json::json!({ "tab_id": target_id }))
+                    (
+                        "tab.focus".to_string(),
+                        serde_json::json!({ "tab_id": target_id }),
+                    )
                 } else {
-                    ("pane.focus".to_string(), serde_json::json!({ "pane_id": target_id }))
+                    (
+                        "pane.focus".to_string(),
+                        serde_json::json!({ "pane_id": target_id }),
+                    )
                 };
                 HerdrJsonRpcRequest {
                     jsonrpc: "2.0".to_string(),
@@ -509,8 +520,17 @@ impl HerdrRequest {
             }
             HerdrRequest::Custom(val) => {
                 if let Some(obj) = val.as_object() {
-                    let id = obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(generate_request_id);
-                    let method = obj.get("method").or_else(|| obj.get("action")).and_then(|v| v.as_str()).unwrap_or("custom").to_string();
+                    let id = obj
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(generate_request_id);
+                    let method = obj
+                        .get("method")
+                        .or_else(|| obj.get("action"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("custom")
+                        .to_string();
                     let params = obj.get("params").cloned().unwrap_or_else(|| val.clone());
                     HerdrJsonRpcRequest {
                         jsonrpc: "2.0".to_string(),

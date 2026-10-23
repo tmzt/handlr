@@ -1,7 +1,7 @@
 //! High-level client for interacting with the `herdr` terminal multiplexer.
 
-use std::path::PathBuf;
 use serde_json::Value;
+use std::path::PathBuf;
 
 use crate::error::{HerdrError, HerdrResult};
 use crate::protocol::{EnvironmentSnapshot, HerdrRequest, DEFAULT_INSPECT_LINES};
@@ -123,11 +123,7 @@ impl HerdrClient {
     }
 
     /// Manage layout (split, zoom, close, etc.).
-    pub async fn manage_layout(
-        &self,
-        action: &str,
-        target_id: Option<&str>,
-    ) -> HerdrResult<Value> {
+    pub async fn manage_layout(&self, action: &str, target_id: Option<&str>) -> HerdrResult<Value> {
         let req = HerdrRequest::manage_layout(action, target_id);
         self.send_request(&req).await
     }
@@ -140,8 +136,8 @@ impl HerdrClient {
 
     /// Execute a tool call dynamically based on tool name and JSON argument object.
     pub async fn execute_tool_call(&self, name: &str, args: &Value) -> HerdrResult<Value> {
-        let request = HerdrRequest::from_tool_call(name, args)
-            .map_err(|e| HerdrError::InvalidArguments {
+        let request =
+            HerdrRequest::from_tool_call(name, args).map_err(|e| HerdrError::InvalidArguments {
                 tool: name.to_string(),
                 details: e,
             })?;
