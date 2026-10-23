@@ -342,8 +342,8 @@ fn device_name(args: &Args) -> String {
 
 impl App {
     /// The app's handling of a pairing URL, however it arrives: the field,
-    /// `--pair`, `pair.txt`, and, once libmorph has URL schemes, an opened
-    /// `handlr://` link. The text is never logged.
+    /// `--pair`, `pair.txt`, and an opened `handlr://` link. The text is
+    /// never logged.
     pub fn open_url(&mut self, url: &str) {
         let text = url.trim();
         if text.is_empty() {
@@ -761,6 +761,22 @@ impl MorphApp for App {
         }
         #[cfg(not(target_os = "android"))]
         let _ = setup;
+    }
+
+    /// A `handlr://` link opened the app (libmorph 0.3.2). Only a pairing
+    /// link (`handlr://<host>:<port>/pair#…`) is acted on; its fragment is
+    /// the pairing string, so nothing past the path is logged.
+    fn on_open_url(&mut self, _ctx: &mut MorphContext, url: &str) {
+        let before_fragment = url.split(['#', '?']).next().unwrap_or("");
+        let is_pairing = before_fragment
+            .strip_prefix("handlr://")
+            .is_some_and(|rest| rest.ends_with("/pair"));
+        if is_pairing {
+            log::info!("link: a pairing link was opened");
+            self.open_url(url);
+        } else {
+            log::warn!("link: ignoring an opened link that is not a pairing link");
+        }
     }
 
     fn init(ctx: &mut MorphContext) -> Self {

@@ -21,8 +21,9 @@ handlr-companion = { path = "../../crates/handlr-companion" }
 handlr-audio = { path = "../../crates/handlr-audio" }
 # `StaticKey`, which the key store's Noise key implements.
 libhandlr_proto = { path = "../../crates/libhandlr_proto", features = ["link"] }
-# libmorph 0.3.1: the key store and the secure store (`secure-store`).
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, features = ["secure-store"] }
+# libmorph 0.3.2: the key store and the secure store (`secure-store`), and
+# URL schemes (`on_open_url`).
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862", default-features = false, features = ["secure-store"] }
 # The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
 # 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
@@ -48,13 +49,13 @@ env_logger = "0.11"
 # Android: libmorph's audio and libmobile, and libmorph's Sink and Source.
 [target.'cfg(target_os = "android")'.dependencies]
 handlr-audio = { path = "../../crates/handlr-audio", features = ["morph"] }
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, features = ["audio", "mobile", "secure-store"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862", default-features = false, features = ["audio", "mobile", "secure-store"] }
 android_logger = "0.14"
 
 # Generates the Gradle project when building for Android; a no-op on the host.
 [build-dependencies]
-libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a" }
+libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862" }
 
 # The key tests use libdevice's memory vault, through libmorph's `script`.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, features = ["secure-store", "script"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862", default-features = false, features = ["secure-store", "script"] }
