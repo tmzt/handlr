@@ -156,3 +156,38 @@ nothing about handlr.
    to `Input::Pair`. Plan 04 is frozen, so this is proposed to the owner as
    an amendment there, not built here.
    **Done when:** the owner has agreed or declined that amendment.
+
+## Amendment — 2026-10-22 22:43 EDT: inline images in herdr, kitty and iTerm2
+
+On the owner's request ("it should be able to show inline in herdr if it's
+iTerm2/kitty compatible"). This adds to decision 5 and step 3; nothing
+earlier is replaced.
+
+- **`qrcodeurl`** adds `pub enum Inline { Kitty, Iterm2 }` and
+  `Qr::inline(&self, png: Png, protocol: Inline) -> String`. The method
+  returns the escape sequence that shows the code's PNG at the cursor,
+  followed by a newline. It is still pure: the caller decides whether the
+  terminal can show the image.
+  - **Kitty:** the graphics protocol, `ESC _G a=T,f=100,q=2,m=1;<base64>
+    ESC \\`, in chunks of at most 4096 base64 bytes. The last chunk has
+    `m=0`. `q=2` keeps the terminal from replying into the pane.
+  - **iTerm2:** `ESC ] 1337 ; File=inline=1;size=<bytes>;preserveAspectRatio=1
+    : <base64> BEL`.
+  - Both use standard base64, padded. Tests check the framing, the chunk
+    sizes, and that the base64 decodes back to the PNG.
+- **`handlr pair --qr-inline[=auto|kitty|iterm2]`** prints the image in
+  place of the text QR code. The pairing string and the expiry line are
+  still printed below it. `auto`, the default when the flag has no value,
+  chooses as follows:
+  - **Inside herdr** (`HERDR_ENV` is set): kitty, if herdr's
+    configuration (`~/.config/herdr/config.toml`) has `[experimental]
+    kitty_graphics = true`. herdr 0.8 renders kitty graphics only then, and
+    only on a kitty-compatible outer terminal. It does not carry iTerm2's
+    `OSC 1337`.
+  - **Outside herdr:** kitty for `TERM=xterm-kitty`, `KITTY_WINDOW_ID`,
+    or `TERM_PROGRAM` of `ghostty` or `WezTerm`; iTerm2 for
+    `TERM_PROGRAM=iTerm.app`.
+  - **Otherwise:** the text QR code, with a line saying why no image was
+    shown (for example "herdr's kitty_graphics is off").
+- Without `--qr-inline`, nothing changes. The image carries the same
+  pairing URL as the text code, so decision 6 applies to it unchanged.
