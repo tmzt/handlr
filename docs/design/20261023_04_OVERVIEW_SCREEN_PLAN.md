@@ -246,3 +246,88 @@ nothing; 5 needs 2, 3 and 4.
 3. **The latest line per row.** With plan 20261023_03, each row could
    show its agent's newest line, with one subscription per row (up to
    8). Wanted on the overview, or only in the agent view?
+
+## Amendment — 2026-10-23 17:04 EDT: two halves, agent cards in tab order and the Gemini turns
+
+Agreed with the owner on 2026-10-23: "the top half would be summary cards
+in tab order with two cards per row, tap to enter the focus screen. if
+there's a pending question or stop (from the session read, not herdr), the
+card says so. if there's a question, it should have the question buttons as
+inactive outlined buttons. the bottom half would be the Gemini turns
+(global) as text. each section scrolls separately"; and "they visually
+indicate if they need input but don't change order".
+
+This replaces decisions 1 to 3 and 7, the layout of section 3, the files of
+section 4 and step 1; it answers open questions 1, 2 and 3. Decisions 4, 5,
+6, 8 and 9 stand.
+
+**A1. Two halves.** Between the status lines and the bottom row, the
+screen is split in the middle: the agent cards above, the Gemini turns
+below. Each half scrolls on its own, with the agent view's drag, fling and
+slop. The confirmation and dictation cards keep their places above the
+bottom row, which is unchanged (play and record).
+
+**A2. Agent cards, two per row, in tab order.** One card per agent pane
+(shells left out), ordered by `(workspace_id, tab_number)` and never
+reordered: a card that needs input is marked where it is. Cards are equal
+width, 12 pt apart, 12 pt from the edges, at least 112 pt high. Tapping a
+card opens the agent view on that pane (decision 4).
+
+**A3. What a card shows:**
+- the shown name's agent and project, and the tab label, on one line;
+- a focus marker (a 4 pt accent bar on the card's left edge) on herdr's
+  focused pane; the main screen's "focus: …" line goes (open question 2);
+- its turn, from the session read, never herdr's status:
+  - **asking:** "Asking" and the question's text, at most three lines,
+    with the question's buttons (Yes and No) drawn inactive: outlined,
+    no fill, dim. They show what is asked; a tap anywhere on the card,
+    buttons included, opens the agent view, where they are live;
+  - **stopped:** the turn ended with no question: "Stopped" and the first
+    line of the last reply;
+  - **working:** the newest line, dim;
+  - no session: the status word, dim;
+- **needing input** (asking, or a handlr confirmation pending for the
+  pane) is shown on the card itself: a 2 pt accent outline (amber for an
+  approval, blue for a question) and its label in that colour. Nothing
+  moves.
+
+**A4. The turn comes from the daemon.** `AgentInfo` gains
+`turn: Option<Turn>`, with `Turn` one of `Working { line }`,
+`Stopped { line }` and `Asking { question }` (each text redacted and cut
+to 200 characters), absent when the pane has no session on the daemon's
+machine. The daemon finds it as the pending question is found (decision
+8, with the 16:28 EDT L3 amendment of plan 20261022_03): asking when there
+is a pending question; stopped when the turn has visibly ended (the last
+entry is the reply and the file has been quiet for 5 s) or herdr says
+idle, blocked or done; working otherwise. This replaces decision 7's
+`asking: bool`. A field added to a public struct is not strictly
+additive, so it goes in libhandlr_proto 0.3.0. The agent view uses it
+too: a stopped turn gives the Finished card when herdr still says working
+(the gap left by that L3 amendment).
+
+**A5. The Gemini turns** (open question 1): the bottom half shows the
+global conversation as plain text, the user's words and Gemini's replies,
+oldest at the top, following the newest until scrolled back, as the agent
+view's flow does. It is the main screen's conversation, moved here.
+
+**A6. Files** (decision 8's layout):
+
+```
+apps/companion/src/
+  overview.rs                 the Overview screen: the two halves, hits, draw
+  overview/agent_card.rs      AgentCard: one card (name, tab, turn, marks)
+  overview/card_grid.rs       CardGrid: two per row, in tab order, scrolling
+  overview/turn_log.rs        TurnLog: the Gemini turns, scrolling
+  controls/outline_button.rs  OutlineButton: an inactive outlined button
+```
+
+`OutlineButton` is in `controls/` because the agent view can use it
+too; like the others, it is a candidate for libcontrols.
+
+**Step 1, as amended:** libhandlr_proto 0.3.0 with `AgentInfo.turn`, and
+the daemon filling it. **Done when:** daemon tests with the herdr mock and
+session fixtures give asking (with the question), stopped (a quiet reply,
+with herdr saying working), working (a file just written) and no session
+(a shell). Step 4 builds `AgentCard`, `CardGrid`, `TurnLog` and
+`OutlineButton`, with tests of the order never changing as turns change,
+the needing-input marks, and the two halves scrolling apart.
