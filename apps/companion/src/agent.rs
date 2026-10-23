@@ -655,6 +655,8 @@ pub struct AgentScreen {
     read_aloud: bool,
     /// Something is being said: the play button skips it.
     speaking: bool,
+    /// The session has not answered yet.
+    loading: bool,
     /// The card a message is being taken in reply to.
     reply: Option<AgentCard>,
     dirty: bool,
@@ -665,6 +667,7 @@ impl AgentScreen {
         AgentScreen {
             follow: true,
             dirty: true,
+            loading: true,
             ..Default::default()
         }
     }
@@ -780,6 +783,15 @@ impl AgentScreen {
 
     pub fn read_aloud(&self) -> bool {
         self.read_aloud
+    }
+
+    /// Whether the session is still loading: "(loading session)" until it
+    /// answers, then "(no session to show)" if it has nothing.
+    pub fn set_loading(&mut self, on: bool) {
+        if on != self.loading {
+            self.loading = on;
+            self.dirty = true;
+        }
     }
 
     /// Whether something is being said; with read aloud on, the play button
@@ -1214,7 +1226,11 @@ impl AgentScreen {
             let px = TEXT_PT * s;
             ctx.draw_text(
                 list,
-                "(no session to show)",
+                if self.loading {
+                    "(loading session)"
+                } else {
+                    "(no session to show)"
+                },
                 [PAD * s, v.y + 16.0 * s],
                 px,
                 DIM,

@@ -436,8 +436,10 @@ impl App {
                 entries,
                 cards,
                 pinned,
+                loading,
             } => {
                 if let Some(agent) = &mut self.agent {
+                    agent.set_loading(loading);
                     agent.set_content(name, status, entries, cards, pinned);
                 }
             }
