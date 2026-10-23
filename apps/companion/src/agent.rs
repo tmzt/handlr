@@ -42,7 +42,7 @@ mod dictation_card;
 mod square_button;
 use control_row::ControlRow;
 use dictation_card::DictationCard;
-use square_button::{Look, SquareButton, depressed};
+use square_button::SquareButton;
 
 pub const BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
 pub const FG: [f32; 4] = [0.94, 0.95, 0.96, 1.0];
@@ -557,8 +557,6 @@ const SLOP: f32 = 10.0;
 const DECAY: f32 = 3.2;
 /// Slower than this (points per second), a fling stops.
 const MIN_FLING: f32 = 30.0;
-/// How long a tap's press shows after the finger lifts, in seconds.
-const PRESS_LINGER: f32 = 0.12;
 
 /// Where things are on the screen, for the current layout and scroll.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -671,10 +669,6 @@ pub struct AgentScreen {
     speaking: bool,
     /// The session has not answered yet.
     loading: bool,
-    /// The control a finger is on, drawn pressed in, and how much longer a
-    /// tap's press shows after the finger lifts, in seconds.
-    pressed: Option<AgentHit>,
-    press_linger: f32,
     /// The card a message is being taken in reply to.
     reply: Option<AgentCard>,
     dirty: bool,
@@ -1120,9 +1114,6 @@ impl AgentScreen {
         match phase {
             TouchPhase::Started => {
                 self.fling = 0.0;
-                self.pressed = self.hit(x, y);
-                self.press_linger = 0.0;
-                self.dirty |= self.pressed.is_some();
                 self.drag = Some(Drag {
                     id,
                     start: [x, y],
@@ -1139,10 +1130,6 @@ impl AgentScreen {
                     && ((y - d.start[1]).abs() > SLOP * s || (x - d.start[0]).abs() > SLOP * s)
                 {
                     d.moved = true;
-                    // A drag, not a press.
-                    if self.pressed.take().is_some() {
-                        self.dirty = true;
-                    }
                 }
                 let dy = y - d.last_y;
                 let dt = now.saturating_sub(d.last_t).as_secs_f32();
@@ -1174,22 +1161,9 @@ impl AgentScreen {
                     return None;
                 }
                 self.scroll_to(self.offset);
-                let hit = self.hit(x, y);
-                // A quick tap's press still shows for a moment.
-                if self.pressed.is_some() {
-                    if hit == self.pressed {
-                        self.press_linger = PRESS_LINGER;
-                    } else {
-                        self.pressed = None;
-                    }
-                    self.dirty = true;
-                }
-                hit
+                self.hit(x, y)
             }
             TouchPhase::Cancelled => {
-                if self.pressed.take().is_some() {
-                    self.dirty = true;
-                }
                 if self.drag.take().is_some() {
                     self.scroll_to(self.offset);
                 }
@@ -1200,14 +1174,6 @@ impl AgentScreen {
 
     /// Carries a fling on by `dt`. Returns whether the view moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
-        if self.press_linger > 0.0 {
-            self.press_linger -= dt.as_secs_f32();
-            if self.press_linger <= 0.0 {
-                self.press_linger = 0.0;
-                self.pressed = None;
-                self.dirty = true;
-            }
-        }
         if self.fling == 0.0 || self.drag.is_some() {
             return false;
         }
@@ -1240,12 +1206,6 @@ impl AgentScreen {
         let l = self.layout;
         let s = self.scale();
         let recording = self.dictation.is_some();
-        let look = Look {
-            read_aloud: self.read_aloud,
-            speaking: self.speaking,
-            recording,
-            pressed: self.pressed,
-        };
         fill(list, Rect::new(0.0, 0.0, l.w, l.h), BG, 0.0);
 
         // The flow, in its window.
@@ -1268,7 +1228,17 @@ impl AgentScreen {
         for b in &self.flow.buttons {
             if visible(b.rect.y, b.rect.h) {
                 let rect = Rect::new(b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
-                SquareButton::draw(list, ctx, term, b, rect, s, &look);
+                SquareButton::draw(
+                    list,
+                    ctx,
+                    term,
+                    b,
+                    rect,
+                    s,
+                    self.read_aloud,
+                    self.speaking,
+                    recording,
+                );
             }
         }
         if self.entries.is_empty() && self.cards.is_empty() {
@@ -1320,7 +1290,17 @@ impl AgentScreen {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
             for b in &d.buttons {
-                SquareButton::draw(list, ctx, term, b, b.rect, s, &look);
+                SquareButton::draw(
+                    list,
+                    ctx,
+                    term,
+                    b,
+                    b.rect,
+                    s,
+                    self.read_aloud,
+                    self.speaking,
+                    recording,
+                );
             }
         }
         if let Some(p) = &self.frame.pin {
@@ -1331,18 +1311,36 @@ impl AgentScreen {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
             for b in &p.flow.buttons {
-                SquareButton::draw(list, ctx, term, b, b.rect, s, &look);
+                SquareButton::draw(
+                    list,
+                    ctx,
+                    term,
+                    b,
+                    b.rect,
+                    s,
+                    self.read_aloud,
+                    self.speaking,
+                    recording,
+                );
             }
         }
         let sg_px = SUGGEST_PT * s;
         for g in &self.frame.suggestions {
-            // Pressed: 2 pt down and darker, as the buttons.
-            let (rect, color) = depressed(g.rect, g.color, self.pressed == Some(g.hit), s);
-            let y = rect.y + (rect.h - line_h(sg_px)) * 0.5;
-            ctx.draw_text(list, g.label, [rect.x + 4.0 * s, y], sg_px, color);
+            let y = g.rect.y + (g.rect.h - line_h(sg_px)) * 0.5;
+            ctx.draw_text(list, g.label, [g.rect.x + 4.0 * s, y], sg_px, g.color);
         }
         for b in &self.frame.buttons {
-            SquareButton::draw(list, ctx, term, b, b.rect, s, &look);
+            SquareButton::draw(
+                list,
+                ctx,
+                term,
+                b,
+                b.rect,
+                s,
+                self.read_aloud,
+                self.speaking,
+                recording,
+            );
         }
         self.dirty = false;
         true
@@ -2149,32 +2147,5 @@ mod tests {
             a.draw(&mut DrawList::new(), &DrawContext::default(), None),
             "the glyph changes back"
         );
-    }
-
-    #[test]
-    fn a_pressed_button_sinks_while_the_finger_is_on_it() {
-        let mut a = screen(conversation(3), vec![], None);
-        let play = a.frame().buttons[0].rect;
-        let (x, y) = (play.x + 5.0, play.y + 5.0);
-        a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
-        assert_eq!(a.pressed, Some(AgentHit::ReadAloud));
-        let (down, bg) = depressed(play, BACK_BG, true, PHONE.scale);
-        assert!(down.y > play.y && bg[0] < BACK_BG[0]);
-        // Lifted: it shows a moment longer, then comes back up.
-        let tap = a.touch(1, TouchPhase::Ended, x, y, MS);
-        assert_eq!(tap, Some(AgentHit::ReadAloud));
-        assert_eq!(a.pressed, Some(AgentHit::ReadAloud));
-        a.tick(Duration::from_millis(150));
-        assert_eq!(a.pressed, None);
-        // A drag is not a press.
-        a.touch(2, TouchPhase::Started, x, y, Duration::from_secs(1));
-        a.touch(
-            2,
-            TouchPhase::Moved,
-            x,
-            y - 80.0,
-            Duration::from_secs(1) + MS,
-        );
-        assert_eq!(a.pressed, None);
     }
 }
