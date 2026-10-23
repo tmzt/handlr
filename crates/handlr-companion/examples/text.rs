@@ -179,8 +179,13 @@ fn print_event(event: Event) {
             entries,
             cards,
             pinned,
+            loading,
         } => {
-            println!("* view of {name} ({status}): {} entries", entries.len());
+            let loading = if loading { ", loading" } else { "" };
+            println!(
+                "* view of {name} ({status}{loading}): {} entries",
+                entries.len()
+            );
             for (i, c) in cards.iter().enumerate() {
                 let pin = if Some(i) == pinned { " (pinned)" } else { "" };
                 let live = if c.live { "live" } else { "resolved" };

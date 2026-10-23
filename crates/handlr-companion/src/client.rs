@@ -264,13 +264,15 @@ pub enum Event {
     Dictation(Dictation),
     /// The open agent view changed (plan 20261022_03, step 4): the agent's
     /// shown name and status, its entries (oldest first), the priority
-    /// cards in flow order, and the index of the pinned one.
+    /// cards in flow order, and the index of the pinned one. `loading`
+    /// until the session's first answer.
     AgentView {
         name: String,
         status: String,
         entries: Vec<common::Entry>,
         cards: Vec<AgentCard>,
         pinned: Option<usize>,
+        loading: bool,
     },
     Error(String),
 }
@@ -564,6 +566,8 @@ struct AgentView {
     peeking: bool,
     /// When the last peek was sent.
     peeked_at: Option<Duration>,
+    /// The session has answered at least once.
+    answered: bool,
     /// A notice or a status change asks for a peek as soon as allowed.
     wanted: bool,
     /// The event as last given.
@@ -772,6 +776,7 @@ impl State {
             entries: v.entries.clone(),
             cards,
             pinned,
+            loading: !v.answered,
         })
     }
 
@@ -818,6 +823,7 @@ impl State {
             cards: Cards::default(),
             peeking: false,
             peeked_at: None,
+            answered: false,
             wanted: true,
             shown: None,
             read_upto: None,
@@ -1644,6 +1650,7 @@ impl State {
             return; // the view closed, or moved to another agent
         };
         v.peeking = false;
+        v.answered = true;
         v.status = peek.status;
         let first = v.entries.is_empty() && v.read_upto.is_none();
         match peek.session {
@@ -3708,5 +3715,21 @@ mod tests {
         assert_eq!(events(&s.input(Input::Skip)), vec![Event::StopSpeaking]);
         // Stopped: the held reply is said next.
         assert_eq!(events(&s.input(Input::Speaking(false))), vec![say("one")]);
+    }
+
+    #[test]
+    fn the_view_is_loading_until_the_session_answers() {
+        let mut s = online();
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let loading = |out: &[Output]| {
+            out.iter().rev().find_map(|o| match o {
+                Output::Event(Event::AgentView { loading, .. }) => Some(*loading),
+                _ => None,
+            })
+        };
+        assert_eq!(loading(&out), Some(true));
+        // No session at all: answered, so no longer loading.
+        let out = peek_answer(&mut s, &out, "idle", Value::Null);
+        assert_eq!(loading(&out), Some(false));
     }
 }
