@@ -537,3 +537,13 @@ Choices the amendments left open:
   as screenshots, and refuses data URLs over 4 MiB.
 
 Still to check by hand: pairing from another machine on the tailnet.
+
+## 2026-10-22 23:26 EDT — plan 20261022_08: PROMPT.md and daemon-side approval (Draft); a correction
+
+**New plan.** `docs/design/20261022_08_PROMPT_CONFIRMATION_PLAN.md`, on the
+owner's instruction. It takes up the open item in the plan 02 step 4 entry,
+and changes only the conflicting block of the Gemini-written prompt.
+
+**Correction.** The commits `0cb5898` and `a6ee077`, and the "pairing by
+public keys" entry above, cite plan 02's amendment as "23:2x EDT". Its
+timestamp is **23:07 EDT**.
