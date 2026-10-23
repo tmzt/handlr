@@ -830,3 +830,12 @@ green and red".
    20261023_05 is implemented, that change is recorded in CHANGES.md when
    it is made.
 5. **One control per file:** `apps/companion/src/agent/diff_block.rs`.
+
+## Amendment — 2026-10-23 19:09 EDT: a cut question expands when tapped (living section L3)
+
+The owner (2026-10-23): "clicking an abbreviated question should expand
+the text and card". The pinned card shows its first three lines and cuts
+the rest with "…". When it is cut, a tap on the card (not on its buttons)
+shows all of its text, growing the card upward as far as leaves the flow
+120 pt; a second tap folds it. A different pinned card starts folded. A
+card whose text fits has nothing to expand, and a tap on it does nothing.
