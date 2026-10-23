@@ -1,13 +1,18 @@
 //! The link listener: Noise over TCP for paired devices
 //! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, decisions 4–6 and
-//! the amendments of 11:58 and 18:20 EDT; the rules for step 3 in
+//! the amendments of 11:58, 18:20 and 23:07 EDT; the rules for step 3 in
 //! CHANGES.md, 2026-10-22 18:24 EDT).
 //!
 //! * By default the link binds only `127.0.0.1:7347`. `[link] listen`
 //!   replaces that and turns off the Tailscale check.
-//! * A handshake must finish within [`HANDSHAKE_TIMEOUT`].
-//! * A pairing secret is burned on first use, and its expiry is checked
-//!   before it is looked up.
+//! * Every connection is `IK`. A handshake must finish within
+//!   [`HANDSHAKE_TIMEOUT`], and a key not in `auth.toml` gets no reply.
+//! * Pairing moves only public keys: `link.pair_begin` gives the pairing
+//!   URL (the server's key and addresses) and holds nothing pending;
+//!   `link.pair_add` checks a device code against the server's key and
+//!   appends the device to `auth.toml`. The device's first `hello` after
+//!   that is answered with `paired: true`, and `link.pair_done` goes to the
+//!   connection that added it.
 //! * A handshake's first message may only be `hello`; anything else closes
 //!   the connection without a reply.
 //! * `auth.toml` is read for every new connection, and every
@@ -26,18 +31,20 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use libhandlr_proto::common::{LinkPairBeginParams, LinkPairBeginResult, LinkPairDone};
+use libhandlr_proto::common::{
+    LinkPairAddParams, LinkPairAddResult, LinkPairBeginResult, LinkPairDone,
+};
 use libhandlr_proto::link::{
-    accept, generate_secret, AcceptedMode, PairingId, PairingPayload, StaticKeypair, KEY_LEN,
+    accept, DeviceCode, PairingPayload, PairingStringError, StaticKeypair, KEY_LEN,
 };
 use libhandlr_proto::{Incoming, Request};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-use self::auth::{AddError, AuthEntry, AuthFile};
+use self::auth::{AuthEntry, AuthFile};
 use self::tailscale::Tailscale;
 use super::Daemon;
 use crate::config::LinkConfig;
@@ -48,10 +55,6 @@ pub const DEFAULT_PORT: u16 = 7347;
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7347";
 /// How long a handshake may take.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a pairing secret lives unless `--ttl` says otherwise.
-pub const DEFAULT_PAIR_TTL: u64 = 300;
-/// The longest `--ttl`.
-pub const MAX_PAIR_TTL: u64 = 3600;
 /// How often open connections are checked against `auth.toml`.
 pub const DEFAULT_REVOKE_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -123,13 +126,10 @@ pub fn normalize_listen(addr: &str) -> String {
     }
 }
 
-/// A pairing that `link.pair_begin` opened and no device has used yet.
-struct Pending {
-    secret: [u8; KEY_LEN],
+/// A device `link.pair_add` added that has not said `hello` yet.
+struct Awaiting {
     name: String,
-    protocols: Vec<String>,
-    replace: bool,
-    expiry: u64,
+    /// To the connection that added it.
     done: oneshot::Sender<LinkPairDone>,
 }
 
@@ -140,11 +140,10 @@ struct OpenConn {
     close: CancellationToken,
 }
 
-/// A pairing begun by `link.pair_begin`.
-pub struct Begun {
-    pub id: PairingId,
-    pub result: LinkPairBeginResult,
-    /// Resolves when a device pairs, the pairing fails, or it expires.
+/// A device added by `link.pair_add`.
+pub struct Added {
+    pub result: LinkPairAddResult,
+    /// Resolves when the device's first `hello` is answered.
     pub done: oneshot::Receiver<LinkPairDone>,
 }
 
@@ -152,20 +151,14 @@ pub struct Begun {
 pub struct Link {
     settings: LinkSettings,
     keypair: StaticKeypair,
-    pending: Mutex<HashMap<PairingId, Pending>>,
+    /// Devices added and not yet heard from, by key.
+    awaiting: Mutex<HashMap<[u8; KEY_LEN], Awaiting>>,
     conns: Mutex<HashMap<u64, OpenConn>>,
     next_conn: AtomicU64,
     /// Serializes writes to `auth.toml`.
     auth_lock: Mutex<()>,
     /// The addresses of an explicit `listen`, as bound.
     bound: Mutex<Vec<String>>,
-}
-
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 /// A device name: 1 to 64 of ASCII letters, digits, `.`, `_` and `-`.
@@ -184,7 +177,7 @@ impl Link {
         Ok(Arc::new(Link {
             settings,
             keypair,
-            pending: Mutex::new(HashMap::new()),
+            awaiting: Mutex::new(HashMap::new()),
             conns: Mutex::new(HashMap::new()),
             next_conn: AtomicU64::new(1),
             auth_lock: Mutex::new(()),
@@ -255,12 +248,38 @@ impl Link {
         (ts.addresses(), ts.warning().into_iter().collect())
     }
 
-    /// `link.pair_begin`: a pending pairing.
-    pub async fn pair_begin(
-        self: &Arc<Self>,
-        params: LinkPairBeginParams,
-    ) -> Result<Begun, String> {
-        let name = params.name.trim().to_string();
+    /// `link.pair_begin`: the pairing URL and string. They hold only the
+    /// server's public key and addresses, and nothing is held pending.
+    pub async fn pair_begin(&self) -> Result<LinkPairBeginResult, String> {
+        let (addresses, warnings) = self.addresses().await;
+        if addresses.is_empty() {
+            return Err("the link has no address to pair with".to_string());
+        }
+        let payload = PairingPayload {
+            server_key: self.keypair.public,
+            addresses: addresses.clone(),
+        };
+        let pairing = payload.encode().map_err(|e| e.to_string())?;
+        let url = payload.url().map_err(|e| e.to_string())?;
+        Ok(LinkPairBeginResult {
+            url,
+            pairing,
+            addresses,
+            warnings,
+        })
+    }
+
+    /// `link.pair_add`: checks `code` against the server's key and appends
+    /// the device to `auth.toml`, under its own name or `name`, for
+    /// `protocols` (by default the companion). A name in use is refused
+    /// unless `replace`, which swaps the entry and closes the old key's
+    /// connections; a key already paired under another name is refused.
+    pub fn pair_add(&self, params: LinkPairAddParams) -> Result<Added, String> {
+        let code = DeviceCode::decode(&params.code, &self.keypair.public).map_err(code_error)?;
+        let name = match params.name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => code.name.clone(),
+        };
         if !valid_name(&name) {
             return Err(format!(
                 "'{name}' is not a valid name: use 1 to 64 letters, digits, '.', '_' or '-'"
@@ -284,134 +303,47 @@ impl Link {
                 "unknown protocol '{bad}'; use companion or harness"
             ));
         }
-        let ttl = params.ttl.unwrap_or(DEFAULT_PAIR_TTL);
-        if !(1..=MAX_PAIR_TTL).contains(&ttl) {
-            return Err(format!("ttl must be 1 to {MAX_PAIR_TTL} seconds"));
-        }
-        let file = self.auth()?;
-        if !params.replace && file.find_name(&name).is_some() {
-            return Err(AddError::NameInUse(name).to_string());
-        }
-        let (addresses, warnings) = self.addresses().await;
-        if addresses.is_empty() {
-            return Err("the link has no address to pair with".to_string());
-        }
 
-        let expiry = now_secs() + ttl;
+        let entry = AuthEntry::new(&name, &code.key, protocols.clone());
+        let replaced = {
+            let _guard = self.auth_lock.lock().unwrap();
+            auth::add(&self.settings.auth_path, entry, params.replace).map_err(|e| e.to_string())?
+        };
+        if let Some(old) = replaced.and_then(|old| old.public_key()) {
+            if old != code.key {
+                self.close_where(|c| c.key == old, "its entry was replaced");
+                self.awaiting.lock().unwrap().remove(&old);
+            }
+        }
         let (done_tx, done) = oneshot::channel();
-        let (id, secret) = {
-            let mut pending = self.pending.lock().unwrap();
-            if pending.values().any(|p| p.name == name) {
-                return Err(format!("a pairing for '{name}' is already waiting"));
-            }
-            let (id, secret) = loop {
-                let secret = generate_secret().map_err(|e| e.to_string())?;
-                let id = PairingId::from_secret(&secret);
-                if !pending.contains_key(&id) {
-                    break (id, secret);
-                }
-            };
-            pending.insert(
-                id,
-                Pending {
-                    secret,
-                    name: name.clone(),
-                    protocols,
-                    replace: params.replace,
-                    expiry,
-                    done: done_tx,
-                },
-            );
-            (id, secret)
-        };
-        let payload = PairingPayload {
-            server_key: self.keypair.public,
-            secret,
-            expiry: u32::try_from(expiry).unwrap_or(u32::MAX),
-            name: name.clone(),
-            addresses: addresses.clone(),
-        };
-        let pairing = match payload.encode() {
-            Ok(pairing) => pairing,
-            Err(e) => {
-                self.pending.lock().unwrap().remove(&id);
-                return Err(e.to_string());
-            }
-        };
-
-        // Expire it, and tell whoever waits.
-        let link = Arc::clone(self);
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(ttl)).await;
-            if let Some(p) = link.pending.lock().unwrap().remove(&id) {
-                log::info!("The pairing for '{}' expired", p.name);
-                let _ = p.done.send(LinkPairDone {
-                    name: p.name,
-                    paired: false,
-                    error: Some("the pairing expired".to_string()),
-                });
-            }
-        });
-        log::info!("Pairing for '{name}' waits for {ttl} s");
-        Ok(Begun {
-            id,
-            result: LinkPairBeginResult {
-                pairing,
-                name,
-                expiry,
-                addresses,
-                warnings,
+        self.awaiting.lock().unwrap().insert(
+            code.key,
+            Awaiting {
+                name: name.clone(),
+                done: done_tx,
             },
+        );
+        log::info!("Added '{name}' ({}) to auth.toml", protocols.join(", "));
+        Ok(Added {
+            result: LinkPairAddResult { name, protocols },
             done,
         })
     }
 
-    /// Withdraw pairings whose `handlr pair` went away.
-    pub fn withdraw(&self, ids: &[PairingId]) {
-        let mut pending = self.pending.lock().unwrap();
-        for id in ids {
-            if let Some(p) = pending.remove(id) {
-                log::info!("The pairing for '{}' was withdrawn", p.name);
-            }
-        }
-    }
-
-    /// Take (and so burn) the pending pairing `id`. An expired one is
-    /// burned too, and not handed out.
-    fn take_pending(&self, id: PairingId) -> Option<Pending> {
-        let p = self.pending.lock().unwrap().remove(&id)?;
-        if now_secs() >= p.expiry {
-            log::info!("Refused an expired pairing for '{}'", p.name);
-            let _ = p.done.send(LinkPairDone {
-                name: p.name,
-                paired: false,
-                error: Some("the pairing expired".to_string()),
-            });
-            return None;
-        }
-        Some(p)
-    }
-
-    /// Record a completed pairing in `auth.toml`, closing the old key's
-    /// connections on a replace.
-    fn complete(&self, p: &Pending, key: &[u8; KEY_LEN]) -> Result<AuthEntry, String> {
-        let entry = AuthEntry::new(&p.name, key, p.protocols.clone());
-        let replaced = {
-            let _guard = self.auth_lock.lock().unwrap();
-            auth::add(&self.settings.auth_path, entry.clone(), p.replace)
-                .map_err(|e| e.to_string())?
+    /// A connection with `key` had its `hello` accepted. Returns whether
+    /// it is the first since `link.pair_add` added the key, and if so tells
+    /// the connection that added it.
+    pub fn first_hello(&self, key: &[u8; KEY_LEN]) -> bool {
+        let Some(awaiting) = self.awaiting.lock().unwrap().remove(key) else {
+            return false;
         };
-        if let Some(old) = replaced.and_then(|old| old.public_key()) {
-            if &old != key {
-                self.close_where(|c| c.key == old, "its entry was replaced");
-            }
-        }
-        // Read back, so `agents` and `approve` kept by a replace apply.
-        Ok(self
-            .auth()
-            .ok()
-            .and_then(|f| f.find_key(key).cloned())
-            .unwrap_or(entry))
+        log::info!("'{}' connected for the first time", awaiting.name);
+        let _ = awaiting.done.send(LinkPairDone {
+            name: awaiting.name,
+            paired: true,
+            error: None,
+        });
+        true
     }
 
     fn register(&self, key: [u8; KEY_LEN], name: &str) -> (u64, CancellationToken) {
@@ -507,70 +439,34 @@ async fn handle(daemon: Arc<Daemon>, stream: TcpStream, peer: SocketAddr) {
         log::warn!("link {peer}: SO_KEEPALIVE: {e}");
     }
 
-    let mut taken: Option<Pending> = None;
     let mut known: Option<AuthEntry> = None;
     let accepted = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        accept(
-            stream,
-            &link.keypair,
-            |id| {
-                let p = link.take_pending(id)?;
-                let secret = p.secret;
-                taken = Some(p);
-                Some(secret)
-            },
-            |key| {
-                known = match link.auth() {
-                    Ok(file) => file.find_key(key).cloned(),
-                    Err(e) => {
-                        log::error!("auth.toml: {e}");
-                        None
-                    }
-                };
-                known.is_some()
-            },
-        ),
+        accept(stream, &link.keypair, |key| {
+            known = match link.auth() {
+                Ok(file) => file.find_key(key).cloned(),
+                Err(e) => {
+                    log::error!("auth.toml: {e}");
+                    None
+                }
+            };
+            known.is_some()
+        }),
     )
     .await;
     let accepted = match accepted {
         Ok(Ok(accepted)) => accepted,
         Ok(Err(e)) => {
-            refused(&e.to_string(), peer, taken);
+            log::info!("Refused a link connection from {peer}: {e}");
             return;
         }
         Err(_) => {
-            refused("the handshake timed out", peer, taken);
+            log::info!("Refused a link connection from {peer}: the handshake timed out");
             return;
         }
     };
-
-    let (entry, paired_now) = match (accepted.mode, taken) {
-        (AcceptedMode::Pairing(_), Some(p)) => match link.complete(&p, &accepted.peer_key) {
-            Ok(entry) => {
-                log::info!("Paired '{}' from {peer}", entry.name);
-                let _ = p.done.send(LinkPairDone {
-                    name: p.name.clone(),
-                    paired: true,
-                    error: None,
-                });
-                (entry, true)
-            }
-            Err(e) => {
-                log::warn!("Pairing '{}' from {peer} refused: {e}", p.name);
-                let _ = p.done.send(LinkPairDone {
-                    name: p.name.clone(),
-                    paired: false,
-                    error: Some(e),
-                });
-                return;
-            }
-        },
-        (AcceptedMode::Reconnect, _) => match known {
-            Some(entry) => (entry, false),
-            None => return,
-        },
-        (AcceptedMode::Pairing(_), None) => return,
+    let Some(entry) = known else {
+        return;
     };
 
     // Only hello may ride in a handshake: anything else could be a replay.
@@ -591,24 +487,27 @@ async fn handle(daemon: Arc<Daemon>, stream: TcpStream, peer: SocketAddr) {
         accepted.stream,
         accepted.first_message,
         entry,
-        paired_now,
+        accepted.peer_key,
         close,
     )
     .await;
     link.unregister(conn_id);
 }
 
-fn refused(why: &str, peer: SocketAddr, taken: Option<Pending>) {
-    match taken {
-        Some(p) => {
-            log::warn!("Pairing '{}' from {peer} failed: {why}", p.name);
-            let _ = p.done.send(LinkPairDone {
-                name: p.name,
-                paired: false,
-                error: Some(format!("the handshake failed: {why}")),
-            });
+/// What `link.pair_add` says of a device code it refused.
+fn code_error(e: PairingStringError) -> String {
+    match e {
+        PairingStringError::BadChecksum => {
+            "that code does not match this server: it was made for another server, or mistyped"
+                .to_string()
         }
-        None => log::info!("Refused a link connection from {peer}: {why}"),
+        PairingStringError::BadPrefix => {
+            "that is not a device code: a device code starts with handlrkey1".to_string()
+        }
+        PairingStringError::BadName => {
+            "the device's name in that code is not valid; pass --name".to_string()
+        }
+        other => format!("that is not a valid device code: {other}"),
     }
 }
 

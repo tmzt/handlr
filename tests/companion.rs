@@ -15,7 +15,7 @@ use handlr::server::companion::{TurnOptions, INTERRUPTED_ENTRY};
 use handlr::server::link::{Link, LinkSettings};
 use handlr::server::{self, CoreEvent, Daemon, ServeOptions};
 use handlr::transport::{AgentStatus, HerdrClient, HerdrTransport};
-use libhandlr_proto::link::{generate_keypair, pair, LinkStream, PairingPayload};
+use libhandlr_proto::link::{generate_keypair, reconnect, DeviceCode, LinkStream, PairingPayload};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -693,11 +693,17 @@ async fn the_vocabulary_is_sent_again_when_it_changes() {
 /// Pair a companion over the link, as the phone would.
 async fn pair_companion(env: &Env) -> Client {
     let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "pair").await;
-    let r = local
-        .call("link.pair_begin", json!({"name": "phone"}))
-        .await;
+    let r = local.call("link.pair_begin", json!({})).await;
     let payload = PairingPayload::decode(r["result"]["pairing"].as_str().unwrap()).unwrap();
     let keypair = generate_keypair().unwrap();
+    let code = DeviceCode {
+        key: keypair.public,
+        name: "phone".to_string(),
+    }
+    .encode(&payload.server_key)
+    .unwrap();
+    let r = local.call("link.pair_add", json!({"code": code})).await;
+    assert_eq!(r["result"]["name"], "phone", "{r}");
     let (address, _) = env.link.as_ref().unwrap();
     let tcp = TcpStream::connect(address).await.unwrap();
     let hello = serde_json::to_vec(&json!({
@@ -705,15 +711,9 @@ async fn pair_companion(env: &Env) -> Client {
         "params": {"protocol": "handlr.companion", "version": 1, "client": "phone"}
     }))
     .unwrap();
-    let (stream, _) = pair(
-        tcp,
-        &keypair,
-        &payload.server_key,
-        &payload.secret,
-        Some(&hello),
-    )
-    .await
-    .unwrap();
+    let stream = reconnect(tcp, &keypair, &payload.server_key, Some(&hello))
+        .await
+        .unwrap();
     let mut c = Client {
         wire: Wire::Link(stream),
         next_id: 0,

@@ -1,7 +1,7 @@
-//! The link end to end (plan 20261022_02, step 3, and the 18:20 EDT
-//! amendment): pairing over TCP on 127.0.0.1 with an ephemeral port, in a
-//! temporary config directory, over the herdr mock. Nothing touches
-//! `~/.config/handlr` or a live herdr.
+//! The link end to end (plan 20261022_02, step 3, and the amendments of
+//! 18:20 and 23:07 EDT): pairing by public keys over TCP on 127.0.0.1 with
+//! an ephemeral port, in a temporary config directory, over the herdr mock.
+//! Nothing touches `~/.config/handlr` or a live herdr.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -14,10 +14,10 @@ use handlr::server::link::{Link, LinkSettings};
 use handlr::server::{self, Daemon, ServeOptions};
 use handlr::transport::HerdrClient;
 use libhandlr_proto::link::{
-    generate_keypair, pair, reconnect, LinkStream, PairingPayload, StaticKeypair,
+    generate_keypair, reconnect, DeviceCode, LinkStream, PairingPayload, StaticKeypair,
 };
 use serde_json::{json, Value};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_util::codec::{FramedRead, LinesCodec};
@@ -145,14 +145,29 @@ impl Local {
         }
     }
 
-    /// `link.pair_begin`, returning the pairing string.
-    async fn begin(&mut self, params: Value) -> String {
-        let r = self.call("link.pair_begin", params).await;
-        r["result"]["pairing"]
-            .as_str()
-            .unwrap_or_else(|| panic!("{r}"))
-            .to_string()
+    /// `link.pair_begin`, returning its result.
+    async fn begin(&mut self) -> Value {
+        let r = self.call("link.pair_begin", json!({})).await;
+        assert!(r["result"]["pairing"].is_string(), "{r}");
+        r["result"].clone()
     }
+
+    /// `link.pair_add`, returning the whole response.
+    async fn add(&mut self, params: Value) -> Value {
+        self.call("link.pair_add", params).await
+    }
+}
+
+/// A device: its key pair, and its code for `server`, named `name`.
+fn device(server: &[u8; 32], name: &str) -> (StaticKeypair, String) {
+    let keypair = generate_keypair().unwrap();
+    let code = DeviceCode {
+        key: keypair.public,
+        name: name.to_string(),
+    }
+    .encode(server)
+    .unwrap();
+    (keypair, code)
 }
 
 fn hello_bytes() -> Vec<u8> {
@@ -185,29 +200,35 @@ async fn call(stream: &mut LinkStream<TcpStream>, id: i64, method: &str) -> Valu
     }
 }
 
-/// Pair from `pairing` with a new key; returns the stream and private key.
-async fn pair_with(
-    pairing: &str,
-) -> Result<(LinkStream<TcpStream>, [u8; 32]), libhandlr_proto::link::LinkError> {
-    let payload = PairingPayload::decode(pairing).unwrap();
-    let keypair = generate_keypair().unwrap();
-    let tcp = TcpStream::connect(&payload.addresses[0]).await.unwrap();
-    let (mut stream, server) = pair(
-        tcp,
-        &keypair,
-        &payload.server_key,
-        &payload.secret,
-        Some(&hello_bytes()),
-    )
-    .await?;
-    assert_eq!(server, payload.server_key);
-    // The server closes a refused pairing; the hello reply shows it took.
-    let reply = tokio::time::timeout(WAIT, stream.recv_message())
+/// Connect as an added device for the first time: the hello reply says
+/// `paired: true`.
+async fn first_connect(env: &Env, keypair: &StaticKeypair) -> LinkStream<TcpStream> {
+    let mut stream = reconnect_with(env, &keypair.private, &hello_bytes())
         .await
-        .expect("no hello reply in time")?;
-    let reply: Value = serde_json::from_slice(&reply).unwrap();
+        .unwrap();
+    let reply = recv(&mut stream).await;
     assert_eq!(reply["result"]["paired"], true, "{reply}");
-    Ok((stream, keypair.private))
+    stream
+}
+
+/// The whole flow, as `handlr pair` and the device run it: the code is
+/// added, the device connects, and `link.pair_done` arrives. Returns the
+/// stream and the device's key pair.
+async fn pair_device(
+    env: &Env,
+    local: &mut Local,
+    name: &str,
+    protocols: &[&str],
+) -> (LinkStream<TcpStream>, StaticKeypair) {
+    let (keypair, code) = device(&env.link.public_key(), name);
+    let r = local
+        .add(json!({"code": code, "protocols": protocols}))
+        .await;
+    assert_eq!(r["result"]["name"], name, "{r}");
+    let stream = first_connect(env, &keypair).await;
+    let done = local.note("link.pair_done").await;
+    assert_eq!(done["params"], json!({"name": name, "paired": true}));
+    (stream, keypair)
 }
 
 async fn reconnect_with(
@@ -233,31 +254,50 @@ async fn closes(stream: &mut LinkStream<TcpStream>, within: Duration) -> bool {
 async fn pairing_reconnecting_and_revoking() {
     let env = start().await;
     let mut local = Local::connect(&env.socket).await;
-    let pairing = local
-        .begin(json!({"name": "s23", "protocols": ["harness"]}))
-        .await;
-    let payload = PairingPayload::decode(&pairing).unwrap();
+    let begun = local.begin().await;
+    let payload = PairingPayload::decode(begun["pairing"].as_str().unwrap()).unwrap();
     assert_eq!(payload.addresses, vec![env.address.clone()]);
     assert_eq!(payload.server_key, env.link.public_key());
+    assert_eq!(begun["addresses"], json!([env.address]));
+    assert_eq!(
+        begun["url"],
+        format!(
+            "handlr://{}/pair#{}",
+            env.address,
+            begun["pairing"].as_str().unwrap()
+        )
+    );
 
-    let (mut paired, private) = pair_with(&pairing).await.unwrap();
+    // Before its code is added, the device's IK gets no reply.
+    let (keypair, code) = device(&payload.server_key, "s23");
+    assert!(reconnect_with(&env, &keypair.private, &hello_bytes())
+        .await
+        .is_err());
+
+    let r = local
+        .add(json!({"code": code, "protocols": ["harness"]}))
+        .await;
+    assert_eq!(
+        r["result"],
+        json!({"name": "s23", "protocols": ["harness"]}),
+        "{r}"
+    );
+    let mut paired = first_connect(&env, &keypair).await;
     let done = local.note("link.pair_done").await;
     assert_eq!(done["params"], json!({"name": "s23", "paired": true}));
 
     // auth.toml gained the entry.
     let file = env.auth();
     let entry = file.find_name("s23").unwrap();
-    assert_eq!(
-        entry.key,
-        format_key(&libhandlr_proto::link::public_key(&private).unwrap())
-    );
+    assert_eq!(entry.key, format_key(&keypair.public));
     assert_eq!(entry.protocols, vec!["harness"]);
     let r = call(&mut paired, 1, "agents.list").await;
     assert!(r["result"]["agents"].as_array().is_some(), "{r}");
     drop(paired);
 
-    // Reconnecting with IK, hello as the first message, lists the agents.
-    let mut stream = reconnect_with(&env, &private, &hello_bytes())
+    // Reconnecting with IK, hello as the first message, lists the agents;
+    // it is no longer the first hello.
+    let mut stream = reconnect_with(&env, &keypair.private, &hello_bytes())
         .await
         .unwrap();
     let hello = recv(&mut stream).await;
@@ -266,8 +306,10 @@ async fn pairing_reconnecting_and_revoking() {
     let r = call(&mut stream, 1, "agents.list").await;
     let agents = r["result"]["agents"].as_array().unwrap();
     assert!(agents.iter().any(|a| a["agent"] == "claude"), "{r}");
-    // A paired client may not begin pairings.
+    // A paired client may neither begin pairings nor add devices.
     let r = call(&mut stream, 2, "link.pair_begin").await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+    let r = call(&mut stream, 3, "link.pair_add").await;
     assert_eq!(r["error"]["code"], -32001, "{r}");
 
     // A first message other than hello closes the connection unanswered.
@@ -276,7 +318,7 @@ async fn pairing_reconnecting_and_revoking() {
         "params": {"pane_id": "p1", "command": "continue"}
     }))
     .unwrap();
-    let mut replayed = reconnect_with(&env, &private, &send).await.unwrap();
+    let mut replayed = reconnect_with(&env, &keypair.private, &send).await.unwrap();
     assert!(closes(&mut replayed, WAIT).await);
 
     // A key that is not paired gets no reply.
@@ -289,9 +331,64 @@ async fn pairing_reconnecting_and_revoking() {
     std::fs::write(env.auth_path(), "").unwrap();
     assert!(closes(&mut stream, Duration::from_secs(3)).await);
     assert_eq!(env.link.open_connections(), 0);
-    assert!(reconnect_with(&env, &private, &hello_bytes())
+    assert!(reconnect_with(&env, &keypair.private, &hello_bytes())
         .await
         .is_err());
+}
+
+#[tokio::test]
+async fn codes_for_another_server_mistyped_codes_and_server_urls_are_refused() {
+    let env = start().await;
+    let mut local = Local::connect(&env.socket).await;
+    let begun = local.begin().await;
+
+    let other = generate_keypair().unwrap();
+    let (_, foreign) = device(&other.public, "s23");
+    let (_, good) = device(&env.link.public_key(), "s23");
+    let at = good.len() - 5;
+    let swapped = if good.as_bytes()[at] == b'2' {
+        "3"
+    } else {
+        "2"
+    };
+    let mut mistyped = good.clone();
+    mistyped.replace_range(at..at + 1, swapped);
+    for (code, why) in [
+        (foreign, "another server"),
+        (mistyped, "mistyped"),
+        (begun["url"].as_str().unwrap().to_string(), "handlrkey1"),
+        (begun["pairing"].as_str().unwrap().to_string(), "handlrkey1"),
+    ] {
+        let r = local.add(json!({"code": code})).await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        let message = r["error"]["message"].as_str().unwrap();
+        assert!(message.contains(why), "{message}");
+    }
+    // A bad --name is refused too.
+    let r = local.add(json!({"code": good, "name": "has space"})).await;
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    assert!(!env.auth_path().exists());
+}
+
+#[tokio::test]
+async fn a_0x01_connection_is_closed_with_no_reply() {
+    let env = start().await;
+    let mut tcp = TcpStream::connect(&env.address).await.unwrap();
+    // What the removed XXpsk3 pairing sent: the mode, a pairing id and `e`.
+    let mut hello = vec![0x01, 1, 2, 3, 4, 0, 32];
+    hello.extend_from_slice(&[7; 32]);
+    tcp.write_all(&hello).await.unwrap();
+    // Closed with nothing sent back: an end of stream, or a reset since
+    // the server left bytes unread.
+    let mut reply = Vec::new();
+    let read = tokio::time::timeout(WAIT, tcp.read_to_end(&mut reply))
+        .await
+        .expect("closed in time");
+    match read {
+        Ok(_) => {}
+        Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::ConnectionReset, "{e}"),
+    }
+    assert!(reply.is_empty());
 }
 
 /// What a phone reads from the pairing QR code's PNG.
@@ -313,72 +410,44 @@ fn scan(png_bytes: &[u8]) -> String {
 async fn pairing_from_the_scanned_qr_code() {
     let env = start().await;
     let mut local = Local::connect(&env.socket).await;
-    let pairing = local
-        .begin(json!({"name": "s23", "protocols": ["harness"]}))
-        .await;
-    let shown = handlr::pair::Shown::new(&pairing).unwrap();
+    let begun = local.begin().await;
+    let shown = handlr::pair::Shown::new(begun["pairing"].as_str().unwrap()).unwrap();
     let url = scan(&shown.png);
     assert_eq!(url, shown.url);
+    assert_eq!(url, begun["url"]);
     assert!(url.starts_with(&format!("handlr://{}/pair#handlr1", env.address)));
 
-    let (_paired, _) = pair_with(&url).await.unwrap();
+    // The phone has only what it scanned.
+    let payload = PairingPayload::decode(&url).unwrap();
+    let (keypair, code) = device(&payload.server_key, "s23");
+    let r = local
+        .add(json!({"code": code, "protocols": ["harness"]}))
+        .await;
+    assert_eq!(r["result"]["name"], "s23", "{r}");
+    let tcp = TcpStream::connect(&payload.addresses[0]).await.unwrap();
+    let mut stream = reconnect(tcp, &keypair, &payload.server_key, Some(&hello_bytes()))
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut stream).await["result"]["paired"], true);
     let done = local.note("link.pair_done").await;
     assert_eq!(done["params"], json!({"name": "s23", "paired": true}));
-}
-
-#[tokio::test]
-async fn expired_and_reused_secrets_are_refused() {
-    let env = start().await;
-    let mut local = Local::connect(&env.socket).await;
-
-    // Reused: the second use of a string finds nothing.
-    let pairing = local
-        .begin(json!({"name": "once", "protocols": ["harness"]}))
-        .await;
-    pair_with(&pairing).await.unwrap();
-    assert!(pair_with(&pairing).await.is_err());
-    assert_eq!(env.auth().clients.len(), 1);
-
-    // Expired: refused, and `handlr pair` hears why.
-    let pairing = local
-        .begin(json!({"name": "late", "protocols": ["harness"], "ttl": 1}))
-        .await;
-    tokio::time::sleep(Duration::from_millis(2100)).await;
-    assert!(pair_with(&pairing).await.is_err());
-    let done = loop {
-        let done = local.note("link.pair_done").await;
-        if done["params"]["name"] == "late" {
-            break done;
-        }
-    };
-    assert_eq!(done["params"]["paired"], false);
-    assert!(done["params"]["error"]
-        .as_str()
-        .unwrap()
-        .contains("expired"));
-    assert!(env.auth().find_name("late").is_none());
 }
 
 #[tokio::test]
 async fn a_name_in_use_is_refused_and_replace_swaps_it() {
     let env = start().await;
     let mut local = Local::connect(&env.socket).await;
-    let pairing = local
-        .begin(json!({"name": "s23", "protocols": ["harness"]}))
-        .await;
-    let (_first, old_private) = pair_with(&pairing).await.unwrap();
-    let mut old = reconnect_with(&env, &old_private, &hello_bytes())
+    let (_first, old_key) = pair_device(&env, &mut local, "s23", &["harness"]).await;
+    let mut old = reconnect_with(&env, &old_key.private, &hello_bytes())
         .await
         .unwrap();
     recv(&mut old).await;
 
-    // Without --replace, the name is refused and auth.toml is unchanged.
+    // Without replace, the name is refused and auth.toml is unchanged.
     let before = std::fs::read_to_string(env.auth_path()).unwrap();
+    let (new_key, code) = device(&env.link.public_key(), "s23");
     let r = local
-        .call(
-            "link.pair_begin",
-            json!({"name": "s23", "protocols": ["harness"]}),
-        )
+        .add(json!({"code": code, "protocols": ["harness"]}))
         .await;
     assert_eq!(r["error"]["code"], -32602, "{r}");
     assert!(r["error"]["message"]
@@ -388,22 +457,50 @@ async fn a_name_in_use_is_refused_and_replace_swaps_it() {
     assert_eq!(std::fs::read_to_string(env.auth_path()).unwrap(), before);
 
     // With it, the new key replaces the old, whose connection closes.
-    let pairing = local
-        .begin(json!({"name": "s23", "protocols": ["harness"], "replace": true}))
+    let r = local
+        .add(json!({"code": code, "protocols": ["harness"], "replace": true}))
         .await;
-    let (_new, new_private) = pair_with(&pairing).await.unwrap();
+    assert_eq!(r["result"]["name"], "s23", "{r}");
     assert!(closes(&mut old, Duration::from_secs(1)).await);
     let file = env.auth();
     assert_eq!(file.clients.len(), 1);
-    let new_key = libhandlr_proto::link::public_key(&new_private).unwrap();
-    assert_eq!(file.find_name("s23").unwrap().key, format_key(&new_key));
-    assert!(reconnect_with(&env, &old_private, &hello_bytes())
+    assert_eq!(
+        file.find_name("s23").unwrap().key,
+        format_key(&new_key.public)
+    );
+    assert!(reconnect_with(&env, &old_key.private, &hello_bytes())
         .await
         .is_err());
-    let mut again = reconnect_with(&env, &new_private, &hello_bytes())
-        .await
-        .unwrap();
-    assert_eq!(recv(&mut again).await["result"]["server"], "handlr");
+    let _new = first_connect(&env, &new_key).await;
+    let done = local.note("link.pair_done").await;
+    assert_eq!(done["params"], json!({"name": "s23", "paired": true}));
+}
+
+#[tokio::test]
+async fn a_key_already_paired_under_another_name_is_refused() {
+    let env = start().await;
+    let mut local = Local::connect(&env.socket).await;
+    let (_, code) = device(&env.link.public_key(), "s23");
+    let r = local.add(json!({"code": code})).await;
+    assert_eq!(r["result"]["name"], "s23", "{r}");
+    let before = std::fs::read_to_string(env.auth_path()).unwrap();
+
+    // The same device, under --name tablet: refused, naming s23.
+    let r = local.add(json!({"code": code, "name": "tablet"})).await;
+    assert_eq!(r["error"]["code"], -32602, "{r}");
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(message.contains("'s23'"), "{message}");
+    assert_eq!(std::fs::read_to_string(env.auth_path()).unwrap(), before);
+
+    // --name pairs a new device under a name of the user's choosing.
+    let (_, other) = device(&env.link.public_key(), "s23");
+    let r = local.add(json!({"code": other, "name": "tablet"})).await;
+    assert_eq!(
+        r["result"],
+        json!({"name": "tablet", "protocols": ["companion"]}),
+        "{r}"
+    );
+    assert_eq!(env.auth().clients.len(), 2);
 }
 
 #[tokio::test]
@@ -411,19 +508,12 @@ async fn hello_is_limited_to_the_entrys_protocols() {
     let env = start().await;
     let mut local = Local::connect(&env.socket).await;
     // Paired for the companion only (the default).
-    let pairing = local.begin(json!({"name": "phone"})).await;
-    let payload = PairingPayload::decode(&pairing).unwrap();
-    let keypair = generate_keypair().unwrap();
-    let tcp = TcpStream::connect(&payload.addresses[0]).await.unwrap();
-    let (mut stream, _) = pair(
-        tcp,
-        &keypair,
-        &payload.server_key,
-        &payload.secret,
-        Some(&hello_bytes()),
-    )
-    .await
-    .unwrap();
+    let (keypair, code) = device(&env.link.public_key(), "phone");
+    let r = local.add(json!({"code": code})).await;
+    assert_eq!(r["result"]["protocols"], json!(["companion"]), "{r}");
+    let mut stream = reconnect_with(&env, &keypair.private, &hello_bytes())
+        .await
+        .unwrap();
     // A harness hello from a companion-only device is not permitted.
     let r = recv(&mut stream).await;
     assert_eq!(r["error"]["code"], -32001, "{r}");
@@ -433,7 +523,7 @@ async fn hello_is_limited_to_the_entrys_protocols() {
     );
 
     // handlr.companion is served (plan 02, step 4), with the session of
-    // the paired name.
+    // the paired name; it is the first hello answered, so it says paired.
     let companion = serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "id": 0, "method": "hello",
         "params": {"protocol": "handlr.companion", "version": 1, "client": "phone"}
@@ -445,4 +535,7 @@ async fn hello_is_limited_to_the_entrys_protocols() {
     let r = recv(&mut stream).await;
     assert_eq!(r["result"]["session_id"], "companion:phone", "{r}");
     assert!(r["result"]["vocabulary"].is_array(), "{r}");
+    assert_eq!(r["result"]["paired"], true, "{r}");
+    let done = local.note("link.pair_done").await;
+    assert_eq!(done["params"], json!({"name": "phone", "paired": true}));
 }

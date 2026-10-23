@@ -6,8 +6,8 @@
 //! handlr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
 //!                 --socket <herdr.sock> | --mock] [--listen <handlr.sock>] [--show-tokens]
 //! handlr ctl [--listen <handlr.sock>] [--client <name>] [--follow] <method> [<params as JSON>]
-//! handlr pair [--listen <handlr.sock>] --name <name> [--protocols companion,harness]
-//!             [--ttl 300] [--replace] [--qr-png <file>]
+//! handlr pair [--listen <handlr.sock>] [--name <name>] [--protocols companion,harness]
+//!             [--replace] [--code <code>] [--qr-png <file>]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -31,8 +31,9 @@ struct AppArgs {
     /// `pair`'s options.
     name: Option<String>,
     protocols: Vec<String>,
-    ttl: Option<String>,
     replace: bool,
+    /// The device code, instead of prompting for it.
+    code: Option<String>,
     qr_png: Option<String>,
 }
 
@@ -51,8 +52,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         positional: Vec::new(),
         name: None,
         protocols: Vec::new(),
-        ttl: None,
         replace: false,
+        code: None,
         qr_png: None,
     };
 
@@ -78,7 +79,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
                     );
                 }
             }
-            "--ttl" => parsed.ttl = args.next(),
+            "--code" => parsed.code = args.next(),
             "--replace" => parsed.replace = true,
             "--qr-png" => parsed.qr_png = args.next(),
             _ if !arg.starts_with("--") => parsed.positional.push(arg),
@@ -206,28 +207,18 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn pair(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     let socket = daemon_socket(&args, &config);
-    let usage = "usage: handlr pair [--listen <socket>] --name <name> [--protocols companion,harness] [--ttl <seconds>] [--replace] [--qr-png <file>]";
-    let Some(name) = args.name.clone() else {
-        return Err(usage.into());
-    };
+    let usage = "usage: handlr pair [--listen <socket>] [--name <name>] [--protocols companion,harness] [--replace] [--code <code>] [--qr-png <file>]";
     if !args.positional.is_empty() {
         return Err(usage.into());
     }
-    let ttl = match &args.ttl {
-        Some(ttl) => Some(
-            ttl.parse::<u64>()
-                .map_err(|_| format!("--ttl {ttl}: not a number of seconds"))?,
-        ),
-        None => None,
-    };
-    let params = libhandlr_proto::common::LinkPairBeginParams {
-        name,
+    let options = handlr::pair::PairOptions {
+        name: args.name.clone(),
         protocols: (!args.protocols.is_empty()).then(|| args.protocols.clone()),
-        ttl,
         replace: args.replace,
+        code: args.code.clone(),
+        qr_png: args.qr_png.as_deref().map(PathBuf::from),
     };
-    let qr_png = args.qr_png.as_deref().map(Path::new);
-    Ok(handlr::pair::run(&socket, params, qr_png).await?)
+    Ok(handlr::pair::run(&socket, options).await?)
 }
 
 async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {

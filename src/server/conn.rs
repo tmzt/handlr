@@ -8,7 +8,7 @@ use futures_util::{Stream, StreamExt};
 use libhandlr_proto::common::{self, methods, protocols, topics};
 use libhandlr_proto::companion;
 use libhandlr_proto::envelope::codes;
-use libhandlr_proto::link::{LinkError, LinkStream, PairingId};
+use libhandlr_proto::link::{LinkError, LinkStream, KEY_LEN};
 use libhandlr_proto::{ErrorObject, Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -51,8 +51,9 @@ enum Origin {
     /// A link connection, with its `auth.toml` entry: `paired:<name>`.
     Link {
         entry: AuthEntry,
-        /// It paired on this connection; `hello` answers `paired: true`.
-        paired_now: bool,
+        /// The client's static key. Its first `hello` since `link.pair_add`
+        /// added it answers `paired: true`.
+        key: [u8; KEY_LEN],
     },
 }
 
@@ -68,8 +69,6 @@ pub(super) struct Conn {
     inflight: Mutex<HashMap<Id, AbortHandle>>,
     /// Confirmations opened on this connection, cancelled when it closes.
     opened: Mutex<HashSet<u64>>,
-    /// Pairings begun on this connection, withdrawn when it closes.
-    pairings: Mutex<Vec<PairingId>>,
     /// A companion's vocabulary as last sent.
     pub(super) vocabulary: Mutex<Vec<String>>,
     /// A companion's notices, held while a confirmation is pending.
@@ -139,7 +138,8 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
     let _ = writer.await;
 }
 
-/// A link connection that finished its handshake as `entry`. `first` is
+/// A link connection that finished its handshake as `entry`, with the
+/// client's static key `key`. `first` is
 /// the message carried in the handshake, already checked to be `hello`.
 /// Each link message is one JSON-RPC object; `close` ends the connection
 /// (its entry was revoked or replaced).
@@ -148,7 +148,7 @@ pub(crate) async fn handle_link(
     stream: LinkStream<TcpStream>,
     first: Option<Vec<u8>>,
     entry: AuthEntry,
-    paired_now: bool,
+    key: [u8; KEY_LEN],
     close: CancellationToken,
 ) {
     let (reader, mut writer) = stream.into_split();
@@ -172,7 +172,7 @@ pub(crate) async fn handle_link(
     });
     serve(
         daemon,
-        Origin::Link { entry, paired_now },
+        Origin::Link { entry, key },
         Box::pin(first.chain(rest)),
         out,
         close,
@@ -205,7 +205,6 @@ async fn serve<S>(
         topics: Mutex::new(HashSet::new()),
         inflight: Mutex::new(HashMap::new()),
         opened: Mutex::new(HashSet::new()),
-        pairings: Mutex::new(Vec::new()),
         vocabulary: Mutex::new(Vec::new()),
         notices: Mutex::new(Announcer::default()),
         next_notice: std::sync::atomic::AtomicU64::new(0),
@@ -301,10 +300,6 @@ async fn serve<S>(
         }
         log::info!("Connection from {} closed", principal.id);
     }
-    if let Some(link) = &conn.daemon.link {
-        let pairings: Vec<PairingId> = conn.pairings.lock().unwrap().drain(..).collect();
-        link.withdraw(&pairings);
-    }
     if let Some(forwarder) = forwarder {
         forwarder.abort();
     }
@@ -347,9 +342,15 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
             "hello needs a client name",
         ));
     }
-    let (principal, paired_now) = match origin {
-        Origin::Local => (Principal::local(client), false),
-        Origin::Link { entry, paired_now } => (entry.principal(&params.protocol), *paired_now),
+    let principal = match origin {
+        Origin::Local => Principal::local(client),
+        Origin::Link { entry, .. } => entry.principal(&params.protocol),
+    };
+    // Plan 20261022_02, amendment of 23:07 EDT: the first hello after
+    // `link.pair_add` added this key, once it is sure to be answered.
+    let first_hello = || match (origin, &conn.daemon.link) {
+        (Origin::Link { key, .. }, Some(link)) => link.first_hello(key),
+        _ => false,
     };
     if params.protocol == protocols::COMPANION {
         // Plan 20261022_02, decisions 8 and 13: the session follows the
@@ -366,6 +367,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
         let vocabulary = turns::vocabulary(&conn.daemon).await;
         *conn.vocabulary.lock().unwrap() = vocabulary.clone();
         let _ = conn.session.set(conn.daemon.turns.session(&session_id));
+        let paired_now = first_hello();
         let result = ok(companion::HelloResult {
             server: "handlr".to_string(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -381,8 +383,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: HARNESS_VERSION,
     })?;
-    if paired_now {
-        // Plan 20261022_02, decision 5: the first hello after pairing.
+    if first_hello() {
         if let Value::Object(map) = &mut result {
             map.insert("paired".to_string(), Value::Bool(true));
         }
@@ -687,11 +688,11 @@ async fn call(
             conn.topics.lock().unwrap().extend(p.topics);
             ok(common::Empty {})
         }
-        methods::LINK_PAIR_BEGIN => {
+        methods::LINK_PAIR_BEGIN | methods::LINK_PAIR_ADD => {
             if !matches!(conn.origin, Origin::Local) {
                 return Err(ErrorObject::new(
                     codes::NOT_PERMITTED,
-                    "link.pair_begin is served only on the daemon socket",
+                    format!("{method} is served only on the daemon socket"),
                 ));
             }
             let Some(link) = &daemon.link else {
@@ -700,24 +701,33 @@ async fn call(
                     "the link is off ([link] listen = [])",
                 ));
             };
-            let p: common::LinkPairBeginParams = params(raw)?;
-            let begun = link
-                .pair_begin(p)
-                .await
+            if method == methods::LINK_PAIR_BEGIN {
+                let _: common::LinkPairBeginParams = params(raw)?;
+                let result = link
+                    .pair_begin()
+                    .await
+                    .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
+                return ok(result);
+            }
+            let p: common::LinkPairAddParams = params(raw)?;
+            let added = link
+                .pair_add(p)
                 .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
-            conn.pairings.lock().unwrap().push(begun.id);
-            let out = conn.out.clone();
-            let done = begun.done;
+            // Weak, so a device that never connects does not hold this
+            // connection's writer open after it closes.
+            let out = conn.out.downgrade();
+            let done = added.done;
             tokio::spawn(async move {
                 if let Ok(done) = done.await {
-                    if let Ok(line) =
-                        serde_json::to_string(&Notification::new(methods::LINK_PAIR_DONE, done))
-                    {
+                    if let (Some(out), Ok(line)) = (
+                        out.upgrade(),
+                        serde_json::to_string(&Notification::new(methods::LINK_PAIR_DONE, done)),
+                    ) {
                         let _ = out.send(line);
                     }
                 }
             });
-            ok(begun.result)
+            ok(added.result)
         }
         other => Err(ErrorObject::new(
             codes::METHOD_NOT_FOUND,
