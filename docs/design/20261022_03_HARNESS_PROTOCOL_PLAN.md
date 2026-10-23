@@ -527,3 +527,53 @@ where they belong:
   on.
 - **Step 4**, the agent view, which the owner has approved.
 - **Steps 5 and 6.**
+
+## Amendment — 2026-10-23 03:11 EDT: step 4 built; how the agent view behaves (living section L3)
+
+Step 4's code is committed in this batch. Its S23 checks follow on the
+phone. This records under L3 what the plan left open.
+
+- **`session.peek`:**
+  - **Who may call it:** companion connections and the local daemon
+    socket. A paired harness gets -32001 until step 5.
+  - **Arguments:** `entries` is 1 to 200, default 40.
+  - **No session:** a shell, a remote herdr or a missing file give
+    `session: null`.
+  - **In `agents.list`:** `AgentInfo.session` carries the session id, how
+    it was matched, and the pending question.
+- **Refreshing:**
+  - a peek when the view opens, and again at once after a reconnect;
+  - then every 5 s while the agent works or is blocked, and every 15 s
+    while it is idle;
+  - at once on that agent's notice or status change;
+  - never two within 5 s, and one in flight at a time.
+
+  Polling is needed because notices only come for watched panes. The view
+  asks for 200 entries.
+- **The cards as built:**
+  1. **Approval:** each queued confirmation for the pane. Its card answers
+     that confirmation even while another is being asked.
+  2. **Question:** placed at the reply it belongs to.
+  3. **Broken:** either the pane is blocked, or the last tool result of the
+     last turn starts `error: ` or shows failing tests (`test result:
+     FAILED`, `N failed` with N > 0, or `FAIL` / `--- FAIL` lines).
+  4. **Finished:** the status is idle or done and the last text is a reply.
+     It is not shown when a Question card is already at that reply.
+
+  A card that the rules no longer find is resolved, and stays as one dim
+  line at its place. At most 32 are kept.
+- **Scrolling** is the app's own, since libcontrols has no scroll view:
+  - a 10 pt slop tells a drag from a tap;
+  - a fling slows as e^(−3.2 t), with no fling after a 100 ms rest;
+  - the view is clipped, and only visible rows are drawn;
+  - scrolled back, the view stays on its top entry as old entries leave
+    the window.
+- **The pin:** the flow always ends above the full pinned card, so
+  switching between the card and its one-line bar never moves the flow.
+  Tapping the bar puts the card a third of the way down the view.
+- **"Take a message"** starts dictation in the view, with that agent as
+  the fixed target. "Take a message" said while the view is open targets
+  it too.
+- **Closing:** the Back button, Android's Back, or Escape on the desktop.
+- **Not done:** opening the view from a notice, since notices are spoken,
+  with nothing on screen to tap.
