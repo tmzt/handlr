@@ -1,7 +1,7 @@
 ---
 title: Dictated messages to the focused agent
 date: 2026-10-23
-status: Draft
+status: In implementation
 covers:
   - "A bulk input mode in the companion: utterances collect into one
     message, which is submitted to an agent as a single send"
@@ -250,3 +250,36 @@ resumes, so the message can be fixed and submitted again.
 - the Submit button submits at once;
 - "read it back" pauses the timer;
 - "deny" resumes the mode with the text kept.
+
+## Amendment — 2026-10-23 01:58 EDT: the strict symbol filter; open questions settled; approved
+
+On the owner's word: "yes, still with strict symbol filter".
+
+**This replaces decision 6's allowed and refused text.** Messages use the
+same strict character filter as arbitrary commands
+(`validate_arbitrary_command`).
+- **Allowed:** ASCII letters, digits, spaces, and the punctuation
+  `. , ' ? :`.
+- **Not allowed:** `/`, `-`, shell metacharacters, quotes other than
+  `'`, and any control character, line breaks included.
+
+What differs from arbitrary commands:
+- **The length:** at most 4000 characters, not 256.
+- **Always confirmed.**
+- **Gated by `allow_messages`,** not `allow_arbitrary_commands`.
+
+Runs of whitespace are folded to one space, and trailing `.` and `,` are
+cleaned as for arbitrary commands. A message with a character outside the
+filter is refused with the offending character named, and the companion
+keeps the buffer so it can be fixed with "scratch that". The rule about a
+leading `/` is moot, since `/` is refused anywhere. Step 2's
+`validate_message` tests change to match.
+
+**Open questions settled:**
+- 2: `allow_messages` defaults to `true` for the built-in agents.
+- 3: the cap is 4000 characters.
+- 1 was settled by the VAD amendment of 01:57 EDT.
+
+The owner approved the plan. Its status is `In implementation`, and this
+document is immutable (AGENTS.md, Rule 1.5), set in this commit ahead of
+the first implementing commit, which follows.
