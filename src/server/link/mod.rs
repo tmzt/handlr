@@ -513,7 +513,7 @@ async fn handle(daemon: Arc<Daemon>, stream: TcpStream, peer: SocketAddr) {
         HANDSHAKE_TIMEOUT,
         accept(
             stream,
-            &link.keypair.private,
+            &link.keypair,
             |id| {
                 let p = link.take_pending(id)?;
                 let secret = p.secret;

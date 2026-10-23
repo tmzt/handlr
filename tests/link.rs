@@ -13,7 +13,9 @@ use handlr::server::link::auth::{format_key, AuthFile};
 use handlr::server::link::{Link, LinkSettings};
 use handlr::server::{self, Daemon, ServeOptions};
 use handlr::transport::HerdrClient;
-use libhandlr_proto::link::{generate_keypair, pair, reconnect, LinkStream, PairingPayload};
+use libhandlr_proto::link::{
+    generate_keypair, pair, reconnect, LinkStream, PairingPayload, StaticKeypair,
+};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -192,7 +194,7 @@ async fn pair_with(
     let tcp = TcpStream::connect(&payload.addresses[0]).await.unwrap();
     let (mut stream, server) = pair(
         tcp,
-        &keypair.private,
+        &keypair,
         &payload.server_key,
         &payload.secret,
         Some(&hello_bytes()),
@@ -213,8 +215,9 @@ async fn reconnect_with(
     private: &[u8; 32],
     first: &[u8],
 ) -> Result<LinkStream<TcpStream>, libhandlr_proto::link::LinkError> {
+    let key = StaticKeypair::from_private(*private).unwrap();
     let tcp = TcpStream::connect(&env.address).await.unwrap();
-    reconnect(tcp, private, &env.link.public_key(), Some(first)).await
+    reconnect(tcp, &key, &env.link.public_key(), Some(first)).await
 }
 
 /// Whether the server closes `stream` within `within`.
@@ -382,7 +385,7 @@ async fn hello_is_limited_to_the_entrys_protocols() {
     let tcp = TcpStream::connect(&payload.addresses[0]).await.unwrap();
     let (mut stream, _) = pair(
         tcp,
-        &keypair.private,
+        &keypair,
         &payload.server_key,
         &payload.secret,
         Some(&hello_bytes()),

@@ -707,7 +707,7 @@ async fn pair_companion(env: &Env) -> Client {
     .unwrap();
     let (stream, _) = pair(
         tcp,
-        &keypair.private,
+        &keypair,
         &payload.server_key,
         &payload.secret,
         Some(&hello),
