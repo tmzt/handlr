@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::process::Command;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::error::{HerdrError, HerdrResult};
 use crate::events::{HerdrEvent, Subscription};
@@ -133,10 +133,10 @@ impl RemoteSshConfig {
 
     /// Build the SSH target string (e.g. `user@host` or `host`).
     pub fn target(&self) -> String {
-        if let Some(ref user) = self.user {
-            if !self.destination.contains('@') {
-                return format!("{}@{}", user, self.destination);
-            }
+        if let Some(ref user) = self.user
+            && !self.destination.contains('@')
+        {
+            return format!("{}@{}", user, self.destination);
         }
         self.destination.clone()
     }
@@ -385,11 +385,11 @@ impl HerdrTransport {
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
-                    if let Some(event) = HerdrEvent::from_line(&line) {
-                        if tx.send(event).await.is_err() {
-                            log::debug!("libherdr: event consumer dropped; closing subscription");
-                            return;
-                        }
+                    if let Some(event) = HerdrEvent::from_line(&line)
+                        && tx.send(event).await.is_err()
+                    {
+                        log::debug!("libherdr: event consumer dropped; closing subscription");
+                        return;
                     }
                 }
                 Ok(None) => {
@@ -697,31 +697,31 @@ impl HerdrTransport {
         let val: Value = serde_json::from_str(trimmed)?;
 
         // Check for JSON-RPC or envelope error objects: { "error": { "code": ..., "message": ... } } or { "error": "..." }
-        if let Some(err_obj) = val.get("error") {
-            if !err_obj.is_null() {
-                let err_msg = if let Some(msg) = err_obj.get("message").and_then(|m| m.as_str()) {
-                    msg.to_string()
-                } else if let Some(msg_str) = err_obj.as_str() {
-                    msg_str.to_string()
-                } else {
-                    err_obj.to_string()
-                };
-                log::warn!("libherdr: Multiplexer server reported error: {}", err_msg);
-                return Err(HerdrError::ServerError(err_msg));
-            }
+        if let Some(err_obj) = val.get("error")
+            && !err_obj.is_null()
+        {
+            let err_msg = if let Some(msg) = err_obj.get("message").and_then(|m| m.as_str()) {
+                msg.to_string()
+            } else if let Some(msg_str) = err_obj.as_str() {
+                msg_str.to_string()
+            } else {
+                err_obj.to_string()
+            };
+            log::warn!("libherdr: Multiplexer server reported error: {}", err_msg);
+            return Err(HerdrError::ServerError(err_msg));
         }
 
         // If the response follows { "success": false, ... }
-        if let Some(success) = val.get("success").and_then(|v| v.as_bool()) {
-            if !success {
-                let err_msg = val
-                    .get("error")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Server reported failure")
-                    .to_string();
-                log::warn!("libherdr: Multiplexer server reported failure: {}", err_msg);
-                return Err(HerdrError::ServerError(err_msg));
-            }
+        if let Some(success) = val.get("success").and_then(|v| v.as_bool())
+            && !success
+        {
+            let err_msg = val
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Server reported failure")
+                .to_string();
+            log::warn!("libherdr: Multiplexer server reported failure: {}", err_msg);
+            return Err(HerdrError::ServerError(err_msg));
         }
 
         // If the response follows JSON-RPC { "result": ... } pattern:

@@ -14,12 +14,12 @@ pub use client::HerdrClient;
 pub use error::{HerdrError, HerdrResult};
 pub use events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
 pub use protocol::{
-    AgentSession, AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction,
-    PaneInfo, ReadSource, TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
+    AgentSession, AgentStatus, DEFAULT_INSPECT_LINES, EnvironmentSnapshot, HerdrRequest,
+    HerdrResponse, LayoutAction, PaneInfo, ReadSource, TabInfo, WorkspaceInfo,
 };
 pub use transport::{
-    default_local_socket_path, HerdrEventStream, HerdrTransport, MockState, RemoteSshConfig,
-    SshInvocationMethod,
+    HerdrEventStream, HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod,
+    default_local_socket_path,
 };
 
 #[cfg(test)]
@@ -190,45 +190,45 @@ mod tests {
                     let (reader, mut writer) = stream.split();
                     let mut buf_reader = BufReader::new(reader);
                     let mut line = String::new();
-                    if buf_reader.read_line(&mut line).await.is_ok() {
-                        if let Ok(req) = serde_json::from_str::<HerdrJsonRpcRequest>(line.trim()) {
-                            let resp = match req.method.as_str() {
-                                "session.snapshot" => json!({
-                                    "id": req.id,
-                                    "result": {
-                                        "workspaces": [{
-                                            "workspace_id": "ws-live",
-                                            "name": "Live Server",
-                                            "tabs": [],
-                                            "panes": [{
-                                                "pane_id": "p-live",
-                                                "terminal_title": "live-server",
-                                                "agent_status": "working",
-                                                "focused": true
-                                            }],
+                    if buf_reader.read_line(&mut line).await.is_ok()
+                        && let Ok(req) = serde_json::from_str::<HerdrJsonRpcRequest>(line.trim())
+                    {
+                        let resp = match req.method.as_str() {
+                            "session.snapshot" => json!({
+                                "id": req.id,
+                                "result": {
+                                    "workspaces": [{
+                                        "workspace_id": "ws-live",
+                                        "name": "Live Server",
+                                        "tabs": [],
+                                        "panes": [{
+                                            "pane_id": "p-live",
+                                            "terminal_title": "live-server",
+                                            "agent_status": "working",
                                             "focused": true
-                                        }]
-                                    }
-                                }),
-                                "pane.read" => json!({
-                                    "id": req.id,
-                                    "result": {
-                                        "pane_id": req.params.get("pane_id"),
-                                        "buffer": "Live buffer stream text\nLine 2"
-                                    }
-                                }),
-                                "pane.focus" | "workspace.focus" | "tab.focus" => json!({
-                                    "id": req.id,
-                                    "result": {
-                                        "focused_id": req.params.get("pane_id").or_else(|| req.params.get("workspace_id"))
-                                    }
-                                }),
-                                _ => json!({"id": req.id, "result": {"status": "ok"}}),
-                            };
-                            let mut out = serde_json::to_vec(&resp).unwrap();
-                            out.push(b'\n');
-                            let _ = writer.write_all(&out).await;
-                        }
+                                        }],
+                                        "focused": true
+                                    }]
+                                }
+                            }),
+                            "pane.read" => json!({
+                                "id": req.id,
+                                "result": {
+                                    "pane_id": req.params.get("pane_id"),
+                                    "buffer": "Live buffer stream text\nLine 2"
+                                }
+                            }),
+                            "pane.focus" | "workspace.focus" | "tab.focus" => json!({
+                                "id": req.id,
+                                "result": {
+                                    "focused_id": req.params.get("pane_id").or_else(|| req.params.get("workspace_id"))
+                                }
+                            }),
+                            _ => json!({"id": req.id, "result": {"status": "ok"}}),
+                        };
+                        let mut out = serde_json::to_vec(&resp).unwrap();
+                        out.push(b'\n');
+                        let _ = writer.write_all(&out).await;
                     }
                 });
             }

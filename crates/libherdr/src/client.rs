@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::path::PathBuf;
 
 use crate::error::{HerdrError, HerdrResult};
-use crate::protocol::{EnvironmentSnapshot, HerdrRequest, ReadSource, DEFAULT_INSPECT_LINES};
+use crate::protocol::{DEFAULT_INSPECT_LINES, EnvironmentSnapshot, HerdrRequest, ReadSource};
 use crate::transport::{HerdrTransport, MockState, RemoteSshConfig};
 
 /// High-level client providing structured and ergonomic access to `herdr`.
@@ -54,20 +54,20 @@ impl HerdrClient {
     /// - `HERDR_REMOTE`: If set (e.g. `user@server`), uses SSH remote mode.
     /// - `HERDR_SOCK`: Local socket path (defaults to `/tmp/herdr.sock`).
     pub fn from_env() -> HerdrResult<Self> {
-        if let Ok(mock_val) = std::env::var("HERDR_MOCK") {
-            if mock_val == "1" || mock_val.eq_ignore_ascii_case("true") {
-                return Ok(Self::mock());
-            }
+        if let Ok(mock_val) = std::env::var("HERDR_MOCK")
+            && (mock_val == "1" || mock_val.eq_ignore_ascii_case("true"))
+        {
+            return Ok(Self::mock());
         }
 
-        if let Ok(remote_dest) = std::env::var("HERDR_REMOTE") {
-            if !remote_dest.trim().is_empty() {
-                let mut config = RemoteSshConfig::new(remote_dest.trim());
-                if let Ok(sock) = std::env::var("HERDR_REMOTE_SOCK") {
-                    config = config.with_remote_socket_path(PathBuf::from(sock));
-                }
-                return Ok(Self::remote_with_config(config));
+        if let Ok(remote_dest) = std::env::var("HERDR_REMOTE")
+            && !remote_dest.trim().is_empty()
+        {
+            let mut config = RemoteSshConfig::new(remote_dest.trim());
+            if let Ok(sock) = std::env::var("HERDR_REMOTE_SOCK") {
+                config = config.with_remote_socket_path(PathBuf::from(sock));
             }
+            return Ok(Self::remote_with_config(config));
         }
 
         let socket_path = std::env::var("HERDR_SOCK")
