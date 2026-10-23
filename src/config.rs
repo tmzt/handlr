@@ -225,8 +225,11 @@ impl AgentConfig {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct GeminiConfig {
-    /// Gemini API Key (falls back to GEMINI_API_KEY environment variable)
-    pub api_key: Option<String>,
+    /// The file holding the Gemini API key, alone, with mode 0600 (default:
+    /// `.private/gemini_api_key`, from the daemon's working directory;
+    /// `.private` is gitignored). Without the file, `GEMINI_API_KEY` is
+    /// used. The key itself is never put in this file.
+    pub api_key_file: Option<String>,
     /// Model identifier (default: "gemini-2.5-flash")
     pub model: Option<String>,
 }

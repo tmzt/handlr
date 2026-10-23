@@ -11,7 +11,7 @@
 //! so `ran` lists what was approved.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -58,8 +58,9 @@ const CLAIM_WAIT: Duration = Duration::from_secs(2);
 /// besides after every turn.
 pub const VOCABULARY_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How the turn service is set up. The default is Gemini, from `[gemini]
-/// api_key` or `GEMINI_API_KEY`, with sessions in `~/.cache/libinfer`.
+/// How the turn service is set up. The default is Gemini, with the key from
+/// `[gemini] api_key_file` (default `.private/gemini_api_key`) or
+/// `GEMINI_API_KEY`, and sessions in `~/.cache/libinfer`.
 #[derive(Clone, Default)]
 pub struct TurnOptions {
     /// The engine to use instead of Gemini (tests use a scripted
@@ -72,7 +73,7 @@ pub struct TurnOptions {
 /// The engine, the session histories, and who is in a turn.
 pub struct TurnService {
     given: Option<Arc<dyn ReasoningEngine>>,
-    gemini_key: Option<String>,
+    gemini_key_file: PathBuf,
     gemini: OnceLock<Arc<dyn ReasoningEngine>>,
     session_dir: Option<PathBuf>,
     manager: OnceLock<SessionManager>,
@@ -83,11 +84,7 @@ impl TurnService {
     pub fn new(config: &AppConfig, options: TurnOptions) -> Self {
         TurnService {
             given: options.engine,
-            gemini_key: config
-                .gemini
-                .api_key
-                .clone()
-                .filter(|k| !k.trim().is_empty()),
+            gemini_key_file: gemini_key_file(config),
             gemini: OnceLock::new(),
             session_dir: options.session_dir,
             manager: OnceLock::new(),
@@ -104,8 +101,10 @@ impl TurnService {
         if let Some(engine) = self.gemini.get() {
             return Ok(Arc::clone(engine));
         }
+        // Read on first use, so a key added later needs no restart.
+        let api_key = read_key_file(&self.gemini_key_file)?;
         let mut builder = ReasoningEngineBuilder::new(EngineType::Gemini {
-            api_key: self.gemini_key.clone(),
+            api_key,
             tools: declare_gemini_tools(),
         });
         if let Some(prompt) = default_system_prompt() {
@@ -311,10 +310,55 @@ pub fn confirm_text(command: &str, spoken: &str, handle: Option<&str>) -> String
     text
 }
 
+/// The default key file, under the gitignored `.private`.
+const GEMINI_KEY_FILE: &str = ".private/gemini_api_key";
+
+/// `[gemini] api_key_file`, or [`GEMINI_KEY_FILE`], made absolute against
+/// the working directory at startup.
+fn gemini_key_file(config: &AppConfig) -> PathBuf {
+    let path = PathBuf::from(
+        config
+            .gemini
+            .api_key_file
+            .as_deref()
+            .unwrap_or(GEMINI_KEY_FILE),
+    );
+    match std::env::current_dir() {
+        Ok(dir) if path.is_relative() => dir.join(path),
+        _ => path,
+    }
+}
+
+/// The key in `path`, trimmed; `None` when the file does not exist or is
+/// empty, which leaves `GEMINI_API_KEY` to libinfer. A file anyone but its
+/// owner may access is refused. Errors name the file, never its contents.
+fn read_key_file(path: &Path) -> Result<Option<String>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("the Gemini key file {}: {e}", path.display())),
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "the Gemini key file {} has mode {mode:04o}; only its owner may have access \
+             (chmod 600)",
+            path.display()
+        ));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("the Gemini key file {}: {e}", path.display()))?;
+    let key = text.trim();
+    Ok((!key.is_empty()).then(|| key.to_string()))
+}
+
 /// A sentence to speak for a turn that failed with `error`.
 pub fn spoken_error(error: &str) -> String {
     if error.contains("GEMINI_API_KEY") {
         "Sorry, I can't think right now: the server has no Gemini API key.".to_string()
+    } else if error.contains("Gemini key file") {
+        "Sorry, I can't think right now: the server can't read its Gemini key.".to_string()
     } else if error.contains("took too long") {
         "Sorry, that took too long. Please try again.".to_string()
     } else if error.contains("session") {
@@ -910,5 +954,29 @@ mod tests {
         let s = spoken_error("the reasoning engine: GEMINI_API_KEY not set");
         assert!(s.contains("no Gemini API key"), "{s}");
         assert!(!s.contains("GEMINI_API_KEY"));
+    }
+
+    #[test]
+    fn the_key_file_is_read_trimmed_and_must_be_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gemini_api_key");
+        assert_eq!(read_key_file(&path).unwrap(), None);
+
+        std::fs::write(&path, "  not-a-real-key\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let err = read_key_file(&path).unwrap_err();
+        assert!(err.contains("0644"), "{err}");
+        assert!(!err.contains("not-a-real-key"), "{err}");
+        assert!(spoken_error(&err).contains("can't read its Gemini key"));
+
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_key_file(&path).unwrap().as_deref(),
+            Some("not-a-real-key")
+        );
+
+        std::fs::write(&path, "\n").unwrap();
+        assert_eq!(read_key_file(&path).unwrap(), None);
     }
 }
