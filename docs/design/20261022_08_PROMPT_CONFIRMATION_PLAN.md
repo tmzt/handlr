@@ -148,3 +148,57 @@ that agent." Gemini reads that as its own job, the same as the block.
    "voice reasoning engine", and "compiler jobs") be left for good, or
    revisited if Gemini's replies show they confuse it? This plan leaves
    them.
+
+## Amendment — 2026-10-22 23:40 EDT: the model names the confirmation (its handle)
+
+On the owner's instruction. The confirmation the model causes must carry
+the confirmation name, its **handle**. The protocol matches the handle,
+and the companion joins it with the token it stores, so the approval stays
+tied to what the model meant (plan 20261022_01's broker; CHANGES.md
+2026-10-22, "Confirmations: handle, token and nonce"). Today
+`HerdrToolExecutor` passes no handle to `ConfirmBroker::request`.
+
+This adds to decisions 1 and 2 and to steps 1 and 2. Where they disagree,
+this amendment wins.
+
+**`run_command` gains a `handle` argument** (string, required in the
+declaration):
+- It is a short name for this one action: lowercase words joined by `-`,
+  naming the command and the agent, for example `usage-claude-highbay` or
+  `continue-handlr-agent`.
+- The declaration describes it in those words.
+
+**The daemon** passes the handle to the broker. The broker's own rules
+apply (3–64 characters of `a-z`, `0-9` and `-`, unique among the
+requester's pending confirmations), with two allowances, so a slightly
+malformed name never blocks a request:
+- **Normalised first:** lowercased, runs of anything else folded to one
+  `-`, leading and trailing `-` trimmed, cut to 64.
+- **When still invalid or missing:** the daemon makes the handle from the
+  command and the agent's spoken name, normalised the same way.
+- **When already pending:** `-2`, `-3` and so on are appended.
+
+The result returned to the model includes `"handle"`, so the model's
+session keeps it. The approval question is the existing `confirm_text`:
+`Approve sending "/usage" to Claude in Highbay? For usage claude highbay.`
+The companion answers with the nonce over its stored token, the id and
+this handle, as the protocol already defines.
+
+**Decision 1's gate block**, item 1, becomes:
+
+```markdown
+  1. When the user asks to send a command to an agent, call `run_command` in that turn, with a `handle`: a short name for this action in lowercase words joined by `-`, naming the command and the agent (e.g. `usage-claude-highbay`). handlr reads the handle to the user and matches their approval to it. Do not ask "Should I send…?" yourself.
+```
+
+Items 2 and 3 are unchanged.
+
+**Step 1 adds tests:**
+- a given handle reaches the broker and the companion's `confirm.requested`;
+- `Usage Claude!` becomes `usage-claude`;
+- a missing or invalid handle is derived from the command and the agent;
+- a handle that is already pending gets `-2`;
+- the nonce computed over the returned handle approves, and one over a
+  different handle does not.
+
+**Step 2's live turn** also checks that the spoken question ends with "For
+<the model's handle, read as words>".
