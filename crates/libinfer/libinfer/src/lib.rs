@@ -306,11 +306,11 @@ impl ReasoningEngine for RoutingReasoningEngine {
         turns: &[Message],
         executor: &dyn ToolExecutor,
     ) -> Result<Option<String>, String> {
-        if let Some(latest) = turns.iter().rev().find(|m| m.role == "user") {
-            if let Some(reply) = self.route(&latest.content) {
-                log::info!("libinfer: routed {:?} without the engine", latest.content);
-                return Ok(Some(reply.to_string()));
-            }
+        if let Some(latest) = turns.iter().rev().find(|m| m.role == "user")
+            && let Some(reply) = self.route(&latest.content)
+        {
+            log::info!("libinfer: routed {:?} without the engine", latest.content);
+            return Ok(Some(reply.to_string()));
         }
         self.inner.process_turns(turns, executor).await
     }
