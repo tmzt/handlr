@@ -1321,6 +1321,7 @@ name = "handlr-companion"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "handlr-speech",
  "libc",
  "libhandlr_proto",
  "log",
@@ -1331,6 +1332,10 @@ dependencies = [
  "tokio",
  "toml 0.8.23",
 ]
+
+[[package]]
+name = "handlr-speech"
+version = "0.1.0"
 
 [[package]]
 name = "hashbrown"
@@ -1578,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "libhandlr_proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "blake2",
  "bs58",
