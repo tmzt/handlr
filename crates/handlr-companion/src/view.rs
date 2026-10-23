@@ -140,40 +140,39 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
         .iter()
         .rev()
         .find(|e| e.kind == EntryKind::ToolResult)
+        && (is_error(&result.summary) || fails_tests(&result.summary))
     {
-        if is_error(&result.summary) || fails_tests(&result.summary) {
-            let text = result
-                .summary
-                .strip_prefix("error: ")
-                .unwrap_or(&result.summary);
-            let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-            let what = match &result.tool {
-                Some(tool) => format!("{tool}: {}", first.trim()),
-                None => first.trim().to_string(),
-            };
-            found.push(Found {
-                kind: CardKind::Broke,
-                anchor: Anchor::Entry(result.clone()),
-                title: "Something broke".to_string(),
-                text: cut(&what, CARD_TEXT_MAX),
-                confirm_id: None,
-            });
-        }
+        let text = result
+            .summary
+            .strip_prefix("error: ")
+            .unwrap_or(&result.summary);
+        let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let what = match &result.tool {
+            Some(tool) => format!("{tool}: {}", first.trim()),
+            None => first.trim().to_string(),
+        };
+        found.push(Found {
+            kind: CardKind::Broke,
+            anchor: Anchor::Entry(result.clone()),
+            title: "Something broke".to_string(),
+            text: cut(&what, CARD_TEXT_MAX),
+            confirm_id: None,
+        });
     }
     // 4. Finished: idle after a turn that ended with a reply. The question
     // card already stands for a reply that asks.
     if matches!(f.status, "idle" | "done") {
         let last_text = f.entries.iter().rposition(|e| e.kind == EntryKind::Text);
-        if let Some(i) = last_text.filter(|&i| is_reply(&f.entries[i])) {
-            if question_at != Some(i) {
-                found.push(Found {
-                    kind: CardKind::Finished,
-                    anchor: Anchor::Entry(f.entries[i].clone()),
-                    title: "Finished".to_string(),
-                    text: cut(first_paragraph(&f.entries[i].summary), CARD_TEXT_MAX),
-                    confirm_id: None,
-                });
-            }
+        if let Some(i) = last_text.filter(|&i| is_reply(&f.entries[i]))
+            && question_at != Some(i)
+        {
+            found.push(Found {
+                kind: CardKind::Finished,
+                anchor: Anchor::Entry(f.entries[i].clone()),
+                title: "Finished".to_string(),
+                text: cut(first_paragraph(&f.entries[i].summary), CARD_TEXT_MAX),
+                confirm_id: None,
+            });
         }
     }
     found

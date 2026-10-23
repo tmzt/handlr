@@ -7,8 +7,8 @@
 //! The PNG is read with `png` (expanded to 8-bit samples, then to luma)
 //! and the code with `rqrr`.
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use libhandlr_proto::link::PairingPayload;
 
 /// The only data URL accepted.
@@ -201,9 +201,11 @@ mod tests {
         let mut string = p.encode().unwrap();
         let last = string.pop().unwrap();
         string.push(if last == '2' { '3' } else { '2' });
-        assert!(read(&string)
-            .unwrap_err()
-            .contains("invalid pairing string"));
+        assert!(
+            read(&string)
+                .unwrap_err()
+                .contains("invalid pairing string")
+        );
         // No addresses.
         assert!(read(&payload(&[]).encode().unwrap()).is_err());
     }

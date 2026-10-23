@@ -29,7 +29,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-pub use client::{Dictation, DictationPhase, Event, Input, Suggestion, DICTATION_SILENCE};
+pub use client::{DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Suggestion};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
 pub use view::{AgentCard, CardKind};

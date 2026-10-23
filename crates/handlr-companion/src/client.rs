@@ -654,10 +654,10 @@ impl State {
             Input::Listening(on) => {
                 self.listening = on;
                 let now = self.now;
-                if !self.voice_reported {
-                    if let Some(d) = self.dictation.as_mut() {
-                        d.quiet_from = (!on).then_some(now);
-                    }
+                if !self.voice_reported
+                    && let Some(d) = self.dictation.as_mut()
+                {
+                    d.quiet_from = (!on).then_some(now);
                 }
                 self.show_dictation(&mut out);
                 self.flush_notices(&mut out);
@@ -1190,10 +1190,10 @@ impl State {
             self.focus = focus.clone();
             out.push(event(Event::Focus(focus.clone())));
         }
-        if let Some(d) = self.dictation.as_mut().filter(|d| d.fixed_pane.is_none()) {
-            if !d.has_target() || d.refresh_target {
-                d.target = focus;
-            }
+        if let Some(d) = self.dictation.as_mut().filter(|d| d.fixed_pane.is_none())
+            && (!d.has_target() || d.refresh_target)
+        {
+            d.target = focus;
         }
         self.show_dictation(out);
     }
@@ -1517,13 +1517,13 @@ impl State {
     /// `agents.list` answered: the view's status, and a message target
     /// fixed to the viewed agent before its names were known.
     fn list_learned(&mut self, out: &mut Vec<Output>) {
-        if let Some(v) = self.view.as_mut() {
-            if let Some(a) = self.agents.iter().find(|a| a.pane_id == v.pane_id) {
-                if a.status != v.status && !v.status.is_empty() {
-                    v.wanted = true;
-                }
-                v.status = a.status.clone();
+        if let Some(v) = self.view.as_mut()
+            && let Some(a) = self.agents.iter().find(|a| a.pane_id == v.pane_id)
+        {
+            if a.status != v.status && !v.status.is_empty() {
+                v.wanted = true;
             }
+            v.status = a.status.clone();
         }
         let fixed = self
             .dictation
@@ -2766,9 +2766,11 @@ mod tests {
             ),
         );
         let out = s.incoming(Incoming::Response(refusal));
-        assert!(events(&out)
-            .iter()
-            .any(|e| matches!(e, Event::Say(t) if t.contains("the character '/'"))));
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Say(t) if t.contains("the character '/'")))
+        );
         let card = s.dictation();
         assert_eq!(card.phase, DictationPhase::Collecting);
         assert_eq!(card.text, "see src/main.rs");
@@ -2812,9 +2814,11 @@ mod tests {
         speak(&mut s, 10.0, 11.0, "one");
         let out = s.input(Input::Tick(secs(19.0)));
         assert!(message_send(&out).is_none());
-        assert!(events(&out)
-            .iter()
-            .any(|e| matches!(e, Event::Say(t) if t.starts_with("No agent is focused"))));
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Say(t) if t.starts_with("No agent is focused")))
+        );
         // Said once, not on every tick.
         assert!(events(&s.input(Input::Tick(secs(30.0)))).is_empty());
 
@@ -2837,9 +2841,11 @@ mod tests {
         s.input(Input::Utterance("one".into()));
         let out = s.input(Input::Submit);
         assert!(message_send(&out).is_none());
-        assert!(events(&out)
-            .iter()
-            .any(|e| matches!(e, Event::Say(t) if t.starts_with("The focused pane has no agent"))));
+        assert!(
+            events(&out).iter().any(
+                |e| matches!(e, Event::Say(t) if t.starts_with("The focused pane has no agent"))
+            )
+        );
         // Focus moving to an agent sets it.
         s.incoming(note("focus.changed", json!({"focus": claude()})));
         assert_eq!(s.dictation().target.unwrap().pane_id, "w2:p4");
@@ -3163,9 +3169,11 @@ mod tests {
             libhandlr_proto::ErrorObject::new(-32003, "not allowed"),
         );
         let out = s.incoming(Incoming::Response(refusal));
-        assert!(events(&out)
-            .iter()
-            .any(|e| matches!(e, Event::Say(t) if t.starts_with("I can't send cmpct"))));
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Say(t) if t.starts_with("I can't send cmpct")))
+        );
     }
 
     #[test]
@@ -3200,9 +3208,11 @@ mod tests {
         assert!(events(&s.input(Input::Tick(secs(22.0)))).is_empty());
         let out = s.input(Input::Tick(secs(23.5)));
         assert!(message_send(&out).is_none());
-        assert!(events(&out)
-            .iter()
-            .any(|e| matches!(e, Event::Say(t) if t == "The message is empty.")));
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Say(t) if t == "The message is empty."))
+        );
     }
 
     #[test]

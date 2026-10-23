@@ -22,11 +22,11 @@
 //! and a connection ends only on an error or end of stream. The client does
 //! not `ping`.
 
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use libhandlr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, StaticKey};
 use libhandlr_proto::Incoming;
+use libhandlr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, StaticKey};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{TcpSocket, TcpStream, UnixStream};
@@ -34,10 +34,10 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+use crate::CompanionConfig;
 use crate::client::{Event, Input, Output, State, TICK};
 use crate::keys::{KeyStore, ServerRecord};
 use crate::scan::{self, Pairing};
-use crate::CompanionConfig;
 
 /// The longest line read from the daemon's socket (the daemon's own limit).
 /// The link has the same limit on its messages.
@@ -465,11 +465,11 @@ impl Net {
             }
         };
         let mut end = None;
-        if let Some(hello) = first {
-            if let Err(e) = write.send(&hello).await {
-                log::debug!("writing to the daemon: {e}");
-                end = Some(End::Closed);
-            }
+        if let Some(hello) = first
+            && let Err(e) = write.send(&hello).await
+        {
+            log::debug!("writing to the daemon: {e}");
+            end = Some(End::Closed);
         }
         let mut ticks = tokio::time::interval(TICK);
         ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

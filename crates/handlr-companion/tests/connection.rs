@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 

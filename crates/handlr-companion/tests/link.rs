@@ -8,7 +8,7 @@
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use base64::Engine;
@@ -16,7 +16,7 @@ use handlr_companion::{
     Companion, CompanionConfig, Event, FileKeyStore, Input, KeyStore, ServerRecord,
 };
 use libhandlr_proto::link::{self, DeviceCode, PairingPayload, StaticKeypair};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
 

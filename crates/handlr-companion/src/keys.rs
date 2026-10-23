@@ -6,8 +6,8 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use libhandlr_proto::link::{self, StaticKey, StaticKeypair};
 use serde::{Deserialize, Serialize};
 
