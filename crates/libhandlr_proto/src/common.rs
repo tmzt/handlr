@@ -117,7 +117,35 @@ pub struct AgentInfo {
     /// reader, or a remote herdr.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<AgentSessionInfo>,
+    /// The agent's turn, from its own session, never herdr's status (plan
+    /// 20261023_04, the 17:04 EDT amendment, A4). Absent when the pane has
+    /// no session on the daemon's machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<Turn>,
 }
+
+/// Where an agent's turn stands, from its own session (plan 20261023_04,
+/// A4), the same for every agent's reader. Each text is redacted and cut
+/// to [`TURN_TEXT_MAX`] characters by the daemon.
+///
+/// On the wire it is an object tagged by `state`, as `AgentsSendResult` is
+/// by `status`: `{"state": "working", "line": "…"}`,
+/// `{"state": "stopped", "line": "…"}` and
+/// `{"state": "asking", "question": "…"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum Turn {
+    /// The turn is going on: `line` is the session's newest line.
+    Working { line: String },
+    /// The turn ended with no question: `line` is the first line of the
+    /// last reply.
+    Stopped { line: String },
+    /// The turn ended on a question: the pending question's text.
+    Asking { question: String },
+}
+
+/// The longest text a [`Turn`] carries, in characters.
+pub const TURN_TEXT_MAX: usize = 200;
 
 /// How an agent's session file was found (plan 20261022_03, the 16:23 EDT
 /// amendment).
@@ -649,6 +677,9 @@ mod tests {
                         ts: "2026-10-23T06:00:00.000Z".to_string(),
                     }),
                 }),
+                turn: Some(Turn::Asking {
+                    question: "Shall I go on?".to_string(),
+                }),
             }],
             focus: Some(FocusInfo {
                 pane_id: "w2:pZ".to_string(),
@@ -861,9 +892,17 @@ mod tests {
         );
         assert_eq!(agent.session, None);
         let shown = serde_json::to_value(&agent).unwrap();
-        for key in ["name", "spoken", "tab_label", "tab_number", "session"] {
+        for key in [
+            "name",
+            "spoken",
+            "tab_label",
+            "tab_number",
+            "session",
+            "turn",
+        ] {
             assert!(shown.get(key).is_none(), "{key} in {shown}");
         }
+        assert_eq!(agent.turn, None);
         let named = serde_json::to_value(AgentInfo {
             name: Some("Claude".to_string()),
             spoken: Some("Claude".to_string()),
@@ -876,6 +915,31 @@ mod tests {
         assert_eq!(named["tab_label"], "-mb");
         assert_eq!(named["tab_number"], 4);
         assert_eq!(serde_json::to_value(Empty {}).unwrap(), json!({}));
+
+        // A turn is tagged by `state`.
+        for (turn, wire) in [
+            (
+                Turn::Working {
+                    line: "Bash cargo test".to_string(),
+                },
+                json!({"state": "working", "line": "Bash cargo test"}),
+            ),
+            (
+                Turn::Stopped {
+                    line: "Done.".to_string(),
+                },
+                json!({"state": "stopped", "line": "Done."}),
+            ),
+            (
+                Turn::Asking {
+                    question: "Push it?".to_string(),
+                },
+                json!({"state": "asking", "question": "Push it?"}),
+            ),
+        ] {
+            assert_eq!(serde_json::to_value(&turn).unwrap(), wire);
+            assert_eq!(serde_json::from_value::<Turn>(wire).unwrap(), turn);
+        }
 
         // Focus is additive: a list without it reads, and none is left out.
         let list: AgentsListResult = serde_json::from_value(json!({"agents": []})).unwrap();

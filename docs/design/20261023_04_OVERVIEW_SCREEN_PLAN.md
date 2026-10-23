@@ -1,7 +1,7 @@
 ---
 title: The overview (home) screen, a list of the agents
 date: 2026-10-23
-status: Draft
+status: In implementation
 covers:
   - "The companion app's home screen becomes an overview: one row per
     agent pane, with its name, status, herdr's focus and a badge when it
@@ -337,3 +337,11 @@ the needing-input marks, and the two halves scrolling apart.
 A4 of the previous amendment cites "the 16:28 EDT L3 amendment of plan
 20261022_03"; the amendment it means, "a question ending a quiet turn is
 pending whatever herdr says", is at 16:32 EDT.
+
+## Amendment — 2026-10-23 17:22 EDT: implementation has started; the document is now immutable
+
+The owner approved building this plan on 2026-10-23: "approve the overview
+screen plan, start building it". Implementation starts with step 1, as
+amended (libhandlr_proto 0.3.0 with `AgentInfo.turn`). From here the
+document is frozen and departures are recorded in CHANGES.md; it has no
+living sections.

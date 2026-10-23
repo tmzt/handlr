@@ -69,3 +69,16 @@ versions in the answer"):
 - **Breaking:** `common::SpeechSummarizeResult` loses `spoken` and gains
   `read` (`String`, always present: the reply under the reading rules)
   and `summary` (`Option<String>`: Gemini's, when one was made).
+
+## libhandlr_proto 0.3.0 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.3.0`)
+
+Not strictly additive (plan 20261023_04, the 17:04 EDT amendment, A4):
+
+- **Breaking:** `common::AgentInfo` gains `turn: Option<Turn>`, left out
+  of the wire when absent and read as absent when missing. `AgentInfo` is
+  an exhaustive struct.
+- **Added:**
+  - `common::Turn`, `Working { line }`, `Stopped { line }` or
+    `Asking { question }`, an object tagged by `state` on the wire
+    (`{"state": "stopped", "line": "Done."}`);
+  - `common::TURN_TEXT_MAX` (200), the longest text a `Turn` carries.
