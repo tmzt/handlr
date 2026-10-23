@@ -294,6 +294,38 @@ async fn pairing_reconnecting_and_revoking() {
         .is_err());
 }
 
+/// What a phone reads from the pairing QR code's PNG.
+fn scan(png_bytes: &[u8]) -> String {
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png_bytes));
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info().unwrap();
+    let mut luma = vec![0; reader.output_buffer_size().unwrap()];
+    let frame = reader.next_frame(&mut luma).unwrap();
+    let side = frame.width as usize;
+    let mut img =
+        rqrr::PreparedImage::prepare_from_greyscale(side, side, |x, y| luma[y * side + x]);
+    let grids = img.detect_grids();
+    assert_eq!(grids.len(), 1);
+    grids[0].decode().unwrap().1
+}
+
+#[tokio::test]
+async fn pairing_from_the_scanned_qr_code() {
+    let env = start().await;
+    let mut local = Local::connect(&env.socket).await;
+    let pairing = local
+        .begin(json!({"name": "s23", "protocols": ["harness"]}))
+        .await;
+    let shown = handlr::pair::Shown::new(&pairing).unwrap();
+    let url = scan(&shown.png);
+    assert_eq!(url, shown.url);
+    assert!(url.starts_with(&format!("handlr://{}/pair#handlr1", env.address)));
+
+    let (_paired, _) = pair_with(&url).await.unwrap();
+    let done = local.note("link.pair_done").await;
+    assert_eq!(done["params"], json!({"name": "s23", "paired": true}));
+}
+
 #[tokio::test]
 async fn expired_and_reused_secrets_are_refused() {
     let env = start().await;

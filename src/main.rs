@@ -7,7 +7,7 @@
 //!                 --socket <herdr.sock> | --mock] [--listen <handlr.sock>] [--show-tokens]
 //! handlr ctl [--listen <handlr.sock>] [--client <name>] [--follow] <method> [<params as JSON>]
 //! handlr pair [--listen <handlr.sock>] --name <name> [--protocols companion,harness]
-//!             [--ttl 300] [--replace]
+//!             [--ttl 300] [--replace] [--qr-png <file>]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -33,6 +33,7 @@ struct AppArgs {
     protocols: Vec<String>,
     ttl: Option<String>,
     replace: bool,
+    qr_png: Option<String>,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
@@ -52,6 +53,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         protocols: Vec::new(),
         ttl: None,
         replace: false,
+        qr_png: None,
     };
 
     while let Some(arg) = args.next() {
@@ -78,6 +80,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             }
             "--ttl" => parsed.ttl = args.next(),
             "--replace" => parsed.replace = true,
+            "--qr-png" => parsed.qr_png = args.next(),
             _ if !arg.starts_with("--") => parsed.positional.push(arg),
             _ => {
                 eprintln!("Unknown argument: {}", arg);
@@ -203,7 +206,7 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn pair(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     let socket = daemon_socket(&args, &config);
-    let usage = "usage: handlr pair [--listen <socket>] --name <name> [--protocols companion,harness] [--ttl <seconds>] [--replace]";
+    let usage = "usage: handlr pair [--listen <socket>] --name <name> [--protocols companion,harness] [--ttl <seconds>] [--replace] [--qr-png <file>]";
     let Some(name) = args.name.clone() else {
         return Err(usage.into());
     };
@@ -223,7 +226,8 @@ async fn pair(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
         ttl,
         replace: args.replace,
     };
-    Ok(handlr::pair::run(&socket, params).await?)
+    let qr_png = args.qr_png.as_deref().map(Path::new);
+    Ok(handlr::pair::run(&socket, params, qr_png).await?)
 }
 
 async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {

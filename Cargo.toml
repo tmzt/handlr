@@ -26,15 +26,19 @@ tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 libc = "0.2"
 # The link (src/server/link/): link_key and auth.toml keys are base64,
-# `handlr pair` prints a QR code, link sockets get SO_KEEPALIVE.
+# link sockets get SO_KEEPALIVE.
 base64 = "0.22"
-qrcode = { version = "0.14", default-features = false }
 socket2 = "0.6"
+# `handlr pair`: the pairing URL's QR code as a PNG (plan 20261022_06).
+qrcodeurl = { path = "crates/qrcodeurl" }
 
 [dev-dependencies]
 # Paused time for the confirmation broker's timers.
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
+# tests/link.rs reads the pairing QR code back (plan 20261022_06, step 3).
+png = "0.18"
+rqrr = { version = "0.11", default-features = false }
 
 [workspace]
 members = [
