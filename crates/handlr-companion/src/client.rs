@@ -75,6 +75,9 @@ pub enum Input {
     /// The play button: read the agent's new replies aloud, or stop. Only
     /// its prose is read, never tool calls, their output or code blocks.
     ReadAloud(bool),
+    /// The play button while something is being said: stop it, and the
+    /// next held reply follows.
+    Skip,
 }
 
 /// A tapped suggestion on its way: its own approval, once confirmed.
@@ -710,6 +713,11 @@ impl State {
                 approve,
             } => self.answer_id(confirm_id, approve, &mut out),
             Input::Respond(response) => self.respond(response, &mut out),
+            Input::Skip => {
+                if self.speaking {
+                    out.push(event(Event::StopSpeaking));
+                }
+            }
             Input::ReadAloud(on) => {
                 self.read_aloud = on;
                 // From now: what is already in the view is not read.
@@ -3468,5 +3476,16 @@ mod tests {
             "They go in the overview and the agent."
         );
         assert_eq!(speakable("Code -32014 is new."), "Code -32014 is new.");
+    }
+
+    #[test]
+    fn skip_stops_what_is_said_and_the_next_follows() {
+        let mut s = online();
+        assert!(s.input(Input::Skip).is_empty(), "nothing to skip");
+        s.input(Input::Speaking(true));
+        s.incoming(notice("one"));
+        assert_eq!(events(&s.input(Input::Skip)), vec![Event::StopSpeaking]);
+        // Stopped: the held reply is said next.
+        assert_eq!(events(&s.input(Input::Speaking(false))), vec![say("one")]);
     }
 }
