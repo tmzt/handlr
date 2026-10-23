@@ -24,10 +24,11 @@ libhandlr_proto = { path = "../../crates/libhandlr_proto", features = ["link"] }
 # libmorph 0.3.1: the key store and the secure store (`secure-store`).
 libmorph = { git = "https://github.com/tmzt/libmorph", rev = "568cf953f4e3de823f9d44cc58275d334265607a", default-features = false, features = ["secure-store"] }
 # The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
-# 0.5.0: the terminal face and symbol page for the agent view (plan
-# 20261022_03, decision 9).
-libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "c3cf5112b5ef11f9d01dec37f66a2a651ac03c4a", features = ["font-apache-roboto-regular", "fonts-ofl-terminal"] }
-libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "45f5cddd7605975aab7e2009163ccf1a5809cea6" }
+# 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
+# agent view (plan 20261022_03, decision 9), with cell boxes and Claude
+# Code's interface glyphs.
+libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "4de319ce57aea99297de0a805b899276dd90b411", features = ["font-apache-roboto-regular", "fonts-ofl-terminal"] }
+libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "5cad90ff2a0409c5cae50ec78084814e0dd16e68" }
 log = "0.4"
 # The key store's Noise key (src/keys.rs): cleared on drop, X25519 with the
 # curve25519-dalek snow already uses, and a random key from the OS.
