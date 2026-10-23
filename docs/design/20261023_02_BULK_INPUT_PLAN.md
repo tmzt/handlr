@@ -283,3 +283,30 @@ leading `/` is moot, since `/` is refused anywhere. Step 2's
 The owner approved the plan. Its status is `In implementation`, and this
 document is immutable (AGENTS.md, Rule 1.5), set in this commit ahead of
 the first implementing commit, which follows.
+
+## Amendment — 2026-10-23 02:28 EDT: the Submit button is the approval
+
+On the owner's instruction: "if I use UI to send it doesn't need a separate
+confirmation".
+
+This replaces decision 5's single approval, for button submits only.
+
+**Submitted with the Submit button:** the press is the approval. The
+companion approves its own message's confirmation itself, with
+`confirm.reply {approve: true}`, without speaking or showing the question.
+- The daemon is unchanged. It still opens the confirmation and logs it as
+  approved by the phone, so the audit trail stays.
+- A companion may already approve its own voice-turn sends, so nothing new
+  is trusted.
+- The confirmation is recognised by its id, from `agents.send`'s answer,
+  or, when the question arrives first, by its text. The text is compared
+  after the daemon's cleaning: runs of whitespace folded, and trailing `.`
+  and `,` dropped.
+
+**Submitted by the silence:** asked as before. Nothing has confirmed it
+yet.
+
+**Tests:**
+- a button submit is approved once, with no question, whichever of the
+  question and the answer arrives first;
+- a silence submit is still asked.
