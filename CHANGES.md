@@ -547,3 +547,20 @@ and changes only the conflicting block of the Gemini-written prompt.
 **Correction.** The commits `0cb5898` and `a6ee077`, and the "pairing by
 public keys" entry above, cite plan 02's amendment as "23:2x EDT". Its
 timestamp is **23:07 EDT**.
+
+## 2026-10-22 23:46 EDT — plan 20261022_07, steps 1 to 3
+
+**What changed:**
+- The libinfer split is done: `libinfer` is the provider-neutral core,
+  and `libinfer-gemini` is built on `gemini-rust`. libgenai is gone.
+- `[gemini] model` is used, defaulting to `gemini-2.5-flash`.
+- handlr answers "never mind", "cancel", "forget it" and "nothing" with
+  "Okay." without asking Gemini.
+- This ends the interim libinfer fix of 17:11 EDT.
+
+**How it was committed.** The subagent that built it committed only under
+`crates/libinfer/`, as the owner asked. So `83d0747` and `98a1ac2` don't
+build on their own: they need the workspace commit that follows them,
+which moves the manifest's paths.
+
+**Still to check live** (step 3), with the owner's Gemini key.
