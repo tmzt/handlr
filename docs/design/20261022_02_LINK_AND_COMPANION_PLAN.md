@@ -612,3 +612,107 @@ The owner approved plans 20261022_02 to 05 for building. Step 1 (the link
 layer in `libhandlr_proto`) is the first implementing commit, which sets the
 status from `Draft` to `In implementation`. From here this document changes
 only on the owner's explicit instruction (AGENTS.md, Rule 1.5).
+
+## Amendment — 2026-10-22 23:07 EDT: pairing by public keys, with no shared secret
+
+On the owner's instruction. Pairing works like Claude Code's login: the
+device opens or scans a URL, then the user pastes the device's code back
+into `handlr pair`, at the Mac or over SSH. Only public keys move. No
+secret, PSK or expiry remains.
+
+This amendment replaces:
+- decision 1's pairing handshake;
+- the `0x01` mode in decision 2;
+- decision 5, with its amendments of 11:58 EDT (the pairing string's
+  fields) and 18:20 EDT (`--replace`, kept below);
+- step 3's pairing checks.
+
+Where they disagree, this amendment wins.
+
+**One handshake.**
+- Every connection, the first one included, is `Noise_IK` with mode byte
+  `0x02`, as reconnecting is today.
+- `XXpsk3`, mode `0x01`, pairing ids, pending pairings and their secrets
+  are removed. A `0x01` first byte is now an unknown mode and closes the
+  connection.
+- The device learns the server's key from the pairing URL. The server
+  learns the device's key from the pasted device code. A key that is not
+  in `auth.toml` is dropped with no reply, as before.
+
+**The pairing string** (version 2, replacing the 11:58 EDT table):
+
+| Field | Size |
+|---|---|
+| version | 1 byte, `2` |
+| server public key | 32 bytes |
+| addresses | 1-byte count, then each as a 1-byte length and `host:port` in UTF-8 |
+| checksum | the first 4 bytes of BLAKE2s-256 over every field above |
+
+- The text form is `handlr1` and base58, as before. It is usually carried
+  in the pairing URL, `handlr://<host>:<port>/pair#handlr1…` (plan
+  20261022_06, decision 1).
+- It holds no secret, name or expiry, so it can be shown, logged or kept
+  freely. A version 1 string is refused as an unknown version.
+
+**The device code**:
+
+| Field | Size |
+|---|---|
+| version | 1 byte, `1` |
+| device public key | 32 bytes |
+| name | 1-byte length, then 1 to 32 bytes of ASCII letters, digits, `-`, `_` or `.` |
+| checksum | the first 4 bytes of BLAKE2s-256 over the **server's** public key, then every field above |
+
+- The text form is `handlrkey1` and base58, about 60 characters.
+- Because the checksum covers the server's key, a code made for another
+  server, or mistyped, is refused before anything is written.
+- The device chooses its own name; the user may change it in the app.
+
+**`handlr pair`**: `handlr pair [--name <name>] [--protocols companion,harness]
+[--replace] [--code <code>] [--qr-png <file>]`.
+
+1. **`link.pair_begin`** (no params) returns:
+   - `{url, pairing, addresses, warnings}`;
+   - nothing is held pending.
+2. **It prints** the URL and the QR code's data URL (plan 06), then
+   prompts `Paste the pairing code from the device:` on standard input.
+   `--code` skips the prompt.
+3. **What it accepts:**
+   - a `handlrkey1…` code is the device;
+   - a pasted `handlr://`, `data:` or `handlr1` string is a server's
+     address, and `handlr pair` says that belongs on the device.
+4. **`link.pair_add {code, name?, protocols?, replace?}`** checks the code
+   against the server's key, then appends the entry to `auth.toml`:
+   - **name:** the device's own, or `--name`;
+   - **protocols:** by default `["companion"]`.
+5. **Names and keys:**
+   - a name already in use is refused unless `--replace`, which swaps the
+     entry and closes the old key's connections (18:20 EDT, kept);
+   - a key already in the file under another name is refused, with that
+     name in the error.
+6. **The result:** `{name, protocols}`. `handlr pair` then prints "Added
+   <name>", and waits.
+7. **The first hello.** The daemon sends that connection
+   `link.pair_done {name, paired: true}` when the new key completes its
+   first `hello`, which is answered with `paired: true`. `handlr pair`
+   then prints "<name> connected" and exits. Ctrl-C stops waiting without
+   undoing the entry.
+8. **Who may call:** only connections on the daemon socket may call
+   `link.pair_begin` and `link.pair_add`; paired link clients get
+   -32001, as before.
+
+**The device.**
+1. It takes the pairing URL, the QR code's data URL or the bare string
+   (plan 06), and stores the server's key and addresses.
+2. It shows its code with a Copy button.
+3. It connects with `IK`, retrying every 2 s for 10 minutes while the
+   server drops it, then with the usual backoff, until the user's paste
+   adds its key.
+
+**Step 3's checks become:**
+- a code pasted into `handlr pair` adds the entry, and the device's next
+  `IK` gets `paired: true`, and `link.pair_done` reaches `handlr pair`;
+- a code for another server, a mistyped code or a pasted server URL is
+  refused, and `auth.toml` is unchanged;
+- a name in use is refused without `--replace`, and swapped with it;
+- a `0x01` connection is closed with no reply.
