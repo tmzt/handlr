@@ -1,4 +1,5 @@
-//! The two handshakes, client and server.
+//! The handshake, `IK`, client and server (plan 02, amendment of 23:07
+//! EDT: one handshake).
 
 use snow::{Builder, HandshakeState};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -6,87 +7,23 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use super::keys::to_key;
 use super::resolver::{KeyResolver, STATIC_MARKER};
 use super::{
-    LinkError, LinkStream, PairingId, StaticKey, KEY_LEN, MAX_FIRST_MESSAGE, MAX_FRAME,
-    MODE_PAIRING, MODE_RECONNECT, PAIRING_PATTERN, PROLOGUE_PREFIX, RECONNECT_PATTERN,
+    LinkError, LinkStream, StaticKey, KEY_LEN, MAX_FIRST_MESSAGE, MAX_FRAME, MODE_RECONNECT,
+    PROLOGUE_PREFIX, RECONNECT_PATTERN,
 };
-
-/// The PSK's position in `XXpsk3`.
-const PSK_LOCATION: u8 = 3;
 
 /// A connection the server accepted.
 pub struct Accepted<S> {
     pub stream: LinkStream<S>,
-    /// The client's static X25519 public key.
+    /// The client's static X25519 public key, which `authorize` allowed.
     pub peer_key: [u8; KEY_LEN],
-    pub mode: AcceptedMode,
-    /// The message the client carried in its last handshake message, if
-    /// any (`hello`, when reconnecting).
+    /// The message the client carried in its first handshake message, if
+    /// any (`hello`).
     pub first_message: Option<Vec<u8>>,
 }
 
-/// How the client connected.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptedMode {
-    /// Paired with the pending pairing of this id. The caller records the
-    /// client's key and burns the secret.
-    Pairing(PairingId),
-    /// Reconnected with a key the caller authorized.
-    Reconnect,
-}
-
-/// Client: pairs with a server, over `XXpsk3` with `secret` as the PSK.
-///
-/// Sends the mode byte `0x01` and the [`PairingId`] of `secret`, then runs
-/// the handshake. If the server's static key is not `server_key`, the
-/// client aborts with [`LinkError::ServerKeyMismatch`] before sending its
-/// own static key. `first_message`, if any, travels in the last handshake
-/// message.
-///
-/// A wrong secret is detected by the server, which closes the connection;
-/// the client sees that as an error on its first receive.
-///
-/// Returns the stream and the server's static key.
-pub async fn pair<S: AsyncRead + AsyncWrite + Unpin, K: StaticKey + Clone>(
-    mut io: S,
-    local: &K,
-    server_key: &[u8; KEY_LEN],
-    secret: &[u8; KEY_LEN],
-    first_message: Option<&[u8]>,
-) -> Result<(LinkStream<S>, [u8; KEY_LEN]), LinkError> {
-    let first = check_first(first_message)?;
-    let prologue = prologue(MODE_PAIRING);
-    let mut hs = builder(PAIRING_PATTERN, local)?
-        .psk(PSK_LOCATION, secret)?
-        .prologue(&prologue)?
-        .build_initiator()?;
-    let mut buf = vec![0u8; MAX_FRAME];
-
-    // -> mode, pairing id, e
-    let n = hs.write_message(&[], &mut buf)?;
-    let mut head = vec![MODE_PAIRING];
-    head.extend_from_slice(&PairingId::from_secret(secret).0);
-    head.extend_from_slice(&(n as u16).to_be_bytes());
-    head.extend_from_slice(&buf[..n]);
-    io.write_all(&head).await?;
-    io.flush().await?;
-
-    // <- e, ee, s, es
-    let msg = read_frame(&mut io).await?;
-    hs.read_message(&msg, &mut buf)?;
-    let remote = remote_static(&hs)?;
-    if &remote != server_key {
-        return Err(LinkError::ServerKeyMismatch);
-    }
-
-    // -> s, se, psk
-    let n = hs.write_message(first, &mut buf)?;
-    write_frame(&mut io, &buf[..n]).await?;
-
-    let transport = hs.into_stateless_transport_mode()?;
-    Ok((LinkStream::new(io, transport, remote), remote))
-}
-
-/// Client: reconnects to a server whose static key it knows, over `IK`.
+/// Client: connects to a server whose static key it knows, over `IK`.
+/// The first connection after pairing is one of these too: the server's
+/// key comes from the pairing string.
 ///
 /// Sends the mode byte `0x02` and the first handshake message, carrying
 /// `first_message` (encrypted) if given. A server that does not authorize
@@ -124,89 +61,48 @@ pub async fn reconnect<S: AsyncRead + AsyncWrite + Unpin, K: StaticKey + Clone>(
 
 /// Server: accepts one connection.
 ///
-/// Reads the mode byte. For pairing (`0x01`), reads the [`PairingId`] and
-/// asks `pairing_secret` for the pending secret it names; with none, or
-/// with a handshake that fails (a wrong secret), the connection is
-/// dropped. For reconnecting (`0x02`), reads the client's first message,
-/// learns its static key and asks `authorize`; an unauthorized key gets no
-/// reply, and the connection is dropped. Any other mode byte closes the
-/// connection.
+/// Reads the mode byte, which must be `0x02` (`IK`); any other byte
+/// (`0x01`, the pairing handshake that was removed, included) is
+/// [`LinkError::UnknownMode`] and closes the connection with no reply.
+/// Then reads the client's first message, learns its static key and asks
+/// `authorize`; an unauthorized key gets no reply, and the connection is
+/// dropped.
 ///
 /// On error, `io` is dropped, which closes the connection.
-pub async fn accept<S, K, P, A>(
-    mut io: S,
-    local: &K,
-    pairing_secret: P,
-    authorize: A,
-) -> Result<Accepted<S>, LinkError>
+pub async fn accept<S, K, A>(mut io: S, local: &K, authorize: A) -> Result<Accepted<S>, LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     K: StaticKey + Clone,
-    P: FnOnce(PairingId) -> Option<[u8; KEY_LEN]>,
     A: FnOnce(&[u8; KEY_LEN]) -> bool,
 {
     let mode = io.read_u8().await?;
-    let mut buf = vec![0u8; MAX_FRAME];
-    match mode {
-        MODE_PAIRING => {
-            let mut id = [0u8; 4];
-            io.read_exact(&mut id).await?;
-            let id = PairingId(id);
-            let secret = pairing_secret(id).ok_or(LinkError::UnknownPairing)?;
-            let prologue = prologue(MODE_PAIRING);
-            let mut hs = builder(PAIRING_PATTERN, local)?
-                .psk(PSK_LOCATION, &secret)?
-                .prologue(&prologue)?
-                .build_responder()?;
-
-            // -> e
-            let msg = read_frame(&mut io).await?;
-            hs.read_message(&msg, &mut buf)?;
-            // <- e, ee, s, es
-            let n = hs.write_message(&[], &mut buf)?;
-            write_frame(&mut io, &buf[..n]).await?;
-            // -> s, se, psk (+ first message)
-            let msg = read_frame(&mut io).await?;
-            let n = hs.read_message(&msg, &mut buf)?;
-            let first = (n > 0).then(|| buf[..n].to_vec());
-
-            let peer_key = remote_static(&hs)?;
-            let transport = hs.into_stateless_transport_mode()?;
-            Ok(Accepted {
-                stream: LinkStream::new(io, transport, peer_key),
-                peer_key,
-                mode: AcceptedMode::Pairing(id),
-                first_message: first,
-            })
-        }
-        MODE_RECONNECT => {
-            let prologue = prologue(MODE_RECONNECT);
-            let mut hs = builder(RECONNECT_PATTERN, local)?
-                .prologue(&prologue)?
-                .build_responder()?;
-
-            // -> e, es, s, ss (+ first message)
-            let msg = read_frame(&mut io).await?;
-            let n = hs.read_message(&msg, &mut buf)?;
-            let first = (n > 0).then(|| buf[..n].to_vec());
-            let peer_key = remote_static(&hs)?;
-            if !authorize(&peer_key) {
-                return Err(LinkError::Unauthorized);
-            }
-            // <- e, ee, se
-            let n = hs.write_message(&[], &mut buf)?;
-            write_frame(&mut io, &buf[..n]).await?;
-
-            let transport = hs.into_stateless_transport_mode()?;
-            Ok(Accepted {
-                stream: LinkStream::new(io, transport, peer_key),
-                peer_key,
-                mode: AcceptedMode::Reconnect,
-                first_message: first,
-            })
-        }
-        other => Err(LinkError::UnknownMode(other)),
+    if mode != MODE_RECONNECT {
+        return Err(LinkError::UnknownMode(mode));
     }
+    let mut buf = vec![0u8; MAX_FRAME];
+    let prologue = prologue(MODE_RECONNECT);
+    let mut hs = builder(RECONNECT_PATTERN, local)?
+        .prologue(&prologue)?
+        .build_responder()?;
+
+    // -> e, es, s, ss (+ first message)
+    let msg = read_frame(&mut io).await?;
+    let n = hs.read_message(&msg, &mut buf)?;
+    let first = (n > 0).then(|| buf[..n].to_vec());
+    let peer_key = remote_static(&hs)?;
+    if !authorize(&peer_key) {
+        return Err(LinkError::Unauthorized);
+    }
+    // <- e, ee, se
+    let n = hs.write_message(&[], &mut buf)?;
+    write_frame(&mut io, &buf[..n]).await?;
+
+    let transport = hs.into_stateless_transport_mode()?;
+    Ok(Accepted {
+        stream: LinkStream::new(io, transport, peer_key),
+        peer_key,
+        first_message: first,
+    })
 }
 
 /// A builder for `pattern` whose local static key is `local`, through

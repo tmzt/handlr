@@ -34,10 +34,13 @@ pub mod methods {
     pub const CONFIRM_REQUESTED: &str = "confirm.requested";
     pub const CONFIRM_RESOLVED: &str = "confirm.resolved";
 
-    /// Local only (the daemon socket): begin a pending link pairing
-    /// (plan 20261022_02, decision 5, as amended).
+    /// Local only (the daemon socket): the pairing URL and string to show
+    /// (plan 20261022_02, amendment of 23:07 EDT). Nothing is held pending.
     pub const LINK_PAIR_BEGIN: &str = "link.pair_begin";
-    /// Notification, to the connection that began the pairing: it ended.
+    /// Local only: add a device from the code it shows.
+    pub const LINK_PAIR_ADD: &str = "link.pair_add";
+    /// Notification, to the connection that added the device: its first
+    /// `hello` was answered.
     pub const LINK_PAIR_DONE: &str = "link.pair_done";
 }
 
@@ -298,30 +301,17 @@ pub struct ConfirmResolved {
     pub detail: Option<String>,
 }
 
-/// `link.pair_begin`: a pending pairing for a device to be named `name`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LinkPairBeginParams {
-    pub name: String,
-    /// What the device may say `hello` with: `companion`, `harness`.
-    /// Defaults to `["companion"]`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocols: Option<Vec<String>>,
-    /// Seconds until the secret expires. Defaults to 300.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl: Option<u64>,
-    /// Replace an `auth.toml` entry of the same name when the pairing
-    /// completes, and close the old key's connections.
-    #[serde(default)]
-    pub replace: bool,
-}
+/// `link.pair_begin` takes no parameters; it serialises as `{}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LinkPairBeginParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkPairBeginResult {
-    /// The pairing string, `handlr1…`, also shown as the QR code.
+    /// The pairing URL, `handlr://<host>:<port>/pair#handlr1…`, also shown
+    /// as the QR code.
+    pub url: String,
+    /// The pairing string, `handlr1…`: the server's key and addresses.
     pub pairing: String,
-    pub name: String,
-    /// When the secret expires, in unix seconds.
-    pub expiry: u64,
     /// The addresses the pairing string carries.
     pub addresses: Vec<String>,
     /// Things the person pairing should know, such as a missing
@@ -330,12 +320,38 @@ pub struct LinkPairBeginResult {
     pub warnings: Vec<String>,
 }
 
-/// `link.pair_done`: how a pending pairing ended.
+/// `link.pair_add`: add the device whose code is `code` to `auth.toml`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkPairAddParams {
+    /// The device code, `handlrkey1…`, made for this server's key.
+    pub code: String,
+    /// The name to pair it as. Defaults to the device's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// What the device may say `hello` with: `companion`, `harness`.
+    /// Defaults to `["companion"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocols: Option<Vec<String>>,
+    /// Replace an `auth.toml` entry of the same name, and close the old
+    /// key's connections.
+    #[serde(default)]
+    pub replace: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkPairAddResult {
+    /// The name it was added as.
+    pub name: String,
+    /// What it may say `hello` with.
+    pub protocols: Vec<String>,
+}
+
+/// `link.pair_done`: the device added by `link.pair_add` said `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkPairDone {
     pub name: String,
     pub paired: bool,
-    /// Why it did not pair: expired, refused, or a failed handshake.
+    /// Why it did not pair, if it did not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -464,23 +480,27 @@ mod tests {
             outcome: Outcome::Denied,
             detail: Some("too many wrong nonces".to_string()),
         });
-        round_trip(LinkPairBeginParams {
-            name: "s23".to_string(),
+        round_trip(LinkPairBeginParams {});
+        round_trip(LinkPairBeginResult {
+            url: "handlr://127.0.0.1:7347/pair#handlr1abc".to_string(),
+            pairing: "handlr1abc".to_string(),
+            addresses: vec!["127.0.0.1:7347".to_string()],
+            warnings: vec!["no forward".to_string()],
+        });
+        round_trip(LinkPairAddParams {
+            code: "handlrkey1abc".to_string(),
+            name: Some("s23".to_string()),
             protocols: Some(vec!["harness".to_string()]),
-            ttl: Some(60),
             replace: true,
         });
-        round_trip(LinkPairBeginResult {
-            pairing: "handlr1abc".to_string(),
+        round_trip(LinkPairAddResult {
             name: "s23".to_string(),
-            expiry: 1_800_000_000,
-            addresses: vec!["127.0.0.1:7347".to_string()],
-            warnings: vec![],
+            protocols: vec!["companion".to_string()],
         });
         round_trip(LinkPairDone {
             name: "s23".to_string(),
-            paired: false,
-            error: Some("expired".to_string()),
+            paired: true,
+            error: None,
         });
     }
 
@@ -539,5 +559,31 @@ mod tests {
         assert_eq!(named["tab_label"], "-mb");
         assert_eq!(named["tab_number"], 4);
         assert_eq!(serde_json::to_value(Empty {}).unwrap(), json!({}));
+
+        // link.pair_begin takes nothing; link.pair_add needs only the code.
+        assert_eq!(
+            serde_json::to_value(LinkPairBeginParams {}).unwrap(),
+            json!({})
+        );
+        let add: LinkPairAddParams =
+            serde_json::from_value(json!({"code": "handlrkey1abc"})).unwrap();
+        assert_eq!(
+            add,
+            LinkPairAddParams {
+                code: "handlrkey1abc".to_string(),
+                name: None,
+                protocols: None,
+                replace: false,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(LinkPairDone {
+                name: "s23".to_string(),
+                paired: true,
+                error: None
+            })
+            .unwrap(),
+            json!({"name": "s23", "paired": true})
+        );
     }
 }

@@ -1,4 +1,4 @@
-//! Static keys and pairing secrets, from snow's default resolver.
+//! Static keys, from snow's default resolver.
 
 use std::fmt;
 use std::sync::Arc;
@@ -87,16 +87,6 @@ pub fn public_key(private: &[u8; KEY_LEN]) -> Result<[u8; KEY_LEN], LinkError> {
         .ok_or(snow::Error::Init(snow::error::InitStage::GetDhImpl))?;
     dh.set(private);
     to_key(dh.pubkey())
-}
-
-/// A new random 32-byte pairing secret.
-pub fn generate_secret() -> Result<[u8; KEY_LEN], LinkError> {
-    let mut rng = DefaultResolver
-        .resolve_rng()
-        .ok_or(snow::Error::Init(snow::error::InitStage::GetRngImpl))?;
-    let mut secret = [0u8; KEY_LEN];
-    rng.try_fill_bytes(&mut secret)?;
-    Ok(secret)
 }
 
 pub(super) fn to_key(bytes: &[u8]) -> Result<[u8; KEY_LEN], LinkError> {

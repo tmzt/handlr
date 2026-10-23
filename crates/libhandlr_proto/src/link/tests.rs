@@ -1,5 +1,6 @@
-//! Plan 02, step 1: both handshakes and the framing over an in-memory
-//! duplex, and the pairing string.
+//! Plan 02, step 1, as amended at 23:07 EDT: the `IK` handshake and the
+//! framing over an in-memory duplex, the pairing string and the device
+//! code.
 
 use blake2::{Blake2s256, Digest};
 use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -8,108 +9,23 @@ use super::*;
 
 const PIPE: usize = 64 * 1024;
 
-fn payload(server: &StaticKeypair, secret: [u8; KEY_LEN]) -> PairingPayload {
+fn payload(server: &StaticKeypair) -> PairingPayload {
     PairingPayload {
         server_key: server.public,
-        secret,
-        expiry: 1_792_000_000,
-        name: "s23".into(),
         addresses: vec!["box.tail1234.ts.net:7347".into(), "127.0.0.1:7347".into()],
     }
 }
 
-/// A paired connection: (client stream, server stream).
-async fn paired() -> (LinkStream<DuplexStream>, LinkStream<DuplexStream>) {
+/// A connected pair: (client stream, server stream).
+async fn connected() -> (LinkStream<DuplexStream>, LinkStream<DuplexStream>) {
     let server = generate_keypair().unwrap();
     let client = generate_keypair().unwrap();
-    let secret = generate_secret().unwrap();
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        pair(c, &client, &server.public, &secret, None),
-        accept(s, &server, |_| Some(secret), |_| false),
+        reconnect(c, &client, &server.public, None),
+        accept(s, &server, |key| key == &client.public),
     );
-    (cr.unwrap().0, sr.unwrap().stream)
-}
-
-#[tokio::test]
-async fn pairing_succeeds_with_the_right_secret() {
-    let server = generate_keypair().unwrap();
-    let client = generate_keypair().unwrap();
-    let secret = generate_secret().unwrap();
-    let p = payload(&server, secret);
-    let id = p.pairing_id();
-    let (c, s) = duplex(PIPE);
-    let (cr, sr) = tokio::join!(
-        pair(c, &client, &p.server_key, &p.secret, Some(b"{\"hello\":1}")),
-        accept(
-            s,
-            &server,
-            |got| (got == id).then_some(secret),
-            |_| panic!("pairing must not consult authorize"),
-        ),
-    );
-    let (mut cs, server_key) = cr.unwrap();
-    let mut acc = sr.unwrap();
-    assert_eq!(server_key, server.public);
-    assert_eq!(cs.peer_key(), &server.public);
-    assert_eq!(acc.peer_key, client.public);
-    assert_eq!(acc.stream.peer_key(), &client.public);
-    assert_eq!(acc.mode, AcceptedMode::Pairing(id));
-    assert_eq!(acc.first_message.as_deref(), Some(&b"{\"hello\":1}"[..]));
-
-    cs.send_message(b"ping").await.unwrap();
-    assert_eq!(acc.stream.recv_message().await.unwrap(), b"ping");
-    acc.stream.send_message(b"pong").await.unwrap();
-    assert_eq!(cs.recv_message().await.unwrap(), b"pong");
-}
-
-#[tokio::test]
-async fn pairing_fails_with_a_wrong_secret() {
-    let server = generate_keypair().unwrap();
-    let client = generate_keypair().unwrap();
-    let secret = generate_secret().unwrap();
-    let wrong = generate_secret().unwrap();
-
-    // The id names no pending pairing: refused before the handshake.
-    let (c, s) = duplex(PIPE);
-    let (cr, sr) = tokio::join!(
-        pair(c, &client, &server.public, &wrong, None),
-        accept(
-            s,
-            &server,
-            |got| (got == PairingId::from_secret(&secret)).then_some(secret),
-            |_| false,
-        ),
-    );
-    assert!(matches!(sr, Err(LinkError::UnknownPairing)));
-    assert!(matches!(cr, Err(LinkError::Closed)));
-
-    // The server uses the real secret whatever the id: the PSK differs and
-    // the server's read of the last handshake message fails.
-    let (c, s) = duplex(PIPE);
-    let (cr, sr) = tokio::join!(
-        pair(c, &client, &server.public, &wrong, None),
-        accept(s, &server, |_| Some(secret), |_| false),
-    );
-    assert!(matches!(sr, Err(LinkError::Noise(_))), "{:?}", sr.err());
-    let (mut cs, _) = cr.unwrap();
-    assert!(matches!(cs.recv_message().await, Err(LinkError::Closed)));
-}
-
-#[tokio::test]
-async fn a_wrong_server_key_in_the_payload_aborts_the_client() {
-    let server = generate_keypair().unwrap();
-    let other = generate_keypair().unwrap();
-    let client = generate_keypair().unwrap();
-    let secret = generate_secret().unwrap();
-    let (c, s) = duplex(PIPE);
-    let (cr, sr) = tokio::join!(
-        pair(c, &client, &other.public, &secret, None),
-        accept(s, &server, |_| Some(secret), |_| false),
-    );
-    assert!(matches!(cr, Err(LinkError::ServerKeyMismatch)));
-    // The client never sent its static key; the server saw the stream end.
-    assert!(matches!(sr, Err(LinkError::Closed)));
+    (cr.unwrap(), sr.unwrap().stream)
 }
 
 #[tokio::test]
@@ -119,17 +35,13 @@ async fn reconnect_carries_the_first_message() {
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
         reconnect(c, &client, &server.public, Some(b"hello")),
-        accept(
-            s,
-            &server,
-            |_| panic!("reconnecting must not look up a pairing"),
-            |key| key == &client.public,
-        ),
+        accept(s, &server, |key| key == &client.public),
     );
     let mut cs = cr.unwrap();
     let mut acc = sr.unwrap();
-    assert_eq!(acc.mode, AcceptedMode::Reconnect);
     assert_eq!(acc.peer_key, client.public);
+    assert_eq!(acc.stream.peer_key(), &client.public);
+    assert_eq!(cs.peer_key(), &server.public);
     assert_eq!(acc.first_message.as_deref(), Some(&b"hello"[..]));
     acc.stream.send_message(b"welcome").await.unwrap();
     assert_eq!(cs.recv_message().await.unwrap(), b"welcome");
@@ -169,31 +81,20 @@ fn store_key(fail: bool) -> StoreKey {
 }
 
 #[tokio::test]
-async fn a_key_store_key_pairs_and_reconnects() {
+async fn a_key_store_key_connects() {
     use std::sync::atomic::Ordering::SeqCst;
     let server = generate_keypair().unwrap();
     let client = store_key(false);
-    let secret = generate_secret().unwrap();
-
-    // XXpsk3: the client's static key is in `se` alone.
-    let (c, s) = duplex(PIPE);
-    let (cr, sr) = tokio::join!(
-        pair(c, &client, &server.public, &secret, None),
-        accept(s, &server, |_| Some(secret), |_| false),
-    );
-    cr.unwrap();
-    assert_eq!(sr.unwrap().peer_key, client.pair.public);
-    assert_eq!(client.dhs.load(SeqCst), 1);
 
     // IK: `ss` on the first message and `se` on the reply.
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
         reconnect(c, &client, &server.public, Some(b"hello")),
-        accept(s, &server, |_| None, |key| key == &client.pair.public),
+        accept(s, &server, |key| key == &client.pair.public),
     );
     let mut cs = cr.unwrap();
     let mut acc = sr.unwrap();
-    assert_eq!(client.dhs.load(SeqCst), 3);
+    assert_eq!(client.dhs.load(SeqCst), 2);
     acc.stream.send_message(b"welcome").await.unwrap();
     assert_eq!(cs.recv_message().await.unwrap(), b"welcome");
 }
@@ -205,7 +106,7 @@ async fn a_locked_key_store_fails_the_handshake() {
     let (c, s) = duplex(PIPE);
     let (cr, _) = tokio::join!(
         reconnect(c, &client, &server.public, Some(b"hello")),
-        accept(s, &server, |_| None, |_| true),
+        accept(s, &server, |_| true),
     );
     assert!(matches!(cr, Err(LinkError::Noise(_))), "{:?}", cr.err());
 }
@@ -219,7 +120,7 @@ async fn ik_with_a_rejected_key_gets_no_reply() {
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
         reconnect(c, &client, &server.public, Some(b"hello")),
-        accept(s, &server, |_| None, |_| false),
+        accept(s, &server, |_| false),
     );
     assert!(matches!(sr, Err(LinkError::Unauthorized)));
     assert!(matches!(cr, Err(LinkError::Closed)));
@@ -243,7 +144,7 @@ async fn ik_with_a_rejected_key_gets_no_reply() {
     head.extend_from_slice(&(n as u16).to_be_bytes());
     head.extend_from_slice(&buf[..n]);
     c.write_all(&head).await.unwrap();
-    let sr = accept(s, &server, |_| None, |_| false).await;
+    let sr = accept(s, &server, |_| false).await;
     assert!(matches!(sr, Err(LinkError::Unauthorized)));
     let mut reply = Vec::new();
     c.read_to_end(&mut reply).await.unwrap();
@@ -252,19 +153,27 @@ async fn ik_with_a_rejected_key_gets_no_reply() {
 
 #[tokio::test]
 async fn an_unknown_mode_byte_closes_the_connection() {
-    let server = generate_keypair().unwrap();
-    let (mut c, s) = duplex(PIPE);
-    c.write_all(&[0x03, 0, 0]).await.unwrap();
-    let sr = accept(s, &server, |_| None, |_| true).await;
-    assert!(matches!(sr, Err(LinkError::UnknownMode(0x03))));
-    let mut reply = Vec::new();
-    c.read_to_end(&mut reply).await.unwrap();
-    assert!(reply.is_empty());
+    // 0x01 was the pairing handshake (XXpsk3), and is now unknown too.
+    for mode in [0x01, 0x03] {
+        let server = generate_keypair().unwrap();
+        let (mut c, s) = duplex(PIPE);
+        c.write_all(&[mode, 0, 0, 0, 0, 0, 32]).await.unwrap();
+        c.write_all(&[0; 32]).await.unwrap();
+        let sr = accept(s, &server, |_| panic!("no key to authorize")).await;
+        assert!(
+            matches!(sr, Err(LinkError::UnknownMode(m)) if m == mode),
+            "{:?}",
+            sr.err()
+        );
+        let mut reply = Vec::new();
+        c.read_to_end(&mut reply).await.unwrap();
+        assert!(reply.is_empty());
+    }
 }
 
 #[tokio::test]
 async fn one_mib_round_trips_in_chunks() {
-    let (mut a, mut b) = paired().await;
+    let (mut a, mut b) = connected().await;
     let msg: Vec<u8> = (0..MAX_MESSAGE).map(|i| (i % 251) as u8).collect();
     assert!(msg.len() > 16 * MAX_CHUNK, "the message spans many frames");
     let (sent, got) = tokio::join!(a.send_message(&msg), b.recv_message());
@@ -280,7 +189,7 @@ async fn one_mib_round_trips_in_chunks() {
 
 #[tokio::test]
 async fn one_mib_plus_one_byte_closes_the_connection() {
-    let (mut a, mut b) = paired().await;
+    let (mut a, mut b) = connected().await;
     let msg = vec![1u8; MAX_MESSAGE + 1];
 
     // The sender refuses it outright.
@@ -299,7 +208,7 @@ async fn one_mib_plus_one_byte_closes_the_connection() {
 
 #[tokio::test]
 async fn split_halves_carry_messages() {
-    let (a, mut b) = paired().await;
+    let (a, mut b) = connected().await;
     let (mut ar, mut aw) = a.into_split();
     aw.send_message(b"one").await.unwrap();
     assert_eq!(b.recv_message().await.unwrap(), b"one");
@@ -320,13 +229,16 @@ fn public_key_matches_the_generated_pair() {
 #[test]
 fn pairing_string_round_trips() {
     let server = generate_keypair().unwrap();
-    let p = payload(&server, generate_secret().unwrap());
+    let p = payload(&server);
     let s = p.encode().unwrap();
     assert!(s.starts_with("handlr1"));
     assert_eq!(PairingPayload::decode(&s).unwrap(), p);
     assert_eq!(format!(" {s}\n").parse::<PairingPayload>().unwrap(), p);
-    assert_eq!(p.pairing_id(), PairingId::from_secret(&p.secret));
-    assert!(!format!("{p:?}").contains(&format!("{:?}", p.secret)));
+    // Version 2: the key and the addresses, nothing secret.
+    let bytes = p.to_bytes().unwrap();
+    assert_eq!(bytes[0], 2);
+    assert_eq!(&bytes[1..33], &server.public);
+    assert_eq!(bytes.len(), 1 + 32 + 1 + (1 + 24) + (1 + 14) + 4);
 }
 
 #[test]
@@ -337,22 +249,27 @@ fn a_changed_character_fails_the_checksum() {
         private: [1; KEY_LEN],
         public: [2; KEY_LEN],
     };
-    let s = payload(&server, [9; KEY_LEN]).encode().unwrap();
+    let s = payload(&server).encode().unwrap();
     let mid = PAIRING_PREFIX.len() + (s.len() - PAIRING_PREFIX.len()) / 2;
-    let c = s.as_bytes()[mid];
-    let swapped = if c == b'2' { '3' } else { '2' };
-    let mut t = s.clone();
-    t.replace_range(mid..mid + 1, &swapped.to_string());
     assert_eq!(
-        PairingPayload::decode(&t),
+        PairingPayload::decode(&change_one(&s, mid)),
         Err(PairingStringError::BadChecksum)
     );
+}
+
+/// `s` with the character at `at` changed, staying base58.
+fn change_one(s: &str, at: usize) -> String {
+    let c = s.as_bytes()[at];
+    let swapped = if c == b'2' { '3' } else { '2' };
+    let mut t = s.to_string();
+    t.replace_range(at..at + 1, &swapped.to_string());
+    t
 }
 
 #[test]
 fn a_wrong_prefix_is_refused() {
     let server = generate_keypair().unwrap();
-    let s = payload(&server, [9; KEY_LEN]).encode().unwrap();
+    let s = payload(&server).encode().unwrap();
     let t = s.replacen("handlr1", "handlr2", 1);
     assert_eq!(
         PairingPayload::decode(&t),
@@ -364,18 +281,35 @@ fn a_wrong_prefix_is_refused() {
     );
 }
 
+/// A pairing string of `body` with its checksum recomputed.
+fn with_checksum(mut body: Vec<u8>) -> String {
+    let sum = Blake2s256::digest(&body);
+    body.extend_from_slice(&sum[..4]);
+    format!("handlr1{}", bs58::encode(&body).into_string())
+}
+
 #[test]
 fn an_unknown_version_is_refused() {
     let server = generate_keypair().unwrap();
-    let mut bytes = payload(&server, [9; KEY_LEN]).to_bytes().unwrap();
-    let body = bytes.len() - 4;
-    bytes[0] = 2;
-    let sum = Blake2s256::digest(&bytes[..body]);
-    bytes[body..].copy_from_slice(&sum[..4]);
-    let s = format!("handlr1{}", bs58::encode(&bytes).into_string());
+    let mut bytes = payload(&server).to_bytes().unwrap();
+    bytes.truncate(bytes.len() - 4);
+    bytes[0] = 3;
     assert_eq!(
-        PairingPayload::decode(&s),
-        Err(PairingStringError::UnknownVersion(2))
+        PairingPayload::decode(&with_checksum(bytes)),
+        Err(PairingStringError::UnknownVersion(3))
+    );
+
+    // A version 1 string, with its secret, expiry and name, is refused.
+    let mut v1 = vec![1];
+    v1.extend_from_slice(&server.public);
+    v1.extend_from_slice(&[9; KEY_LEN]);
+    v1.extend_from_slice(&1_792_000_000u32.to_be_bytes());
+    v1.extend_from_slice(&[3, b's', b'2', b'3']);
+    v1.extend_from_slice(&[1, 14]);
+    v1.extend_from_slice(b"127.0.0.1:7347");
+    assert_eq!(
+        PairingPayload::decode(&with_checksum(v1)),
+        Err(PairingStringError::UnknownVersion(1))
     );
 }
 
@@ -390,20 +324,31 @@ fn bad_base58_and_short_payloads_are_refused() {
         PairingPayload::decode("handlr1"),
         Err(PairingStringError::Malformed)
     );
+    // Trailing bytes after the addresses.
+    let server = generate_keypair().unwrap();
+    let mut bytes = payload(&server).to_bytes().unwrap();
+    bytes.truncate(bytes.len() - 4);
+    bytes.push(0);
+    assert_eq!(
+        PairingPayload::decode(&with_checksum(bytes)),
+        Err(PairingStringError::Malformed)
+    );
 }
 
 #[test]
 fn encoding_refuses_oversized_fields() {
     let server = generate_keypair().unwrap();
-    let mut p = payload(&server, [9; KEY_LEN]);
-    p.name = "x".repeat(256);
-    assert_eq!(p.encode(), Err(PairingStringError::NameTooLong));
+    let mut p = payload(&server);
+    p.addresses = vec!["x".repeat(256)];
+    assert_eq!(p.encode(), Err(PairingStringError::AddressTooLong));
+    p.addresses = vec!["a:1".to_string(); 256];
+    assert_eq!(p.encode(), Err(PairingStringError::TooManyAddresses));
 }
 
 #[test]
 fn the_pairing_url_names_the_remote_address_and_round_trips() {
     let server = generate_keypair().unwrap();
-    let mut p = payload(&server, generate_secret().unwrap());
+    let mut p = payload(&server);
     p.addresses = vec!["127.0.0.1:7347".into(), "box.tail1234.ts.net:7347".into()];
     let url = p.url().unwrap();
     assert_eq!(
@@ -435,7 +380,7 @@ fn the_pairing_url_names_the_remote_address_and_round_trips() {
 #[test]
 fn a_pairing_url_must_match_its_payload() {
     let server = generate_keypair().unwrap();
-    let p = payload(&server, generate_secret().unwrap());
+    let p = payload(&server);
     let s = p.encode().unwrap();
     for bad in [
         format!("handlr://other.ts.net:7347/pair#{s}"),
@@ -455,5 +400,117 @@ fn a_pairing_url_must_match_its_payload() {
     assert_eq!(
         PairingPayload::decode(&format!("https://box.tail1234.ts.net:7347/pair#{s}")),
         Err(PairingStringError::BadPrefix)
+    );
+}
+
+fn device(name: &str) -> DeviceCode {
+    DeviceCode {
+        key: generate_keypair().unwrap().public,
+        name: name.to_string(),
+    }
+}
+
+#[test]
+fn a_device_code_round_trips() {
+    let server = generate_keypair().unwrap();
+    let d = device("s23-ultra_1.a");
+    let code = d.encode(&server.public).unwrap();
+    assert!(code.starts_with("handlrkey1"), "{code}");
+    // About 60 characters for a short name.
+    let short = device("s23").encode(&server.public).unwrap();
+    assert!((60..=70).contains(&short.len()), "{} {short}", short.len());
+    assert_eq!(DeviceCode::decode(&code, &server.public).unwrap(), d);
+    assert_eq!(
+        DeviceCode::decode(&format!("  {code}\n"), &server.public).unwrap(),
+        d
+    );
+    // The layout: version 1, the key, the name; the checksum covers the
+    // server's key first.
+    let bytes = bs58::decode(&code["handlrkey1".len()..])
+        .into_vec()
+        .unwrap();
+    assert_eq!(bytes[0], 1);
+    assert_eq!(&bytes[1..33], &d.key);
+    assert_eq!(usize::from(bytes[33]), d.name.len());
+    assert_eq!(&bytes[34..bytes.len() - 4], d.name.as_bytes());
+    let mut sum = Blake2s256::new();
+    sum.update(server.public);
+    sum.update(&bytes[..bytes.len() - 4]);
+    assert_eq!(&bytes[bytes.len() - 4..], &sum.finalize()[..4]);
+}
+
+#[test]
+fn a_device_code_for_another_server_is_refused() {
+    let server = generate_keypair().unwrap();
+    let other = generate_keypair().unwrap();
+    let code = device("s23").encode(&other.public).unwrap();
+    assert_eq!(
+        DeviceCode::decode(&code, &server.public),
+        Err(PairingStringError::BadChecksum)
+    );
+}
+
+#[test]
+fn a_mistyped_device_code_is_refused() {
+    let server = StaticKeypair {
+        private: [1; KEY_LEN],
+        public: [2; KEY_LEN],
+    };
+    let code = DeviceCode {
+        key: [5; KEY_LEN],
+        name: "s23".into(),
+    }
+    .encode(&server.public)
+    .unwrap();
+    let mid = DEVICE_CODE_PREFIX.len() + (code.len() - DEVICE_CODE_PREFIX.len()) / 2;
+    assert_eq!(
+        DeviceCode::decode(&change_one(&code, mid), &server.public),
+        Err(PairingStringError::BadChecksum)
+    );
+    assert_eq!(
+        DeviceCode::decode(
+            &code.replacen("handlrkey1", "handlrkey2", 1),
+            &server.public
+        ),
+        Err(PairingStringError::BadPrefix)
+    );
+    // A pairing string is not a device code, nor the other way round.
+    let pairing = payload(&server).encode().unwrap();
+    assert_eq!(
+        DeviceCode::decode(&pairing, &server.public),
+        Err(PairingStringError::BadPrefix)
+    );
+    assert_eq!(
+        PairingPayload::decode(&code),
+        Err(PairingStringError::BadPrefix)
+    );
+}
+
+#[test]
+fn a_bad_device_name_is_refused() {
+    let server = generate_keypair().unwrap();
+    for bad in ["", "has space", "slash/", "ünï", &"x".repeat(33)] {
+        assert!(!DeviceCode::valid_name(bad), "{bad}");
+        assert_eq!(
+            device(bad).encode(&server.public),
+            Err(PairingStringError::BadName),
+            "{bad}"
+        );
+    }
+    assert!(DeviceCode::valid_name(&"x".repeat(32)));
+
+    // A code that carries a bad name, with a good checksum, is refused.
+    let key = [7u8; KEY_LEN];
+    let mut body = vec![1];
+    body.extend_from_slice(&key);
+    body.extend_from_slice(&[2, b'a', b' ']);
+    let mut sum = Blake2s256::new();
+    sum.update(server.public);
+    sum.update(&body);
+    body.extend_from_slice(&sum.finalize()[..4]);
+    let code = format!("handlrkey1{}", bs58::encode(&body).into_string());
+    assert_eq!(
+        DeviceCode::decode(&code, &server.public),
+        Err(PairingStringError::BadName)
     );
 }

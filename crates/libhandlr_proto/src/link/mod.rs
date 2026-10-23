@@ -1,19 +1,23 @@
 //! handlr link: Noise over any Tokio byte stream
 //! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, decisions 1–2 and
-//! the amendments of 11:58 and 16:23 EDT).
+//! the amendments of 11:58, 16:23 and 23:07 EDT).
 //!
-//! * Pairing is `Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s`, with the pairing
-//!   secret as the PSK. The client opens with the mode byte `0x01` and the
-//!   4-byte [`PairingId`] in the clear, so the server knows which pending
-//!   secret to use.
-//! * Reconnecting is `Noise_IK_25519_ChaChaPoly_BLAKE2s`: the client knows
-//!   the server's static key, opens with the mode byte `0x02`, and may carry
-//!   its first message in the handshake.
+//! * Every connection, the first one included, is
+//!   `Noise_IK_25519_ChaChaPoly_BLAKE2s`: the client knows the server's
+//!   static key (from the pairing string), opens with the mode byte `0x02`,
+//!   and may carry its first message in the handshake. The server learns
+//!   the client's key from the device code pasted into `handlr pair`, and
+//!   drops a key it does not know with no reply. Any other mode byte,
+//!   `0x01` (the pairing handshake that was removed) included, closes the
+//!   connection.
 //! * The prologue is `b"handlr.link/1"` followed by the mode byte.
 //! * Every Noise message is a frame: a 2-byte big-endian length, then the
 //!   message (at most 65535 bytes). After the handshake each frame's
 //!   plaintext is a flag byte (`0x00` last, `0x01` more) and a chunk of one
 //!   message. A message reassembled past 1 MiB closes the connection.
+//! * [`PairingPayload`] is the pairing string, `handlr1…`, and its URL;
+//!   [`DeviceCode`] is the device's code, `handlrkey1…`. Neither holds a
+//!   secret.
 //!
 //! The local static key is a [`StaticKey`], which does its own
 //! Diffie-Hellman, so a client's private key can stay in a key store and
@@ -31,29 +35,25 @@ mod stream;
 #[cfg(test)]
 mod tests;
 
-pub use handshake::{accept, pair, reconnect, Accepted, AcceptedMode};
-pub use keys::{generate_keypair, generate_secret, public_key, StaticKey, StaticKeypair};
+pub use handshake::{accept, reconnect, Accepted};
+pub use keys::{generate_keypair, public_key, StaticKey, StaticKeypair};
 pub use pairing::{
-    PairingId, PairingPayload, PairingStringError, PAIRING_PREFIX, PAIRING_URL_SCHEME,
-    PAIRING_VERSION,
+    DeviceCode, PairingPayload, PairingStringError, DEVICE_CODE_PREFIX, DEVICE_CODE_VERSION,
+    DEVICE_NAME_MAX, PAIRING_PREFIX, PAIRING_URL_SCHEME, PAIRING_VERSION,
 };
 pub use stream::{LinkReader, LinkStream, LinkWriter};
 
 use std::fmt;
 
-/// An X25519 public or private key, or a pairing secret.
+/// An X25519 public or private key.
 pub const KEY_LEN: usize = 32;
 
-/// The pairing handshake.
-pub const PAIRING_PATTERN: &str = "Noise_XXpsk3_25519_ChaChaPoly_BLAKE2s";
-/// The reconnecting handshake.
+/// The handshake.
 pub const RECONNECT_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// The prologue, before the mode byte.
 pub const PROLOGUE_PREFIX: &[u8] = b"handlr.link/1";
 
-/// The client's first byte when pairing.
-pub const MODE_PAIRING: u8 = 0x01;
-/// The client's first byte when reconnecting.
+/// The client's first byte: `IK`.
 pub const MODE_RECONNECT: u8 = 0x02;
 
 /// The largest Noise message, and so the largest frame body.
@@ -83,17 +83,12 @@ pub enum LinkError {
     /// The peer closed the connection, or the stream was already closed by
     /// an earlier error.
     Closed,
-    /// The Noise handshake or a decryption failed (for example, a wrong
-    /// pairing secret).
+    /// The Noise handshake or a decryption failed (for example, a client
+    /// that has the wrong server key).
     Noise(NoiseError),
     /// The client's first byte was not a known mode.
     UnknownMode(u8),
-    /// No pending pairing matches the client's pairing id.
-    UnknownPairing,
-    /// While pairing, the server's static key differed from the pairing
-    /// payload's.
-    ServerKeyMismatch,
-    /// While reconnecting, the client's static key was not authorized. The
+    /// The client's static key was not authorized. The
     /// server sent nothing back.
     Unauthorized,
     /// A message is larger than [`MAX_MESSAGE`] (sending), or was
@@ -125,10 +120,6 @@ impl fmt::Display for LinkError {
             LinkError::Closed => f.write_str("link closed"),
             LinkError::Noise(e) => write!(f, "noise: {e}"),
             LinkError::UnknownMode(m) => write!(f, "unknown link mode byte 0x{m:02x}"),
-            LinkError::UnknownPairing => f.write_str("no pending pairing matches"),
-            LinkError::ServerKeyMismatch => {
-                f.write_str("the server's key differs from the pairing string's")
-            }
             LinkError::Unauthorized => f.write_str("client key not authorized"),
             LinkError::MessageTooLarge => {
                 write!(f, "message larger than {MAX_MESSAGE} bytes")

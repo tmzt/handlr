@@ -1,15 +1,24 @@
-//! The pairing string (plan 02, amendment of 11:58 EDT).
+//! The pairing string and the device code (plan 02, amendment of
+//! 23:07 EDT: pairing by public keys, with no shared secret).
 //!
-//! The payload, as bytes: version (1), server public key (32), secret (32),
-//! expiry (4, unix seconds, big-endian), name (1-byte length, UTF-8),
-//! addresses (1-byte count, then each a 1-byte length and `host:port` in
-//! UTF-8), and a checksum: the first 4 bytes of BLAKE2s-256 over every
-//! field before it. The text form is `handlr1` followed by the payload in
-//! base58 with the Bitcoin alphabet.
+//! The pairing string's payload, as bytes: version (1 byte, `2`), the
+//! server's public key (32), addresses (1-byte count, then each a 1-byte
+//! length and `host:port` in UTF-8), and a checksum: the first 4 bytes of
+//! BLAKE2s-256 over every field before it. The text form is `handlr1`
+//! followed by the payload in base58 with the Bitcoin alphabet. It holds no
+//! secret, so it may be shown, logged or kept freely.
 //!
-//! The pairing URL (plan 20261022_06, decision 1) is
-//! `handlr://<host>:<port>/pair#<pairing string>`: the address a phone
+//! The pairing URL (plan 20261022_06, decision 1, as amended at 23:07 EDT)
+//! is `handlr://<host>:<port>/pair#<pairing string>`: the address a phone
 //! reaches the server at, and the string. A QR code carries it.
+//!
+//! The device code is what the device shows for the user to paste into
+//! `handlr pair`: version (1 byte, `1`), the device's public key (32), its
+//! name (1-byte length, then 1 to 32 bytes of ASCII letters, digits, `-`,
+//! `_` or `.`), and a checksum: the first 4 bytes of BLAKE2s-256 over the
+//! **server's** public key, then every field before it. The text form is
+//! `handlrkey1` and base58. Because the checksum covers the server's key, a
+//! code made for another server, or mistyped, fails it.
 
 use std::fmt;
 
@@ -17,73 +26,59 @@ use blake2::{Blake2s256, Digest};
 
 use super::KEY_LEN;
 
-/// The text form's prefix.
+/// The pairing string's prefix.
 pub const PAIRING_PREFIX: &str = "handlr1";
 /// The pairing URL's scheme.
 pub const PAIRING_URL_SCHEME: &str = "handlr";
 /// The pairing URL's path.
 const PAIRING_URL_PATH: &str = "/pair";
 
-/// The payload version this crate writes and reads.
-pub const PAIRING_VERSION: u8 = 1;
+/// The pairing payload version this crate writes and reads.
+pub const PAIRING_VERSION: u8 = 2;
+
+/// The device code's prefix.
+pub const DEVICE_CODE_PREFIX: &str = "handlrkey1";
+/// The device code version this crate writes and reads.
+pub const DEVICE_CODE_VERSION: u8 = 1;
+/// The longest device name, in bytes.
+pub const DEVICE_NAME_MAX: usize = 32;
 
 const CHECKSUM_LEN: usize = 4;
 
-/// What a pairing string carries. `Debug` does not print the secret.
-#[derive(Clone, PartialEq, Eq)]
+/// What a pairing string carries: the server's key and where to reach it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingPayload {
     /// The server's static X25519 public key.
     pub server_key: [u8; KEY_LEN],
-    /// The single-use pairing secret, the PSK of the pairing handshake.
-    pub secret: [u8; KEY_LEN],
-    /// When the secret expires, in unix seconds.
-    pub expiry: u32,
-    /// The name the client is paired as.
-    pub name: String,
     /// The server's addresses, `host:port`, in order of preference.
     pub addresses: Vec<String>,
 }
 
-impl fmt::Debug for PairingPayload {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PairingPayload")
-            .field("server_key", &self.server_key)
-            .field("secret", &"<redacted>")
-            .field("expiry", &self.expiry)
-            .field("name", &self.name)
-            .field("addresses", &self.addresses)
-            .finish()
-    }
+/// What a device code carries: the device's key and the name it chose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCode {
+    /// The device's static X25519 public key.
+    pub key: [u8; KEY_LEN],
+    /// 1 to 32 bytes of ASCII letters, digits, `-`, `_` or `.`.
+    pub name: String,
 }
 
-/// Which pending pairing a client means: the first 4 bytes of
-/// BLAKE2s-256 of the secret. The client sends it in the clear after the
-/// mode byte `0x01`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PairingId(pub [u8; 4]);
-
-impl PairingId {
-    pub fn from_secret(secret: &[u8; KEY_LEN]) -> Self {
-        PairingId(blake2s_prefix(secret))
-    }
-}
-
-/// Why a pairing string or payload was refused.
+/// Why a pairing string, a pairing URL or a device code was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PairingStringError {
-    /// The string does not start with `handlr1`.
+    /// The text does not start with `handlr1` (a pairing string) or
+    /// `handlrkey1` (a device code).
     BadPrefix,
     /// A character outside the base58 alphabet.
     BadBase58,
-    /// The checksum does not match the payload.
+    /// The checksum does not match. For a device code, it may also have
+    /// been made for another server.
     BadChecksum,
-    /// A payload version this crate does not know.
+    /// A version this crate does not know.
     UnknownVersion(u8),
     /// The payload is truncated, has trailing bytes or invalid UTF-8.
     Malformed,
-    /// Encoding: the name is longer than 255 bytes.
-    NameTooLong,
     /// Encoding: more than 255 addresses.
     TooManyAddresses,
     /// Encoding: an address longer than 255 bytes.
@@ -91,23 +86,30 @@ pub enum PairingStringError {
     /// A pairing URL that is not `handlr://<host>:<port>/pair#<string>`
     /// with a host the payload carries, or a payload with no address.
     BadUrl,
+    /// A device name that is not 1 to 32 bytes of ASCII letters, digits,
+    /// `-`, `_` or `.`.
+    BadName,
 }
 
 impl fmt::Display for PairingStringError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let what = match self {
-            PairingStringError::BadPrefix => "it does not start with \"handlr1\"",
+            PairingStringError::BadPrefix => {
+                "it does not start with \"handlr1\" (or \"handlrkey1\" for a device code)"
+            }
             PairingStringError::BadBase58 => "it has a character outside base58",
             PairingStringError::BadChecksum => "its checksum does not match",
             PairingStringError::UnknownVersion(v) => {
                 return write!(f, "invalid pairing string: unknown version {v}")
             }
             PairingStringError::Malformed => "its payload is malformed",
-            PairingStringError::NameTooLong => "the name is longer than 255 bytes",
             PairingStringError::TooManyAddresses => "there are more than 255 addresses",
             PairingStringError::AddressTooLong => "an address is longer than 255 bytes",
             PairingStringError::BadUrl => {
                 "it is not a handlr://<host>:<port>/pair# URL for one of its addresses"
+            }
+            PairingStringError::BadName => {
+                "the name is not 1 to 32 ASCII letters, digits, '-', '_' or '.'"
             }
         };
         write!(f, "invalid pairing string: {what}")
@@ -117,26 +119,11 @@ impl fmt::Display for PairingStringError {
 impl std::error::Error for PairingStringError {}
 
 impl PairingPayload {
-    /// The pairing id the client sends for this payload's secret.
-    pub fn pairing_id(&self) -> PairingId {
-        PairingId::from_secret(&self.secret)
-    }
-
-    /// Whether the secret has expired at `now`, in unix seconds.
-    pub fn is_expired(&self, now: u64) -> bool {
-        now >= u64::from(self.expiry)
-    }
-
     /// The binary payload, with its checksum.
     pub fn to_bytes(&self) -> Result<Vec<u8>, PairingStringError> {
-        let mut out = Vec::with_capacity(1 + 2 * KEY_LEN + 4 + 64);
+        let mut out = Vec::with_capacity(1 + KEY_LEN + 64);
         out.push(PAIRING_VERSION);
         out.extend_from_slice(&self.server_key);
-        out.extend_from_slice(&self.secret);
-        out.extend_from_slice(&self.expiry.to_be_bytes());
-        let name = u8::try_from(self.name.len()).map_err(|_| PairingStringError::NameTooLong)?;
-        out.push(name);
-        out.extend_from_slice(self.name.as_bytes());
         let count =
             u8::try_from(self.addresses.len()).map_err(|_| PairingStringError::TooManyAddresses)?;
         out.push(count);
@@ -145,41 +132,27 @@ impl PairingPayload {
             out.push(len);
             out.extend_from_slice(addr.as_bytes());
         }
-        let sum = blake2s_prefix(&out);
+        let sum = blake2s_prefix(&[&out]);
         out.extend_from_slice(&sum);
         Ok(out)
     }
 
     /// Reads a binary payload: checksum first, then version, then fields.
+    /// A version 1 payload (with a secret) is [`PairingStringError::UnknownVersion`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PairingStringError> {
-        if bytes.len() < 1 + CHECKSUM_LEN {
-            return Err(PairingStringError::Malformed);
-        }
-        let (body, sum) = bytes.split_at(bytes.len() - CHECKSUM_LEN);
-        if blake2s_prefix(body) != sum {
-            return Err(PairingStringError::BadChecksum);
-        }
-        let mut r = Reader(body);
+        let mut r = Reader(checked(bytes, &[])?);
         let version = r.u8()?;
         if version != PAIRING_VERSION {
             return Err(PairingStringError::UnknownVersion(version));
         }
         let server_key = r.array()?;
-        let secret = r.array()?;
-        let expiry = u32::from_be_bytes(r.array()?);
-        let name = r.string()?;
         let count = r.u8()?;
         let addresses = (0..count)
             .map(|_| r.string())
             .collect::<Result<Vec<_>, _>>()?;
-        if !r.0.is_empty() {
-            return Err(PairingStringError::Malformed);
-        }
+        r.end()?;
         Ok(PairingPayload {
             server_key,
-            secret,
-            expiry,
-            name,
             addresses,
         })
     }
@@ -238,13 +211,7 @@ impl PairingPayload {
     }
 
     fn decode_string(s: &str) -> Result<Self, PairingStringError> {
-        let rest = s
-            .strip_prefix(PAIRING_PREFIX)
-            .ok_or(PairingStringError::BadPrefix)?;
-        let bytes = bs58::decode(rest)
-            .into_vec()
-            .map_err(|_| PairingStringError::BadBase58)?;
-        Self::from_bytes(&bytes)
+        Self::from_bytes(&from_base58(s, PAIRING_PREFIX)?)
     }
 }
 
@@ -254,6 +221,78 @@ impl std::str::FromStr for PairingPayload {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::decode(s)
     }
+}
+
+impl DeviceCode {
+    /// Whether `name` may be a device's name: 1 to 32 bytes of ASCII
+    /// letters, digits, `-`, `_` or `.`.
+    pub fn valid_name(name: &str) -> bool {
+        (1..=DEVICE_NAME_MAX).contains(&name.len())
+            && name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+    }
+
+    /// The text form for the server whose key is `server_key`:
+    /// `handlrkey1` and the code in base58.
+    pub fn encode(&self, server_key: &[u8; KEY_LEN]) -> Result<String, PairingStringError> {
+        if !Self::valid_name(&self.name) {
+            return Err(PairingStringError::BadName);
+        }
+        let mut out = Vec::with_capacity(1 + KEY_LEN + 1 + self.name.len() + CHECKSUM_LEN);
+        out.push(DEVICE_CODE_VERSION);
+        out.extend_from_slice(&self.key);
+        out.push(self.name.len() as u8);
+        out.extend_from_slice(self.name.as_bytes());
+        let sum = blake2s_prefix(&[server_key, &out]);
+        out.extend_from_slice(&sum);
+        Ok(format!(
+            "{DEVICE_CODE_PREFIX}{}",
+            bs58::encode(out).into_string()
+        ))
+    }
+
+    /// Reads the text form, checking it against `server_key`.
+    /// Surrounding whitespace is ignored. A code made for another server
+    /// fails as [`PairingStringError::BadChecksum`].
+    pub fn decode(s: &str, server_key: &[u8; KEY_LEN]) -> Result<Self, PairingStringError> {
+        let bytes = from_base58(s.trim(), DEVICE_CODE_PREFIX)?;
+        let mut r = Reader(checked(&bytes, server_key)?);
+        let version = r.u8()?;
+        if version != DEVICE_CODE_VERSION {
+            return Err(PairingStringError::UnknownVersion(version));
+        }
+        let key = r.array()?;
+        let name = r.string()?;
+        r.end()?;
+        if !Self::valid_name(&name) {
+            return Err(PairingStringError::BadName);
+        }
+        Ok(DeviceCode { key, name })
+    }
+}
+
+/// The base58 after `prefix`.
+fn from_base58(s: &str, prefix: &str) -> Result<Vec<u8>, PairingStringError> {
+    let rest = s
+        .strip_prefix(prefix)
+        .ok_or(PairingStringError::BadPrefix)?;
+    bs58::decode(rest)
+        .into_vec()
+        .map_err(|_| PairingStringError::BadBase58)
+}
+
+/// The body of `bytes`, once its trailing checksum matches BLAKE2s-256 of
+/// `salt` then the body.
+fn checked<'a>(bytes: &'a [u8], salt: &[u8]) -> Result<&'a [u8], PairingStringError> {
+    if bytes.len() < 1 + CHECKSUM_LEN {
+        return Err(PairingStringError::Malformed);
+    }
+    let (body, sum) = bytes.split_at(bytes.len() - CHECKSUM_LEN);
+    if blake2s_prefix(&[salt, body]) != sum {
+        return Err(PairingStringError::BadChecksum);
+    }
+    Ok(body)
 }
 
 /// Whether `host:port` names this machine only: `localhost`, `127.0.0.0/8`
@@ -267,8 +306,13 @@ fn is_loopback(address: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
-fn blake2s_prefix(data: &[u8]) -> [u8; 4] {
-    let digest = Blake2s256::digest(data);
+/// The first 4 bytes of BLAKE2s-256 over `parts`, in order.
+fn blake2s_prefix(parts: &[&[u8]]) -> [u8; CHECKSUM_LEN] {
+    let mut hasher = Blake2s256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    let digest = hasher.finalize();
     [digest[0], digest[1], digest[2], digest[3]]
 }
 
@@ -297,5 +341,13 @@ impl Reader<'_> {
     fn string(&mut self) -> Result<String, PairingStringError> {
         let len = usize::from(self.u8()?);
         String::from_utf8(self.take(len)?.to_vec()).map_err(|_| PairingStringError::Malformed)
+    }
+
+    fn end(&self) -> Result<(), PairingStringError> {
+        if self.0.is_empty() {
+            Ok(())
+        } else {
+            Err(PairingStringError::Malformed)
+        }
     }
 }

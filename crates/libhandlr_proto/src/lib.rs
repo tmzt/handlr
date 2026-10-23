@@ -13,7 +13,8 @@
 //! alone, so clients can use it without handlr.
 //!
 //! The `link` feature adds [`link`], the encrypted transport (Noise over
-//! any Tokio byte stream) and the pairing string (plan 02, decisions 1–2).
+//! any Tokio byte stream), the pairing string and the device code (plan 02,
+//! decisions 1–2, as amended at 23:07 EDT).
 
 pub mod common;
 pub mod companion;

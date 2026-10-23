@@ -1,23 +1,27 @@
 //! A handlr link client, for pairing, reconnecting and revocation
-//! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, step 3).
+//! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, step 3, as amended
+//! at 23:07 EDT: pairing by public keys).
 //!
 //! ```text
 //! cargo run -p libhandlr_proto --features link --example link_client -- \
-//!     --key <file> [--protocol handlr.harness] [--wait] [<pairing string>]
+//!     --key <file> [--name <name>] [--protocol handlr.harness] [--wait] \
+//!     [<pairing URL or string>]
 //! ```
 //!
-//! With a pairing string, it pairs (`XXpsk3`, sending `hello` in the
-//! handshake), stores its key, the server's key and addresses in `--key`
-//! (mode 0600), and runs `agents.list`. Without one, it reads `--key`,
-//! reconnects (`IK`, `hello` as the first message) and runs `agents.list`.
-//! `--wait` then stays connected, printing what arrives, until the server
-//! closes the connection (as it does when the entry is deleted).
+//! With a pairing URL or string, it uses the key in `--key` (or makes one),
+//! stores the server's key and addresses there (mode 0600), and prints its
+//! device code for `handlr pair`. It then connects (`IK`, `hello` in the
+//! handshake) every 2 s until the server accepts its key, which it does once
+//! the code is pasted. Without one, it reads `--key` and connects once. Either
+//! way it then runs `agents.list`. `--wait` then stays connected, printing
+//! what arrives, until the server closes the connection (as it does when the
+//! entry is deleted).
 //!
 //! Each link message is one JSON-RPC object, with no newline.
 //!
-//! The crate's dev-dependencies give Tokio without `net`, so the TCP
-//! connection is a std `TcpStream`, bridged to an in-memory Tokio duplex
-//! by two threads.
+//! The crate's dev-dependencies give Tokio without `net` or `time`, so the
+//! TCP connection is a std `TcpStream`, bridged to an in-memory Tokio
+//! duplex by two threads, and the 2 s wait is a thread sleep.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream, ToSocketAddrs};
@@ -27,24 +31,29 @@ use std::time::Duration;
 
 use libhandlr_proto::common::{methods, protocols, HelloParams};
 use libhandlr_proto::link::{
-    generate_keypair, pair, reconnect, LinkStream, PairingPayload, StaticKeypair,
+    generate_keypair, reconnect, DeviceCode, LinkError, LinkStream, PairingPayload, StaticKeypair,
 };
 use libhandlr_proto::{Id, Incoming, Request};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often to try again while the server does not know the key yet.
+const RETRY: Duration = Duration::from_secs(2);
 
 struct Args {
     key: PathBuf,
+    name: String,
     protocol: String,
     wait: bool,
     pairing: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
-    let usage = "usage: link_client --key <file> [--protocol <name>] [--wait] [<pairing string>]";
+    let usage = "usage: link_client --key <file> [--name <name>] [--protocol <name>] [--wait] \
+                 [<pairing URL or string>]";
     let mut key = None;
+    let mut name = "link-client".to_string();
     let mut protocol = protocols::HARNESS.to_string();
     let mut wait = false;
     let mut pairing = None;
@@ -52,6 +61,7 @@ fn parse_args() -> Result<Args, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--key" => key = args.next().map(PathBuf::from),
+            "--name" => name = args.next().ok_or(usage)?,
             "--protocol" => protocol = args.next().ok_or(usage)?,
             "--wait" => wait = true,
             _ if !arg.starts_with("--") && pairing.is_none() => pairing = Some(arg),
@@ -60,13 +70,15 @@ fn parse_args() -> Result<Args, String> {
     }
     Ok(Args {
         key: key.ok_or(usage)?,
+        name,
         protocol,
         wait,
         pairing,
     })
 }
 
-/// What the key file keeps: this client's private key, and the server.
+/// What the key file keeps: this client's private key and name, and the
+/// server.
 struct Stored {
     private: [u8; 32],
     server: [u8; 32],
@@ -234,51 +246,67 @@ async fn response(stream: &mut LinkStream<DuplexStream>, id: i64) -> Result<Valu
     }
 }
 
+/// Connects once with `IK`.
+async fn connect_once(
+    stored: &Stored,
+    first: &[u8],
+) -> Result<LinkStream<DuplexStream>, LinkError> {
+    let io = connect(&stored.addresses).map_err(|e| LinkError::Io(std::io::Error::other(e)))?;
+    let keypair = StaticKeypair::from_private(stored.private)?;
+    // No client-side timeout: this crate's Tokio has no `time` feature.
+    // The server times a handshake out at 10 s.
+    reconnect(io, &keypair, &stored.server, Some(first)).await
+}
+
 async fn run() -> Result<(), String> {
     let args = parse_args()?;
     let first = hello(&args.protocol);
     let mut stream = match &args.pairing {
         Some(text) => {
             let payload = PairingPayload::decode(text).map_err(|e| e.to_string())?;
-            let keypair = generate_keypair().map_err(|e| e.to_string())?;
-            let io = connect(&payload.addresses)?;
-            // No client-side timeout: this crate's Tokio has no `time`
-            // feature. The server times a handshake out at 10 s.
-            let (stream, server) = pair(
-                io,
-                &keypair,
-                &payload.server_key,
-                &payload.secret,
-                Some(&first),
-            )
-            .await
-            .map_err(|e| format!("pairing failed: {e}"))?;
-            Stored {
-                private: keypair.private,
-                server,
-                name: payload.name.clone(),
+            // Keep this client's key and name if it has them.
+            let (private, name) = match Stored::load(&args.key) {
+                Ok(stored) => (stored.private, stored.name),
+                Err(_) => (
+                    generate_keypair().map_err(|e| e.to_string())?.private,
+                    args.name.clone(),
+                ),
+            };
+            let stored = Stored {
+                private,
+                server: payload.server_key,
+                name,
                 addresses: payload.addresses.clone(),
+            };
+            stored.save(&args.key)?;
+            let code = DeviceCode {
+                key: libhandlr_proto::link::public_key(&stored.private)
+                    .map_err(|e| e.to_string())?,
+                name: stored.name.clone(),
             }
-            .save(&args.key)?;
-            eprintln!(
-                "paired as {}; key stored in {}",
-                payload.name,
-                args.key.display()
-            );
-            stream
+            .encode(&payload.server_key)
+            .map_err(|e| e.to_string())?;
+            eprintln!("key stored in {}", args.key.display());
+            eprintln!("Paste this code into handlr pair:");
+            println!("{code}");
+            loop {
+                match connect_once(&stored, &first).await {
+                    Ok(stream) => break stream,
+                    Err(e) => {
+                        eprintln!("not accepted yet ({e}); trying again in 2 s");
+                        std::thread::sleep(RETRY);
+                    }
+                }
+            }
         }
         None => {
             let stored = Stored::load(&args.key)?;
-            let io = connect(&stored.addresses)?;
-            let keypair = StaticKeypair::from_private(stored.private).map_err(|e| e.to_string())?;
-            let stream = reconnect(io, &keypair, &stored.server, Some(&first))
-                .await
-                .map_err(|e| {
-                    format!(
-                        "reconnecting failed (is {} still paired?): {e}",
-                        stored.name
-                    )
-                })?;
+            let stream = connect_once(&stored, &first).await.map_err(|e| {
+                format!(
+                    "reconnecting failed (is {} still paired?): {e}",
+                    stored.name
+                )
+            })?;
             eprintln!("reconnected as {}", stored.name);
             stream
         }
