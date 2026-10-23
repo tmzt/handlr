@@ -17,8 +17,9 @@ pub use gemini_rust::{
 /// The default number of tool-calling steps allowed in one turn.
 pub const DEFAULT_MAX_TURNS: usize = 5;
 
-/// The model used when none is configured (decision 3).
-pub const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+/// The model used when none is configured (decision 3; CHANGES.md
+/// 2026-10-23: Google no longer serves `gemini-2.5-flash` to new keys).
+pub const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 
 /// The `gemini-rust` model for a configured name such as `gemini-2.5-pro`
 /// (decision 3). A leading `models/` is optional, and an empty name means
@@ -346,7 +347,10 @@ mod tests {
         assert_eq!(engine.system_prompt(), None);
         assert!(engine.tools().is_empty());
         assert_eq!(engine.max_turns(), DEFAULT_MAX_TURNS);
-        assert_eq!(engine.model(), &Model::Gemini25Flash);
+        assert_eq!(
+            engine.model(),
+            &Model::Custom("models/gemini-3.8-flash".to_string())
+        );
     }
 
     fn built_with(model: &str) -> Model {
@@ -371,8 +375,9 @@ mod tests {
 
     #[test]
     fn an_empty_model_is_the_default() {
-        assert_eq!(built_with(""), Model::Gemini25Flash);
-        assert_eq!(built_with("  "), Model::Gemini25Flash);
+        let default = Model::Custom("models/gemini-3.8-flash".to_string());
+        assert_eq!(built_with(""), default);
+        assert_eq!(built_with("  "), default);
     }
 
     #[test]
