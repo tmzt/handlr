@@ -604,6 +604,13 @@ fn draw_row(
     }
 }
 
+/// Whether `a` and `b` are the same entry of the session: its time, role and
+/// kind. Its summary may change between peeks, as a tool call's result is
+/// linked to it.
+fn same_entry(a: &Entry, b: &Entry) -> bool {
+    a.ts == b.ts && a.role == b.role && a.kind == b.kind
+}
+
 /// The agent view's screen: content, scroll state and layout.
 #[derive(Default)]
 pub struct AgentScreen {
@@ -656,23 +663,52 @@ impl AgentScreen {
         {
             return;
         }
-        let keep = (!self.follow).then(|| self.top_entry()).flatten();
+        // Scrolled back, the view holds still: it stays on the entry at its
+        // top, or, when that one has left the window, on the next one that
+        // is still there, at the same place on screen.
+        let keep = if self.follow {
+            Vec::new()
+        } else {
+            self.anchors()
+        };
         self.name = name;
         self.status = status;
         self.entries = entries;
         self.cards = cards;
         self.pinned = pinned;
         self.relayout();
-        if let Some((entry, delta)) = keep
-            && let Some(i) = self.entries.iter().rposition(|e| *e == entry)
-        {
+        if let Some((i, delta)) = keep.iter().find_map(|(entry, delta)| {
+            self.entries
+                .iter()
+                .rposition(|e| same_entry(e, entry))
+                .map(|i| (i, *delta))
+        }) {
             self.offset = self.flow.entry_y[i] + delta;
         }
         self.settle();
     }
 
+    /// The entries from the one at the top of the window on, each with how
+    /// far the window's top is from it.
+    fn anchors(&self) -> Vec<(Entry, f32)> {
+        // Above the first entry (the flow's top padding), the first.
+        let top = self
+            .flow
+            .entry_y
+            .iter()
+            .rposition(|&y| y <= self.offset)
+            .unwrap_or(0);
+        self.entries
+            .iter()
+            .zip(&self.flow.entry_y)
+            .skip(top)
+            .map(|(e, &y)| (e.clone(), self.offset - y))
+            .collect()
+    }
+
     /// The entry at the top of the window, and how far into it the window
     /// starts.
+    #[cfg(test)]
     fn top_entry(&self) -> Option<(Entry, f32)> {
         let i = self.flow.entry_y.iter().rposition(|&y| y <= self.offset)?;
         Some((
@@ -1860,5 +1896,48 @@ mod tests {
         let line = shaper.line(BACK_GLYPH, GlyphStyle::Regular);
         assert_eq!(line.columns, 1);
         assert!(!line.segments.is_empty(), "{BACK_GLYPH} has a glyph");
+    }
+
+    #[test]
+    fn scrolled_back_the_view_holds_when_its_top_entry_leaves() {
+        let all = conversation(30);
+        let mut a = screen(all[..100].to_vec(), vec![], None);
+        // Scrolled back to the very top.
+        let t = drag(&mut a, 300.0, 2200.0, 40, Duration::ZERO);
+        a.touch(
+            1,
+            TouchPhase::Ended,
+            540.0,
+            2200.0,
+            t + Duration::from_millis(200),
+        );
+        a.scroll_to(0.0);
+        assert!(!a.following());
+        let second = a.entries[1].clone();
+        // The window moves on: the top entry leaves, and the next one is at
+        // the top, not the old offset into the new content.
+        a.set_content(
+            "Claude".into(),
+            "idle".into(),
+            all[1..101].to_vec(),
+            vec![],
+            None,
+        );
+        assert!(!a.following());
+        assert_eq!((a.entries[0].clone(), a.offset()), (second, 0.0));
+        // In the middle, entries leaving above keep the view on the same
+        // entry, at the same place, even when its summary changes (a
+        // result linked to its call).
+        a.scroll_to(a.flow.entry_y[20] + 7.0);
+        let (top, delta) = a.top_entry().unwrap();
+        let mut changed = all[5..105].to_vec();
+        for e in changed.iter_mut() {
+            e.summary.push_str(" (linked)");
+        }
+        a.set_content("Claude".into(), "idle".into(), changed, vec![], None);
+        let (now_top, now_delta) = a.top_entry().unwrap();
+        assert!(same_entry(&now_top, &top));
+        assert!((now_delta - delta).abs() < 0.5);
+        assert!(!a.following());
     }
 }
