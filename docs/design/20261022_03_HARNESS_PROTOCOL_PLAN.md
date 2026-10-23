@@ -455,3 +455,13 @@ The owner's description ended mid-sentence because the companion app
 restarted during an install. The rest was only "make a plan", which became
 the amendment of the agent view itself. There is nothing more to add, and
 open question L3-3 is closed.
+
+## Amendment — 2026-10-23 02:36 EDT: L3-2: rules for now, a model decided later (living section L3)
+
+On the owner's answer: "rules for now, decide on a model later".
+
+- **Built now:** priority cards are detected by the four rules only.
+- **Deferred:** a model-flagged "worth a look" card stays in L3 as a
+  later entry, to be added by amendment once the rules have been lived
+  with. It would rank below the four rules, run only when an agent's turn
+  ends, and read only the final reply, preferably on the local model.
