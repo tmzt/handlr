@@ -358,6 +358,17 @@ fn read_key_file(path: &Path) -> Result<Option<String>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("the Gemini key file {}: {e}", path.display()))?;
     let key = text.trim();
+    // An API key is one short token. Anything else (a service-account JSON,
+    // several lines) is refused here, so it never reaches a request header.
+    let looks_like_key =
+        !key.contains(char::is_whitespace) && !key.starts_with(['{', '[']) && key.len() <= 256;
+    if !key.is_empty() && !looks_like_key {
+        return Err(format!(
+            "the Gemini key file {} does not hold an API key (a service-account \
+             file is not an API key)",
+            path.display()
+        ));
+    }
     Ok((!key.is_empty()).then(|| key.to_string()))
 }
 
@@ -986,5 +997,16 @@ mod tests {
 
         std::fs::write(&path, "\n").unwrap();
         assert_eq!(read_key_file(&path).unwrap(), None);
+
+        // A service-account JSON is refused, without its contents in the error.
+        std::fs::write(
+            &path,
+            "{\n  \"type\": \"service_account\",\n  \"private_key\": \"x\"\n}\n",
+        )
+        .unwrap();
+        let err = read_key_file(&path).unwrap_err();
+        assert!(err.contains("does not hold an API key"), "{err}");
+        assert!(!err.contains("private_key"), "{err}");
+        assert!(spoken_error(&err).contains("can't read its Gemini key"));
     }
 }
