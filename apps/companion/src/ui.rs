@@ -235,6 +235,9 @@ pub struct View {
     pub status: Vec<String>,
     /// The conversation, and the confirmation's text.
     pub body: Vec<Line>,
+    /// How many of `body`'s first lines are the focus line, which opens
+    /// the agent view when tapped (plan 20261022_03, step 4).
+    pub focus_lines: usize,
     /// The buttons under the body.
     pub buttons: Buttons,
     /// The pairing area above the field: the device code and notes.
@@ -260,6 +263,8 @@ pub enum Hit {
     Clear,
     Field,
     Pair,
+    /// The focus line: open the focused agent's view.
+    Focus,
 }
 
 /// Surface size, scale factor and safe area top and bottom.
@@ -496,10 +501,21 @@ impl Screen {
         };
         let limit = code_top - 16.0 * s - buttons_h;
         let mut body_lines = view.body.iter();
-        for &id in &self.lines {
+        let mut focus_rect: Option<Rect> = None;
+        for (i, &id) in self.lines.iter().enumerate() {
             match body_lines.next() {
                 Some(line) if y + height(line) <= limit => {
                     y += line.gap * s;
+                    if i < view.focus_lines {
+                        // The whole width, and at least a finger's height.
+                        let h = (line.size * s * 1.35).max(44.0 * s);
+                        let top = y - (h - line.size * s * 1.35) * 0.5;
+                        let rect = match focus_rect {
+                            None => Rect::new(0.0, top, layout.w, h),
+                            Some(r) => Rect::new(0.0, r.y, layout.w, top + h - r.y),
+                        };
+                        focus_rect = Some(rect);
+                    }
                     let line_style = (line.size, line.color);
                     place(
                         &mut self.router,
@@ -516,6 +532,9 @@ impl Screen {
                     .expect("a label node")
                     .set_text(""),
             }
+        }
+        if let Some(rect) = focus_rect {
+            self.hits.push((Hit::Focus, rect));
         }
         let row: Vec<(Hit, NodeId)> = match view.buttons {
             Buttons::None => vec![],
@@ -561,6 +580,12 @@ impl Screen {
         button.font_size = Some(18.0 * s);
         button.corner_radius = Some(10.0 * s);
         self.router.set_flags(id, NodeFlags::HIDDEN, !visible);
+    }
+
+    /// Marks the screen to be drawn again, as after another screen drew
+    /// over the list.
+    pub fn invalidate(&mut self) {
+        self.dirty = true;
     }
 
     /// Rebuilds `list` if the screen changed since the last call. Returns
@@ -871,6 +896,50 @@ mod tests {
         assert_eq!(screen.hit(clear.x + 1.0, clear.y + 1.0), Some(Hit::Clear));
         screen.set(PHONE, View::default());
         assert!(hits(&screen).is_empty());
+    }
+
+    #[test]
+    fn the_focus_line_is_a_control() {
+        let mut screen = Screen::new();
+        let focus = Line {
+            text: "focus: Claude \u{b7} handlr".into(),
+            size: 15.0,
+            color: MUTED,
+            gap: 0.0,
+        };
+        screen.set(
+            PHONE,
+            View {
+                body: vec![focus.clone(), line("> hello")],
+                focus_lines: 1,
+                buttons: Buttons::Start,
+                ..View::default()
+            },
+        );
+        let rect = screen
+            .hits
+            .iter()
+            .find(|(h, _)| *h == Hit::Focus)
+            .expect("the focus line")
+            .1;
+        assert!(rect.h >= 44.0 * PHONE.scale, "a finger's height");
+        assert_eq!(screen.hit(540.0, rect.y + rect.h / 2.0), Some(Hit::Focus));
+        let start = screen
+            .hits
+            .iter()
+            .find(|(h, _)| *h == Hit::Start)
+            .unwrap()
+            .1;
+        assert!(rect.y + rect.h <= start.y, "above the buttons");
+        // Without a focus line, there is none.
+        screen.set(
+            PHONE,
+            View {
+                body: vec![line("> hello")],
+                ..View::default()
+            },
+        );
+        assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Focus));
     }
 
     #[test]

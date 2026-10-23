@@ -25,7 +25,13 @@
 //! is submitted after `--dictation-silence <seconds>` (default and least 8)
 //! of silence, set on Android by `dictation_silence.txt` in the data
 //! directory, holding the seconds.
+//!
+//! The agent view (plan 20261022_03, step 4, `agent.rs`): tapping the focus
+//! line opens the focused agent's transcript as terminal scrollback with
+//! its priority cards; Back, or the system Back, returns. "Take a message"
+//! there dictates to that agent, with its card in the view.
 
+pub mod agent;
 pub mod keys;
 pub mod ui;
 
@@ -50,6 +56,7 @@ use libmsdf::font::{
     BUNDLED_ATLAS_PX_RANGE, FontAtlas, ROBOTO_REGULAR_ASCII, ROBOTO_REGULAR_ATLAS, TextShaper,
 };
 
+use crate::agent::{AgentHit, AgentScreen};
 use crate::keys::VaultKeyStore;
 use crate::ui::{
     Buttons, CODE, Card, CardState, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN,
@@ -169,6 +176,12 @@ pub struct App {
     focus: Option<FocusInfo>,
     /// The message being dictated, while the mode is on.
     dictation: Option<Dictation>,
+    /// The agent view, while it is open.
+    agent: Option<AgentScreen>,
+    /// The clock touches and flings are timed by.
+    started: Instant,
+    /// When the last frame was updated, for a fling's step.
+    last_update: Instant,
 }
 
 /// The models: `<data dir>/<name>` on Android, `--models <dir>` (default
@@ -407,7 +420,63 @@ impl App {
                 }
                 self.dictation = d.active.then_some(d);
             }
+            Event::AgentView {
+                name,
+                status,
+                entries,
+                cards,
+                pinned,
+            } => {
+                if let Some(agent) = &mut self.agent {
+                    agent.set_content(name, status, entries, cards, pinned);
+                }
+            }
             Event::StopSpeaking | Event::Arm | Event::Vocabulary(_) => {}
+        }
+    }
+
+    /// Opens the view of the focused agent.
+    fn open_agent(&mut self) {
+        let Some(focus) = &self.focus else {
+            return;
+        };
+        log::info!("agent view: open");
+        self.send(Input::OpenAgent(focus.pane_id.clone()));
+        let mut agent = AgentScreen::new();
+        agent.name = focus.name.clone();
+        self.agent = Some(agent);
+    }
+
+    /// Closes the agent view, back to the main screen.
+    fn close_agent(&mut self) {
+        if self.agent.take().is_some() {
+            log::info!("agent view: closed");
+            self.send(Input::CloseAgent);
+            self.screen.invalidate();
+        }
+    }
+
+    /// A tap on one of the agent view's controls.
+    fn agent_hit(&mut self, hit: AgentHit) {
+        match hit {
+            AgentHit::Back => self.close_agent(),
+            AgentHit::Message => self.send(Input::StartDictation),
+            AgentHit::Approve(confirm_id) => self.send(Input::Answer {
+                confirm_id,
+                approve: true,
+            }),
+            AgentHit::Deny(confirm_id) => self.send(Input::Answer {
+                confirm_id,
+                approve: false,
+            }),
+            AgentHit::Pin => {
+                if let Some(agent) = &mut self.agent {
+                    agent.jump_to_pin();
+                }
+            }
+            AgentHit::Submit => self.send(Input::Submit),
+            AgentHit::Scratch => self.send(Input::Scratch),
+            AgentHit::Clear => self.send(Input::Clear),
         }
     }
 
@@ -507,10 +576,14 @@ impl App {
                 body.push(line(t, size, color, if i == 0 { gap } else { 0.0 }));
             }
         };
+        // The focus line: tapping it opens the agent view.
+        let mut focus_lines = 0;
         if self.dictation.is_none()
             && let Some(focus) = &self.focus
         {
-            push(&format!("focus: {}", focus_words(focus)), 15.0, MUTED, 0.0);
+            let text = format!("focus: {}", focus_words(focus));
+            focus_lines = wrap(&text, layout.columns(15.0)).len();
+            push(&text, 15.0, MUTED, 0.0);
         }
         if !self.partial.is_empty() {
             push(&format!("> {}\u{2026}", self.partial), 20.0, MUTED, 24.0);
@@ -564,9 +637,14 @@ impl App {
             }
         }
 
+        if let Some(agent) = &mut self.agent {
+            agent.set_layout(layout);
+            agent.set_dictation(self.dictation.as_ref().map(dictation_lines));
+        }
         let view = View {
             status: vec![self.link.clone(), self.sound.clone()],
             body,
+            focus_lines,
             buttons: if asking {
                 Buttons::Confirm
             } else if self.dictation.is_some() {
@@ -661,6 +739,9 @@ impl MorphApp for App {
             online: false,
             focus: None,
             dictation: None,
+            agent: None,
+            started: Instant::now(),
+            last_update: Instant::now(),
         };
 
         match key_store(ctx, &args) {
@@ -770,15 +851,29 @@ impl MorphApp for App {
         for event in sounds {
             self.on_audio(event);
         }
+        let dt = now.saturating_duration_since(self.last_update);
+        self.last_update = now;
+        if let Some(agent) = &mut self.agent {
+            agent.tick(dt);
+        }
         self.lay_out(ctx);
     }
 
-    /// The buttons and the field, and a tap anywhere else.
+    /// The buttons and the field, and a tap anywhere else. In the agent
+    /// view, every phase goes to it: a drag scrolls, a tap hits.
     fn on_touch(&mut self, _ctx: &mut MorphContext, touch: Touch) {
+        if let Some(agent) = &mut self.agent {
+            let now = self.started.elapsed();
+            if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
+                self.agent_hit(hit);
+            }
+            return;
+        }
         if touch.phase != TouchPhase::Ended {
             return;
         }
         match self.screen.hit(touch.x, touch.y) {
+            Some(Hit::Focus) => self.open_agent(),
             Some(Hit::Approve) => self.send(Input::Approve),
             Some(Hit::Deny) => self.send(Input::Deny),
             Some(Hit::Start) => self.send(Input::StartDictation),
@@ -797,6 +892,11 @@ impl MorphApp for App {
     /// Typing into the focused field (desktop): Enter pairs, Escape clears.
     /// libmorph has no Backspace, paste or on-screen keyboard yet.
     fn on_key(&mut self, _ctx: &mut MorphContext, key: Key) -> KeyStatus {
+        // The system Back closes the agent view.
+        if self.agent.is_some() && matches!(key, Key::Back | Key::Escape) {
+            self.close_agent();
+            return KeyStatus::Handled;
+        }
         if !self.field_focused {
             return KeyStatus::Unhandled;
         }
@@ -824,7 +924,10 @@ impl MorphApp for App {
             px_range: BUNDLED_ATLAS_PX_RANGE,
             ..DrawContext::new(Some(&self.atlas), Some(&self.shaper))
         };
-        self.screen.draw(&mut self.list, &draw);
+        match &mut self.agent {
+            Some(agent) => agent.draw(&mut self.list, &draw),
+            None => self.screen.draw(&mut self.list, &draw),
+        };
         let (w, h) = frame.size;
         self.sdf.render_draw_list(
             ctx.device(),
