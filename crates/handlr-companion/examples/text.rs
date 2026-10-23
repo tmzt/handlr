@@ -196,6 +196,10 @@ fn print_event(event: Event) {
                 println!("  card at {}: {} [{live}]{pin}: {}", c.at, c.title, c.text);
             }
         }
+        Event::Agents(agents) => println!("* {} agents", agents.len()),
+        Event::PendingPanes(panes) => println!("* {} panes waiting for approval", panes.len()),
+        // Gemini's lines also come as Say.
+        Event::Conversation { .. } => {}
         Event::Error(e) => println!("! {e}"),
     }
 }

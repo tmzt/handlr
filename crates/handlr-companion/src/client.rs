@@ -147,6 +147,13 @@ pub const PEEK_IDLE_INTERVAL: Duration = Duration::from_secs(15);
 /// The entries the agent view asks for: the most `session.peek` gives.
 pub const VIEW_ENTRIES: usize = common::PEEK_ENTRIES_MAX;
 
+/// How often the agents are listed while the overview shows and nothing
+/// else asked (plan 20261023_04, decision 6).
+pub const LIST_INTERVAL: Duration = Duration::from_secs(15);
+/// The least time between the last list sent and one asked for since (as
+/// on `focus.changed`).
+pub const LIST_MIN_INTERVAL: Duration = Duration::from_secs(5);
+
 /// Where a dictated message stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DictationPhase {
@@ -261,6 +268,19 @@ pub enum Event {
     Vocabulary(Vec<String>),
     /// herdr's focus changed, or was first learned.
     Focus(Option<common::FocusInfo>),
+    /// The agents, as `agents.list` gave them: on its first answer on each
+    /// connection, then whenever the list changes (plan 20261023_04, decision 6).
+    Agents(Vec<common::AgentInfo>),
+    /// The panes with a handlr confirmation waiting, as
+    /// [`State::pending_panes`] gives them, whenever they change.
+    PendingPanes(Vec<String>),
+    /// A line of the conversation with Gemini (plan 20261023_04, A5): the
+    /// user's words as a turn starts, and each thing Gemini says in it.
+    /// Gemini's are also given as [`Event::Say`].
+    Conversation {
+        speaker: Speaker,
+        text: String,
+    },
     /// The dictation card changed.
     Dictation(Dictation),
     /// The open agent view changed (plan 20261022_03, step 4): the agent's
@@ -279,6 +299,13 @@ pub enum Event {
         typed: Option<String>,
     },
     Error(String),
+}
+
+/// Who said a line of [`Event::Conversation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Speaker {
+    User,
+    Gemini,
 }
 
 /// What the driver must do.
@@ -645,6 +672,16 @@ pub struct State {
     shown: Dictation,
     /// The agents as `agents.list` last gave them.
     agents: Vec<common::AgentInfo>,
+    /// `agents.list` has answered on this connection.
+    listed: bool,
+    /// An `agents.list` is on its way.
+    listing: bool,
+    /// When the last `agents.list` was sent.
+    listed_at: Option<Duration>,
+    /// A list is asked for as soon as `LIST_MIN_INTERVAL` allows.
+    list_wanted: bool,
+    /// The pending panes as last given.
+    pending_shown: Vec<String>,
     /// The open agent view.
     view: Option<AgentView>,
 }
@@ -709,6 +746,11 @@ impl State {
             silence: DICTATION_SILENCE,
             shown: Dictation::off(),
             agents: Vec::new(),
+            listed: false,
+            listing: false,
+            listed_at: None,
+            list_wanted: false,
+            pending_shown: Vec::new(),
             view: None,
         }
     }
@@ -769,6 +811,9 @@ impl State {
         let mut out = Vec::new();
         self.link = Link::Offline;
         self.sent.clear();
+        // The next connection's first list is given, changed or not.
+        self.listing = false;
+        self.listed = false;
         self.confirms.clear();
         self.deferred = None;
         // The daemon withdraws what this connection opened; the message is
@@ -858,7 +903,12 @@ impl State {
             Input::Clear => self.clear_dictation(&mut out),
             Input::Scratch => self.scratch(&mut out),
             Input::OpenAgent(pane_id) => self.open_agent(pane_id, &mut out),
-            Input::CloseAgent => self.view = None,
+            Input::CloseAgent => {
+                // Back on the overview: its list is refreshed.
+                self.view = None;
+                self.list_wanted = true;
+                self.list_if_due(&mut out);
+            }
             Input::Answer {
                 confirm_id,
                 approve,
@@ -950,7 +1000,7 @@ impl State {
         });
         if self.online() {
             // Names and statuses, for the view's title and its target.
-            out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+            self.ask_list(out);
         }
         self.peek_if_due(out);
         self.recompute_view(out);
@@ -992,8 +1042,10 @@ impl State {
         out.push(self.request(methods::SESSION_PEEK, params, Sent::Peek(pane_id)));
     }
 
-    /// Applies the card rules to the open view and gives it if it changed.
+    /// Applies the card rules to the open view and gives it if it changed;
+    /// gives the pending panes if they changed.
     fn recompute_view(&mut self, out: &mut Vec<Output>) {
+        self.show_pending(out);
         let Some(v) = self.view.as_ref() else {
             return;
         };
@@ -1139,6 +1191,7 @@ impl State {
         }
         self.show_dictation(out);
         self.peek_if_due(out);
+        self.list_if_due(out);
         if !self.reading.is_empty() {
             self.read_in_order();
             self.flush_notices(out);
@@ -1168,7 +1221,7 @@ impl State {
             submit_waiting: None,
         });
         if self.online() {
-            out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+            self.ask_list(out);
         }
         self.show_dictation(out);
         out.push(event(Event::Arm));
@@ -1555,6 +1608,10 @@ impl State {
         let id = self.next_turn;
         self.next_turn += 1;
         self.turn = Some(Turn { id, tapped: false });
+        out.push(event(Event::Conversation {
+            speaker: Speaker::User,
+            text: text.clone(),
+        }));
         let params = wire::TurnStartParams { turn_id: id, text };
         out.push(self.request(wire::methods::TURN_START, params, Sent::Turn(id)));
     }
@@ -1580,7 +1637,10 @@ impl State {
                     confirm_id,
                     message,
                 })),
-                Sent::List => log::warn!("agents.list: {message}"),
+                Sent::List => {
+                    self.listing = false;
+                    log::warn!("agents.list: {message}");
+                }
                 Sent::Options => log::warn!("client.options: {message}"),
                 Sent::Summarize(serial) => {
                     log::info!("speech.summarize: {message}; reading the reply here");
@@ -1644,7 +1704,7 @@ impl State {
                     // The connection's options start off: say read aloud's.
                     self.send_options(out);
                     // herdr's focus, for the dictation mode's target.
-                    out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+                    self.ask_list(out);
                     // An open view is peeked again at once.
                     if let Some(v) = self.view.as_mut() {
                         v.peeked_at = None;
@@ -1669,6 +1729,11 @@ impl State {
             },
             Sent::List => match parse::<common::AgentsListResult>(result) {
                 Ok(list) => {
+                    self.listing = false;
+                    if !self.listed || list.agents != self.agents {
+                        out.push(event(Event::Agents(list.agents.clone())));
+                    }
+                    self.listed = true;
                     self.agents = list.agents;
                     self.list_learned(out);
                     self.set_focus(list.focus, out);
@@ -1676,12 +1741,15 @@ impl State {
                         d.refresh_target = false;
                     }
                 }
-                Err(e) => log::warn!("a bad agents.list result: {e}"),
+                Err(e) => {
+                    self.listing = false;
+                    log::warn!("a bad agents.list result: {e}");
+                }
             },
             // Focused: learn the focus, which a message without a target
             // takes.
             Sent::Focus(_) => {
-                out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+                self.ask_list(out);
             }
             Sent::Message => match parse::<common::AgentsSendResult>(result) {
                 Ok(common::AgentsSendResult::Pending { confirm_id, .. }) => {
@@ -1943,6 +2011,10 @@ impl State {
                         .as_ref()
                         .is_some_and(|t| t.id == say.turn_id && !t.tapped);
                     if running {
+                        out.push(event(Event::Conversation {
+                            speaker: Speaker::Gemini,
+                            text: say.text.clone(),
+                        }));
                         out.push(event(Event::Say(say.text)));
                     } else {
                         log::debug!("dropping a late turn.say for turn {}", say.turn_id);
@@ -1977,6 +2049,9 @@ impl State {
             wire::methods::FOCUS_CHANGED => {
                 if let Some(f) = parse_or_log::<wire::FocusChanged>(note) {
                     self.set_focus(f.focus, out);
+                    // The overview's focus bar moves with it.
+                    self.list_wanted = true;
+                    self.list_if_due(out);
                 }
             }
             other => log::debug!("ignoring the notification {other}"),
@@ -2043,6 +2118,7 @@ impl State {
         if was_asked {
             self.ask_next(out);
         }
+        self.show_pending(out);
     }
 
     /// Sends `confirm.reply` for `confirm_id` without asking anyone.
@@ -2133,6 +2209,55 @@ impl State {
         if self.speaking && self.saying.iter().any(|t| t == ts) {
             log::info!("read aloud: the question is answered; skipping it");
             out.push(event(Event::StopSpeaking));
+        }
+    }
+
+    /// The panes with a handlr confirmation waiting, each once, in the
+    /// order they were asked (plan 20261023_04, section 4).
+    pub fn pending_panes(&self) -> Vec<String> {
+        let mut panes: Vec<String> = Vec::new();
+        for c in &self.confirms {
+            if !panes.contains(&c.pane_id) {
+                panes.push(c.pane_id.clone());
+            }
+        }
+        panes
+    }
+
+    /// Gives the pending panes if they changed since last given.
+    fn show_pending(&mut self, out: &mut Vec<Output>) {
+        let panes = self.pending_panes();
+        if panes != self.pending_shown {
+            self.pending_shown = panes.clone();
+            out.push(event(Event::PendingPanes(panes)));
+        }
+    }
+
+    /// Sends `agents.list`.
+    fn ask_list(&mut self, out: &mut Vec<Output>) {
+        self.listing = true;
+        self.listed_at = Some(self.now);
+        out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
+    }
+
+    /// Lists the agents for the overview if it is due (plan 20261023_04,
+    /// decision 6): only while no agent view is open and no list is on its
+    /// way; every `LIST_INTERVAL` since the last list sent or, once asked
+    /// for, `LIST_MIN_INTERVAL` after it.
+    fn list_if_due(&mut self, out: &mut Vec<Output>) {
+        if !self.online() || self.listing || self.view.is_some() {
+            return;
+        }
+        let due = match self.listed_at {
+            None => true,
+            Some(at) => {
+                let since = self.now.saturating_sub(at);
+                since >= LIST_INTERVAL || (self.list_wanted && since >= LIST_MIN_INTERVAL)
+            }
+        };
+        if due {
+            self.list_wanted = false;
+            self.ask_list(out);
         }
     }
 
@@ -2342,7 +2467,16 @@ mod tests {
             "turn.say",
             json!({"turn_id": 1, "seq": 0, "text": "Claude is running the tests."}),
         ));
-        assert_eq!(events(&out), vec![say("Claude is running the tests.")]);
+        assert_eq!(
+            events(&out),
+            vec![
+                Event::Conversation {
+                    speaker: Speaker::Gemini,
+                    text: "Claude is running the tests.".into()
+                },
+                say("Claude is running the tests.")
+            ]
+        );
         let out = s.incoming(response(req.id, json!({"outcome": "done", "ran": []})));
         assert_eq!(
             events(&out),
@@ -2480,6 +2614,7 @@ mod tests {
                     project: Some("handlr".into()),
                 },
                 say(text),
+                Event::PendingPanes(vec!["w2:pZ".into()]),
             ]
         );
         s.incoming(response(req.id, json!({"outcome": "done", "ran": []})));
@@ -2530,10 +2665,13 @@ mod tests {
         let out = s.input(Input::Utterance("approve".into()));
         assert_eq!(
             events(&out),
-            vec![Event::Answered {
-                confirm_id: 7,
-                approve: true
-            }]
+            vec![
+                Event::Answered {
+                    confirm_id: 7,
+                    approve: true
+                },
+                Event::PendingPanes(vec![])
+            ]
         );
         let reply = sent(&out)[0].id.clone();
         let out = s.incoming(Incoming::Response(Response::err(
@@ -2650,6 +2788,7 @@ mod tests {
                     confirm_id: 7,
                     approve: true
                 },
+                Event::PendingPanes(vec![]),
                 say("one")
             ]
         );
@@ -3228,7 +3367,9 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         let out = s.incoming(response(id, json!({"server": "handlr", "vocabulary": []})));
         let out = list_answer(&mut s, &out, claude());
-        assert!(matches!(&events(&out)[..], [Event::Focus(Some(f))] if f.pane_id == "w2:p4"));
+        assert!(
+            matches!(&events(&out)[..], [Event::Agents(a), Event::Focus(Some(f))] if a.is_empty() && f.pane_id == "w2:p4")
+        );
     }
 
     #[test]
@@ -4034,5 +4175,186 @@ mod tests {
             _ => None,
         });
         assert_eq!(typed.as_deref(), Some("please run the tests"));
+    }
+
+    // ── The overview's list (plan 20261023_04, step 2) ───────────────────
+
+    /// The `Agents` events in `out`.
+    fn agents_of(out: &[Output]) -> Vec<Vec<common::AgentInfo>> {
+        events(out)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Agents(a) => Some(a),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Answers the `agents.list` in `out` with `agents`.
+    fn answer_list(s: &mut State, out: &[Output], agents: Value) -> Vec<Output> {
+        let list = requests(out, "agents.list")[0].clone();
+        s.incoming(response(list.id, json!({ "agents": agents })))
+    }
+
+    /// Online at 0 s, hello's list answered with one working agent.
+    fn overview() -> State {
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(id, json!({"server": "handlr", "vocabulary": []})));
+        let out = answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
+        assert_eq!(agents_of(&out).len(), 1, "the first answer: {out:?}");
+        s
+    }
+
+    #[test]
+    fn each_list_answer_that_changes_gives_the_agents() {
+        let mut s = overview();
+        // 15 s on, nothing else asked: listed again.
+        assert!(requests(&s.input(Input::Tick(secs(14.0))), "agents.list").is_empty());
+        let out = s.input(Input::Tick(secs(15.0)));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        // The same list: no event.
+        let same = answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
+        assert!(agents_of(&same).is_empty(), "{same:?}");
+        // A changed one: the event, with the turn.
+        let out = s.input(Input::Tick(secs(30.0)));
+        let mut idle = agent_info("w2:pZ", "idle");
+        idle["turn"] = json!({"state": "stopped", "line": "Done."});
+        let changed = answer_list(&mut s, &out, json!([idle]));
+        let given = agents_of(&changed);
+        assert_eq!(given.len(), 1, "{changed:?}");
+        assert_eq!(
+            given[0][0].turn,
+            Some(common::Turn::Stopped {
+                line: "Done.".into()
+            })
+        );
+        // A list asked for by something else counts: the next is 15 s
+        // after it.
+        let out = s.input(Input::StartDictation);
+        answer_list(&mut s, &out, json!([idle]));
+        s.input(Input::Clear);
+        assert!(requests(&s.input(Input::Tick(secs(44.0))), "agents.list").is_empty());
+        assert_eq!(
+            requests(&s.input(Input::Tick(secs(45.0))), "agents.list").len(),
+            1
+        );
+    }
+
+    #[test]
+    fn focus_changes_list_again_at_most_once_in_five_seconds() {
+        let mut s = overview();
+        // At 1 s: too soon after hello's list; it waits for 5 s.
+        s.input(Input::Tick(secs(1.0)));
+        let out = s.incoming(note("focus.changed", json!({"focus": claude()})));
+        assert!(requests(&out, "agents.list").is_empty(), "{out:?}");
+        assert!(requests(&s.input(Input::Tick(secs(4.9))), "agents.list").is_empty());
+        let out = s.input(Input::Tick(secs(5.0)));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        // Another change while it is on its way: none more.
+        let more = s.incoming(note("focus.changed", json!({"focus": null})));
+        assert!(requests(&more, "agents.list").is_empty());
+        answer_list(&mut s, &out, json!([]));
+        // Then one more, 5 s after the last.
+        assert!(requests(&s.input(Input::Tick(secs(9.0))), "agents.list").is_empty());
+        let out = s.input(Input::Tick(secs(10.0)));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        answer_list(&mut s, &out, json!([]));
+        // Long after: a change lists at once.
+        s.input(Input::Tick(secs(16.0)));
+        let out = s.incoming(note("focus.changed", json!({"focus": claude()})));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+    }
+
+    #[test]
+    fn no_list_is_asked_while_the_agent_view_is_open() {
+        let mut s = overview();
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        // Opening the view lists, as before, for its name.
+        answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
+        peek_answer(&mut s, &out, "working", asking());
+        let mut asked = 0;
+        for t in 1..=60 {
+            let out = s.input(Input::Tick(secs(f64::from(t))));
+            asked += requests(&out, "agents.list").len();
+            for peek in requests(&out, "session.peek") {
+                s.incoming(response(
+                    peek.id.clone(),
+                    json!({"session": asking(), "status": "working"}),
+                ));
+            }
+        }
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        assert_eq!(asked, 0);
+        // Back on the overview: listed at once.
+        let out = s.input(Input::CloseAgent);
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+    }
+
+    #[test]
+    fn the_pending_panes_follow_the_confirmations() {
+        let mut s = online();
+        assert!(s.pending_panes().is_empty());
+        let out = s.incoming(confirm_requested(7));
+        assert_eq!(s.pending_panes(), vec!["w2:pZ".to_string()]);
+        assert!(events(&out).contains(&Event::PendingPanes(vec!["w2:pZ".into()])));
+        // A second for the same pane: no change.
+        let out = s.incoming(note(
+            "confirm.requested",
+            json!({"confirm_id": 8, "pane_id": "w2:pZ", "agent": "claude",
+                   "command": "/compact", "requested_by": "companion:test",
+                   "text": "Approve sending \"/compact\" to Claude?"}),
+        ));
+        assert!(
+            !events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::PendingPanes(_)))
+        );
+        s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 7, "outcome": "sent"}),
+        ));
+        assert_eq!(s.pending_panes(), vec!["w2:pZ".to_string()]);
+        let out = s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 8, "outcome": "denied"}),
+        ));
+        assert!(s.pending_panes().is_empty());
+        assert!(events(&out).contains(&Event::PendingPanes(vec![])));
+    }
+
+    #[test]
+    fn the_conversation_gives_the_users_words_and_geminis() {
+        let mut s = online();
+        let out = s.input(Input::Utterance("what is claude doing".into()));
+        assert_eq!(
+            events(&out),
+            vec![Event::Conversation {
+                speaker: Speaker::User,
+                text: "what is claude doing".into()
+            }]
+        );
+        let out = s.incoming(note(
+            "turn.say",
+            json!({"turn_id": 1, "seq": 0, "text": "Running the tests."}),
+        ));
+        assert_eq!(
+            events(&out)[0],
+            Event::Conversation {
+                speaker: Speaker::Gemini,
+                text: "Running the tests.".into()
+            }
+        );
+        // Notices are said, not part of the conversation.
+        let out = s.incoming(note(
+            "notice",
+            json!({"pane_id": "w2:pZ", "kind": "agent_status", "text": "Claude is done."}),
+        ));
+        assert!(
+            !events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Conversation { .. }))
+        );
     }
 }

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use base64::Engine;
 use handlr_companion::{
-    Companion, CompanionConfig, Event, FileKeyStore, Input, KeyStore, ServerRecord,
+    Companion, CompanionConfig, Event, FileKeyStore, Input, KeyStore, ServerRecord, Speaker,
 };
 use libhandlr_proto::link::{self, DeviceCode, PairingPayload, StaticKeypair};
 use serde_json::{Value, json};
@@ -309,6 +309,13 @@ fn pairing_shows_the_code_and_connects_once_it_is_added() {
 
     // And the connection carries a turn.
     c.send(Input::Utterance("what is claude doing".into()));
+    assert_eq!(
+        next_event(&c),
+        Event::Conversation {
+            speaker: Speaker::User,
+            text: "what is claude doing".into()
+        }
+    );
     assert_eq!(
         next_event(&c),
         Event::TurnEnded {

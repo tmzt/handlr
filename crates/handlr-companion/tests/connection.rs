@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input};
+use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input, Speaker};
 use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -105,6 +105,19 @@ fn expect_connected(c: &Companion) {
         next_event(c),
         Event::Vocabulary(vec!["claude".into(), "hr".into()])
     );
+    // The first list answer, `greet`'s.
+    assert_eq!(next_event(c), Event::Agents(vec![]));
+}
+
+/// The user's words of a turn, as the overview's conversation shows them.
+fn expect_user(c: &Companion, text: &str) {
+    assert_eq!(
+        next_event(c),
+        Event::Conversation {
+            speaker: Speaker::User,
+            text: text.into()
+        }
+    );
 }
 
 fn paths(dir: &tempfile::TempDir) -> (PathBuf, PathBuf) {
@@ -136,6 +149,14 @@ fn hello_then_a_turn_and_its_say() {
                       "params": {"turn_id": 1, "seq": 0, "text": "Claude is idle."}}));
     conn.write(json!({"jsonrpc": "2.0", "id": start["id"],
                       "result": {"outcome": "done", "ran": []}}));
+    expect_user(&c, "what is claude doing");
+    assert_eq!(
+        next_event(&c),
+        Event::Conversation {
+            speaker: Speaker::Gemini,
+            text: "Claude is idle.".into()
+        }
+    );
     assert_eq!(next_event(&c), Event::Say("Claude is idle.".into()));
     assert_eq!(
         next_event(&c),
@@ -225,6 +246,7 @@ fn a_tap_during_a_turn_interrupts_it_over_the_socket() {
     c.send(Input::Utterance("send continue to the handlr agent".into()));
     let start = conn.read();
     c.send(Input::Tap);
+    expect_user(&c, "send continue to the handlr agent");
     assert_eq!(next_event(&c), Event::StopSpeaking);
     let interrupt = conn.read();
     assert_eq!(interrupt["method"], "turn.interrupt");
