@@ -50,7 +50,7 @@ pub const GREEN: [f32; 4] = [0.36, 0.93, 0.45, 1.0];
 pub const RED: [f32; 4] = [1.0, 0.40, 0.40, 1.0];
 pub const YELLOW: [f32; 4] = [1.0, 0.82, 0.30, 1.0];
 pub const BAND: [f32; 4] = [0.18, 0.19, 0.21, 1.0];
-const CARD_BG: [f32; 4] = [0.11, 0.12, 0.17, 1.0];
+pub(crate) const CARD_BG: [f32; 4] = [0.11, 0.12, 0.17, 1.0];
 const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
 const HEADER_BG: [f32; 4] = [0.07, 0.07, 0.09, 1.0];
 pub(crate) const APPROVE_BG: [f32; 4] = [0.16, 0.45, 0.25, 1.0];
@@ -77,7 +77,7 @@ const CARD_PT: f32 = 19.0;
 const NAME_PT: f32 = 18.0;
 /// The side margin, the accent edge, a card's padding and its buttons'
 /// height, in points.
-const PAD: f32 = 12.0;
+pub(crate) const PAD: f32 = 12.0;
 const EDGE: f32 = 6.0;
 const CARD_PAD: f32 = 12.0;
 const ACTION_H: f32 = 44.0;
@@ -112,7 +112,7 @@ const PIN_LINES: usize = 3;
 const DICTATION_LINES: usize = 6;
 
 /// A line height for type of `px` pixels.
-fn line_h(px: f32) -> f32 {
+pub(crate) fn line_h(px: f32) -> f32 {
     px * 1.35
 }
 
@@ -134,7 +134,7 @@ fn term_columns(width: f32, px: f32) -> usize {
 
 /// How many characters of `px`-pixel type fit in `width`: roughly half an
 /// em each in Roboto, as the main screen counts.
-fn columns(width: f32, px: f32) -> usize {
+pub(crate) fn columns(width: f32, px: f32) -> usize {
     (width / (px * 0.5)).max(8.0) as usize
 }
 
@@ -340,7 +340,7 @@ pub fn is_diff(text: &str) -> bool {
 }
 
 /// `text` on one line of `cols` characters, cut with "…".
-fn one_line(text: &str, cols: usize) -> String {
+pub(crate) fn one_line(text: &str, cols: usize) -> String {
     if text.chars().count() <= cols {
         return text.to_string();
     }
@@ -550,12 +550,12 @@ struct Drag {
 }
 
 /// A movement under this many points is a tap.
-const SLOP: f32 = 10.0;
+pub(crate) const SLOP: f32 = 10.0;
 /// The momentum's decay per second: the speed falls to `e^-DECAY` of
 /// itself each second.
-const DECAY: f32 = 3.2;
+pub(crate) const DECAY: f32 = 3.2;
 /// Slower than this (points per second), a fling stops.
-const MIN_FLING: f32 = 30.0;
+pub(crate) const MIN_FLING: f32 = 30.0;
 /// How long the agent must be quiet, in seconds, before continue is
 /// suggested after a finished turn.
 const QUIET_FOR_CONTINUE: f32 = 30.0;

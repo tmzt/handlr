@@ -34,6 +34,7 @@
 pub mod agent;
 pub mod controls;
 pub mod keys;
+pub mod overview;
 pub mod ui;
 
 use std::path::PathBuf;
