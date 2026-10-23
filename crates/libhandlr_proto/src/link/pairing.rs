@@ -100,7 +100,7 @@ impl fmt::Display for PairingStringError {
             PairingStringError::BadBase58 => "it has a character outside base58",
             PairingStringError::BadChecksum => "its checksum does not match",
             PairingStringError::UnknownVersion(v) => {
-                return write!(f, "invalid pairing string: unknown version {v}")
+                return write!(f, "invalid pairing string: unknown version {v}");
             }
             PairingStringError::Malformed => "its payload is malformed",
             PairingStringError::TooManyAddresses => "there are more than 255 addresses",

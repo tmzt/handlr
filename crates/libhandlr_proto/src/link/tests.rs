@@ -3,7 +3,7 @@
 //! code.
 
 use blake2::{Blake2s256, Digest};
-use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt, DuplexStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream, duplex};
 
 use super::*;
 
@@ -367,10 +367,11 @@ fn the_pairing_url_names_the_remote_address_and_round_trips() {
         "[::1]:7347".into(),
         "localhost:7347".into(),
     ];
-    assert!(p
-        .url()
-        .unwrap()
-        .starts_with("handlr://127.0.0.1:7347/pair#handlr1"));
+    assert!(
+        p.url()
+            .unwrap()
+            .starts_with("handlr://127.0.0.1:7347/pair#handlr1")
+    );
     assert!(!p.has_remote_address());
 
     p.addresses.clear();

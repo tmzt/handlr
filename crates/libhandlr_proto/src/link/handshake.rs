@@ -7,8 +7,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use super::keys::to_key;
 use super::resolver::{KeyResolver, STATIC_MARKER};
 use super::{
-    LinkError, LinkStream, StaticKey, KEY_LEN, MAX_FIRST_MESSAGE, MAX_FRAME, MODE_RECONNECT,
-    PROLOGUE_PREFIX, RECONNECT_PATTERN,
+    KEY_LEN, LinkError, LinkStream, MAX_FIRST_MESSAGE, MAX_FRAME, MODE_RECONNECT, PROLOGUE_PREFIX,
+    RECONNECT_PATTERN, StaticKey,
 };
 
 /// A connection the server accepted.

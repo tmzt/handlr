@@ -35,11 +35,11 @@ mod stream;
 #[cfg(test)]
 mod tests;
 
-pub use handshake::{accept, reconnect, Accepted};
-pub use keys::{generate_keypair, public_key, StaticKey, StaticKeypair};
+pub use handshake::{Accepted, accept, reconnect};
+pub use keys::{StaticKey, StaticKeypair, generate_keypair, public_key};
 pub use pairing::{
-    DeviceCode, PairingPayload, PairingStringError, DEVICE_CODE_PREFIX, DEVICE_CODE_VERSION,
-    DEVICE_NAME_MAX, PAIRING_PREFIX, PAIRING_URL_SCHEME, PAIRING_VERSION,
+    DEVICE_CODE_PREFIX, DEVICE_CODE_VERSION, DEVICE_NAME_MAX, DeviceCode, PAIRING_PREFIX,
+    PAIRING_URL_SCHEME, PAIRING_VERSION, PairingPayload, PairingStringError,
 };
 pub use stream::{LinkReader, LinkStream, LinkWriter};
 

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use snow::params::DHChoice;
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 
-use super::{LinkError, KEY_LEN, RECONNECT_PATTERN};
+use super::{KEY_LEN, LinkError, RECONNECT_PATTERN};
 
 /// An X25519 static key pair. `Debug` does not print the private key.
 #[derive(Clone, PartialEq, Eq)]

@@ -15,7 +15,7 @@ use snow::params::{CipherChoice, DHChoice, HashChoice};
 use snow::resolvers::{CryptoResolver, DefaultResolver};
 use snow::types::{Cipher, Dh, Hash, Random};
 
-use super::{StaticKey, KEY_LEN};
+use super::{KEY_LEN, StaticKey};
 
 /// What the handshakes pass to `local_private_key`: not a key, so a
 /// [`KeyDh`] set with it uses the [`StaticKey`].

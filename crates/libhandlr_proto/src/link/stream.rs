@@ -5,7 +5,7 @@ use std::sync::Arc;
 use snow::StatelessTransportState;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
-use super::{LinkError, FLAG_LAST, FLAG_MORE, KEY_LEN, MAX_CHUNK, MAX_FRAME, MAX_MESSAGE};
+use super::{FLAG_LAST, FLAG_MORE, KEY_LEN, LinkError, MAX_CHUNK, MAX_FRAME, MAX_MESSAGE};
 
 /// An established link connection. Messages are whole: one
 /// [`send_message`](Self::send_message) is one

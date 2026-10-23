@@ -29,12 +29,12 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use libhandlr_proto::common::{methods, protocols, HelloParams};
+use libhandlr_proto::common::{HelloParams, methods, protocols};
 use libhandlr_proto::link::{
-    generate_keypair, reconnect, DeviceCode, LinkError, LinkStream, PairingPayload, StaticKeypair,
+    DeviceCode, LinkError, LinkStream, PairingPayload, StaticKeypair, generate_keypair, reconnect,
 };
 use libhandlr_proto::{Id, Incoming, Request};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
