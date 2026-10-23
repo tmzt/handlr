@@ -1,7 +1,7 @@
 ---
 title: Session readers for agy and other agents, behind one agnostic trait
 date: 2026-10-23
-status: Draft
+status: In implementation
 covers:
   - "Reading the sessions of agents other than Claude Code and Codex,
     starting with agy (the Antigravity CLI), so their panes get the agent
@@ -207,3 +207,12 @@ owner's approval".
 `out/sessions/agy_example/` and read by an ignored test, `AGY_STEPS.md`
 names the step types for a user prompt, a reply, a tool call and a tool
 result, and two synthetic fixtures are committed.
+
+## Amendment — 2026-10-23 17:33 EDT: implementation has started; the document is now immutable
+
+The owner approved the plan on 2026-10-23: "Yes, approve the session
+readers plan and start with step 1, copying and mapping the agy example".
+Open question 3 is answered by the owner's "It shouldn't include the
+memory or anything like that. Just a session": agy's `brain/`, annotations
+and summaries are never read, and its state snapshots (step type 23) are
+left out. The document is now immutable; departures go to CHANGES.md.
