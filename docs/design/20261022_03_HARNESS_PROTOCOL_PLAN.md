@@ -367,3 +367,62 @@ existing notice queue and its rules for when notices are spoken.
    replies and its pending question, and take a message to it from there.
 5. **The harness methods:** the old step 2.
 6. **`handlr mcp`:** the old step 3.
+
+## Amendment — 2026-10-23 02:34 EDT: the agent view as terminal scrollback with priority cards (living section L3)
+
+On the owner's description (2026-10-23). This replaces the "view" bullet
+of decision 9. Access, opening, the font and answering stand.
+
+**One flow per agent.**
+- **Scrollback formatted as a terminal.** The agent's transcript (from the
+  step 1 readers) is laid out at the phone's width, wrapped by the app, so
+  nothing breaks at a fixed column:
+  - dark background with the bright terminal colours;
+  - the user's turns on a grey band;
+  - the agent's replies in plain text;
+  - tool calls as dim one-line summaries;
+  - diff lines in green and red, errors in red;
+  - the terminal font when libmsdf 0.5.0 is released.
+- **Finger scrolling** through the whole session, with momentum, as in
+  Termux and herdr today. The view follows the newest entry at the bottom
+  until the user scrolls up, and follows again once scrolled back to the
+  bottom.
+
+**Priority cards, in the same flow.** A card sits at its place in the
+conversation, but is visually distinct: a raised panel, an accent edge,
+larger text, and its actions on it. Cards, highest priority first:
+1. **Approval needed:** a handlr confirmation pending for this agent, with
+   Approve and Deny.
+2. **The agent is asking:** its pending question (decision 8), with "Take a
+   message".
+3. **Something broke:** a tool result with `is_error`, failing tests in a
+   tool result, or the pane's `agent_status` being `blocked`.
+4. **Finished:** the agent's turn ended (`working` to `idle`), with the
+   final reply's first paragraph.
+
+A card is **live** until it is resolved:
+- the confirmation is resolved;
+- a user entry follows the question;
+- a later tool result succeeds;
+- the agent works again.
+
+Once resolved, it fades to ordinary scrollback styling, so only live cards
+stand out.
+
+**Detection** is by these rules, from data handlr already has: the broker,
+the readers, herdr's status. Nothing extra is computed.
+
+**Open questions, in this living section:**
+- L3-1. Should the highest live card also stay **pinned** at the edge of the
+  screen while the user scrolls back, or appear only in the flow?
+- L3-2. **Rules only, or a model too?** A model (Gemini now, or the local
+  model later) could flag "the thing that matters right now" in replies
+  that match no rule, at the cost of a call per agent turn.
+- L3-3. What else did the owner mean to add? The description ended mid-
+  sentence ("So make…").
+
+**Step 4's "Done when"** gains:
+- on the S23, the handlr agent's view scrolls back through its session in
+  terminal format;
+- a pending confirmation and a pending question each show as a live card
+  in the flow, and fade when resolved.
