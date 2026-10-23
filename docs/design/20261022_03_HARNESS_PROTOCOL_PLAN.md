@@ -448,3 +448,10 @@ settles open question L3-1.
 Step 4's "Done when" gains:
 - with a live card and the view scrolled back, the bar shows, scrolling is
   never interrupted, and tapping the bar jumps to the card.
+
+## Amendment — 2026-10-23 02:35 EDT: L3-3 settled: nothing more to add (living section L3)
+
+The owner's description ended mid-sentence because the companion app
+restarted during an install. The rest was only "make a plan", which became
+the amendment of the agent view itself. There is nothing more to add, and
+open question L3-3 is closed.
