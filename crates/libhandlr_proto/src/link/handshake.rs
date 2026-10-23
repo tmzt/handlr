@@ -4,9 +4,10 @@ use snow::{Builder, HandshakeState};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::keys::to_key;
+use super::resolver::{KeyResolver, STATIC_MARKER};
 use super::{
-    LinkError, LinkStream, PairingId, KEY_LEN, MAX_FIRST_MESSAGE, MAX_FRAME, MODE_PAIRING,
-    MODE_RECONNECT, PAIRING_PATTERN, PROLOGUE_PREFIX, RECONNECT_PATTERN,
+    LinkError, LinkStream, PairingId, StaticKey, KEY_LEN, MAX_FIRST_MESSAGE, MAX_FRAME,
+    MODE_PAIRING, MODE_RECONNECT, PAIRING_PATTERN, PROLOGUE_PREFIX, RECONNECT_PATTERN,
 };
 
 /// The PSK's position in `XXpsk3`.
@@ -45,17 +46,16 @@ pub enum AcceptedMode {
 /// the client sees that as an error on its first receive.
 ///
 /// Returns the stream and the server's static key.
-pub async fn pair<S: AsyncRead + AsyncWrite + Unpin>(
+pub async fn pair<S: AsyncRead + AsyncWrite + Unpin, K: StaticKey + Clone>(
     mut io: S,
-    local_private: &[u8; KEY_LEN],
+    local: &K,
     server_key: &[u8; KEY_LEN],
     secret: &[u8; KEY_LEN],
     first_message: Option<&[u8]>,
 ) -> Result<(LinkStream<S>, [u8; KEY_LEN]), LinkError> {
     let first = check_first(first_message)?;
     let prologue = prologue(MODE_PAIRING);
-    let mut hs = Builder::new(PAIRING_PATTERN.parse()?)
-        .local_private_key(local_private)?
+    let mut hs = builder(PAIRING_PATTERN, local)?
         .psk(PSK_LOCATION, secret)?
         .prologue(&prologue)?
         .build_initiator()?;
@@ -92,16 +92,15 @@ pub async fn pair<S: AsyncRead + AsyncWrite + Unpin>(
 /// `first_message` (encrypted) if given. A server that does not authorize
 /// the client's key sends nothing and closes the connection, which this
 /// returns as [`LinkError::Closed`].
-pub async fn reconnect<S: AsyncRead + AsyncWrite + Unpin>(
+pub async fn reconnect<S: AsyncRead + AsyncWrite + Unpin, K: StaticKey + Clone>(
     mut io: S,
-    local_private: &[u8; KEY_LEN],
+    local: &K,
     server_key: &[u8; KEY_LEN],
     first_message: Option<&[u8]>,
 ) -> Result<LinkStream<S>, LinkError> {
     let first = check_first(first_message)?;
     let prologue = prologue(MODE_RECONNECT);
-    let mut hs = Builder::new(RECONNECT_PATTERN.parse()?)
-        .local_private_key(local_private)?
+    let mut hs = builder(RECONNECT_PATTERN, local)?
         .remote_public_key(server_key)?
         .prologue(&prologue)?
         .build_initiator()?;
@@ -134,14 +133,15 @@ pub async fn reconnect<S: AsyncRead + AsyncWrite + Unpin>(
 /// connection.
 ///
 /// On error, `io` is dropped, which closes the connection.
-pub async fn accept<S, P, A>(
+pub async fn accept<S, K, P, A>(
     mut io: S,
-    local_private: &[u8; KEY_LEN],
+    local: &K,
     pairing_secret: P,
     authorize: A,
 ) -> Result<Accepted<S>, LinkError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
+    K: StaticKey + Clone,
     P: FnOnce(PairingId) -> Option<[u8; KEY_LEN]>,
     A: FnOnce(&[u8; KEY_LEN]) -> bool,
 {
@@ -154,8 +154,7 @@ where
             let id = PairingId(id);
             let secret = pairing_secret(id).ok_or(LinkError::UnknownPairing)?;
             let prologue = prologue(MODE_PAIRING);
-            let mut hs = Builder::new(PAIRING_PATTERN.parse()?)
-                .local_private_key(local_private)?
+            let mut hs = builder(PAIRING_PATTERN, local)?
                 .psk(PSK_LOCATION, &secret)?
                 .prologue(&prologue)?
                 .build_responder()?;
@@ -182,8 +181,7 @@ where
         }
         MODE_RECONNECT => {
             let prologue = prologue(MODE_RECONNECT);
-            let mut hs = Builder::new(RECONNECT_PATTERN.parse()?)
-                .local_private_key(local_private)?
+            let mut hs = builder(RECONNECT_PATTERN, local)?
                 .prologue(&prologue)?
                 .build_responder()?;
 
@@ -209,6 +207,13 @@ where
         }
         other => Err(LinkError::UnknownMode(other)),
     }
+}
+
+/// A builder for `pattern` whose local static key is `local`, through
+/// [`KeyResolver`]: snow is given a marker, not the private key.
+fn builder<'a, K: StaticKey + Clone>(pattern: &str, local: &K) -> Result<Builder<'a>, LinkError> {
+    let resolver = Box::new(KeyResolver::new(local));
+    Ok(Builder::with_resolver(pattern.parse()?, resolver).local_private_key(STATIC_MARKER)?)
 }
 
 fn prologue(mode: u8) -> Vec<u8> {

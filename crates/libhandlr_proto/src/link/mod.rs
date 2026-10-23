@@ -15,19 +15,24 @@
 //!   plaintext is a flag byte (`0x00` last, `0x01` more) and a chunk of one
 //!   message. A message reassembled past 1 MiB closes the connection.
 //!
+//! The local static key is a [`StaticKey`], which does its own
+//! Diffie-Hellman, so a client's private key can stay in a key store and
+//! out of snow. [`StaticKeypair`] is one held in memory.
+//!
 //! The handshake functions do not time out; callers wrap them in
 //! `tokio::time::timeout` as they see fit.
 
 mod handshake;
 mod keys;
 mod pairing;
+mod resolver;
 mod stream;
 
 #[cfg(test)]
 mod tests;
 
 pub use handshake::{accept, pair, reconnect, Accepted, AcceptedMode};
-pub use keys::{generate_keypair, generate_secret, public_key, StaticKeypair};
+pub use keys::{generate_keypair, generate_secret, public_key, StaticKey, StaticKeypair};
 pub use pairing::{PairingId, PairingPayload, PairingStringError, PAIRING_PREFIX, PAIRING_VERSION};
 pub use stream::{LinkReader, LinkStream, LinkWriter};
 

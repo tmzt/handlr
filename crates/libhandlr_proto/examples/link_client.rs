@@ -26,7 +26,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use libhandlr_proto::common::{methods, protocols, HelloParams};
-use libhandlr_proto::link::{generate_keypair, pair, reconnect, LinkStream, PairingPayload};
+use libhandlr_proto::link::{
+    generate_keypair, pair, reconnect, LinkStream, PairingPayload, StaticKeypair,
+};
 use libhandlr_proto::{Id, Incoming, Request};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
@@ -244,7 +246,7 @@ async fn run() -> Result<(), String> {
             // feature. The server times a handshake out at 10 s.
             let (stream, server) = pair(
                 io,
-                &keypair.private,
+                &keypair,
                 &payload.server_key,
                 &payload.secret,
                 Some(&first),
@@ -268,7 +270,8 @@ async fn run() -> Result<(), String> {
         None => {
             let stored = Stored::load(&args.key)?;
             let io = connect(&stored.addresses)?;
-            let stream = reconnect(io, &stored.private, &stored.server, Some(&first))
+            let keypair = StaticKeypair::from_private(stored.private).map_err(|e| e.to_string())?;
+            let stream = reconnect(io, &keypair, &stored.server, Some(&first))
                 .await
                 .map_err(|e| {
                     format!(

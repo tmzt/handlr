@@ -1,6 +1,7 @@
 //! Static keys and pairing secrets, from snow's default resolver.
 
 use std::fmt;
+use std::sync::Arc;
 
 use snow::params::DHChoice;
 use snow::resolvers::{CryptoResolver, DefaultResolver};
@@ -30,6 +31,42 @@ impl fmt::Debug for StaticKeypair {
             .field("private", &"<redacted>")
             .field("public", &self.public)
             .finish()
+    }
+}
+
+/// A static X25519 key that does the Diffie-Hellman itself, so its private
+/// key can stay where it is kept: an Android Keystore, a Keychain, or (for
+/// [`StaticKeypair`]) memory. The handshakes take one for the local key.
+pub trait StaticKey: Send + Sync + 'static {
+    /// The public key.
+    fn public(&self) -> [u8; KEY_LEN];
+    /// X25519 of the private key with `peer`, or `None` if the key could not
+    /// be used (for example, a store that is locked). A handshake given
+    /// `None` fails with [`LinkError::Noise`].
+    fn dh(&self, peer: &[u8; KEY_LEN]) -> Option<[u8; KEY_LEN]>;
+}
+
+impl StaticKey for StaticKeypair {
+    fn public(&self) -> [u8; KEY_LEN] {
+        self.public
+    }
+
+    fn dh(&self, peer: &[u8; KEY_LEN]) -> Option<[u8; KEY_LEN]> {
+        let mut dh = DefaultResolver.resolve_dh(&DHChoice::Curve25519)?;
+        dh.set(&self.private);
+        let mut out = [0u8; KEY_LEN];
+        dh.dh(peer, &mut out).ok()?;
+        Some(out)
+    }
+}
+
+impl<K: StaticKey + ?Sized> StaticKey for Arc<K> {
+    fn public(&self) -> [u8; KEY_LEN] {
+        (**self).public()
+    }
+
+    fn dh(&self, peer: &[u8; KEY_LEN]) -> Option<[u8; KEY_LEN]> {
+        (**self).dh(peer)
     }
 }
 

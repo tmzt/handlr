@@ -25,8 +25,8 @@ async fn paired() -> (LinkStream<DuplexStream>, LinkStream<DuplexStream>) {
     let secret = generate_secret().unwrap();
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        pair(c, &client.private, &server.public, &secret, None),
-        accept(s, &server.private, |_| Some(secret), |_| false),
+        pair(c, &client, &server.public, &secret, None),
+        accept(s, &server, |_| Some(secret), |_| false),
     );
     (cr.unwrap().0, sr.unwrap().stream)
 }
@@ -40,16 +40,10 @@ async fn pairing_succeeds_with_the_right_secret() {
     let id = p.pairing_id();
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        pair(
-            c,
-            &client.private,
-            &p.server_key,
-            &p.secret,
-            Some(b"{\"hello\":1}")
-        ),
+        pair(c, &client, &p.server_key, &p.secret, Some(b"{\"hello\":1}")),
         accept(
             s,
-            &server.private,
+            &server,
             |got| (got == id).then_some(secret),
             |_| panic!("pairing must not consult authorize"),
         ),
@@ -79,10 +73,10 @@ async fn pairing_fails_with_a_wrong_secret() {
     // The id names no pending pairing: refused before the handshake.
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        pair(c, &client.private, &server.public, &wrong, None),
+        pair(c, &client, &server.public, &wrong, None),
         accept(
             s,
-            &server.private,
+            &server,
             |got| (got == PairingId::from_secret(&secret)).then_some(secret),
             |_| false,
         ),
@@ -94,8 +88,8 @@ async fn pairing_fails_with_a_wrong_secret() {
     // the server's read of the last handshake message fails.
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        pair(c, &client.private, &server.public, &wrong, None),
-        accept(s, &server.private, |_| Some(secret), |_| false),
+        pair(c, &client, &server.public, &wrong, None),
+        accept(s, &server, |_| Some(secret), |_| false),
     );
     assert!(matches!(sr, Err(LinkError::Noise(_))), "{:?}", sr.err());
     let (mut cs, _) = cr.unwrap();
@@ -110,8 +104,8 @@ async fn a_wrong_server_key_in_the_payload_aborts_the_client() {
     let secret = generate_secret().unwrap();
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        pair(c, &client.private, &other.public, &secret, None),
-        accept(s, &server.private, |_| Some(secret), |_| false),
+        pair(c, &client, &other.public, &secret, None),
+        accept(s, &server, |_| Some(secret), |_| false),
     );
     assert!(matches!(cr, Err(LinkError::ServerKeyMismatch)));
     // The client never sent its static key; the server saw the stream end.
@@ -124,10 +118,10 @@ async fn reconnect_carries_the_first_message() {
     let client = generate_keypair().unwrap();
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        reconnect(c, &client.private, &server.public, Some(b"hello")),
+        reconnect(c, &client, &server.public, Some(b"hello")),
         accept(
             s,
-            &server.private,
+            &server,
             |_| panic!("reconnecting must not look up a pairing"),
             |key| key == &client.public,
         ),
@@ -143,6 +137,79 @@ async fn reconnect_carries_the_first_message() {
     assert_eq!(acc.stream.recv_message().await.unwrap(), b"");
 }
 
+/// A [`StaticKey`] that keeps its key pair to itself, as a key store does,
+/// and counts its Diffie-Hellmans; with `fail`, it is a locked store.
+#[derive(Clone)]
+struct StoreKey {
+    pair: StaticKeypair,
+    dhs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fail: bool,
+}
+
+impl StaticKey for StoreKey {
+    fn public(&self) -> [u8; KEY_LEN] {
+        self.pair.public
+    }
+
+    fn dh(&self, peer: &[u8; KEY_LEN]) -> Option<[u8; KEY_LEN]> {
+        self.dhs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.fail {
+            return None;
+        }
+        self.pair.dh(peer)
+    }
+}
+
+fn store_key(fail: bool) -> StoreKey {
+    StoreKey {
+        pair: generate_keypair().unwrap(),
+        dhs: Default::default(),
+        fail,
+    }
+}
+
+#[tokio::test]
+async fn a_key_store_key_pairs_and_reconnects() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let server = generate_keypair().unwrap();
+    let client = store_key(false);
+    let secret = generate_secret().unwrap();
+
+    // XXpsk3: the client's static key is in `se` alone.
+    let (c, s) = duplex(PIPE);
+    let (cr, sr) = tokio::join!(
+        pair(c, &client, &server.public, &secret, None),
+        accept(s, &server, |_| Some(secret), |_| false),
+    );
+    cr.unwrap();
+    assert_eq!(sr.unwrap().peer_key, client.pair.public);
+    assert_eq!(client.dhs.load(SeqCst), 1);
+
+    // IK: `ss` on the first message and `se` on the reply.
+    let (c, s) = duplex(PIPE);
+    let (cr, sr) = tokio::join!(
+        reconnect(c, &client, &server.public, Some(b"hello")),
+        accept(s, &server, |_| None, |key| key == &client.pair.public),
+    );
+    let mut cs = cr.unwrap();
+    let mut acc = sr.unwrap();
+    assert_eq!(client.dhs.load(SeqCst), 3);
+    acc.stream.send_message(b"welcome").await.unwrap();
+    assert_eq!(cs.recv_message().await.unwrap(), b"welcome");
+}
+
+#[tokio::test]
+async fn a_locked_key_store_fails_the_handshake() {
+    let server = generate_keypair().unwrap();
+    let client = store_key(true);
+    let (c, s) = duplex(PIPE);
+    let (cr, _) = tokio::join!(
+        reconnect(c, &client, &server.public, Some(b"hello")),
+        accept(s, &server, |_| None, |_| true),
+    );
+    assert!(matches!(cr, Err(LinkError::Noise(_))), "{:?}", cr.err());
+}
+
 #[tokio::test]
 async fn ik_with_a_rejected_key_gets_no_reply() {
     let server = generate_keypair().unwrap();
@@ -151,8 +218,8 @@ async fn ik_with_a_rejected_key_gets_no_reply() {
     // Through the client API: the stream ends with no reply.
     let (c, s) = duplex(PIPE);
     let (cr, sr) = tokio::join!(
-        reconnect(c, &client.private, &server.public, Some(b"hello")),
-        accept(s, &server.private, |_| None, |_| false),
+        reconnect(c, &client, &server.public, Some(b"hello")),
+        accept(s, &server, |_| None, |_| false),
     );
     assert!(matches!(sr, Err(LinkError::Unauthorized)));
     assert!(matches!(cr, Err(LinkError::Closed)));
@@ -176,7 +243,7 @@ async fn ik_with_a_rejected_key_gets_no_reply() {
     head.extend_from_slice(&(n as u16).to_be_bytes());
     head.extend_from_slice(&buf[..n]);
     c.write_all(&head).await.unwrap();
-    let sr = accept(s, &server.private, |_| None, |_| false).await;
+    let sr = accept(s, &server, |_| None, |_| false).await;
     assert!(matches!(sr, Err(LinkError::Unauthorized)));
     let mut reply = Vec::new();
     c.read_to_end(&mut reply).await.unwrap();
@@ -188,7 +255,7 @@ async fn an_unknown_mode_byte_closes_the_connection() {
     let server = generate_keypair().unwrap();
     let (mut c, s) = duplex(PIPE);
     c.write_all(&[0x03, 0, 0]).await.unwrap();
-    let sr = accept(s, &server.private, |_| None, |_| true).await;
+    let sr = accept(s, &server, |_| None, |_| true).await;
     assert!(matches!(sr, Err(LinkError::UnknownMode(0x03))));
     let mut reply = Vec::new();
     c.read_to_end(&mut reply).await.unwrap();
