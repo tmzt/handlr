@@ -76,6 +76,49 @@ pub fn validate_arbitrary_command(cmd: &str) -> Result<String, String> {
     Ok(cleaned.to_string())
 }
 
+/// Maximum length of a dictated message (plan 20261023_02, decision 6 as
+/// amended at 01:58 EDT).
+pub const MAX_MESSAGE_LEN: usize = 4000;
+
+/// Validate a dictated message (plan 20261023_02, decision 6, as amended at
+/// 01:58 EDT): the same strict characters as an arbitrary command (ASCII
+/// letters, digits, spaces and `. , ' ? :`), at most [`MAX_MESSAGE_LEN`]
+/// characters.
+///
+/// Returns the cleaned message (runs of spaces folded to one, surrounding
+/// space and trailing `.` and `,` removed) or the reason it was refused,
+/// naming the offending character. Line breaks, tabs and every other
+/// control character are refused, never folded, so a message is always one
+/// line of input.
+pub fn validate_message(text: &str) -> Result<String, String> {
+    if let Some(bad) = text.chars().find(|c| c.is_control()) {
+        return Err(format!(
+            "Message rejected: control characters (found {bad:?}) are not permitted."
+        ));
+    }
+    let folded = text
+        .split(' ')
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cleaned = folded.trim_end_matches(['.', ',']).trim_end();
+    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err("Message cannot be empty.".to_string());
+    }
+    let len = cleaned.chars().count();
+    if len > MAX_MESSAGE_LEN {
+        return Err(format!(
+            "Message rejected: {len} characters exceeds the {MAX_MESSAGE_LEN} character limit."
+        ));
+    }
+    if let Some(bad) = cleaned.chars().find(|c| !is_allowed_arbitrary_char(*c)) {
+        return Err(format!(
+            "Message rejected: the character '{bad}' is not permitted. Only letters, digits, spaces and . , ' ? : are allowed."
+        ));
+    }
+    Ok(cleaned.to_string())
+}
+
 /// Normalize a command so the phrasing used when confirmation was requested
 /// matches the string later handed to `run_command`: lowercased, trailing
 /// sentence punctuation dropped, and internal whitespace collapsed.
@@ -316,6 +359,62 @@ mod tests {
         assert!(validate_arbitrary_command(&long)
             .unwrap_err()
             .contains("exceeds"));
+    }
+
+    #[test]
+    fn test_validate_message_accepts_strict_text_and_folds_spaces() {
+        assert_eq!(
+            validate_message("  Please run   the tests,  then tell me what failed.  ").unwrap(),
+            "Please run the tests, then tell me what failed"
+        );
+        assert_eq!(
+            validate_message("Is it ready? Yes: it's ready").unwrap(),
+            "Is it ready? Yes: it's ready"
+        );
+    }
+
+    #[test]
+    fn test_validate_message_refuses_slash_anywhere_and_names_the_character() {
+        let err = validate_message("/compact").unwrap_err();
+        assert!(err.contains("the character '/'"), "{err}");
+        let err = validate_message("look in src/main.rs please").unwrap_err();
+        assert!(err.contains("the character '/'"), "{err}");
+        let err = validate_message("use cargo test --all").unwrap_err();
+        assert!(err.contains("the character '-'"), "{err}");
+        let err = validate_message("say \"hi\"").unwrap_err();
+        assert!(err.contains("the character '\"'"), "{err}");
+        let err = validate_message("caf\u{e9} au lait").unwrap_err();
+        assert!(err.contains("the character '\u{e9}'"), "{err}");
+        for bad in [";", "&", "|", "$", "`", ">", "(", "!"] {
+            let err = validate_message(&format!("run tests {bad} now")).unwrap_err();
+            assert!(err.contains(&format!("'{bad}'")), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_message_refuses_control_characters() {
+        for bad in [
+            "one\ntwo",
+            "one\r\ntwo",
+            "one\ttwo",
+            "clear\u{1b}[2J",
+            "x\u{85}y",
+        ] {
+            let err = validate_message(bad).unwrap_err();
+            assert!(err.contains("control characters"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_message_takes_4000_characters_and_not_4001() {
+        let at_cap = "a".repeat(MAX_MESSAGE_LEN);
+        assert_eq!(validate_message(&at_cap).unwrap(), at_cap);
+        let err = validate_message(&"a".repeat(MAX_MESSAGE_LEN + 1)).unwrap_err();
+        assert!(err.contains("4001 characters exceeds the 4000"), "{err}");
+        // Folding comes first: spaces that fold away do not count.
+        let padded = format!("{}   {}", "a".repeat(1999), "b".repeat(2000));
+        assert_eq!(validate_message(&padded).unwrap().len(), MAX_MESSAGE_LEN);
+        assert!(validate_message(" . , ").unwrap_err().contains("empty"));
     }
 
     #[test]

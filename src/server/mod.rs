@@ -169,6 +169,31 @@ pub fn word_priors(
         .with_letter_names(('a'..='z').filter_map(|c| naming::letter_name(c, naming)))
 }
 
+/// herdr's focused pane in `snapshot`, named by `names` as `agents.list`
+/// names it (plan 20261023_02, decision 4). `None` when nothing is focused
+/// or the focused pane is not in the snapshot.
+pub fn focus_info(
+    snapshot: &serde_json::Value,
+    names: &Names,
+) -> Option<libhandlr_proto::common::FocusInfo> {
+    let pane_id = agents::focused_pane_id(snapshot)?;
+    let named = names.get(&pane_id)?;
+    let a = &named.agent;
+    Some(libhandlr_proto::common::FocusInfo {
+        pane_id: a.pane_id.clone(),
+        project: named
+            .project
+            .as_ref()
+            .map(|p| p.shown.clone())
+            .or_else(|| a.project.clone()),
+        agent: (a.agent != "shell").then(|| named.agent_part.shown.clone()),
+        tab_label: a.tab_label.clone(),
+        tab_number: a.tab_number,
+        name: named.shown.clone(),
+        spoken: named.spoken.clone(),
+    })
+}
+
 /// How long a name lookup waits for herdr before going without names.
 pub const NAME_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -317,6 +342,7 @@ mod tests {
             handle: handle.map(str::to_string),
             requested_by: "local:mcp".to_string(),
             lifetime: crate::core::confirm::Lifetime::Standing,
+            message: false,
         }
     }
 
@@ -349,6 +375,37 @@ mod tests {
         let names = Names::from_snapshot(&snap, &naming);
         let p = word_priors(&agents, &naming, Some((&snap, &names)));
         assert_eq!(p.prior("highbay", None), 0.25);
+    }
+
+    #[test]
+    fn focus_is_named_like_the_agents() {
+        let naming = NamingConfig::default();
+        let snap = serde_json::json!({
+            "focused_pane_id": "p2",
+            "workspaces": [{"workspace_id": "w1", "label": "libmorph"}],
+            "tabs": [{"tab_id": "w1:t1", "workspace_id": "w1", "number": 4, "label": "-ad"}],
+            "panes": [
+                {"pane_id": "w1:p1", "workspace_id": "w1", "cwd": "/src/libmorph"},
+                {"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1",
+                 "agent": "claude", "cwd": "/src/libmorph"}
+            ]
+        });
+        let names = Names::from_snapshot(&snap, &naming);
+        let focus = focus_info(&snap, &names).unwrap();
+        assert_eq!(focus.pane_id, "w1:p2");
+        assert_eq!(focus.agent.as_deref(), Some("Claude"));
+        assert_eq!(focus.project.as_deref(), Some("libmorph"));
+        assert_eq!(focus.tab_label.as_deref(), Some("-ad"));
+        assert_eq!(focus.tab_number, Some(4));
+        assert_eq!(focus.name, names.get("w1:p2").unwrap().shown);
+        // A shell has no agent; nothing focused is none.
+        let shell =
+            serde_json::json!({"focused_pane_id": "w1:p1", "panes": [{"pane_id": "w1:p1"}]});
+        let names = Names::from_snapshot(&shell, &naming);
+        assert_eq!(focus_info(&shell, &names).unwrap().agent, None);
+        let none = serde_json::json!({"panes": [{"pane_id": "w1:p1"}]});
+        let names = Names::from_snapshot(&none, &naming);
+        assert_eq!(focus_info(&none, &names), None);
     }
 
     #[test]

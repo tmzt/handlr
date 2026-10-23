@@ -320,6 +320,13 @@ pub fn confirm_text(command: &str, spoken: &str, handle: Option<&str>) -> String
     text
 }
 
+/// `Approve sending your message to <spoken>?`: a dictated message's
+/// question, which leaves the text to the card (plan 20261023_02,
+/// decision 5).
+pub fn message_confirm_text(spoken: &str) -> String {
+    format!("Approve sending your message to {spoken}?")
+}
+
 /// The default key file, under the gitignored `.private`.
 const GEMINI_KEY_FILE: &str = ".private/gemini_api_key";
 
@@ -416,13 +423,17 @@ pub(super) fn confirm_requested(
         handle: view.handle.clone(),
         token: token.reveal_to(principal).map(str::to_string),
         reminder,
-        text: confirm_text(
-            &view.command,
-            &say,
-            view.handle
-                .as_deref()
-                .filter(|_| view.lifetime != Lifetime::VoiceTurn),
-        ),
+        text: if view.message {
+            message_confirm_text(&say)
+        } else {
+            confirm_text(
+                &view.command,
+                &say,
+                view.handle
+                    .as_deref()
+                    .filter(|_| view.lifetime != Lifetime::VoiceTurn),
+            )
+        },
     }
 }
 
@@ -856,15 +867,18 @@ async fn work(
 }
 
 /// Send `vocabulary.changed` if the vocabulary differs from what this
-/// connection was last given (on each turn and every
-/// `VOCABULARY_INTERVAL`).
+/// connection was last given, and `focus.changed` if herdr's focus does
+/// (plan 20261023_02, decision 4), both from one snapshot (on each turn,
+/// after `agents.focus`, and every `VOCABULARY_INTERVAL`).
 pub(super) async fn check_vocabulary(conn: Arc<Conn>) {
     let Ok(Ok(snap)) =
         tokio::time::timeout(super::NAME_LOOKUP_TIMEOUT, conn.daemon.client.list_panes()).await
     else {
         return;
     };
-    let vocabulary = conn.daemon.names(&snap).vocabulary();
+    let names = conn.daemon.names(&snap);
+    let vocabulary = names.vocabulary();
+    let focus = super::focus_info(&snap, &names);
     let changed = {
         let mut last = conn.vocabulary.lock().unwrap();
         if *last == vocabulary {
@@ -880,13 +894,34 @@ pub(super) async fn check_vocabulary(conn: Arc<Conn>) {
             companion::VocabularyChanged { vocabulary },
         ));
     }
+    let moved = {
+        let mut last = conn.focus.lock().unwrap();
+        if *last == focus {
+            false
+        } else {
+            *last = focus.clone();
+            true
+        }
+    };
+    if moved {
+        conn.send(&Notification::new(
+            methods::FOCUS_CHANGED,
+            companion::FocusChanged { focus },
+        ));
+    }
 }
 
-/// The vocabulary for `hello`, or none when herdr cannot be read.
-pub(super) async fn vocabulary(daemon: &Daemon) -> Vec<String> {
+/// The vocabulary and herdr's focus for `hello`, or none when herdr cannot
+/// be read.
+pub(super) async fn vocabulary(
+    daemon: &Daemon,
+) -> (Vec<String>, Option<libhandlr_proto::common::FocusInfo>) {
     match tokio::time::timeout(super::NAME_LOOKUP_TIMEOUT, daemon.client.list_panes()).await {
-        Ok(Ok(snap)) => daemon.names(&snap).vocabulary(),
-        _ => Vec::new(),
+        Ok(Ok(snap)) => {
+            let names = daemon.names(&snap);
+            (names.vocabulary(), super::focus_info(&snap, &names))
+        }
+        _ => (Vec::new(), None),
     }
 }
 
@@ -960,6 +995,10 @@ mod tests {
         assert_eq!(
             confirm_text("/compact", "Claude", Some("compact-after-tests")),
             "Approve sending \"/compact\" to Claude? For compact after tests."
+        );
+        assert_eq!(
+            message_confirm_text("Claude in libmorph"),
+            "Approve sending your message to Claude in libmorph?"
         );
     }
 

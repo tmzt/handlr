@@ -250,6 +250,27 @@ pub fn is_workspace_or_tab_id(snap: &serde_json::Value, target: &str) -> bool {
             .any(|ws| ws.get("workspace_id").and_then(|v| v.as_str()) == Some(target))
 }
 
+/// The pane herdr reports as focused (plan 20261023_02, decision 4):
+/// the snapshot's `focused_pane_id`, else its `active_pane_id`, else the
+/// first pane marked `focused`. Canonical when the snapshot has the pane.
+pub fn focused_pane_id(snapshot: &serde_json::Value) -> Option<String> {
+    let root = snapshot_root(snapshot);
+    let named = ["focused_pane_id", "active_pane_id"]
+        .iter()
+        .find_map(|key| root.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    match named {
+        Some(id) => Some(resolve_pane_id(snapshot, id).unwrap_or_else(|| id.to_string())),
+        None => collect_panes(snapshot)
+            .into_iter()
+            .find(|p| p.get("focused").and_then(|v| v.as_bool()) == Some(true))
+            .and_then(|p| p.get("pane_id"))
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+    }
+}
+
 /// Resolve a pane id to the fully-qualified form herdr uses (`w1:p6`).
 ///
 /// Event subscriptions are matched by exact pane id server-side, so a watch
@@ -389,6 +410,30 @@ mod tests {
         assert_eq!(refs[1].project.as_deref(), Some("highbay"));
         assert_eq!(refs[1].status, AgentStatus::Unknown);
         assert_eq!(refs[1].tab_label, None);
+    }
+
+    #[test]
+    fn the_focused_pane_is_named_by_the_snapshot_or_marked() {
+        // herdr's own field wins, canonicalised.
+        let snap = json!({"result": {"snapshot": {
+            "focused_pane_id": "p2", "active_pane_id": "w1:p1",
+            "panes": [
+                {"pane_id": "w1:p1", "focused": true},
+                {"pane_id": "w1:p2"}
+            ]
+        }}});
+        assert_eq!(focused_pane_id(&snap).as_deref(), Some("w1:p2"));
+        // The mock's field.
+        let snap = json!({"active_pane_id": "p1", "workspaces": []});
+        assert_eq!(focused_pane_id(&snap).as_deref(), Some("p1"));
+        // Only a marked pane.
+        let snap = json!({"snapshot": {"panes": [
+            {"pane_id": "w1:p1"}, {"pane_id": "w1:p3", "focused": true}
+        ]}});
+        assert_eq!(focused_pane_id(&snap).as_deref(), Some("w1:p3"));
+        // Nothing focused.
+        let snap = json!({"snapshot": {"panes": [{"pane_id": "w1:p1"}]}});
+        assert_eq!(focused_pane_id(&snap), None);
     }
 
     #[test]

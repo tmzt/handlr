@@ -674,6 +674,9 @@ pub struct ConfirmView {
     pub requested_by: String,
     /// A companion's own voice turn, or standing.
     pub lifetime: Lifetime,
+    /// A dictated message (plan 20261023_02), not a command: `command` is
+    /// its text, and its question does not quote it.
+    pub message: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -892,6 +895,43 @@ impl Broker {
         handle_info: Option<&HandleInfo>,
         lifetime: Lifetime,
     ) -> Result<u64, ConfirmError> {
+        self.open(
+            requester,
+            pane_id,
+            agent,
+            command,
+            handle_info,
+            lifetime,
+            false,
+        )
+    }
+
+    /// [`Broker::request_with`] for a dictated message, already checked by
+    /// `core::policy::check_message`: approved, `text` is sent as a command
+    /// is, as text and then Enter (plan 20261023_02, decision 6).
+    pub fn request_message(
+        &self,
+        requester: &Principal,
+        pane_id: &str,
+        agent: &str,
+        text: &str,
+        handle_info: Option<&HandleInfo>,
+        lifetime: Lifetime,
+    ) -> Result<u64, ConfirmError> {
+        self.open(requester, pane_id, agent, text, handle_info, lifetime, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn open(
+        &self,
+        requester: &Principal,
+        pane_id: &str,
+        agent: &str,
+        command: &str,
+        handle_info: Option<&HandleInfo>,
+        lifetime: Lifetime,
+        message: bool,
+    ) -> Result<u64, ConfirmError> {
         let handle = handle_info.map(|h| h.handle.as_str());
         if let Some(h) = handle {
             validate_handle(h)?;
@@ -918,6 +958,7 @@ impl Broker {
                 handle: handle.map(str::to_string),
                 requested_by: requester.id.clone(),
                 lifetime,
+                message,
             };
             let token = Token::generate();
             state.entries.insert(

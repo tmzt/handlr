@@ -23,7 +23,9 @@ use super::companion::{self as turns, Session};
 use super::link::auth::AuthEntry;
 use super::{CoreEvent, Daemon};
 use crate::core::agents::{self, extract_agent_name_for_pane};
-use crate::core::confirm::{ConfirmError, ConfirmEvent, Lifetime, Outcome, StatusKey};
+use crate::core::confirm::{
+    self, ConfirmError, ConfirmEvent, HandleRequest, Lifetime, Outcome, StatusKey,
+};
 use crate::core::naming::ResolveError;
 use crate::core::policy;
 use crate::core::principal::Principal;
@@ -71,6 +73,9 @@ pub(super) struct Conn {
     opened: Mutex<HashSet<u64>>,
     /// A companion's vocabulary as last sent.
     pub(super) vocabulary: Mutex<Vec<String>>,
+    /// herdr's focus as a companion last had it, by `focus.changed` or
+    /// `agents.list` (plan 20261023_02, decision 4).
+    pub(super) focus: Mutex<Option<common::FocusInfo>>,
     /// A companion's notices, held while a confirmation is pending.
     pub(super) notices: Mutex<Announcer<companion::Notice>>,
     pub(super) next_notice: std::sync::atomic::AtomicU64,
@@ -206,6 +211,7 @@ async fn serve<S>(
         inflight: Mutex::new(HashMap::new()),
         opened: Mutex::new(HashSet::new()),
         vocabulary: Mutex::new(Vec::new()),
+        focus: Mutex::new(None),
         notices: Mutex::new(Announcer::default()),
         next_notice: std::sync::atomic::AtomicU64::new(0),
     });
@@ -364,8 +370,9 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
                 asked.session_id
             );
         }
-        let vocabulary = turns::vocabulary(&conn.daemon).await;
+        let (vocabulary, focus) = turns::vocabulary(&conn.daemon).await;
         *conn.vocabulary.lock().unwrap() = vocabulary.clone();
+        *conn.focus.lock().unwrap() = focus;
         let _ = conn.session.set(conn.daemon.turns.session(&session_id));
         let paired_now = first_hello();
         let result = ok(companion::HelloResult {
@@ -521,8 +528,12 @@ async fn call(
         )),
         methods::AGENTS_LIST => {
             let snap = snapshot(conn).await?;
-            let agents = daemon
-                .names(&snap)
+            let names = daemon.names(&snap);
+            let focus = super::focus_info(&snap, &names);
+            if conn.is_companion() {
+                *conn.focus.lock().unwrap() = focus.clone();
+            }
+            let agents = names
                 .agents
                 .into_iter()
                 .map(|named| {
@@ -543,7 +554,7 @@ async fn call(
                     }
                 })
                 .collect();
-            ok(common::AgentsListResult { agents })
+            ok(common::AgentsListResult { agents, focus })
         }
         methods::AGENTS_READ => {
             let p: common::AgentsReadParams = params(raw)?;
@@ -568,6 +579,9 @@ async fn call(
             let snap = snapshot(conn).await?;
             let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
             let agent = extract_agent_name_for_pane(&snap, &pane_id);
+            if p.kind == common::SendKind::Message {
+                return send_message(conn, &snap, &pane_id, &agent, p).await;
+            }
             let principal = conn.principal();
             let checked = policy::check(principal, &daemon.agents, &agent, &pane_id, &p.command)
                 .map_err(|denied| ErrorObject::new(codes::NOT_PERMITTED, denied.to_string()))?;
@@ -609,6 +623,9 @@ async fn call(
                 .focus(&target)
                 .await
                 .map_err(herdr_unavailable)?;
+            if conn.is_companion() {
+                tokio::spawn(turns::check_vocabulary(Arc::clone(conn)));
+            }
             ok(common::Empty {})
         }
         methods::WATCH_ADD | methods::WATCH_REMOVE => {
@@ -764,6 +781,95 @@ async fn call(
             format!("unknown method '{other}'"),
         )),
     }
+}
+
+/// `agents.send` with `kind: "message"` (plan 20261023_02, decisions 5 and
+/// 6): checked by `policy::check_message`, then always a confirmation,
+/// whose handle is settled as a voice turn's is. A companion's own message
+/// is a `Lifetime::VoiceTurn` confirmation, which it may approve itself as
+/// the user confirming what they dictated; its question is sent to it here,
+/// since the forwarder leaves a companion's own voice-turn questions alone.
+/// Approved, the text is sent as a command is: text, then Enter.
+async fn send_message(
+    conn: &Arc<Conn>,
+    snap: &Value,
+    pane_id: &str,
+    agent: &str,
+    p: common::AgentsSendParams,
+) -> Result<Value, ErrorObject> {
+    let daemon = &conn.daemon;
+    let principal = conn.principal();
+    let checked = policy::check_message(principal, &daemon.agents, agent, pane_id, &p.command)
+        .map_err(|denied| ErrorObject::new(codes::NOT_PERMITTED, denied.to_string()))?;
+    let names = daemon.names(snap);
+    let named = names.get(pane_id);
+    let spoken = named
+        .map(|a| a.spoken.clone())
+        .unwrap_or_else(|| crate::core::naming::capitalise(agent));
+    let tab_code = named.and_then(|a| {
+        a.tab.as_ref().map(|tab| {
+            if tab.word_form.is_empty() {
+                tab.spoken.clone()
+            } else {
+                crate::core::naming::spell(&tab.word_form, &daemon.naming)
+            }
+        })
+    });
+    // Without a handle: "message" and the first words, then the agent.
+    let first_words: Vec<&str> = checked.command.split(' ').take(3).collect();
+    let fallback = format!("message {}", first_words.join(" "));
+    let request = HandleRequest {
+        given: p.handle.as_deref(),
+        command: &fallback,
+        agent: &spoken,
+        tab_code: tab_code.as_deref(),
+    };
+    let lifetime = if conn.is_companion() {
+        Lifetime::VoiceTurn
+    } else {
+        Lifetime::Standing
+    };
+    let priors = daemon.broker.word_priors();
+    let mut attempt = 0;
+    let (confirm_id, handle) = loop {
+        let pending = daemon.broker.pending_handle_infos(&principal.id);
+        let settled = confirm::settle_handle(&request, &pending, &priors, confirm::random_word);
+        match daemon.broker.request_message(
+            principal,
+            pane_id,
+            agent,
+            &checked.command,
+            Some(&settled),
+            lifetime,
+        ) {
+            Ok(id) => break (id, settled.handle),
+            Err(ConfirmError::DuplicateHandle(_)) if attempt < 3 => attempt += 1,
+            Err(e) => return Err(confirm_error(e)),
+        }
+    };
+    conn.opened.lock().unwrap().insert(confirm_id);
+    if lifetime == Lifetime::VoiceTurn {
+        if let Some((view, token)) = daemon.broker.pending(confirm_id) {
+            let pane_names = named.map(|a| super::PaneNames {
+                name: a.shown.clone(),
+                spoken: a.spoken.clone(),
+                project: a.agent.project.clone(),
+                tab: a.tab.as_ref().map(|t| t.shown.clone()),
+            });
+            conn.send(&Notification::new(
+                methods::CONFIRM_REQUESTED,
+                turns::confirm_requested(&view, &token, principal, false, pane_names),
+            ));
+        }
+    }
+    log::info!(
+        "Message confirmation {confirm_id} handle '{handle}' for pane '{pane_id}' ({} characters)",
+        checked.command.len()
+    );
+    ok(common::AgentsSendResult::Pending {
+        confirm_id,
+        handle: Some(handle),
+    })
 }
 
 /// Send this connection the events it is entitled to: what it subscribed

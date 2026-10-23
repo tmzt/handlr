@@ -839,3 +839,180 @@ async fn over_the_link_a_paired_phone_approves_its_own_turn() {
     let h = history(&env, "companion:phone");
     assert_eq!(h.last().unwrap()["content"], INTERRUPTED_ENTRY);
 }
+
+// ── Dictated messages (plan 20261023_02, step 2) ─────────────────────────
+
+const MESSAGE: &str = "Please run the tests, then tell me what failed? It's in the parser: yes";
+
+fn message(pane: &str, text: &str) -> Value {
+    json!({"pane_id": pane, "text": text, "kind": "message",
+           "handle": "message-claude-handlr-please-run"})
+}
+
+#[tokio::test]
+async fn a_message_is_confirmed_once_and_sent_as_dictated() {
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("agents.send", message("claude", MESSAGE)).await;
+    assert_eq!(r["result"]["status"], "pending", "{r}");
+    assert_eq!(r["result"]["handle"], "message-claude-handlr-please-run");
+    let confirm_id = r["result"]["confirm_id"].as_u64().unwrap();
+
+    // One question, naming the agent, with the full text for the card.
+    let asked = c.note("confirm.requested").await;
+    assert_eq!(asked["params"]["confirm_id"], confirm_id);
+    assert_eq!(
+        asked["params"]["text"], "Approve sending your message to Claude?",
+        "{asked}"
+    );
+    assert_eq!(asked["params"]["command"], MESSAGE);
+    assert_eq!(
+        asked["params"]["handle"],
+        "message-claude-handlr-please-run"
+    );
+    assert!(
+        mock_logs(&env.daemon).await.0.is_empty(),
+        "nothing sent yet"
+    );
+    c.drain(Duration::from_millis(200)).await;
+    let questions = c
+        .seen
+        .iter()
+        .filter(|m| m["method"] == "confirm.requested")
+        .count();
+    assert_eq!(questions, 1, "asked once");
+
+    // The companion approves its own message, as the user confirming it.
+    let r = c
+        .call(
+            "confirm.reply",
+            json!({"confirm_id": confirm_id, "approve": true}),
+        )
+        .await;
+    assert_eq!(r["result"]["outcome"], "sent", "{r}");
+    assert_eq!(
+        c.note("confirm.resolved").await["params"]["outcome"],
+        "sent"
+    );
+    // The exact text, once, by herdr's text send, which ends with Enter;
+    // no separate keystroke.
+    let (commands, keys) = mock_logs(&env.daemon).await;
+    assert_eq!(commands, vec![("p1".to_string(), MESSAGE.to_string())]);
+    assert!(keys.is_empty(), "{keys:?}");
+    let rpc = handlr::transport::HerdrRequest::run_command("p1", MESSAGE).to_jsonrpc();
+    assert_eq!(rpc.method, "pane.send_input");
+    assert_eq!(rpc.params["text"], MESSAGE);
+    assert_eq!(rpc.params["keys"], json!(["Enter"]));
+
+    // It cannot be approved twice.
+    let r = c
+        .call(
+            "confirm.reply",
+            json!({"confirm_id": confirm_id, "approve": true}),
+        )
+        .await;
+    assert_eq!(r["error"]["code"], -32006, "{r}");
+    assert_eq!(mock_logs(&env.daemon).await.0.len(), 1);
+}
+
+#[tokio::test]
+async fn a_denied_message_sends_nothing() {
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("agents.send", message("claude", MESSAGE)).await;
+    let confirm_id = r["result"]["confirm_id"].as_u64().unwrap();
+    let r = c
+        .call(
+            "confirm.reply",
+            json!({"confirm_id": confirm_id, "approve": false}),
+        )
+        .await;
+    assert_eq!(r["result"]["outcome"], "denied", "{r}");
+    assert_eq!(
+        c.note("confirm.resolved").await["params"]["outcome"],
+        "denied"
+    );
+    assert!(mock_logs(&env.daemon).await.0.is_empty());
+}
+
+#[tokio::test]
+async fn messages_are_always_confirmed_and_strictly_filtered() {
+    // claude takes commands without confirmation here; a message still asks.
+    let env = start(direct("esc")).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("agents.send", message("claude", "keep going")).await;
+    assert_eq!(r["result"]["status"], "pending", "{r}");
+
+    // A character outside the filter is refused, and named.
+    let r = c
+        .call("agents.send", message("claude", "look in src/main.rs"))
+        .await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+    let why = r["error"]["message"].as_str().unwrap();
+    assert!(why.contains("'/'"), "{why}");
+    let r = c.call("agents.send", message("claude", "one\ntwo")).await;
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("control characters"),
+        "{r}"
+    );
+    let r = c
+        .call("agents.send", message("claude", &"a".repeat(4001)))
+        .await;
+    assert!(
+        r["error"]["message"].as_str().unwrap().contains("4000"),
+        "{r}"
+    );
+    assert!(mock_logs(&env.daemon).await.0.is_empty());
+
+    // `allow_messages = false` refuses them.
+    let off = config(vec![AgentConfig::new(
+        "claude",
+        vec!["continue".to_string()],
+        true,
+    )
+    .with_messages(false)]);
+    let env = start(off).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("agents.send", message("claude", "keep going")).await;
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("allow_messages"),
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn agents_list_carries_the_focus_and_focus_changes_are_pushed() {
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("agents.list", json!({})).await;
+    let focus = &r["result"]["focus"];
+    assert_eq!(focus["pane_id"], "p1", "{r}");
+    assert_eq!(focus["agent"], "Claude");
+    assert_eq!(focus["name"], r["result"]["agents"][0]["name"]);
+    assert_eq!(focus["spoken"], r["result"]["agents"][0]["spoken"]);
+
+    // Focus moves to a pane with no agent: pushed after agents.focus.
+    match env.daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let mut shell = state.snapshot.workspaces[0].tabs[0].panes[0].clone();
+            shell.pane_id = "p2".to_string();
+            shell.extra.clear();
+            shell.terminal_title = None;
+            shell.focused = false;
+            state.snapshot.workspaces[0].tabs[0].panes.push(shell);
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+    let r = c.call("agents.focus", json!({"target_id": "p2"})).await;
+    assert!(r.get("error").is_none(), "{r}");
+    let moved = c.note("focus.changed").await;
+    assert_eq!(moved["params"]["focus"]["pane_id"], "p2", "{moved}");
+    assert!(moved["params"]["focus"].get("agent").is_none(), "{moved}");
+}

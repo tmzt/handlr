@@ -36,6 +36,7 @@ fn default_agents() -> Vec<AgentConfig> {
             allowed_commands: vec!["continue".to_string(), "/compact".to_string()],
             require_confirmation: true,
             allow_arbitrary_commands: false,
+            allow_messages: true,
             interrupt_key: default_interrupt_key(),
         },
         AgentConfig {
@@ -43,6 +44,7 @@ fn default_agents() -> Vec<AgentConfig> {
             allowed_commands: vec!["continue".to_string()],
             require_confirmation: true,
             allow_arbitrary_commands: false,
+            allow_messages: true,
             interrupt_key: default_interrupt_key(),
         },
         AgentConfig {
@@ -50,6 +52,7 @@ fn default_agents() -> Vec<AgentConfig> {
             allowed_commands: vec!["continue".to_string()],
             require_confirmation: true,
             allow_arbitrary_commands: false,
+            allow_messages: true,
             interrupt_key: default_interrupt_key(),
         },
     ]
@@ -116,6 +119,11 @@ pub struct AgentConfig {
     /// Whether arbitrary safe commands are allowed (must be ASCII, no '/' or '-', '.' and ',' allowed)
     #[serde(default)]
     pub allow_arbitrary_commands: bool,
+    /// Whether dictated messages may be sent: the strict characters of an
+    /// arbitrary command, at most 4000 of them, always confirmed (plan
+    /// 20261023_02, decision 6 as amended). Default `true`.
+    #[serde(default = "default_allow_messages")]
+    pub allow_messages: bool,
     /// The one key, in herdr's key names, that stops this agent's work
     /// when a companion turn is interrupted or `agents.interrupt` is
     /// called. Sent as a keystroke (`pane.send_keys`), never typed as text.
@@ -128,6 +136,10 @@ pub struct AgentConfig {
 }
 
 fn default_require_confirmation() -> bool {
+    true
+}
+
+fn default_allow_messages() -> bool {
     true
 }
 
@@ -207,12 +219,18 @@ impl AgentConfig {
             allowed_commands,
             require_confirmation,
             allow_arbitrary_commands: false,
+            allow_messages: true,
             interrupt_key: default_interrupt_key(),
         }
     }
 
     pub fn with_arbitrary_commands(mut self, allow: bool) -> Self {
         self.allow_arbitrary_commands = allow;
+        self
+    }
+
+    pub fn with_messages(mut self, allow: bool) -> Self {
+        self.allow_messages = allow;
         self
     }
 
@@ -609,6 +627,26 @@ w = "dub"
             Some("handlr")
         );
         assert_eq!(cfg.naming.aliases.len(), 2);
+    }
+
+    #[test]
+    fn messages_are_allowed_by_default_and_can_be_turned_off() {
+        let cfg = AppConfig::default();
+        for name in ["claude", "omp", "agy"] {
+            assert!(cfg.find_agent(name).unwrap().allow_messages, "{name}");
+        }
+        assert!(AgentConfig::new("x", vec![], true).allow_messages);
+        let sample = r#"
+[[agents]]
+name = "claude"
+
+[[agents]]
+name = "omp"
+allow_messages = false
+"#;
+        let cfg: AppConfig = toml::from_str(sample).unwrap();
+        assert!(cfg.find_agent("claude").unwrap().allow_messages);
+        assert!(!cfg.find_agent("omp").unwrap().allow_messages);
     }
 
     #[test]

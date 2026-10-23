@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::commands::validate_arbitrary_command;
+use crate::commands::{validate_arbitrary_command, validate_message};
 use crate::config::AgentConfig;
 use crate::core::principal::Principal;
 
@@ -33,8 +33,11 @@ pub enum Denied {
         agent: String,
         allowed: Vec<String>,
     },
-    /// An arbitrary command that `validate_arbitrary_command` rejected.
+    /// An arbitrary command that `validate_arbitrary_command` rejected, or
+    /// a message that `validate_message` rejected.
     Invalid(String),
+    /// The agent's `allow_messages` is off.
+    MessagesOff { agent: String },
 }
 
 impl fmt::Display for Denied {
@@ -60,19 +63,20 @@ impl fmt::Display for Denied {
                 "Command '{command}' is not permitted for agent '{agent}'. Allowed commands for {agent}: {allowed:?}"
             ),
             Denied::Invalid(reason) => f.write_str(reason),
+            Denied::MessagesOff { agent } => {
+                write!(f, "Messages are not permitted for agent '{agent}' (allow_messages is off)")
+            }
         }
     }
 }
 
-/// Check `command` for the agent named `agent` (lowercased) in `pane_id`,
-/// as `principal`, against the `[[agents]]` entries.
-pub fn check(
+/// The `[[agents]]` entry for `agent`, if `principal` may reach it.
+fn entry<'a>(
     principal: &Principal,
-    agents: &[AgentConfig],
+    agents: &'a [AgentConfig],
     agent: &str,
     pane_id: &str,
-    command: &str,
-) -> Result<Checked, Denied> {
+) -> Result<&'a AgentConfig, Denied> {
     let Some(agent_cfg) = agents.iter().find(|a| a.name.to_lowercase() == agent) else {
         return Err(Denied::UnconfiguredAgent {
             agent: agent.to_string(),
@@ -86,6 +90,19 @@ pub fn check(
             principal: principal.id.clone(),
         });
     }
+    Ok(agent_cfg)
+}
+
+/// Check `command` for the agent named `agent` (lowercased) in `pane_id`,
+/// as `principal`, against the `[[agents]]` entries.
+pub fn check(
+    principal: &Principal,
+    agents: &[AgentConfig],
+    agent: &str,
+    pane_id: &str,
+    command: &str,
+) -> Result<Checked, Denied> {
+    let agent_cfg = entry(principal, agents, agent, pane_id)?;
 
     let is_explicitly_allowed = agent_cfg
         .allowed_commands
@@ -107,6 +124,29 @@ pub fn check(
     Ok(Checked {
         command,
         require_confirmation: agent_cfg.require_confirmation,
+    })
+}
+
+/// Check a dictated message (plan 20261023_02, decision 6 as amended):
+/// the agent's entry and reach as for a command, its `allow_messages`, then
+/// `validate_message`. A message is always confirmed, whatever the agent's
+/// `require_confirmation`.
+pub fn check_message(
+    principal: &Principal,
+    agents: &[AgentConfig],
+    agent: &str,
+    pane_id: &str,
+    text: &str,
+) -> Result<Checked, Denied> {
+    let agent_cfg = entry(principal, agents, agent, pane_id)?;
+    if !agent_cfg.allow_messages {
+        return Err(Denied::MessagesOff {
+            agent: agent.to_string(),
+        });
+    }
+    Ok(Checked {
+        command: validate_message(text).map_err(Denied::Invalid)?,
+        require_confirmation: true,
     })
 }
 
@@ -155,6 +195,33 @@ mod tests {
         assert!(!checked.require_confirmation);
         let err = check(&Principal::local("t"), &agents(), "omp", "p2", "rm -rf /").unwrap_err();
         assert!(matches!(err, Denied::Invalid(_)));
+    }
+
+    #[test]
+    fn messages_are_validated_and_always_confirmed() {
+        let p = Principal::local("t");
+        // omp does not require confirmation for commands; a message still does.
+        let checked = check_message(&p, &agents(), "omp", "p2", "please run  the tests.").unwrap();
+        assert_eq!(checked.command, "please run the tests");
+        assert!(checked.require_confirmation);
+        let err = check_message(&p, &agents(), "omp", "p2", "rm -rf /").unwrap_err();
+        assert!(matches!(err, Denied::Invalid(_)), "{err}");
+        let err = check_message(&p, &agents(), "codex", "p3", "hello").unwrap_err();
+        assert!(matches!(err, Denied::UnconfiguredAgent { .. }));
+        let off = vec![AgentConfig::new("claude", vec![], true).with_messages(false)];
+        let err = check_message(&p, &off, "claude", "p1", "hello").unwrap_err();
+        assert_eq!(
+            err,
+            Denied::MessagesOff {
+                agent: "claude".to_string()
+            }
+        );
+        let narrowed = Principal {
+            agents: Some(vec!["omp".to_string()]),
+            ..Principal::local("mcp")
+        };
+        let err = check_message(&narrowed, &agents(), "claude", "p1", "hello").unwrap_err();
+        assert!(matches!(err, Denied::OutOfReach { .. }));
     }
 
     #[test]
