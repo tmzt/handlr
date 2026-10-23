@@ -29,6 +29,9 @@ pub mod methods {
 pub mod notice_kinds {
     /// A watched agent needs input or finished.
     pub const AGENT_STATUS: &str = "agent_status";
+    /// A watched agent stopped on a new question (plan 20261022_03,
+    /// decision 8): "<spoken name> is asking: <question>".
+    pub const PENDING_QUESTION: &str = "pending_question";
 }
 
 /// `hello`, as a companion says it: the common fields and the

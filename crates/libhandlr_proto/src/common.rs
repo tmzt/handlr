@@ -140,6 +140,60 @@ pub struct AgentsListResult {
     pub focus: Option<FocusInfo>,
 }
 
+/// Who an [`Entry`] of an agent's session is from (plan 20261022_03,
+/// decision 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Role {
+    User,
+    Assistant,
+    /// A tool's result, given back to the agent.
+    Tool,
+}
+
+/// What an [`Entry`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Text,
+    ToolUse,
+    ToolResult,
+}
+
+/// One entry of an agent's own session transcript, the same shape for
+/// every agent (plan 20261022_03, decision 2). Secrets are redacted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    /// RFC 3339, from the file.
+    pub ts: String,
+    pub role: Role,
+    pub kind: EntryKind,
+    /// The tool or function name, for `tool_use` and, where known,
+    /// `tool_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// At most `ENTRY_SUMMARY_MAX` characters, cut at a character boundary
+    /// with "…".
+    pub summary: String,
+}
+
+/// The longest `Entry::summary`, in characters.
+pub const ENTRY_SUMMARY_MAX: usize = 500;
+
+/// The question an agent stopped on (plan 20261022_03, decision 8): the
+/// final paragraph of its last reply, when it asks something and the user
+/// has not answered. Redacted, and at most `PENDING_QUESTION_MAX`
+/// characters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingQuestion {
+    pub text: String,
+    /// The reply's timestamp, RFC 3339.
+    pub ts: String,
+}
+
+/// The longest `PendingQuestion::text`, in characters.
+pub const PENDING_QUESTION_MAX: usize = 400;
+
 /// Lines read by default, and the most that may be asked for.
 pub const READ_LINES_DEFAULT: usize = 40;
 pub const READ_LINES_MAX: usize = 200;
@@ -420,6 +474,30 @@ mod tests {
         let text = serde_json::to_string(&value).unwrap();
         let back: T = serde_json::from_str(&text).unwrap();
         assert_eq!(back, value, "{text}");
+    }
+
+    #[test]
+    fn session_entries_round_trip() {
+        round_trip(Entry {
+            ts: "2026-10-23T06:00:00.000Z".into(),
+            role: Role::Assistant,
+            kind: EntryKind::ToolUse,
+            tool: Some("Bash".into()),
+            summary: "Bash {\"command\":\"ls\"}".into(),
+        });
+        round_trip(PendingQuestion {
+            text: "Shall I go on?".into(),
+            ts: "2026-10-23T06:00:00.000Z".into(),
+        });
+        assert_eq!(
+            serde_json::to_value(EntryKind::ToolResult).unwrap(),
+            json!("tool_result")
+        );
+        let text: Entry = serde_json::from_value(json!({
+            "ts": "t", "role": "user", "kind": "text", "summary": "hi"
+        }))
+        .unwrap();
+        assert_eq!(text.tool, None);
     }
 
     #[test]
