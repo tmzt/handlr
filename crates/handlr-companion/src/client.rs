@@ -1811,8 +1811,13 @@ fn newest_reply(entries: &[common::Entry]) -> Option<String> {
         .map(|e| e.ts.clone())
 }
 
-/// A reply as it is read aloud: without code blocks, inline code marks,
-/// Markdown emphasis, headings or list bullets, on one line.
+/// A reply as it is read aloud: without code blocks, Markdown emphasis,
+/// headings or list bullets, on one line. A link is read as its text, and
+/// a path or inline code as its English words only: a path as "the" and
+/// the words of its last part ("docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md"
+/// is "the overview screen plan"), an identifier as its words
+/// (`AgentInfo.asking` is "agent info asking"), and a commit hash not at
+/// all.
 pub fn speakable(text: &str) -> String {
     let mut lines = Vec::new();
     let mut in_code = false;
@@ -1830,13 +1835,124 @@ pub fn speakable(text: &str) -> String {
             .strip_prefix("- ")
             .or_else(|| t.strip_prefix("* "))
             .unwrap_or(t);
-        lines.push(t.replace(['`', '*'], ""));
+        lines.push(spoken_line(&unlink(t)));
     }
     lines
         .join(" ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// `[text](target)` as `text`.
+fn unlink(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        let Some(close) = rest[open..].find("](").map(|c| open + c) else {
+            break;
+        };
+        let Some(end) = rest[close..].find(')').map(|e| close + e) else {
+            break;
+        };
+        out.push_str(&rest[..open]);
+        out.push_str(&rest[open + 1..close]);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A line's words, with inline code and paths read as their English words.
+/// A word's punctuation stays; brackets left empty go.
+fn spoken_line(line: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for (i, part) in line.split('`').enumerate() {
+        let code = i % 2 == 1;
+        for word in part.split_whitespace() {
+            let punct = |c: char| matches!(c, ',' | ';' | ':' | '.' | '(' | ')' | '"' | '!' | '?');
+            let start = word.len() - word.trim_start_matches(punct).len();
+            let end = word.trim_end_matches(punct).len().max(start);
+            let core = &word[start..end];
+            if code || looks_like_path(core) {
+                let spoken = spoken_code(core);
+                out.push(format!("{}{spoken}{}", &word[..start], &word[end..]));
+            } else {
+                out.push(word.replace('*', ""));
+            }
+        }
+    }
+    out.retain(|w| !w.is_empty());
+    out.join(" ")
+        .replace("( )", "")
+        .replace("()", "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" .", ".")
+        .replace(" ,", ",")
+}
+
+/// Whether a bare word is a path or file name: it has a `/`, or ends in a
+/// known extension.
+fn looks_like_path(word: &str) -> bool {
+    const EXT: [&str; 9] = [
+        ".md", ".rs", ".toml", ".json", ".jsonl", ".sh", ".txt", ".log", ".apk",
+    ];
+    word.len() > 1 && (word.contains('/') || EXT.iter().any(|e| word.ends_with(e)))
+}
+
+/// Inline code or a path as its English words.
+fn spoken_code(code: &str) -> String {
+    const EXT: [&str; 9] = [
+        "md", "rs", "toml", "json", "jsonl", "sh", "txt", "log", "apk",
+    ];
+    let is_path = code.contains('/') || looks_like_path(code);
+    // A number or a version reads as it is.
+    if code
+        .chars()
+        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))
+    {
+        return code.to_string();
+    }
+    // A commit hash: no words to read.
+    if code.len() >= 7 && code.chars().all(|c| c.is_ascii_hexdigit()) {
+        return String::new();
+    }
+    let last = if is_path {
+        code.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(code)
+    } else {
+        code
+    };
+    let mut words = Vec::new();
+    for piece in last.split(|c: char| !c.is_ascii_alphanumeric()) {
+        // camelCase and PascalCase into words.
+        let mut word = String::new();
+        let mut prev_lower = false;
+        for c in piece.chars() {
+            if c.is_ascii_uppercase() && prev_lower {
+                words.push(std::mem::take(&mut word));
+            }
+            prev_lower = c.is_ascii_lowercase();
+            word.push(c.to_ascii_lowercase());
+        }
+        words.push(word);
+    }
+    words.retain(|w| w.len() > 1 && w.chars().all(|c| c.is_ascii_alphabetic()));
+    // A file's extension is not read.
+    if is_path {
+        if words.last().is_some_and(|w| EXT.contains(&w.as_str())) {
+            words.pop();
+        }
+        if words.is_empty() {
+            return String::new();
+        }
+        return format!("the {}", words.join(" "));
+    }
+    words.join(" ")
 }
 
 /// An agent of `agents.list` as a message target, as the focus names it.
@@ -3329,5 +3445,28 @@ mod tests {
         let out = s.input(Input::Tick(secs(200.0)));
         let out = peek_answer(&mut s, &out, "idle", asking());
         assert!(!events(&out).iter().any(|e| matches!(e, Event::Say(_))));
+    }
+
+    #[test]
+    fn paths_and_code_are_read_as_their_english_words() {
+        assert_eq!(
+            speakable("Wrote docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md and pushed."),
+            "Wrote the overview screen plan and pushed."
+        );
+        assert_eq!(
+            speakable(
+                "Up as a Draft: [The overview (home) screen](docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md) (`355f5f0`)."
+            ),
+            "Up as a Draft: The overview (home) screen."
+        );
+        assert_eq!(
+            speakable("A new field, `AgentInfo.asking`, in libhandlr_proto 0.2.0."),
+            "A new field, agent info asking, in libhandlr_proto 0.2.0."
+        );
+        assert_eq!(
+            speakable("They go in `src/overview/` and `apps/companion/src/agent/`."),
+            "They go in the overview and the agent."
+        );
+        assert_eq!(speakable("Code -32014 is new."), "Code -32014 is new.");
     }
 }
