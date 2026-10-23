@@ -472,6 +472,12 @@ impl App {
         match hit {
             AgentHit::Back => self.close_agent(),
             AgentHit::Message => self.send(Input::StartDictation),
+            AgentHit::Reply => {
+                if let Some(agent) = &mut self.agent {
+                    agent.begin_reply();
+                }
+                self.send(Input::StartDictation);
+            }
             AgentHit::Approve(confirm_id) => self.send(Input::Answer {
                 confirm_id,
                 approve: true,

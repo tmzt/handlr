@@ -35,6 +35,13 @@ use libmsdf::font::{GlyphStyle, TerminalShaper};
 
 use crate::ui::{Layout, Line};
 
+mod control_row;
+mod dictation_card;
+mod square_button;
+use control_row::ControlRow;
+use dictation_card::DictationCard;
+use square_button::SquareButton;
+
 pub const BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
 pub const FG: [f32; 4] = [0.94, 0.95, 0.96, 1.0];
 pub const DIM: [f32; 4] = [0.50, 0.53, 0.58, 1.0];
@@ -81,12 +88,14 @@ const BAR_H: f32 = 40.0;
 const SUGGEST_H: f32 = 36.0;
 const SUGGEST_PT: f32 = 18.0;
 const BACK_W: f32 = 44.0;
-/// The width of the take-a-message button at the bottom right and the play
-/// button at the bottom left, and the record dot: white on blue, centred,
-/// in place of a microphone glyph, which no bundled atlas has yet (a
-/// microphone icon is for later).
-const MIC_W: f32 = 96.0;
+/// The record dot: white on blue, red while recording, centred in place of
+/// a microphone glyph, which no bundled atlas has yet (a microphone icon
+/// is for later).
 const DOT: f32 = 18.0;
+const RECORDING: [f32; 4] = [1.0, 0.35, 0.35, 1.0];
+/// Send and cancel, from the terminal face's symbol page.
+const SEND_GLYPH: &str = "\u{27A4}";
+const CANCEL_GLYPH: &str = "\u{2715}";
 /// The back glyph, from the terminal face (Roboto here is ASCII only).
 const BACK_GLYPH: &str = "\u{2039}";
 /// The play button's glyph, from the terminal face.
@@ -212,6 +221,8 @@ pub enum AgentHit {
     Suggest(Suggestion),
     /// The play button: read the agent's replies aloud, or stop.
     ReadAloud,
+    /// A card's record button: take a message in reply to that card.
+    Reply,
     /// The pinned bar: jump to its card.
     Pin,
     /// The dictation buttons, while a message is taken from the view.
@@ -344,7 +355,7 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
         (CardKind::Question, _) => vec![
             (AgentHit::Suggest(Suggestion::Yes), "Yes", APPROVE_BG),
             (AgentHit::Suggest(Suggestion::No), "No", DENY_BG),
-            (AgentHit::Message, "", MESSAGE_BG),
+            (AgentHit::Reply, "", MESSAGE_BG),
         ],
         _ => vec![],
     }
@@ -640,6 +651,8 @@ pub struct AgentScreen {
     dictation: Option<Vec<Line>>,
     /// The play button is on: replies are read aloud.
     read_aloud: bool,
+    /// The card a message is being taken in reply to.
+    reply: Option<AgentCard>,
     dirty: bool,
 }
 
@@ -724,13 +737,33 @@ impl AgentScreen {
     }
 
     /// The dictation card, or `None` once the message is sent or cleared.
-    /// The buttons are Submit, Scratch and Clear while it shows.
+    /// While it shows, the controls are send, cancel and record.
     pub fn set_dictation(&mut self, lines: Option<Vec<Line>>) {
         if lines == self.dictation {
             return;
         }
+        if lines.is_none() {
+            self.reply = None;
+        }
         self.dictation = lines;
         self.settle();
+    }
+
+    /// A message is to be taken in reply to a card: the pinned card when it
+    /// asks, else the newest live question.
+    pub fn begin_reply(&mut self) {
+        let asking = |c: &&AgentCard| c.live && c.kind == CardKind::Question;
+        self.reply = self
+            .pinned_card()
+            .filter(asking)
+            .or_else(|| self.cards.iter().rev().find(asking))
+            .cloned();
+        self.settle();
+    }
+
+    /// The card a message is being taken in reply to.
+    pub fn replying_to(&self) -> Option<&AgentCard> {
+        self.reply.as_ref().filter(|_| self.dictation.is_some())
     }
 
     /// The play button's state: bright when on, dull when off.
@@ -811,50 +844,28 @@ impl AgentScreen {
         let s = self.scale();
         let pad = PAD * s;
         let header = Rect::new(0.0, 0.0, l.w, l.top + HEADER_H * s);
-        let buttons_top = l.h - l.bottom - 16.0 * s - BUTTON_H * s;
-        let gap = 12.0 * s;
-        // The play button, always at the bottom left, and the
-        // take-a-message button, always at the bottom right; while
-        // dictating, Submit, Scratch and Clear share the row between them.
-        let mic_w = MIC_W * s;
-        let mut buttons = vec![
-            FlowButton {
-                hit: AgentHit::ReadAloud,
-                rect: Rect::new(pad, buttons_top, mic_w, BUTTON_H * s),
-                label: "",
-                bg: BACK_BG,
-            },
-            FlowButton {
-                hit: AgentHit::Message,
-                rect: Rect::new(l.w - pad - mic_w, buttons_top, mic_w, BUTTON_H * s),
-                label: "",
-                bg: MESSAGE_BG,
-            },
-        ];
-        if self.dictation.is_some() {
-            let row = [
-                (AgentHit::Submit, "Submit", APPROVE_BG),
-                (AgentHit::Scratch, "Scratch", BACK_BG),
-                (AgentHit::Clear, "Clear", DENY_BG),
-            ];
-            let n = row.len() as f32;
-            let left = pad + mic_w + gap;
-            let w = (l.w - 2.0 * left - gap * (n - 1.0)) / n;
-            for (i, (hit, label, bg)) in row.into_iter().enumerate() {
-                buttons.push(FlowButton {
-                    hit,
-                    rect: Rect::new(left + i as f32 * (w + gap), buttons_top, w, BUTTON_H * s),
-                    label,
-                    bg,
-                });
-            }
-        }
+        // The bottom row controls the audio: play at the left and record at
+        // the right, square. While a message is taken, play becomes send
+        // and a cancel sits in the middle. Replying to a card, the row is
+        // in that card instead, and the screen's is hidden.
+        let row_bottom = l.h - l.bottom - 16.0 * s;
+        let dictating = self.dictation.is_some();
+        let replying = self.reply.as_ref().filter(|_| dictating);
+        let buttons = if replying.is_some() {
+            Vec::new()
+        } else {
+            ControlRow::lay_out(pad, l.w - pad, row_bottom, s, dictating)
+        };
         let back = Rect::new(0.0, l.top, BACK_W * s, HEADER_H * s);
-        let mut above = buttons_top - 12.0 * s;
+        let mut above = if replying.is_some() {
+            row_bottom
+        } else {
+            row_bottom - BUTTON_H * s - 12.0 * s
+        };
         // The suggestions, just above the buttons.
         let offered = self.suggestions();
         let slot = (l.w - 2.0 * pad) / 4.0;
-        let row_top = buttons_top - 8.0 * s - SUGGEST_H * s;
+        let row_top = above + 4.0 * s - SUGGEST_H * s;
         let suggestions: Vec<Suggested> = offered
             .into_iter()
             .enumerate()
@@ -868,54 +879,17 @@ impl AgentScreen {
         if !suggestions.is_empty() {
             above = row_top - 8.0 * s;
         }
-        // The dictation card, above the buttons.
+        // The message being taken, pinned above the buttons: on its own
+        // card, or in the card it replies to with the controls.
         let dictation = self.dictation.as_ref().map(|lines| {
-            let inner = l.w - 4.0 * pad;
-            let mut rows: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
-            for line in lines {
-                let px = line.size * s;
-                for (i, t) in wrap_hard(&line.text, columns(inner, px))
-                    .into_iter()
-                    .enumerate()
-                {
-                    let gap = if i == 0 { line.gap.min(8.0) * s } else { 0.0 };
-                    rows.push((t, px, line.color, gap));
-                }
-            }
-            let skip = rows.len().saturating_sub(DICTATION_LINES);
-            let rows = &rows[skip..];
-            let h: f32 = rows
-                .iter()
-                .map(|(_, px, _, gap)| line_h(*px) + gap)
-                .sum::<f32>()
-                + 2.0 * pad;
-            let top = above - h;
-            let mut flow = Flow::default();
-            flow.fills.push(Fill {
-                rect: Rect::new(pad, top, l.w - 2.0 * pad, h),
-                color: DICTATION_BG,
-                radius: 10.0 * s,
-            });
-            let mut y = top + pad;
-            for (text, px, color, gap) in rows {
-                y += gap;
-                flow.rows.push(Row {
-                    text: text.clone(),
-                    x: 2.0 * pad,
-                    y,
-                    px: *px,
-                    color: *color,
-                    mono: false,
-                });
-                y += line_h(*px);
-            }
-            flow.height = h;
-            above = top - 8.0 * s;
+            let flow = DictationCard::lay_out(lines, replying, pad, l.w - 2.0 * pad, above, s);
+            above -= flow.height + 8.0 * s;
             flow
         });
         let mut full_top = above;
         let mut pin = None;
-        if let Some(card) = self.pinned_card() {
+        // While a message is taken, the pinned card makes way for it.
+        if let Some(card) = self.pinned_card().filter(|_| !dictating) {
             // The full card, laid out once to know its height.
             let mut full = Flow::default();
             let h = card_block(card, pad, 0.0, l.w - 2.0 * pad, s, PIN_LINES, &mut full);
@@ -1009,6 +983,11 @@ impl AgentScreen {
             self.hits.push((b.hit, b.rect));
         }
         self.hits.push((AgentHit::Back, self.frame.back));
+        if let Some(d) = &self.frame.dictation {
+            for b in &d.buttons {
+                self.hits.push((b.hit, b.rect));
+            }
+        }
         for g in &self.frame.suggestions {
             self.hits.push((g.hit, g.rect));
         }
@@ -1177,6 +1156,7 @@ impl AgentScreen {
         list.clear();
         let l = self.layout;
         let s = self.scale();
+        let recording = self.dictation.is_some();
         fill(list, Rect::new(0.0, 0.0, l.w, l.h), BG, 0.0);
 
         // The flow, in its window.
@@ -1199,7 +1179,7 @@ impl AgentScreen {
         for b in &self.flow.buttons {
             if visible(b.rect.y, b.rect.h) {
                 let rect = Rect::new(b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
-                draw_button(list, ctx, term, b, rect, s, self.read_aloud);
+                SquareButton::draw(list, ctx, term, b, rect, s, self.read_aloud, recording);
             }
         }
         if self.entries.is_empty() && self.cards.is_empty() {
@@ -1246,6 +1226,9 @@ impl AgentScreen {
             for r in &d.rows {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
+            for b in &d.buttons {
+                SquareButton::draw(list, ctx, term, b, b.rect, s, self.read_aloud, recording);
+            }
         }
         if let Some(p) = &self.frame.pin {
             for f in &p.flow.fills {
@@ -1255,7 +1238,7 @@ impl AgentScreen {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
             for b in &p.flow.buttons {
-                draw_button(list, ctx, term, b, b.rect, s, self.read_aloud);
+                SquareButton::draw(list, ctx, term, b, b.rect, s, self.read_aloud, recording);
             }
         }
         let sg_px = SUGGEST_PT * s;
@@ -1264,7 +1247,7 @@ impl AgentScreen {
             ctx.draw_text(list, g.label, [g.rect.x + 4.0 * s, y], sg_px, g.color);
         }
         for b in &self.frame.buttons {
-            draw_button(list, ctx, term, b, b.rect, s, self.read_aloud);
+            SquareButton::draw(list, ctx, term, b, b.rect, s, self.read_aloud, recording);
         }
         self.dirty = false;
         true
@@ -1289,51 +1272,6 @@ fn fill(list: &mut DrawList, rect: Rect, color: [f32; 4], radius: f32) {
         color,
         anim: 0,
     });
-}
-
-/// Draws `b` at `rect`: the take-a-message button as a white record dot on
-/// blue, the play button as its glyph (bright when `read_aloud`), and the
-/// rest as labelled buttons.
-fn draw_button(
-    list: &mut DrawList,
-    ctx: &DrawContext,
-    term: Option<&Terminal>,
-    b: &FlowButton,
-    rect: Rect,
-    s: f32,
-    read_aloud: bool,
-) {
-    match b.hit {
-        AgentHit::Message => {
-            fill(list, rect, b.bg, 10.0 * s);
-            let d = DOT * s;
-            let dot = Rect::new(
-                rect.x + (rect.w - d) * 0.5,
-                rect.y + (rect.h - d) * 0.5,
-                d,
-                d,
-            );
-            fill(list, dot, FG, d * 0.5);
-        }
-        AgentHit::ReadAloud => {
-            fill(list, rect, b.bg, 10.0 * s);
-            let px = 26.0 * s;
-            let glyph = Row {
-                text: if term.is_some() { PLAY_GLYPH } else { ">" }.to_string(),
-                x: 0.0,
-                y: 0.0,
-                px,
-                color: if read_aloud { FG } else { DIM },
-                mono: true,
-            };
-            let pos = [
-                rect.x + (rect.w - CELL_EM * px) * 0.5,
-                rect.y + (rect.h - term_h(px)) * 0.5,
-            ];
-            draw_row(list, ctx, term, &glyph, pos);
-        }
-        _ => button(list, ctx, b.label, rect, b.bg, s),
-    }
 }
 
 fn button(list: &mut DrawList, ctx: &DrawContext, label: &str, rect: Rect, bg: [f32; 4], s: f32) {
@@ -1526,7 +1464,7 @@ mod tests {
             [
                 AgentHit::Suggest(Suggestion::Yes),
                 AgentHit::Suggest(Suggestion::No),
-                AgentHit::Message
+                AgentHit::Reply
             ]
         );
         let finished = lay_out_flow(&entries, &[card(CardKind::Finished, 4, true)], 1080.0, 2.0);
@@ -1766,15 +1704,15 @@ mod tests {
         let cards = vec![card(CardKind::Question, entries.len(), true)];
         // Not pinned, so its only button is the one in the flow.
         let a = screen(entries, cards, None);
-        let take = a
-            .hits
-            .iter()
-            .filter(|(h, _)| *h == AgentHit::Message)
-            .count();
-        assert_eq!(take, 2, "the screen's and the card's");
+        let take = |hit| a.hits.iter().filter(|(h, _)| *h == hit).count();
+        assert_eq!(
+            (take(AgentHit::Message), take(AgentHit::Reply)),
+            (1, 1),
+            "the screen's record and the card's"
+        );
         let v = a.frame().viewport;
         for (hit, rect) in &a.hits {
-            if *hit == AgentHit::Message && rect.y < v.y + v.h {
+            if *hit == AgentHit::Reply && rect.y < v.y + v.h {
                 assert!(rect.y >= v.y);
             }
         }
@@ -1801,16 +1739,7 @@ mod tests {
         ];
         a.set_dictation(Some(lines));
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(
-            hits,
-            [
-                AgentHit::ReadAloud,
-                AgentHit::Message,
-                AgentHit::Submit,
-                AgentHit::Scratch,
-                AgentHit::Clear
-            ]
-        );
+        assert_eq!(hits, [AgentHit::Submit, AgentHit::Clear, AgentHit::Message]);
         let card = a.frame().dictation.clone().expect("the card");
         assert!(card.rows.iter().any(|r| r.text == "please go on"));
         let v = a.frame().viewport;
@@ -1964,7 +1893,12 @@ mod tests {
         let text = FontAtlas::from_bytes(NOTO_SANS_MONO_ATLAS).expect("parses");
         let page = FontAtlas::from_bytes(TERMINAL_SYMBOLS_ATLAS).expect("parses");
         let shaper = TerminalShaper::new(&text, &page).expect("the atlases agree");
-        for (name, glyph) in [("back", BACK_GLYPH), ("play", PLAY_GLYPH)] {
+        for (name, glyph) in [
+            ("back", BACK_GLYPH),
+            ("play", PLAY_GLYPH),
+            ("send", SEND_GLYPH),
+            ("cancel", CANCEL_GLYPH),
+        ] {
             let line = shaper.line(glyph, GlyphStyle::Regular);
             let found = line
                 .segments
@@ -2019,5 +1953,65 @@ mod tests {
         assert!(same_entry(&now_top, &top));
         assert!((now_delta - delta).abs() < 0.5);
         assert!(!a.following());
+    }
+
+    fn said(text: &str) -> Vec<Line> {
+        vec![Line {
+            text: text.into(),
+            size: 20.0,
+            color: FG,
+            gap: 0.0,
+        }]
+    }
+
+    #[test]
+    fn taking_a_message_turns_play_into_send_with_cancel_between() {
+        let mut a = screen(
+            conversation(3),
+            vec![card(CardKind::Finished, 12, true)],
+            Some(0),
+        );
+        assert!(a.frame().pin.is_some());
+        a.set_dictation(Some(said("please go on")));
+        let f = a.frame().clone();
+        let hits: Vec<AgentHit> = f.buttons.iter().map(|b| b.hit).collect();
+        assert_eq!(hits, [AgentHit::Submit, AgentHit::Clear, AgentHit::Message]);
+        // Square, play's place, the middle, record's place.
+        for b in &f.buttons {
+            assert!((b.rect.w - b.rect.h).abs() < 0.5);
+        }
+        let mid = f.buttons[1].rect;
+        assert!((mid.x + mid.w * 0.5 - PHONE.w * 0.5).abs() < 0.5);
+        // The pinned card makes way; the flow ends above the message.
+        assert!(f.pin.is_none());
+        let card = f.dictation.expect("the message card");
+        assert!(f.viewport.y + f.viewport.h <= card.fills[0].rect.y);
+        assert!(card.buttons.is_empty());
+    }
+
+    #[test]
+    fn replying_to_a_card_puts_the_controls_in_it() {
+        let mut a = screen(
+            conversation(3),
+            vec![card(CardKind::Question, 12, true)],
+            Some(0),
+        );
+        a.begin_reply();
+        a.set_dictation(Some(said("yes, the second one")));
+        let f = a.frame().clone();
+        assert!(f.buttons.is_empty(), "the screen's row is hidden");
+        let card = f.dictation.expect("the card replied to");
+        assert!(card.rows.iter().any(|r| r.text.ends_with("is asking")));
+        assert!(card.rows.iter().any(|r| r.text == "yes, the second one"));
+        let hits: Vec<AgentHit> = card.buttons.iter().map(|b| b.hit).collect();
+        assert_eq!(hits, [AgentHit::Submit, AgentHit::Clear, AgentHit::Message]);
+        let b = card.buttons[0].rect;
+        assert_eq!(a.hit(b.x + 5.0, b.y + 5.0), Some(AgentHit::Submit));
+        assert!(a.replying_to().is_some());
+        // Sent or cancelled: back to play and record.
+        a.set_dictation(None);
+        assert!(a.replying_to().is_none());
+        let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
+        assert_eq!(hits, [AgentHit::ReadAloud, AgentHit::Message]);
     }
 }
