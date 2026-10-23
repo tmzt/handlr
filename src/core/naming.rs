@@ -499,6 +499,62 @@ impl Names {
     }
 }
 
+impl Names {
+    /// The agents an utterance names (plan 20261022_03, decision 7): by a
+    /// full name, or a project or tab part, shown, spoken or aliased, said
+    /// as whole words. The agent part alone ("Claude") names an agent only
+    /// when no other agent has it. One-word parts shorter than three
+    /// characters are not matched on their own.
+    pub fn named_in(&self, utterance: &str) -> Vec<&NamedAgent> {
+        let said = word_tokens(utterance);
+        if said.is_empty() {
+            return Vec::new();
+        }
+        let mut agent_parts: HashMap<String, usize> = HashMap::new();
+        for a in self.agents.iter().filter(|a| !a.is_shell()) {
+            *agent_parts
+                .entry(a.agent_part.spoken.to_lowercase())
+                .or_default() += 1;
+        }
+        self.agents
+            .iter()
+            .filter(|a| {
+                let mut phrases: Vec<&str> = vec![&a.shown, &a.spoken];
+                let part_forms = |p: &'_ NamePart| -> Vec<String> {
+                    let mut forms = vec![p.shown.clone(), p.spoken.clone(), p.word_form.clone()];
+                    forms.extend(p.alias.clone());
+                    forms
+                };
+                let mut owned: Vec<String> = Vec::new();
+                for part in [a.project.as_ref(), a.tab.as_ref()].into_iter().flatten() {
+                    owned.extend(part_forms(part));
+                }
+                let unique = agent_parts
+                    .get(&a.agent_part.spoken.to_lowercase())
+                    .is_some_and(|n| *n == 1);
+                if unique && !a.is_shell() {
+                    owned.extend(part_forms(&a.agent_part));
+                }
+                phrases.extend(owned.iter().map(String::as_str));
+                phrases.into_iter().any(|p| {
+                    let words = word_tokens(p);
+                    let long_enough =
+                        words.len() > 1 || words.first().is_some_and(|w| w.len() >= 3);
+                    long_enough && said.windows(words.len()).any(|w| w == words.as_slice())
+                })
+            })
+            .collect()
+    }
+}
+
+/// Lowercase letter-and-digit words.
+fn word_tokens(s: &str) -> Vec<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
 /// Name every pane in `snapshot` and resolve `target` to its pane id.
 pub fn resolve_pane_id(
     snapshot: &serde_json::Value,
@@ -734,6 +790,29 @@ mod tests {
 
     fn names(snap: &Value) -> Names {
         Names::from_snapshot(snap, &cfg())
+    }
+
+    #[test]
+    fn utterances_name_agents_by_their_parts() {
+        let snap = highbay();
+        let n = names(&snap);
+        let ids = |said: &str| -> Vec<String> {
+            n.named_in(said)
+                .into_iter()
+                .map(|a| a.agent.pane_id.clone())
+                .collect()
+        };
+        assert_eq!(ids("What is the handlr agent waiting on?"), ["w2:pZ"]);
+        assert_eq!(ids("and handlr?"), ["w2:pZ"]);
+        // Two agents share the project.
+        assert_eq!(ids("check libmorph"), ["w2:p3", "w2:p4"]);
+        assert_eq!(ids("what about tab em bee"), ["w2:p4"]);
+        // Every agent is Claude: the agent part alone names none.
+        assert!(ids("what is claude doing").is_empty());
+        // Words, not substrings; short parts alone do not count.
+        assert!(ids("handlrs everywhere").is_empty());
+        assert!(ids("hr").is_empty());
+        assert!(ids("").is_empty());
     }
 
     fn contains_pane_id(name: &str, pane_id: &str) -> bool {

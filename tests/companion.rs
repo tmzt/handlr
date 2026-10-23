@@ -14,7 +14,8 @@ use handlr::reasoning::{MockHandler, MockReasoningEngine, ReasoningEngine, ToolE
 use handlr::server::companion::{TurnOptions, INTERRUPTED_ENTRY};
 use handlr::server::link::{Link, LinkSettings};
 use handlr::server::{self, CoreEvent, Daemon, ServeOptions};
-use handlr::transport::{AgentStatus, HerdrClient, HerdrTransport};
+use handlr::sessions::Sessions;
+use handlr::transport::{AgentSession, AgentStatus, HerdrClient, HerdrTransport};
 use libhandlr_proto::link::{generate_keypair, reconnect, DeviceCode, LinkStream, PairingPayload};
 use serde_json::{json, Value};
 use tokio::io::AsyncWriteExt;
@@ -129,6 +130,8 @@ async fn start_with(config: AppConfig, engine: Arc<dyn ReasoningEngine>, with_li
         TurnOptions {
             engine: Some(engine),
             session_dir: Some(sessions.clone()),
+            // The synthetic fixtures, never this machine's own sessions.
+            agent_sessions: Some(Arc::new(Sessions::with_home(&fixture_home()))),
         },
     );
     let listener = server::bind(&socket).await.unwrap();
@@ -175,6 +178,30 @@ async fn set_status(daemon: &Daemon, status: AgentStatus) {
     match daemon.client.transport() {
         HerdrTransport::Mock { state } => {
             state.write().await.snapshot.workspaces[0].tabs[0].panes[0].agent_status = Some(status);
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+}
+
+/// The synthetic home of `tests/fixtures/sessions`.
+fn fixture_home() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/sessions/home")
+}
+
+/// Make the mock's pane p1 Claude Code in `/work/example`, with the
+/// fixture session whose last reply asks a question.
+async fn give_session(daemon: &Daemon) {
+    match daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let pane = &mut state.snapshot.workspaces[0].tabs[0].panes[0];
+            pane.cwd = Some("/work/example".to_string());
+            pane.agent_session = Some(AgentSession {
+                source: "herdr:claude".to_string(),
+                agent: "claude".to_string(),
+                kind: "id".to_string(),
+                value: "00000000-0000-4000-8000-0000000000a1".to_string(),
+            });
         }
         _ => unreachable!("tests use the mock"),
     }
@@ -681,6 +708,50 @@ async fn a_notice_waits_for_a_pending_confirmation() {
     let resolved = c.position(|m| m["method"] == "confirm.resolved").unwrap();
     let notice = c.position(|m| m["method"] == "notice").unwrap();
     assert!(resolved < notice, "{:?}", c.seen);
+}
+
+#[tokio::test]
+async fn a_new_pending_question_gives_one_notice() {
+    let env = start(confirming()).await;
+    give_session(&env.daemon).await;
+    env.daemon.watches.watch("p1");
+    let (mut c, _) = Client::companion(&env).await;
+    let status = |status: AgentStatus| {
+        let _ = env.daemon.events.send(CoreEvent::AgentStatus {
+            pane_id: "p1".to_string(),
+            agent: "claude".to_string(),
+            status,
+        });
+    };
+
+    // Working, then idle on the question: one notice that asks it.
+    status(AgentStatus::Working);
+    status(AgentStatus::Idle);
+    let n = c.note("notice").await;
+    assert_eq!(n["params"]["kind"], "pending_question", "{n}");
+    assert_eq!(
+        n["params"]["text"],
+        "Claude is asking: Should the notices wait for the phone to finish speaking, or interrupt it?"
+    );
+    assert_eq!(n["params"]["spoken"], "Claude");
+    c.drain(Duration::from_millis(300)).await;
+    let count = |c: &Client| c.seen.iter().filter(|m| m["method"] == "notice").count();
+    assert_eq!(count(&c), 1, "{:?}", c.seen);
+
+    // The same question again: no second notice.
+    status(AgentStatus::Working);
+    status(AgentStatus::Idle);
+    c.drain(Duration::from_millis(300)).await;
+    assert_eq!(count(&c), 1, "{:?}", c.seen);
+
+    // Blocked on it again: only the plain status notice.
+    status(AgentStatus::Working);
+    status(AgentStatus::Blocked);
+    c.drain(Duration::from_millis(300)).await;
+    let notices: Vec<&Value> = c.seen.iter().filter(|m| m["method"] == "notice").collect();
+    assert_eq!(notices.len(), 2, "{:?}", c.seen);
+    assert_eq!(notices[1]["params"]["kind"], "agent_status");
+    assert_eq!(notices[1]["params"]["text"], "Claude needs your input.");
 }
 
 #[tokio::test]

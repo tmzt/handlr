@@ -1,7 +1,7 @@
 ---
 title: The handlr.harness protocol, session peek and the MCP adapter
 date: 2026-10-22
-status: Draft
+status: In implementation
 covers:
   - The `handlr.harness` protocol for programs: agent state, sending with
     confirmation, and peeking at an agent's session
@@ -465,3 +465,65 @@ On the owner's answer: "rules for now, decide on a model later".
   later entry, to be added by amendment once the rules have been lived
   with. It would rank below the four rules, run only when an agent's turn
   ends, and read only the final reply, preferably on the local model.
+
+## Amendment — 2026-10-23 02:52 EDT: implementation started; steps 1, 2 and 3 done
+
+The status is `In implementation`. Outside the living sections L1, L2 and
+L3 and the open questions, this document is now immutable (AGENTS.md, Rules
+1.5 and 1.6).
+
+**Commits:**
+- libherdr: `0a51286` (rustfmt only), then `786a09a` (0.2.0, tag
+  `libherdr-v0.2.0`, `agent_session` and the read source);
+- `libhandlr_proto`, then handlr, in this batch.
+
+**Decided where the plan was open,** recorded under the living sections
+where they belong:
+- **L1, session sources:**
+  - **The reader's interface.** `locate(cwd, session_id)` returns the
+    path, the id and how it was matched.
+  - **No fallback after an id.** When herdr gives a session id and no file
+    matches it, there is no session, rather than the newest file for the
+    directory.
+  - **Claude Code's directory names.** Every character that is not an
+    ASCII letter or digit becomes `-`.
+  - **Codex's 14 days** are the 14 newest day directories.
+  - **Skipped as not conversation:**
+    - Claude Code sidechain, meta and compaction-summary lines, and lines
+      whose origin is a task notification;
+    - user text that is only a harness tag;
+    - Codex developer and system messages.
+- **L2, Gemini's session context:**
+  - **Which agents:** the focused one, those the utterance names (by full
+    name, or by project or tab as whole words, and by the bare agent name
+    only when it is unique), and idle or blocked agents with a pending
+    question.
+  - **Over the limit,** the oldest entry of any agent is dropped first.
+  - **The tool calls** are one line: "(N tool calls in between)".
+  - **Terminal tails:** a pane with a session block gets no terminal tail
+    unless it is blocked, since permission prompts show on screen and not
+    in the transcript. Every tail is read with `recent_unwrapped` and 80
+    lines.
+- **Decision 8, pending questions:**
+  - tool entries after the reply do not clear the question;
+  - trailing `* _ \` " ' ) ]` and curly quotes are ignored when looking
+    for the `?`;
+  - a question notice replaces the status notice for the same event;
+  - repeats are suppressed per pane and per connection.
+- **Redaction:**
+  - PEM blocks;
+  - `.private/` and `.env` lines;
+  - API keys by prefix (`AIza`, `sk-`, the GitHub token prefixes,
+    `xox?-`);
+  - JWTs;
+  - hex runs over 40 characters;
+  - mixed base64 runs over 40 characters.
+
+  A tool result whose call names a `.private/` or `.env` path is
+  redacted whole.
+
+**Still to do:**
+- **Step 2's live check:** ask the phone what the handlr agent is waiting
+  on.
+- **Step 4**, the agent view, which the owner has approved.
+- **Steps 5 and 6.**

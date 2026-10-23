@@ -6,8 +6,8 @@ pub use libherdr::{
     client::HerdrClient,
     error::{HerdrError, HerdrResult},
     protocol::{
-        AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction, PaneInfo,
-        TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
+        AgentSession, AgentStatus, EnvironmentSnapshot, HerdrRequest, HerdrResponse, LayoutAction,
+        PaneInfo, ReadSource, TabInfo, WorkspaceInfo, DEFAULT_INSPECT_LINES,
     },
     transport::{
         default_local_socket_path, HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod,
@@ -20,8 +20,15 @@ use crate::core::confirm::{self, Broker, ConfirmError, HandleRequest, Lifetime};
 use crate::core::naming::Names;
 use crate::core::policy;
 use crate::core::principal::Principal;
+use crate::sessions::context::{self as session_context, AgentContext};
+use crate::sessions::{pending, Sessions};
 use crate::watch::WatchRegistry;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+
+/// Lines of terminal output read for a pane in the turn context, with soft
+/// wraps joined (plan 20261022_03, decision 7).
+pub const CONTEXT_TAIL_LINES: usize = 80;
 
 pub use crate::core::agents::{extract_agent_name_for_pane, resolve_pane_id};
 
@@ -391,6 +398,9 @@ pub struct HerdrContextContributor {
     /// When set, the context lists each pane's names (plan 20261022_05),
     /// which tools accept as targets and replies should say.
     pub naming: Option<NamingConfig>,
+    /// When set, the context has an `### Agent sessions` section read from
+    /// the agents' own transcripts (plan 20261022_03, decision 7).
+    pub sessions: Option<Arc<Sessions>>,
 }
 
 impl HerdrContextContributor {
@@ -400,7 +410,101 @@ impl HerdrContextContributor {
             agents,
             watches: None,
             naming: None,
+            sessions: None,
         }
+    }
+
+    pub fn with_sessions(mut self, sessions: Arc<Sessions>) -> Self {
+        self.sessions = Some(sessions);
+        self
+    }
+
+    /// The `### Agent sessions` section and the panes it covers (decision
+    /// 7): the focused agent, the agents `utterance` names, and any agent
+    /// with a pending question, each from its own transcript. Empty when
+    /// there are no sessions, or herdr is remote (decision 4: session files
+    /// are only read on this machine).
+    pub fn session_section(
+        &self,
+        snapshot: &serde_json::Value,
+        utterance: Option<&str>,
+    ) -> (String, HashSet<String>) {
+        let Some(sessions) = &self.sessions else {
+            return (String::new(), HashSet::new());
+        };
+        if matches!(self.client.transport(), HerdrTransport::RemoteSsh { .. }) {
+            return (String::new(), HashSet::new());
+        }
+        let naming = self.naming.clone().unwrap_or_default();
+        let names = Names::from_snapshot(snapshot, &naming);
+        let focused = agents::focused_pane_id(snapshot);
+        let named: HashSet<String> = utterance
+            .map(|u| {
+                names
+                    .named_in(u)
+                    .into_iter()
+                    .map(|a| a.agent.pane_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // (priority, block): focused, then named, then pending only.
+        let mut blocks: Vec<(u8, AgentContext)> = Vec::new();
+        for named_agent in &names.agents {
+            let agent = &named_agent.agent;
+            if sessions.reader_for(&agent.agent).is_none() {
+                continue;
+            }
+            let is_focused = focused
+                .as_deref()
+                .is_some_and(|f| crate::watch::pane_ids_match(&agent.pane_id, f));
+            let is_named = named.contains(&agent.pane_id);
+            let may_ask = matches!(agent.status, AgentStatus::Idle | AgentStatus::Blocked);
+            if !(is_focused || is_named || may_ask) {
+                continue;
+            }
+            let Some(read) = sessions.read(agent, |items| {
+                items.iter().filter(|i| i.is_text()).count() >= session_context::ENTRIES_PER_AGENT
+            }) else {
+                continue;
+            };
+            let question = pending::pending_question(&read.items, &agent.status);
+            let priority = match (is_focused, is_named) {
+                (true, _) => 0,
+                (false, true) => 1,
+                _ if question.is_some() => 2,
+                _ => continue,
+            };
+            let status = serde_json::to_value(&agent.status)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_else(|| "unknown".to_string());
+            blocks.push((
+                priority,
+                AgentContext::new(
+                    &crate::core::naming::capitalise(&named_agent.spoken),
+                    &agent.pane_id,
+                    &status,
+                    &read.items,
+                    question,
+                ),
+            ));
+        }
+        blocks.sort_by_key(|(priority, _)| *priority);
+        let covered = blocks.iter().map(|(_, b)| b.pane_id.clone()).collect();
+        let section = session_context::section(blocks.into_iter().map(|(_, b)| b).collect());
+        (section, covered)
+    }
+
+    /// The terminal tail of `pane_id` for the context: `recent_unwrapped`,
+    /// `CONTEXT_TAIL_LINES` lines.
+    async fn pane_tail(&self, pane_id: &str) -> Option<String> {
+        let read = self
+            .client
+            .inspect_pane_from(pane_id, CONTEXT_TAIL_LINES, ReadSource::RecentUnwrapped)
+            .await
+            .ok()?;
+        agents::pane_text(&read).map(str::to_string)
     }
 
     pub fn with_watches(mut self, watches: Arc<WatchRegistry>) -> Self {
@@ -452,6 +556,17 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             .find(|m| m.role == "user")
             .map(|m| m.content.as_str());
 
+        // The agents' own transcripts. A pane they cover needs no terminal
+        // tail, unless it is blocked: what blocks it (a permission prompt)
+        // is on its screen, not in its transcript.
+        let (sessions_section, covered) = self.session_section(&snapshot, last_user_query);
+        let tail_wanted = |pane_id: &str, status: &str| {
+            status == "blocked"
+                || !covered
+                    .iter()
+                    .any(|c| crate::watch::pane_ids_match(c, pane_id))
+        };
+
         let mut pane_details = Vec::new();
         let mut pane_summaries = Vec::new();
 
@@ -494,28 +609,19 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                     last_user_query,
                 );
 
-                if should_include && !pane_id.is_empty() {
-                    if let Ok(inspect_res) = self.client.inspect_pane(pane_id, 50).await {
-                        let buffer_opt = inspect_res
-                            .get("read")
-                            .and_then(|r| r.get("text"))
-                            .and_then(|t| t.as_str())
-                            .or_else(|| inspect_res.get("buffer").and_then(|b| b.as_str()))
-                            .or_else(|| inspect_res.get("text").and_then(|t| t.as_str()));
-
-                        if let Some(buffer) = buffer_opt {
-                            let trimmed = buffer.trim();
-                            if !trimmed.is_empty() {
-                                pane_details.push(format!(
-                                    "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\nRecent 50 Lines of Output:\n```\n{}\n```",
-                                    idx + 1, pane_id, agent, status, focused, cwd, trimmed
-                                ));
-                            } else {
-                                pane_details.push(format!(
-                                    "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\n(Buffer is idle/empty)",
-                                    idx + 1, pane_id, agent, status, focused, cwd
-                                ));
-                            }
+                if should_include && !pane_id.is_empty() && tail_wanted(pane_id, status) {
+                    if let Some(buffer) = self.pane_tail(pane_id).await {
+                        let trimmed = buffer.trim();
+                        if !trimmed.is_empty() {
+                            pane_details.push(format!(
+                                "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\nRecent {} Lines of Output:\n```\n{}\n```",
+                                idx + 1, pane_id, agent, status, focused, cwd, CONTEXT_TAIL_LINES, trimmed
+                            ));
+                        } else {
+                            pane_details.push(format!(
+                                "#### Pane {} (ID: {}) [Agent: {}, Status: {}, Focused: {}, CWD: '{}']\n(Buffer is idle/empty)",
+                                idx + 1, pane_id, agent, status, focused, cwd
+                            ));
                         }
                     }
                 }
@@ -567,31 +673,14 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                                         last_user_query,
                                     );
 
-                                    if should_include {
-                                        if let Ok(inspect_res) =
-                                            self.client.inspect_pane(pane_id, 50).await
-                                        {
-                                            let buffer_opt = inspect_res
-                                                .get("read")
-                                                .and_then(|r| r.get("text"))
-                                                .and_then(|t| t.as_str())
-                                                .or_else(|| {
-                                                    inspect_res
-                                                        .get("buffer")
-                                                        .and_then(|b| b.as_str())
-                                                })
-                                                .or_else(|| {
-                                                    inspect_res.get("text").and_then(|t| t.as_str())
-                                                });
-
-                                            if let Some(buffer) = buffer_opt {
-                                                let trimmed = buffer.trim();
-                                                if !trimmed.is_empty() {
-                                                    pane_details.push(format!(
-                                                        "#### Pane {} (ID: {}) [Workspace: {}, Title: '{}', Status: {}, Focused: {}]:\nRecent 50 Lines of Output:\n```\n{}\n```",
-                                                        global_idx, pane_id, ws_name, title, status, focused, trimmed
-                                                    ));
-                                                }
+                                    if should_include && tail_wanted(pane_id, status) {
+                                        if let Some(buffer) = self.pane_tail(pane_id).await {
+                                            let trimmed = buffer.trim();
+                                            if !trimmed.is_empty() {
+                                                pane_details.push(format!(
+                                                    "#### Pane {} (ID: {}) [Workspace: {}, Title: '{}', Status: {}, Focused: {}]:\nRecent {} Lines of Output:\n```\n{}\n```",
+                                                    global_idx, pane_id, ws_name, title, status, focused, CONTEXT_TAIL_LINES, trimmed
+                                                ));
                                             }
                                         }
                                     }
@@ -617,6 +706,11 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         } else {
             content.push_str("No active/working terminal pane output to report.\n\n");
+        }
+
+        if !sessions_section.is_empty() {
+            content.push_str(&sessions_section);
+            content.push('\n');
         }
 
         if !self.agents.is_empty() {
@@ -909,6 +1003,121 @@ mod tests {
                 state.read().await.command_log.is_empty(),
             _ => unreachable!(),
         });
+    }
+
+    /// The mock with p1 as Claude Code in `/work/example`, idle, with the
+    /// fixture session's id, and p2 a working shell.
+    async fn session_mock() -> HerdrClient {
+        let client = HerdrClient::mock();
+        if let HerdrTransport::Mock { state } = client.transport() {
+            let mut state = state.write().await;
+            let tab = &mut state.snapshot.workspaces[0].tabs[0];
+            let p1 = &mut tab.panes[0];
+            p1.cwd = Some("/work/example".to_string());
+            p1.agent_status = Some(AgentStatus::Idle);
+            p1.agent_session = Some(AgentSession {
+                source: "herdr:claude".to_string(),
+                agent: "claude".to_string(),
+                kind: "id".to_string(),
+                value: "00000000-0000-4000-8000-0000000000a1".to_string(),
+            });
+            let mut p2 = p1.clone();
+            p2.pane_id = "p2".to_string();
+            p2.focused = false;
+            p2.agent_session = None;
+            p2.agent_status = Some(AgentStatus::Working);
+            p2.terminal_title = Some("zsh".to_string());
+            p2.extra.remove("agent");
+            tab.panes.push(p2);
+        }
+        client
+    }
+
+    fn fixture_sessions() -> Arc<Sessions> {
+        Arc::new(Sessions::with_home(
+            &crate::sessions::test_support::fixture("home"),
+        ))
+    }
+
+    async fn read_log(client: &HerdrClient) -> Vec<(String, ReadSource, usize)> {
+        match client.transport() {
+            HerdrTransport::Mock { state } => state.read().await.read_log.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    async fn context_for(contributor: &HerdrContextContributor, said: &str) -> String {
+        use libinfer::TurnContributor;
+        let mut messages = vec![libinfer::Message {
+            role: "user".to_string(),
+            content: said.to_string(),
+            name: None,
+            thought_signature: None,
+        }];
+        contributor.contribute(&mut messages).await.unwrap();
+        messages.pop().unwrap().content
+    }
+
+    #[tokio::test]
+    async fn test_context_carries_the_agent_sessions_within_limits() {
+        let client = session_mock().await;
+        let contributor = HerdrContextContributor::new(client.clone(), vec![])
+            .with_naming(NamingConfig::default())
+            .with_sessions(fixture_sessions());
+        let content = context_for(&contributor, "what is the handlr agent waiting on?").await;
+        let start = content.find("### Agent sessions").expect("the section");
+        let section = &content[start..];
+        assert!(section.len() <= crate::sessions::context::TOTAL_MAX);
+        assert!(section.contains("#### Claude (pane p1, idle)"), "{section}");
+        assert!(section.contains("- user [2026-01-04T07:00:00.000Z]: Where do the notices stand?"));
+        assert!(section.contains("(1 tool call in between)"));
+        assert!(section.contains(
+            "Pending question [2026-01-04T07:15:00.000Z]: Should the notices wait for the phone to finish speaking, or interrupt it?"
+        ));
+        // The covered agent's screen is not read; the shell's is, unwrapped.
+        assert_eq!(
+            read_log(&client).await,
+            [(
+                "p2".to_string(),
+                ReadSource::RecentUnwrapped,
+                CONTEXT_TAIL_LINES
+            )]
+        );
+        assert!(content.contains("Recent 80 Lines of Output"));
+    }
+
+    #[tokio::test]
+    async fn test_context_without_sessions_reads_every_tail() {
+        let client = session_mock().await;
+        let contributor = HerdrContextContributor::new(client.clone(), vec![]);
+        let content = context_for(&contributor, "hello").await;
+        assert!(!content.contains("### Agent sessions"));
+        let panes: Vec<String> = read_log(&client).await.into_iter().map(|r| r.0).collect();
+        assert_eq!(panes, ["p1", "p2"]);
+    }
+
+    #[tokio::test]
+    async fn test_a_blocked_agent_keeps_its_screen_and_a_remote_herdr_has_no_sessions() {
+        let client = session_mock().await;
+        if let HerdrTransport::Mock { state } = client.transport() {
+            state.write().await.snapshot.workspaces[0].tabs[0].panes[0].agent_status =
+                Some(AgentStatus::Blocked);
+        }
+        let contributor =
+            HerdrContextContributor::new(client.clone(), vec![]).with_sessions(fixture_sessions());
+        let content = context_for(&contributor, "status?").await;
+        assert!(content.contains("#### Claude (pane p1, blocked)"));
+        let panes: Vec<String> = read_log(&client).await.into_iter().map(|r| r.0).collect();
+        assert_eq!(panes, ["p1", "p2"]);
+
+        let remote = HerdrContextContributor::new(
+            HerdrClient::remote_with_config(RemoteSshConfig::new("example.invalid")),
+            vec![],
+        )
+        .with_sessions(fixture_sessions());
+        let snapshot = client.list_panes().await.unwrap();
+        let (section, covered) = remote.session_section(&snapshot, Some("status?"));
+        assert!(section.is_empty() && covered.is_empty());
     }
 
     #[tokio::test]

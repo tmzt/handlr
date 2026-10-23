@@ -29,6 +29,8 @@ const MAX_PENDING: usize = 4;
 #[derive(Debug)]
 pub struct Announcer<T = String> {
     last_status: HashMap<String, AgentStatus>,
+    /// The last pending question announced for each pane.
+    last_question: HashMap<String, String>,
     pending: VecDeque<T>,
 }
 
@@ -36,6 +38,7 @@ impl<T> Default for Announcer<T> {
     fn default() -> Self {
         Announcer {
             last_status: HashMap::new(),
+            last_question: HashMap::new(),
             pending: VecDeque::new(),
         }
     }
@@ -71,6 +74,25 @@ impl<T: std::fmt::Debug> Announcer<T> {
         }
     }
 
+    /// The status last noted for a pane, if any.
+    pub fn status_of(&self, pane_id: &str) -> Option<&AgentStatus> {
+        self.last_status.get(pane_id)
+    }
+
+    /// Record a pane's pending question (plan 20261022_03, decision 8) and
+    /// report whether it is new: a question already announced for the pane
+    /// is not announced again. `question` identifies it (its time and text).
+    pub fn note_question(&mut self, pane_id: &str, question: &str) -> bool {
+        match self.last_question.get(pane_id) {
+            Some(last) if last == question => false,
+            _ => {
+                self.last_question
+                    .insert(pane_id.to_string(), question.to_string());
+                true
+            }
+        }
+    }
+
     /// Queue a sentence to be spoken when the voice channel is free.
     pub fn queue(&mut self, sentence: T) {
         if self.pending.len() >= MAX_PENDING {
@@ -99,6 +121,7 @@ impl<T: std::fmt::Debug> Announcer<T> {
     /// again. Used when a pane stops being watched.
     pub fn forget(&mut self, pane_id: &str) {
         self.last_status.remove(pane_id);
+        self.last_question.remove(pane_id);
     }
 }
 
@@ -158,6 +181,22 @@ mod tests {
     }
 
     // ── what is worth announcing ──
+
+    #[test]
+    fn test_a_question_is_announced_once_per_pane() {
+        let mut a: Announcer<String> = Announcer::default();
+        assert!(a.note_question("w1:p6", "t1\nShall I?"));
+        assert!(!a.note_question("w1:p6", "t1\nShall I?"));
+        // Another pane, or a new question, is new.
+        assert!(a.note_question("w1:p7", "t1\nShall I?"));
+        assert!(a.note_question("w1:p6", "t2\nAnd now?"));
+        // Forgetting the pane forgets its question.
+        a.forget("w1:p6");
+        assert!(a.note_question("w1:p6", "t2\nAnd now?"));
+        assert_eq!(a.status_of("w1:p6"), None);
+        a.note(&change("w1:p6", "claude", AgentStatus::Working));
+        assert_eq!(a.status_of("w1:p6"), Some(&AgentStatus::Working));
+    }
 
     #[test]
     fn test_notes_blocked_and_done_only() {

@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use libherdr::protocol::AgentStatus;
+use libherdr::protocol::{AgentSession, AgentStatus};
 
 /// One pane and the agent running in it.
 #[derive(Debug, Clone, PartialEq)]
@@ -29,6 +29,9 @@ pub struct AgentRef {
     pub tab_number: Option<u32>,
     pub status: AgentStatus,
     pub focused: bool,
+    /// The session herdr reports for the pane's agent (plan 20261022_03,
+    /// 16:23 EDT amendment).
+    pub session: Option<AgentSession>,
 }
 
 /// Every pane in the snapshot, once each, as an `AgentRef`.
@@ -64,6 +67,9 @@ pub fn agents(snapshot: &serde_json::Value) -> Vec<AgentRef> {
                 .get("focused")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            session: pane
+                .get("agent_session")
+                .and_then(|v| serde_json::from_value(v.clone()).ok()),
         });
     }
     refs
@@ -388,7 +394,9 @@ mod tests {
         let snap = json!({"snapshot": {
             "panes": [
                 {"pane_id": "w1:p1", "agent": "Claude", "workspace_id": "w1", "tab_id": "w1:t1",
-                 "cwd": "/src/handlr", "agent_status": "blocked", "focused": true},
+                 "cwd": "/src/handlr", "agent_status": "blocked", "focused": true,
+                 "agent_session": {"source": "herdr:claude", "agent": "claude", "kind": "id",
+                                   "value": "00000000-0000-4000-8000-000000000001"}},
                 {"pane_id": "w2:p2", "workspace_id": "w2", "cwd": "/src/highbay/"}
             ],
             "workspaces": [
@@ -405,6 +413,11 @@ mod tests {
         assert_eq!(refs[0].status, AgentStatus::Blocked);
         assert!(refs[0].focused);
         assert_eq!(refs[0].tab_id.as_deref(), Some("w1:t1"));
+        assert_eq!(
+            refs[0].session.as_ref().and_then(|s| s.id()),
+            Some("00000000-0000-4000-8000-000000000001")
+        );
+        assert_eq!(refs[1].session, None);
         // No agent: a shell. Unlabelled workspace: the cwd's basename.
         assert_eq!(refs[1].agent, "shell");
         assert_eq!(refs[1].project.as_deref(), Some("highbay"));

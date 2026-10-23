@@ -1,0 +1,13 @@
+{"timestamp":"2026-01-03T09:00:00.000Z","type":"session_meta","payload":{"id":"00000000-0000-7000-8000-0000000000c3","session_id":"00000000-0000-7000-8000-0000000000c3","cwd":"/work/example","cli_version":"0.0.0","base_instructions":{"text":"Synthetic instructions."}}}
+{"timestamp":"2026-01-03T09:00:00.100Z","type":"turn_context","payload":{"cwd":"/work/example"}}
+{"timestamp":"2026-01-03T09:00:00.200Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"Developer instructions."}]}}
+{"timestamp":"2026-01-03T09:00:00.300Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>\n  <cwd>/work/example</cwd>\n</environment_context>"}]}}
+{"timestamp":"2026-01-03T09:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"list the agents"}]}}
+{"timestamp":"2026-01-03T09:00:01.500Z","type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-01-03T09:00:02.000Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"ZmFrZQ=="}}
+{"timestamp":"2026-01-03T09:00:03.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"I will check which agents are running."}]}}
+{"timestamp":"2026-01-03T09:00:04.000Z","type":"response_item","payload":{"type":"function_call","name":"list_agents","namespace":"collaboration","arguments":"{\"all\": true}","call_id":"call_fake_1"}}
+{"timestamp":"2026-01-03T09:00:05.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call_fake_1","output":"one agent: primary"}}
+{"timestamp":"2026-01-03T09:00:05.500Z","type":"response_item","payload":{"type":"mess
+{"timestamp":"2026-01-03T09:00:06.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Only the primary agent is running. Do you want me to start another?"}]}}
+{"timestamp":"2026-01-03T09:00:07.000Z","type":"event_msg","payload":{"type":"task_complete"}}

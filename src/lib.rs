@@ -8,6 +8,7 @@ pub mod notify;
 pub mod pair;
 pub mod reasoning;
 pub mod server;
+pub mod sessions;
 pub mod transport;
 pub mod watch;
 

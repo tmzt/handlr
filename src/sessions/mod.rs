@@ -1,0 +1,428 @@
+//! Agents' own session transcripts (docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md,
+//! decisions 2, 3, 7 and 8, with the 16:23 and 02:28 EDT amendments).
+//!
+//! herdr holds no scrollback for a full-screen agent such as Claude Code,
+//! so what an agent said and is waiting on is read from its own transcript
+//! file. A session is found by the id herdr reports for the pane
+//! (`agent_session`), else by the pane's cwd. Files are read from the end,
+//! never whole, and only on the machine the daemon runs on.
+//!
+//! Everything that leaves this module for a client or for Gemini goes
+//! through [`redact::redact`] first: [`Item::entry`], [`pending`] and
+//! [`context`] all redact.
+
+pub mod claude;
+pub mod codex;
+pub mod context;
+pub mod pending;
+pub mod redact;
+
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+pub use libhandlr_proto::common::{
+    Entry, EntryKind, PendingQuestion, Role, ENTRY_SUMMARY_MAX, PENDING_QUESTION_MAX,
+};
+
+use crate::core::agents::AgentRef;
+
+/// How much of a file `tail` reads at a time, from the end.
+pub const TAIL_CHUNK: u64 = 256 * 1024;
+/// The most of a file `tail` reads.
+pub const TAIL_MAX: u64 = 2 * 1024 * 1024;
+/// A tool call's or result's text is kept to this many characters as it is
+/// read; summaries are cut further after redaction.
+pub(crate) const TOOL_TEXT_MAX: usize = 4000;
+/// A text entry is kept to this many characters as it is read.
+pub(crate) const TEXT_MAX: usize = 32 * 1024;
+
+/// One entry as it was read, before it is redacted and cut for a client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Item {
+    /// RFC 3339, from the file; empty when the line had none.
+    pub ts: String,
+    pub role: Role,
+    pub kind: EntryKind,
+    pub tool: Option<String>,
+    /// The whole text of a `Text` entry (up to 32 KiB); a tool call's name
+    /// and input, or a result's text, up to 4000 characters. Not redacted.
+    pub text: String,
+    /// The id linking a tool call and its result.
+    pub call_id: Option<String>,
+}
+
+impl Item {
+    /// The entry a client sees: redacted, then cut to `ENTRY_SUMMARY_MAX`.
+    pub fn entry(&self) -> Entry {
+        Entry {
+            ts: self.ts.clone(),
+            role: self.role,
+            kind: self.kind,
+            tool: self.tool.clone(),
+            summary: cut(&redact::redact(&self.text), ENTRY_SUMMARY_MAX),
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        self.kind == EntryKind::Text
+    }
+}
+
+/// `s` cut to at most `max` characters, at a character boundary, ending in
+/// "…" when it was cut.
+pub fn cut(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        None => s.to_string(),
+        Some(_) => {
+            let keep = max.saturating_sub(1);
+            let end = s.char_indices().nth(keep).map_or(s.len(), |(i, _)| i);
+            format!("{}…", &s[..end])
+        }
+    }
+}
+
+/// How a session was found (16:23 EDT amendment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Matched {
+    /// By the session id herdr reports for the pane.
+    Id,
+    /// By the pane's cwd: the newest session there, which may belong to
+    /// another agent in the same directory.
+    Cwd,
+}
+
+/// A session file found for a pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Located {
+    pub path: PathBuf,
+    /// The session's id, where it is known.
+    pub session_id: Option<String>,
+    pub matched: Matched,
+}
+
+/// One agent's session format (decision 3).
+pub trait SessionReader: Send + Sync {
+    /// `claude_code` or `codex`.
+    fn kind(&self) -> &'static str;
+
+    /// The session for a pane: by `session_id` when herdr gives one, else
+    /// the newest session for `cwd`.
+    fn locate(&self, cwd: Option<&Path>, session_id: Option<&str>) -> Option<Located>;
+
+    /// The entries one line holds. Unknown and malformed lines give none.
+    fn parse_line(&self, line: &str) -> Vec<Item>;
+
+    /// The last `n` entries of the file at `path`.
+    fn tail(&self, path: &Path, n: usize) -> Result<Vec<Item>, String> {
+        let mut items = read_tail(self, path, |items| items.len() >= n)?.items;
+        let skip = items.len().saturating_sub(n);
+        items.drain(..skip);
+        Ok(items)
+    }
+}
+
+/// What [`read_tail`] read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tail {
+    /// Every entry in the whole lines read, oldest first.
+    pub items: Vec<Item>,
+    /// How many bytes of the file were read.
+    pub bytes_read: u64,
+}
+
+/// Read entries from the end of the file at `path`: its last `TAIL_CHUNK`
+/// bytes, then `TAIL_CHUNK` more at a time until `enough` holds, the file's
+/// start is reached, or `TAIL_MAX` bytes have been read. Only whole lines
+/// are parsed.
+pub fn read_tail<R: SessionReader + ?Sized>(
+    reader: &R,
+    path: &Path,
+    enough: impl Fn(&[Item]) -> bool,
+) -> Result<Tail, String> {
+    let mut file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let len = file
+        .metadata()
+        .map_err(|e| format!("stat {}: {e}", path.display()))?
+        .len();
+    let mut start = len;
+    let mut window: Vec<u8> = Vec::new();
+    loop {
+        let next = start
+            .saturating_sub(TAIL_CHUNK)
+            .max(len.saturating_sub(TAIL_MAX));
+        let mut chunk = vec![0u8; (start - next) as usize];
+        file.seek(SeekFrom::Start(next))
+            .and_then(|_| file.read_exact(&mut chunk))
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        chunk.extend_from_slice(&window);
+        window = chunk;
+        start = next;
+        let items = parse_window(reader, &window, start > 0);
+        let at_limit = start == 0 || len - start >= TAIL_MAX;
+        if at_limit || enough(&items) {
+            return Ok(Tail {
+                items,
+                bytes_read: len - start,
+            });
+        }
+    }
+}
+
+/// The entries in `window`'s whole lines. When `partial_first`, the first
+/// line was cut by the window and is skipped.
+fn parse_window<R: SessionReader + ?Sized>(
+    reader: &R,
+    window: &[u8],
+    partial_first: bool,
+) -> Vec<Item> {
+    let text = String::from_utf8_lossy(window);
+    let mut lines = text.split('\n');
+    if partial_first {
+        lines.next();
+    }
+    let mut items: Vec<Item> = lines
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .flat_map(|l| reader.parse_line(l))
+        .collect();
+    link_results(&mut items);
+    items
+}
+
+/// Give each tool result its call's tool name, and redact a result whose
+/// call names a path under `.private/` or a `.env` file whole: its text is
+/// that file's contents.
+fn link_results(items: &mut [Item]) {
+    let calls: HashMap<String, (Option<String>, bool)> = items
+        .iter()
+        .filter(|i| i.kind == EntryKind::ToolUse)
+        .filter_map(|i| {
+            let id = i.call_id.clone()?;
+            Some((id, (i.tool.clone(), redact::mentions_secret_path(&i.text))))
+        })
+        .collect();
+    for item in items.iter_mut().filter(|i| i.kind == EntryKind::ToolResult) {
+        let Some((tool, secret)) = item.call_id.as_ref().and_then(|id| calls.get(id)) else {
+            continue;
+        };
+        if item.tool.is_none() {
+            item.tool = tool.clone();
+        }
+        if *secret {
+            item.text = redact::REDACTED.to_string();
+        }
+    }
+}
+
+/// A pane's session, read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRead {
+    /// The reader's kind (`claude_code`, `codex`).
+    pub kind: &'static str,
+    pub located: Located,
+    pub items: Vec<Item>,
+}
+
+/// The session readers, by agent name (decision 3).
+pub struct Sessions {
+    pub claude: claude::ClaudeCode,
+    pub codex: codex::Codex,
+}
+
+impl Default for Sessions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Sessions {
+    /// The readers for the files under `$HOME`.
+    pub fn new() -> Self {
+        let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("."), PathBuf::from);
+        Self::with_home(&home)
+    }
+
+    /// The readers for the files under `home` (`.claude/projects`,
+    /// `.codex/sessions`).
+    pub fn with_home(home: &Path) -> Self {
+        Sessions {
+            claude: claude::ClaudeCode::new(home.join(".claude").join("projects")),
+            codex: codex::Codex::new(home.join(".codex").join("sessions")),
+        }
+    }
+
+    /// The reader for an agent: `claude` is Claude Code, `codex` is Codex;
+    /// any other agent has none.
+    pub fn reader_for(&self, agent: &str) -> Option<&dyn SessionReader> {
+        match agent {
+            "claude" => Some(&self.claude),
+            "codex" => Some(&self.codex),
+            _ => None,
+        }
+    }
+
+    /// The session of the agent in `pane`, if it has a reader and a file.
+    pub fn locate(&self, pane: &AgentRef) -> Option<(&dyn SessionReader, Located)> {
+        let reader = self.reader_for(&pane.agent)?;
+        let id = pane.session.as_ref().and_then(|s| s.id());
+        let cwd = pane.cwd.as_deref().map(Path::new);
+        let located = reader.locate(cwd, id)?;
+        Some((reader, located))
+    }
+
+    /// Read the session of the agent in `pane` from the end until `enough`
+    /// holds (within `read_tail`'s limits).
+    pub fn read(&self, pane: &AgentRef, enough: impl Fn(&[Item]) -> bool) -> Option<SessionRead> {
+        let (reader, located) = self.locate(pane)?;
+        match read_tail(reader, &located.path, enough) {
+            Ok(tail) => Some(SessionRead {
+                kind: reader.kind(),
+                located,
+                items: tail.items,
+            }),
+            Err(e) => {
+                log::warn!("Could not read the {} session: {e}", reader.kind());
+                None
+            }
+        }
+    }
+}
+
+/// Whether a session id can be used in a file name as given.
+pub(crate) fn safe_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The first line of the file at `path`, read up to `max` bytes.
+pub(crate) fn first_line(path: &Path, max: usize) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut buf = vec![0u8; max];
+    let mut filled = 0;
+    while filled < max {
+        match file.read(&mut buf[filled..]) {
+            Ok(0) => break,
+            Ok(n) => {
+                filled += n;
+                if buf[..filled].contains(&b'\n') {
+                    break;
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+    let text = String::from_utf8_lossy(&buf[..filled]);
+    text.split('\n').next().map(str::to_string)
+}
+
+/// The `*.jsonl` files directly in `dir`, newest modification first.
+pub(crate) fn jsonl_newest_first(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl") && p.is_file())
+        .map(|p| {
+            let modified = p
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (modified, p)
+        })
+        .collect();
+    files.sort_by(|a, b| b.cmp(a));
+    files.into_iter().map(|(_, p)| p).collect()
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// `tests/fixtures/sessions/<name>`.
+    pub fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("sessions")
+            .join(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn cut_keeps_short_text_and_cuts_at_a_char_boundary() {
+        assert_eq!(cut("hello", 5), "hello");
+        assert_eq!(cut("hello!", 5), "hell…");
+        assert_eq!(cut("ééééé", 3), "éé…");
+        assert_eq!(cut("", 3), "");
+        let long = "x".repeat(600);
+        assert_eq!(cut(&long, ENTRY_SUMMARY_MAX).chars().count(), 500);
+    }
+
+    #[test]
+    fn a_large_file_is_read_from_the_end_only() {
+        // 50 MiB of user lines, then 10 assistant replies at the end.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.jsonl");
+        let mut file = std::io::BufWriter::new(File::create(&path).unwrap());
+        let filler = format!(
+            "{{\"type\":\"user\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"{}\"}}}}\n",
+            "filler ".repeat(140)
+        );
+        let mut written = 0usize;
+        while written < 50 * 1024 * 1024 {
+            file.write_all(filler.as_bytes()).unwrap();
+            written += filler.len();
+        }
+        for i in 0..10 {
+            writeln!(
+                file,
+                "{{\"type\":\"assistant\",\"timestamp\":\"2026-01-01T00:00:{i:02}.000Z\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"reply {i}\"}}]}}}}"
+            )
+            .unwrap();
+        }
+        drop(file);
+        assert!(std::fs::metadata(&path).unwrap().len() >= 50 * 1024 * 1024);
+
+        let reader = claude::ClaudeCode::new(dir.path().to_path_buf());
+        let tail = read_tail(&reader, &path, |items| items.len() >= 10).unwrap();
+        assert!(tail.bytes_read <= 512 * 1024, "read {}", tail.bytes_read);
+        let last: Vec<String> = reader
+            .tail(&path, 10)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.text)
+            .collect();
+        let want: Vec<String> = (0..10).map(|i| format!("reply {i}")).collect();
+        assert_eq!(last, want);
+    }
+
+    #[test]
+    fn reading_back_stops_at_two_mebibytes() {
+        // Lines no reader knows: nothing is ever enough.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("noise.jsonl");
+        let line = format!(
+            "{{\"type\":\"progress\",\"data\":\"{}\"}}\n",
+            "z".repeat(1000)
+        );
+        let body = line.repeat(5 * 1024);
+        std::fs::write(&path, body).unwrap();
+        let reader = claude::ClaudeCode::new(dir.path().to_path_buf());
+        let tail = read_tail(&reader, &path, |_| false).unwrap();
+        assert!(tail.items.is_empty());
+        assert_eq!(tail.bytes_read, TAIL_MAX);
+    }
+}

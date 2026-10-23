@@ -1,0 +1,14 @@
+{"type":"file-history-snapshot","snapshot":{}}
+{"type":"user","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:00.000Z","isSidechain":false,"message":{"role":"user","content":"Caveat: injected context."},"isMeta":true}
+{"type":"user","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:01.000Z","isSidechain":false,"message":{"role":"user","content":"<command-name>/usage</command-name>\n<command-message>usage</command-message>"}}
+{"type":"user","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:02.000Z","isSidechain":false,"message":{"role":"user","content":"What changed today?"},"origin":{"kind":"human"}}
+{"type":"assistant","timestamp":"2026-01-02T11:00:03.000Z","message":{"content":[{"type":"text","text":"cut off
+not json at all
+{"type":"assistant","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:04.000Z","isSidechain":true,"message":{"role":"assistant","type":"message","content":[{"type":"text","text":"A subagent's reply."}]}}
+{"type":"user","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:05.000Z","isSidechain":false,"message":{"role":"user","content":"<task-notification>\n<status>completed</status>\n</task-notification>"},"origin":{"kind":"task-notification"}}
+{"type":"user","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:06.000Z","isSidechain":false,"message":{"role":"user","content":"This session is being continued from a previous conversation."},"isCompactSummary":true}
+{"type":"api-request","timestamp":"2026-01-02T11:00:07.000Z"}
+{"type":"assistant","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:08.000Z","isSidechain":false,"message":{"role":"assistant","type":"message","content":[{"type":"redacted_thinking","data":"ZmFrZQ=="},{"type":"text","text":"Two files changed."}]}}
+{"type":"mode","mode":"normal"}
+{"type":"assistant","cwd":"/work/example","sessionId":"00000000-0000-4000-8000-0000000000a1","timestamp":"2026-01-02T11:00:09.000Z","isSidechain":false,"message":{"role":"assistant","type":"message","content":[{"type":"some_new_block","value":1}]}}
+[1,2,3]

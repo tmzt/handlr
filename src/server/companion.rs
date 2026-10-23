@@ -68,6 +68,9 @@ pub struct TurnOptions {
     pub engine: Option<Arc<dyn ReasoningEngine>>,
     /// Where session histories are kept, instead of `~/.cache/libinfer`.
     pub session_dir: Option<PathBuf>,
+    /// The agents' own session readers, instead of those under `$HOME`
+    /// (plan 20261022_03).
+    pub agent_sessions: Option<Arc<crate::sessions::Sessions>>,
 }
 
 /// The engine, the session histories, and who is in a turn.
@@ -771,7 +774,8 @@ async fn work(
     messages.push(user.clone());
     let contributor = HerdrContextContributor::new(daemon.client.clone(), daemon.agents.clone())
         .with_watches(Arc::clone(&daemon.watches))
-        .with_naming(daemon.naming.clone());
+        .with_naming(daemon.naming.clone())
+        .with_sessions(Arc::clone(&daemon.sessions));
     if let Err(e) = contributor.contribute(&mut messages).await {
         log::warn!("The herdr context could not be added: {e}");
     }
@@ -925,8 +929,17 @@ pub(super) async fn vocabulary(
     }
 }
 
+/// The longest question a notice speaks, in characters (plan 20261022_03,
+/// decision 8).
+pub const QUESTION_NOTICE_MAX: usize = 200;
+
 /// A status change of a watched agent: queue its notice if it is worth
 /// announcing, then send what may be sent.
+///
+/// An agent going from `working` to `idle` or `blocked` with a new pending
+/// question gets a `pending_question` notice, "<name> is asking: <the
+/// question>", in place of the status notice; a question already announced
+/// for the pane is not announced again.
 pub(super) async fn agent_status(
     conn: &Arc<Conn>,
     pane_id: &str,
@@ -941,27 +954,87 @@ pub(super) async fn agent_status(
         display_agent: None,
         title: None,
     };
-    let noted = conn.notices.lock().unwrap().note(&change);
-    let Some(status) = noted else { return };
-    let names = conn.daemon.names_for(pane_id).await;
-    let spoken = names
-        .as_ref()
+    let (previous, noted) = {
+        let mut notices = conn.notices.lock().unwrap();
+        let previous = notices.status_of(pane_id).cloned();
+        (previous, notices.note(&change))
+    };
+    let daemon = &conn.daemon;
+    let snapshot = tokio::time::timeout(super::NAME_LOOKUP_TIMEOUT, daemon.client.list_panes())
+        .await
+        .ok()
+        .and_then(Result::ok);
+    let names = snapshot.as_ref().map(|snap| daemon.names(snap));
+    let named = names.as_ref().and_then(|n| n.get(pane_id));
+    let spoken = named
         .map(|n| n.spoken.clone())
         .unwrap_or_else(|| naming::capitalise(agent));
-    let Some(text) = crate::notify::announcement(&status, &spoken) else {
-        return;
+    let shown = named.map(|n| n.shown.clone());
+
+    let stopped = matches!(status, AgentStatus::Idle | AgentStatus::Blocked)
+        && matches!(previous, None | Some(AgentStatus::Working));
+    let question = if stopped {
+        named.and_then(|n| pending_question(daemon, &n.agent, status))
+    } else {
+        None
+    };
+    let (kind, text) = match question {
+        Some(q)
+            if conn
+                .notices
+                .lock()
+                .unwrap()
+                .note_question(pane_id, &format!("{}\n{}", q.ts, q.text)) =>
+        {
+            (
+                companion::notice_kinds::PENDING_QUESTION,
+                format!(
+                    "{} is asking: {}",
+                    naming::capitalise(&spoken),
+                    crate::sessions::cut(&q.text, QUESTION_NOTICE_MAX)
+                ),
+            )
+        }
+        _ => {
+            let Some(status) = noted else { return };
+            let Some(text) = crate::notify::announcement(&status, &spoken) else {
+                return;
+            };
+            (companion::notice_kinds::AGENT_STATUS, text)
+        }
     };
     let id = conn.next_notice.fetch_add(1, Ordering::Relaxed) + 1;
     let notice = companion::Notice {
         id,
-        kind: companion::notice_kinds::AGENT_STATUS.to_string(),
+        kind: kind.to_string(),
         pane_id: pane_id.to_string(),
-        name: names.as_ref().map(|n| n.name.clone()),
+        name: shown,
         spoken: Some(spoken),
         text,
     };
     conn.notices.lock().unwrap().queue(notice);
     flush_notices(conn);
+}
+
+/// The pending question of the agent in `pane` (decision 8), read from its
+/// session. None for a remote herdr, whose session files are not here.
+fn pending_question(
+    daemon: &Daemon,
+    pane: &crate::core::agents::AgentRef,
+    status: &AgentStatus,
+) -> Option<crate::sessions::PendingQuestion> {
+    if matches!(
+        daemon.client.transport(),
+        libherdr::transport::HerdrTransport::RemoteSsh { .. }
+    ) {
+        return None;
+    }
+    let read = daemon.sessions.read(pane, |items| {
+        items
+            .iter()
+            .any(|i| i.is_text() && i.role == crate::sessions::Role::Assistant)
+    })?;
+    crate::sessions::pending::pending_question(&read.items, status)
 }
 
 /// Send the held notices, oldest first, unless a confirmation this

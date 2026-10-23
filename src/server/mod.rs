@@ -25,6 +25,7 @@ use crate::config::{AgentConfig, AppConfig, NamingConfig};
 use crate::core::agents;
 use crate::core::confirm::{Broker, ConfirmEvent, ConfirmView, WordPriors, DEFAULT_TTL};
 use crate::core::naming::{self, Names};
+use crate::sessions::Sessions;
 use crate::watch::WatchRegistry;
 
 /// The socket `handlr serve` listens on unless `[server] socket` says otherwise.
@@ -61,6 +62,8 @@ pub struct Daemon {
     pub link: Option<Arc<link::Link>>,
     /// Companion sessions and their turns (plan 20261022_02, decisions 9–13).
     pub turns: companion::TurnService,
+    /// The agents' own session transcripts (plan 20261022_03).
+    pub sessions: Arc<Sessions>,
 }
 
 impl Daemon {
@@ -94,7 +97,12 @@ impl Daemon {
         let (events, _) = broadcast::channel(256);
         let broker = Broker::new(Arc::new(client.clone()), ttl);
         broker.set_word_priors(word_priors(&config.agents, &config.naming, None));
+        let sessions = turns
+            .agent_sessions
+            .clone()
+            .unwrap_or_else(|| Arc::new(Sessions::new()));
         Arc::new(Daemon {
+            sessions,
             broker,
             client,
             agents: config.agents.clone(),
