@@ -28,6 +28,9 @@ pub mod methods {
     pub const CONFIRM_CANCEL: &str = "confirm.cancel";
     pub const CONFIRM_STATUS: &str = "confirm.status";
     pub const EVENTS_SUBSCRIBE: &str = "events.subscribe";
+    /// An agent's own session: its last entries and pending question (plan
+    /// 20261022_03, decision 9, the agent view). Read-only.
+    pub const SESSION_PEEK: &str = "session.peek";
 
     /// Notifications from the daemon.
     pub const AGENT_STATUS_CHANGED: &str = "agent.status_changed";
@@ -102,6 +105,73 @@ pub struct AgentInfo {
     /// `unknown`, or a runner's own word.
     pub status: String,
     pub focused: bool,
+    /// The agent's own session, where one was found on the daemon's machine
+    /// (plan 20261022_03, step 4). Absent for a shell, an agent without a
+    /// reader, or a remote herdr.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<AgentSessionInfo>,
+}
+
+/// How an agent's session file was found (plan 20261022_03, the 16:23 EDT
+/// amendment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMatched {
+    /// By the session id herdr reports for the pane.
+    Id,
+    /// By the pane's cwd: the newest session there, which may belong to
+    /// another agent in the same directory.
+    Cwd,
+}
+
+/// An agent's session, as `agents.list` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSessionInfo {
+    /// The session's id, where it is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub matched: SessionMatched,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_question: Option<PendingQuestion>,
+}
+
+/// Entries `session.peek` returns by default, and the most it may be asked
+/// for.
+pub const PEEK_ENTRIES_DEFAULT: usize = 40;
+pub const PEEK_ENTRIES_MAX: usize = 200;
+
+fn peek_entries_default() -> usize {
+    PEEK_ENTRIES_DEFAULT
+}
+
+/// `session.peek`: the target is resolved like `agents.read`'s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPeekParams {
+    pub pane_id: String,
+    /// 1 to `PEEK_ENTRIES_MAX`.
+    #[serde(default = "peek_entries_default")]
+    pub entries: usize,
+}
+
+/// An agent's session as `session.peek` reads it. The entries are
+/// redacted, oldest first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPeek {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub matched: SessionMatched,
+    pub entries: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_question: Option<PendingQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionPeekResult {
+    /// `None` for a shell, an agent without a reader or session file, or a
+    /// remote herdr, whose session files are not on the daemon's machine.
+    pub session: Option<SessionPeek>,
+    /// herdr's `agent_status`, as `AgentInfo::status`.
+    pub status: String,
 }
 
 /// The pane herdr reports as focused, named as `AgentInfo` names it
@@ -526,6 +596,14 @@ mod tests {
                 tab_number: Some(17),
                 status: "working".to_string(),
                 focused: true,
+                session: Some(AgentSessionInfo {
+                    session_id: Some("00000000-0000-4000-8000-0000000000a1".to_string()),
+                    matched: SessionMatched::Id,
+                    pending_question: Some(PendingQuestion {
+                        text: "Shall I go on?".to_string(),
+                        ts: "2026-10-23T06:00:00.000Z".to_string(),
+                    }),
+                }),
             }],
             focus: Some(FocusInfo {
                 pane_id: "w2:pZ".to_string(),
@@ -544,6 +622,29 @@ mod tests {
         round_trip(AgentsReadParams {
             pane_id: "p1".to_string(),
             lines: 12,
+        });
+        round_trip(SessionPeekParams {
+            pane_id: "p1".to_string(),
+            entries: 200,
+        });
+        round_trip(SessionPeekResult {
+            session: Some(SessionPeek {
+                session_id: None,
+                matched: SessionMatched::Cwd,
+                entries: vec![Entry {
+                    ts: "t".to_string(),
+                    role: Role::User,
+                    kind: EntryKind::Text,
+                    tool: None,
+                    summary: "hi".to_string(),
+                }],
+                pending_question: None,
+            }),
+            status: "idle".to_string(),
+        });
+        round_trip(SessionPeekResult {
+            session: None,
+            status: "unknown".to_string(),
         });
         round_trip(AgentsReadResult {
             text: "ok".to_string(),
@@ -695,8 +796,9 @@ mod tests {
             ),
             (None, None, None)
         );
+        assert_eq!(agent.session, None);
         let shown = serde_json::to_value(&agent).unwrap();
-        for key in ["name", "spoken", "tab_label", "tab_number"] {
+        for key in ["name", "spoken", "tab_label", "tab_number", "session"] {
             assert!(shown.get(key).is_none(), "{key} in {shown}");
         }
         let named = serde_json::to_value(AgentInfo {
@@ -738,6 +840,28 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&message).unwrap()["kind"],
             json!("message")
+        );
+
+        // session.peek: 40 entries by default; a session found by cwd has
+        // no id, and the pending question is left out when there is none.
+        let peek: SessionPeekParams = serde_json::from_value(json!({"pane_id": "p1"})).unwrap();
+        assert_eq!(peek.entries, PEEK_ENTRIES_DEFAULT);
+        assert_eq!(
+            serde_json::to_value(AgentSessionInfo {
+                session_id: None,
+                matched: SessionMatched::Cwd,
+                pending_question: None,
+            })
+            .unwrap(),
+            json!({"matched": "cwd"})
+        );
+        assert_eq!(
+            serde_json::to_value(SessionPeekResult {
+                session: None,
+                status: "idle".to_string()
+            })
+            .unwrap(),
+            json!({"session": null, "status": "idle"})
         );
 
         // link.pair_begin takes nothing; link.pair_add needs only the code.
