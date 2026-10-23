@@ -31,6 +31,9 @@ pub mod methods {
     /// An agent's own session: its last entries and pending question (plan
     /// 20261022_03, decision 9, the agent view). Read-only.
     pub const SESSION_PEEK: &str = "session.peek";
+    /// A reply read aloud, measured and, when complex, summarised for the
+    /// ear (plan 20261023_05, as amended at 15:45 EDT). Companions only.
+    pub const SPEECH_SUMMARIZE: &str = "speech.summarize";
 
     /// Notifications from the daemon.
     pub const AGENT_STATUS_CHANGED: &str = "agent.status_changed";
@@ -172,6 +175,30 @@ pub struct SessionPeekResult {
     pub session: Option<SessionPeek>,
     /// herdr's `agent_status`, as `AgentInfo::status`.
     pub status: String,
+}
+
+/// `speech.summarize`: the reply to read aloud, named by its pane and its
+/// entry's time (plan 20261023_05, decisions 3 and 4, as amended).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechSummarizeParams {
+    pub pane_id: String,
+    /// The entry's `ts`, RFC 3339.
+    pub ts: String,
+    /// The reply as the client has it: used only when the daemon cannot
+    /// find the entry.
+    #[serde(default)]
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechSummarizeResult {
+    /// The spoken summary, when the reply is complex; `None` when it is
+    /// not, and the client reads the reply as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<String>,
+    /// Whether the daemon measured the reply as complex.
+    #[serde(default)]
+    pub complex: bool,
 }
 
 /// The pane herdr reports as focused, named as `AgentInfo` names it
@@ -646,6 +673,19 @@ mod tests {
             session: None,
             status: "unknown".to_string(),
         });
+        round_trip(SpeechSummarizeParams {
+            pane_id: "w2:pZ".to_string(),
+            ts: "2026-10-23T06:00:00.000Z".to_string(),
+            text: "Done: `src/prompts.rs` added.".to_string(),
+        });
+        round_trip(SpeechSummarizeResult {
+            spoken: Some("The prompts module is added.".to_string()),
+            complex: true,
+        });
+        round_trip(SpeechSummarizeResult {
+            spoken: None,
+            complex: false,
+        });
         round_trip(AgentsReadResult {
             text: "ok".to_string(),
         });
@@ -863,6 +903,20 @@ mod tests {
             .unwrap(),
             json!({"session": null, "status": "idle"})
         );
+
+        // speech.summarize: a plain reply's answer has no `spoken`, and the
+        // client's text may be left out.
+        assert_eq!(
+            serde_json::to_value(SpeechSummarizeResult {
+                spoken: None,
+                complex: false
+            })
+            .unwrap(),
+            json!({"complex": false})
+        );
+        let summarize: SpeechSummarizeParams =
+            serde_json::from_value(json!({"pane_id": "p1", "ts": "t"})).unwrap();
+        assert_eq!(summarize.text, "");
 
         // link.pair_begin takes nothing; link.pair_add needs only the code.
         assert_eq!(

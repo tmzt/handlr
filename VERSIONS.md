@@ -36,3 +36,18 @@ confused with handlr's own `v<version>` tags.
   - `ReadSource` (`visible`, `recent`, `recent_unwrapped`, `detection`);
   - `HerdrRequest::inspect_pane_from` and
     `HerdrClient::inspect_pane_from(pane_id, lines, source)`.
+
+## libhandlr_proto 0.1.1 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.1.1`)
+
+The first separately numbered version of the workspace crate
+`libhandlr_proto`, which was 0.1.0 from its first commit. It is a path
+dependency of handlr and handlr-companion, not published. Its tags carry the
+crate's name, as libherdr's do. Strictly additive (plan 20261023_05,
+section 4, as amended at 15:45 EDT):
+
+- **Added:**
+  - `common::methods::SPEECH_SUMMARIZE` (`"speech.summarize"`);
+  - `common::SpeechSummarizeParams` (`pane_id`, `ts`, `text`) and
+    `common::SpeechSummarizeResult` (`spoken: Option<String>`, `complex`);
+  - `envelope::codes::UNAVAILABLE` (-32015). `codes::ALL` is unchanged, so
+    its type stays `[i64; 15]`.
