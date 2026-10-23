@@ -727,3 +727,21 @@ while the pinned live card is Something broke or Finished":
   so a turn that simply finished is not offered a continue;
 - never while working, taking a message, or when the pinned card has its
   own buttons (a question's Yes and No, an approval's Approve and Deny).
+
+## Amendment — 2026-10-23 16:32 EDT: a question ending a quiet turn is pending whatever herdr says (living section L3)
+
+The owner (2026-10-23), after no Question card appeared: "I didn't get the
+question card, is it delayed?", then "yes" to the fix. herdr reports a
+Claude Code pane `working` while one of its background agents runs, after
+its turn has ended, so decision 8's status test hid the question. A reply's
+final question is now also pending when the turn has visibly ended: that
+reply is the session's last entry and the session file has been unwritten
+for 5 s (`pending::TURN_QUIET`, `Located::quiet`), whatever herdr's
+status. Every place that finds the pending question uses it: the agent
+view, the notices and Gemini's session context.
+
+Not yet: the Finished card follows herdr's `idle` or `done` in the
+client's rules, so a turn that ended without a question while a background
+agent runs shows no Finished card. That needs the daemon to tell the
+client the turn ended, a protocol field, which waits for
+libhandlr_proto's next release.
