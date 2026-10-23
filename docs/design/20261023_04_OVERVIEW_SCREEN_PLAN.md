@@ -345,3 +345,32 @@ screen plan, start building it". Implementation starts with step 1, as
 amended (libhandlr_proto 0.3.0 with `AgentInfo.turn`). From here the
 document is frozen and departures are recorded in CHANGES.md; it has no
 living sections.
+
+## Amendment — 2026-10-23 18:07 EDT: the Gemini turns in an overlay, the cards on the whole screen
+
+On the owner's instruction (2026-10-23), after trying the split on the S23:
+"the split ui isn't working, we should move gemini turns to a popup/expand
+overlay"; then "yes" to the proposal below. This replaces A1's two halves
+and A5's bottom half; A2 to A4 and A6 stand, with the files below added.
+
+1. **The cards take the whole screen** between the status lines and the
+   bottom row: two per row, in tab order, scrolling as one list.
+2. **A one-line strip** just above the bottom row (and above the
+   confirmation and dictation cards' place) shows the newest Gemini line,
+   dim; while the user is speaking, the live words instead. A tap opens the
+   overlay. With no turns yet, the strip is hidden.
+3. **The overlay** slides up from the bottom over the cards, about two
+   thirds of the screen high: the conversation as text (`TurnLog`), newest
+   at the bottom, scrolling. A tap on the dimmed cards above it, a swipe
+   down on it, or Android's Back closes it. The bottom row stays live
+   under it.
+4. **It never opens by itself;** during a voice turn the strip shows what
+   is said. Opening it for each Gemini reply may become a setting later.
+5. **Files:** `overview/turn_strip.rs` (`TurnStrip`) and
+   `overview/turn_overlay.rs` (`TurnOverlay`, holding the `TurnLog`); the
+   split leaves `overview.rs`.
+
+**Done when** (step 5, added): app tests show the cards filling the screen,
+the strip's line and its hiding with no turns, a tap opening the overlay,
+each way of closing it, and the bottom row's hits with it open; and on
+the S23, the overlay opens and closes and the cards scroll on their own.
