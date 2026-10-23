@@ -673,3 +673,25 @@ play and record); `979e732`, `c8ebd95` (own approvals, the audio row, the
 message card); `73668af` (record becomes send); `3ba67c9` (the reading
 rules); `d8e62e2` (skip); `2e70b69`, `41cfda1` (loading); `05561dd`
 (questions when done).
+
+## Amendment — 2026-10-23 16:16 EDT: a tapped Yes or No carries its question; the pinned card is shown once (living section L3)
+
+The owner (2026-10-23): "the \"yes\" should carry the context handle when
+typed, either a phrase such as \"Yes, install it on the S23\" or the bip
+handle. the button should only show \"yes\""; and "got two cards instead of
+one with the same content". This adds to the 16:02 EDT amendment's
+**Suggested responses** and replaces the 03:11 EDT amendment's "Tapping
+the bar puts the card a third of the way down the view".
+
+- **Yes and No answering a question** send the answer with the question's
+  context (`handlr_companion::answer_text`), from the last sentence of the
+  pending question that asks: "Install it on the S23?" sends "Yes, install
+  it on the S23" or "No, don't install it on the S23"; "Should I …",
+  "Shall I …", "Do you want me to …" and the like are turned into the
+  request ("Yes, write the amendment now"); a question that is not a
+  request sends "Yes, re: is that what you meant". Only the message
+  filter's characters are kept, at most 200. The buttons still read Yes
+  and No. With no pending question, they send "yes" and "no" as before.
+- **The pinned card is shown once,** at the bottom; its place in the flow
+  is kept with no height, and tapping its bar while scrolled back returns
+  to the bottom.
