@@ -436,3 +436,30 @@ Departures and decisions:
 for vocal confirmation before calling `run_command`. With real Gemini that
 means asking twice: once in words, and then again through the daemon. The
 prompt needs its rules rewritten for daemon-side approval.
+
+## 2026-10-22 21:22 EDT — the link's local key is a `StaticKey` (plans 20261022_02 and 20261022_04)
+
+**Departure from plan 02, decision 1, and plan 04, decision 5; agreed with
+the owner.** The released libmorph key store (rev `568cf953`, plan
+`~/src/libmorph/docs/design/20261022_06_KEY_STORE_PLAN.md`, section 7)
+keeps the companion's Noise static key in the Android Keystore or the
+Keychain, and does X25519 itself. It does not hand the private key out.
+The handshakes took the raw private key, so they could not use it.
+
+- `libhandlr_proto::link` adds the `StaticKey` trait (`public`, and `dh`
+  with a peer key). `pair`, `reconnect` and `accept` take a `&K` where
+  `K: StaticKey + Clone`, instead of `&[u8; 32]`. `StaticKeypair`
+  implements it, in memory, for the daemon, the tests and the example.
+- The handshakes give snow a resolver of their own. Its static-key DH
+  calls `StaticKey::dh`, so snow never holds the static private key.
+  Ephemeral keys, the cipher, the hash and the random source are still
+  snow's defaults.
+- `handlr_companion::KeyStore` replaces `secret` and `set_secret` with
+  `static_key` and `generate_static_key`, which return an
+  `Arc<dyn StaticKey>`. `FileKeyStore` keeps its 0600 file, for the
+  desktop.
+- The wire is unchanged.
+
+A locked key store fails the handshake with `LinkError::Noise`. Telling
+"locked, retry" apart from "re-pair needed" is left to the store, which
+plan 04 step 4 implements on libmorph's `Vault` with flags 0.
