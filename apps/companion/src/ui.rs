@@ -4,11 +4,15 @@
 //! rebuilt only when something changed.
 //!
 //! From the top: the title, two status lines, and the conversation, with
-//! the Approve and Deny buttons under it while a confirmation waits. From
-//! the bottom: the pairing field and its Pair button, and above them the
-//! device code and any pairing note.
+//! a row of buttons under it: Approve and Deny while a confirmation waits,
+//! Submit, Scratch and Clear while a message is dictated, and Take a
+//! message otherwise (plan 20261023_02, step 4). From the bottom: the
+//! pairing field and its Pair button, and above them the device code and
+//! any pairing note.
 
+use handlr_companion::{Dictation, DictationPhase};
 use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Router, TextAlign};
+use libhandlr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
 /// Lines of conversation the screen can show.
@@ -25,6 +29,8 @@ pub const CODE: [f32; 4] = [1.0, 0.86, 0.45, 1.0];
 const APPROVE_BG: [f32; 4] = [0.16, 0.45, 0.25, 1.0];
 const DENY_BG: [f32; 4] = [0.55, 0.18, 0.18, 1.0];
 const PAIR_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
+const START_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
+const SCRATCH_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 
 /// One line of text, before layout.
 #[derive(Clone, Debug, PartialEq)]
@@ -153,6 +159,75 @@ impl Card {
     }
 }
 
+/// Where a focus is, as the dictation card and the focus line show it:
+/// "Claude · libmorph · tab -ad".
+pub fn focus_words(focus: &FocusInfo) -> String {
+    let mut parts = vec![focus.agent.clone().unwrap_or_else(|| focus.name.clone())];
+    if let Some(project) = focus.project.as_deref().filter(|p| !p.is_empty()) {
+        parts.push(project.to_string());
+    }
+    let tab = focus
+        .tab_label
+        .clone()
+        .filter(|l| !l.is_empty())
+        .or_else(|| focus.tab_number.map(|n| n.to_string()));
+    if let Some(tab) = tab {
+        parts.push(format!("tab {tab}"));
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// The dictation card's lines, unwrapped (plan 20261023_02, decisions 3
+/// and 4, and the countdown of the 01:57 EDT amendment): where it stands,
+/// the target, a moved focus, then the text.
+pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
+    let line = |text: String, size: f32, color, gap| Line {
+        text,
+        size,
+        color,
+        gap,
+    };
+    let (state, color) = match (d.phase, d.submit_in) {
+        (DictationPhase::Collecting, Some(n)) => (format!("Submitting in {n} s\u{2026}"), WARN),
+        (DictationPhase::Collecting, None) => ("Taking a message".to_string(), MUTED),
+        (DictationPhase::Submitting, _) => ("Submitting\u{2026}".to_string(), MUTED),
+        (DictationPhase::Confirming, _) => ("Waiting for your approval".to_string(), MUTED),
+    };
+    let target = match &d.target {
+        Some(t) if t.agent.is_some() => (format!("Message for {}", focus_words(t)), TEXT),
+        _ => (
+            "No agent focused \u{2014} say \u{2018}focus \u{2026}\u{2019}".to_string(),
+            WARN,
+        ),
+    };
+    let mut lines = vec![
+        line(state, 15.0, color, 28.0),
+        line(target.0, 18.0, target.1, 4.0),
+    ];
+    if let Some(moved) = &d.focus_moved {
+        lines.push(line(format!("focus moved to {moved}"), 15.0, WARN, 2.0));
+    }
+    if d.text.is_empty() {
+        lines.push(line("(say your message)".to_string(), 20.0, MUTED, 8.0));
+    } else {
+        lines.push(line(d.text.clone(), 20.0, TEXT, 8.0));
+    }
+    lines
+}
+
+/// The row of buttons under the body.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Buttons {
+    #[default]
+    None,
+    /// Approve and Deny.
+    Confirm,
+    /// Take a message.
+    Start,
+    /// Submit, Scratch and Clear.
+    Dictation,
+}
+
 /// What the screen shows.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct View {
@@ -160,8 +235,8 @@ pub struct View {
     pub status: Vec<String>,
     /// The conversation, and the confirmation's text.
     pub body: Vec<Line>,
-    /// Show Approve and Deny under the body.
-    pub confirm: bool,
+    /// The buttons under the body.
+    pub buttons: Buttons,
     /// The pairing area above the field: the device code and notes.
     pub code: Vec<Line>,
     /// The pairing field's text; the screen shows its tail.
@@ -175,6 +250,10 @@ pub struct View {
 pub enum Hit {
     Approve,
     Deny,
+    Start,
+    Submit,
+    Scratch,
+    Clear,
     Field,
     Pair,
 }
@@ -221,6 +300,10 @@ pub struct Screen {
     pair: NodeId,
     approve: NodeId,
     deny: NodeId,
+    start: NodeId,
+    submit: NodeId,
+    scratch: NodeId,
+    clear: NodeId,
     /// Where each visible control is, as last laid out.
     hits: Vec<(Hit, Rect)>,
     /// What the screen shows, as last laid out.
@@ -253,6 +336,10 @@ impl Screen {
             .collect();
         let approve = router.add(None, button("Approve", APPROVE_BG));
         let deny = router.add(None, button("Deny", DENY_BG));
+        let start = router.add(None, button("Take a message", START_BG));
+        let submit = router.add(None, button("Submit", APPROVE_BG));
+        let scratch = router.add(None, button("Scratch", SCRATCH_BG));
+        let clear = router.add(None, button("Clear", DENY_BG));
         let code = (0..CODE_LINES)
             .map(|_| router.add(None, label("", 20.0, CODE, TextAlign::Left)))
             .collect();
@@ -273,6 +360,10 @@ impl Screen {
             pair,
             approve,
             deny,
+            start,
+            submit,
+            scratch,
+            clear,
             hits: Vec::new(),
             shown: None,
             dirty: true,
@@ -389,8 +480,12 @@ impl Screen {
             }
         }
 
-        // The conversation, then the buttons while confirming.
-        let buttons_h = if view.confirm { (52.0 + 16.0) * s } else { 0.0 };
+        // The conversation, then the buttons.
+        let buttons_h = if view.buttons == Buttons::None {
+            0.0
+        } else {
+            (52.0 + 16.0) * s
+        };
         let limit = code_top - 16.0 * s - buttons_h;
         let mut body_lines = view.body.iter();
         for &id in &self.lines {
@@ -414,18 +509,38 @@ impl Screen {
                     .set_text(""),
             }
         }
-        if view.confirm {
-            let w = (layout.w - 2.0 * pad - 16.0 * s) / 2.0;
-            let top = y + 16.0 * s;
-            let approve = Rect::new(pad, top, w, 52.0 * s);
-            let deny = Rect::new(pad + w + 16.0 * s, top, w, 52.0 * s);
-            self.place_button(self.approve, approve, s, true);
-            self.place_button(self.deny, deny, s, true);
-            self.hits.insert(0, (Hit::Approve, approve));
-            self.hits.insert(1, (Hit::Deny, deny));
-        } else {
-            self.place_button(self.approve, Rect::default(), s, false);
-            self.place_button(self.deny, Rect::default(), s, false);
+        let row: Vec<(Hit, NodeId)> = match view.buttons {
+            Buttons::None => vec![],
+            Buttons::Confirm => vec![(Hit::Approve, self.approve), (Hit::Deny, self.deny)],
+            Buttons::Start => vec![(Hit::Start, self.start)],
+            Buttons::Dictation => vec![
+                (Hit::Submit, self.submit),
+                (Hit::Scratch, self.scratch),
+                (Hit::Clear, self.clear),
+            ],
+        };
+        // One button takes half the row; more share it.
+        let slots = row.len().max(2) as f32;
+        let gap = 16.0 * s;
+        let w = (layout.w - 2.0 * pad - gap * (slots - 1.0)) / slots;
+        let top = y + 16.0 * s;
+        for (hit, id) in [
+            (Hit::Approve, self.approve),
+            (Hit::Deny, self.deny),
+            (Hit::Start, self.start),
+            (Hit::Submit, self.submit),
+            (Hit::Scratch, self.scratch),
+            (Hit::Clear, self.clear),
+        ] {
+            // In row order, so each goes in at its slot.
+            match row.iter().position(|(h, _)| *h == hit) {
+                Some(slot) => {
+                    let rect = Rect::new(pad + slot as f32 * (w + gap), top, w, 52.0 * s);
+                    self.place_button(id, rect, s, true);
+                    self.hits.insert(slot, (hit, rect));
+                }
+                None => self.place_button(id, Rect::default(), s, false),
+            }
         }
 
         self.shown = Some((view, layout));
@@ -537,7 +652,7 @@ mod tests {
             PHONE,
             View {
                 body: vec![line("Approve sending \"continue\" to claude?")],
-                confirm: true,
+                buttons: Buttons::Confirm,
                 ..View::default()
             },
         );
@@ -619,6 +734,113 @@ mod tests {
         assert!(refused.contains("4 attempt(s) left"), "{refused}");
         assert!(!card(CardState::Done("sent".into())).asks());
         assert!(!card(CardState::Answering { approve: true }).asks());
+    }
+
+    fn claude() -> FocusInfo {
+        FocusInfo {
+            pane_id: "w2:p4".into(),
+            project: Some("libmorph".into()),
+            agent: Some("Claude".into()),
+            tab_label: Some("-ad".into()),
+            tab_number: Some(4),
+            name: "Claude in libmorph".into(),
+            spoken: "Claude in libmorph".into(),
+        }
+    }
+
+    fn dictation(target: Option<FocusInfo>) -> Dictation {
+        Dictation {
+            active: true,
+            text: "Please run the tests.".into(),
+            target,
+            focus_moved: None,
+            phase: DictationPhase::Collecting,
+            submit_in: None,
+        }
+    }
+
+    #[test]
+    fn the_dictation_card_shows_the_target_and_the_text() {
+        let texts = |d: &Dictation| -> Vec<String> {
+            dictation_lines(d).into_iter().map(|l| l.text).collect()
+        };
+        assert_eq!(
+            texts(&dictation(Some(claude()))),
+            [
+                "Taking a message",
+                "Message for Claude \u{b7} libmorph \u{b7} tab -ad",
+                "Please run the tests."
+            ]
+        );
+        let none = dictation(None);
+        assert_eq!(
+            texts(&none)[1],
+            "No agent focused \u{2014} say \u{2018}focus \u{2026}\u{2019}"
+        );
+        let shell = dictation(Some(FocusInfo {
+            agent: None,
+            ..claude()
+        }));
+        assert!(texts(&shell)[1].starts_with("No agent focused"));
+        let moved = Dictation {
+            focus_moved: Some("Claude in keypad".into()),
+            submit_in: Some(3),
+            ..dictation(Some(claude()))
+        };
+        let lines = texts(&moved);
+        assert_eq!(lines[0], "Submitting in 3 s\u{2026}");
+        assert_eq!(lines[2], "focus moved to Claude in keypad");
+        let empty = Dictation {
+            text: String::new(),
+            phase: DictationPhase::Confirming,
+            ..dictation(Some(claude()))
+        };
+        assert_eq!(texts(&empty)[0], "Waiting for your approval");
+        assert_eq!(texts(&empty)[2], "(say your message)");
+        // A tab without a label shows its number.
+        let numbered = FocusInfo {
+            tab_label: None,
+            ..claude()
+        };
+        assert_eq!(
+            focus_words(&numbered),
+            "Claude \u{b7} libmorph \u{b7} tab 4"
+        );
+    }
+
+    #[test]
+    fn the_button_rows() {
+        let mut screen = Screen::new();
+        let hits = |screen: &Screen| -> Vec<Hit> {
+            screen
+                .hits
+                .iter()
+                .map(|(h, _)| *h)
+                .filter(|h| !matches!(h, Hit::Field | Hit::Pair))
+                .collect()
+        };
+        screen.set(
+            PHONE,
+            View {
+                buttons: Buttons::Start,
+                ..View::default()
+            },
+        );
+        assert_eq!(hits(&screen), [Hit::Start]);
+        screen.set(
+            PHONE,
+            View {
+                buttons: Buttons::Dictation,
+                ..View::default()
+            },
+        );
+        assert_eq!(hits(&screen), [Hit::Submit, Hit::Scratch, Hit::Clear]);
+        let rect = |hit| screen.hits.iter().find(|(h, _)| *h == hit).unwrap().1;
+        let (submit, clear) = (rect(Hit::Submit), rect(Hit::Clear));
+        assert!(submit.x + submit.w < clear.x, "side by side");
+        assert_eq!(screen.hit(clear.x + 1.0, clear.y + 1.0), Some(Hit::Clear));
+        screen.set(PHONE, View::default());
+        assert!(hits(&screen).is_empty());
     }
 
     #[test]

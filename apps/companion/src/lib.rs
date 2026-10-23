@@ -18,6 +18,13 @@
 //! (desktop), or pushed as `pair.txt` into the data directory (Android,
 //! the plan's 16:23 EDT amendment), which the app reads and deletes at
 //! start.
+//!
+//! Dictation (plan 20261023_02): "take a message" or the Take a message
+//! button collects utterances into one message for herdr's focused agent,
+//! shown on its card as it grows; Submit, Scratch and Clear are buttons. It
+//! is submitted after `--dictation-silence <seconds>` (default and least 8)
+//! of silence, set on Android by `dictation_silence.txt` in the data
+//! directory, holding the seconds.
 
 pub mod keys;
 pub mod ui;
@@ -28,8 +35,11 @@ use std::time::{Duration, Instant};
 use handlr_audio::libvoicexn::config::SttQuant;
 use handlr_audio::libvoicexn::vad::GateState;
 use handlr_audio::{AudioConfig, AudioEvent, AudioSession};
-use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input, KeyStore};
+use handlr_companion::{
+    Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore,
+};
 use libcontrols::DrawContext;
+use libhandlr_proto::common::FocusInfo;
 use libmorph::{
     AudioSetup, Frame, Key, KeyStatus, LimitsRequest, MorphApp, MorphContext, Touch, TouchPhase,
     wgpu,
@@ -42,7 +52,8 @@ use libmsdf::font::{
 
 use crate::keys::VaultKeyStore;
 use crate::ui::{
-    CODE, Card, CardState, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN, chunk, wrap,
+    Buttons, CODE, Card, CardState, Hit, Layout, Line, MUTED, SPOKEN, Screen, TEXT, View, WARN,
+    chunk, dictation_lines, focus_words, wrap,
 };
 
 /// The frame rate: enough for text, and far less heat than the display's
@@ -56,6 +67,9 @@ const FIELD_MAX: usize = 16 * 1024;
 /// The name the client gives in `hello`.
 const CLIENT: &str = "companion";
 
+/// The most lines of a dictated message's text the card shows: its tail.
+const MESSAGE_LINES: usize = 8;
+
 /// The desktop's command line (Android has none).
 #[derive(Debug, Default)]
 struct Args {
@@ -65,6 +79,17 @@ struct Args {
     pair: Option<String>,
     keys: Option<PathBuf>,
     name: Option<String>,
+    /// Seconds of silence that submit a dictated message.
+    dictation_silence: Option<Duration>,
+}
+
+/// Seconds as a silence: a positive number, else `None`.
+fn parse_silence(text: &str) -> Option<Duration> {
+    text.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|s| s.is_finite() && *s > 0.0)
+        .map(Duration::from_secs_f64)
 }
 
 impl Args {
@@ -88,6 +113,15 @@ impl Args {
                 "--pair" => out.pair = value(),
                 "--keys" => out.keys = value().map(PathBuf::from),
                 "--name" => out.name = value(),
+                "--dictation-silence" => {
+                    out.dictation_silence = value().and_then(|v| {
+                        let silence = parse_silence(&v);
+                        if silence.is_none() {
+                            log::error!("--dictation-silence {v:?}: a number of seconds");
+                        }
+                        silence
+                    })
+                }
                 other => log::warn!("unknown argument {other:?}"),
             }
         }
@@ -129,6 +163,12 @@ pub struct App {
     note: Option<(String, [f32; 4])>,
     field: String,
     field_focused: bool,
+    /// `hello` was answered on the current connection.
+    online: bool,
+    /// herdr's focus, as last told.
+    focus: Option<FocusInfo>,
+    /// The message being dictated, while the mode is on.
+    dictation: Option<Dictation>,
 }
 
 /// The models: `<data dir>/<name>` on Android, `--models <dir>` (default
@@ -189,6 +229,22 @@ fn key_store(
         if server.is_some() { "present" } else { "none" },
     );
     Ok((keys, server))
+}
+
+/// The dictation silence: `--dictation-silence` on the desktop, or
+/// `dictation_silence.txt` in the data directory (Android's setting until
+/// the app has a settings screen). The client raises anything under 8 s.
+fn dictation_silence(ctx: &MorphContext, args: &Args) -> Option<Duration> {
+    if args.dictation_silence.is_some() {
+        return args.dictation_silence;
+    }
+    let path = ctx.data_dir()?.join("dictation_silence.txt");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let silence = parse_silence(&text);
+    if silence.is_none() {
+        log::warn!("{}: not a number of seconds", path.display());
+    }
+    silence
 }
 
 /// The device name to pair as: the phone's model on Android, the hostname
@@ -273,8 +329,10 @@ impl App {
             Event::Connected { server } => {
                 log::info!("link: connected to {server}");
                 self.link = format!("connected to {server}");
+                self.online = true;
             }
             Event::Disconnected { retry_in_ms } => {
+                self.online = false;
                 self.link = if self.paired {
                     format!(
                         "disconnected \u{b7} retrying in {} s",
@@ -341,6 +399,13 @@ impl App {
             Event::Error(e) => {
                 log::warn!("companion: {e}");
                 self.note = Some((e, WARN));
+            }
+            Event::Focus(focus) => self.focus = focus,
+            Event::Dictation(d) => {
+                if d.active != self.dictation.is_some() {
+                    log::info!("dictation: {}", if d.active { "on" } else { "off" });
+                }
+                self.dictation = d.active.then_some(d);
             }
             Event::StopSpeaking | Event::Arm | Event::Vocabulary(_) => {}
         }
@@ -442,6 +507,11 @@ impl App {
                 body.push(line(t, size, color, if i == 0 { gap } else { 0.0 }));
             }
         };
+        if self.dictation.is_none()
+            && let Some(focus) = &self.focus
+        {
+            push(&format!("focus: {}", focus_words(focus)), 15.0, MUTED, 0.0);
+        }
         if !self.partial.is_empty() {
             push(&format!("> {}\u{2026}", self.partial), 20.0, MUTED, 24.0);
         } else if !self.heard.is_empty() {
@@ -449,6 +519,24 @@ impl App {
         }
         if !self.said.is_empty() {
             push(&format!("< {}", self.said), 19.0, SPOKEN, 18.0);
+        }
+        let asking = self.card.as_ref().is_some_and(Card::asks);
+        if let Some(d) = self.dictation.as_ref().filter(|_| !asking) {
+            for l in dictation_lines(d) {
+                let text = if l.text == d.text {
+                    // The tail of a long message.
+                    let lines = wrap(&l.text, layout.columns(l.size));
+                    let skip = lines.len().saturating_sub(MESSAGE_LINES);
+                    if skip > 0 {
+                        format!("\u{2026} {}", lines[skip..].join(" "))
+                    } else {
+                        l.text
+                    }
+                } else {
+                    l.text
+                };
+                push(&text, l.size, l.color, l.gap);
+            }
         }
         if let Some(card) = &self.card {
             for l in card.lines() {
@@ -479,7 +567,15 @@ impl App {
         let view = View {
             status: vec![self.link.clone(), self.sound.clone()],
             body,
-            confirm: self.card.as_ref().is_some_and(Card::asks),
+            buttons: if asking {
+                Buttons::Confirm
+            } else if self.dictation.is_some() {
+                Buttons::Dictation
+            } else if self.online {
+                Buttons::Start
+            } else {
+                Buttons::None
+            },
             code,
             field: self.field.clone(),
             field_focused: self.field_focused,
@@ -561,6 +657,9 @@ impl MorphApp for App {
             note: None,
             field: String::new(),
             field_focused: false,
+            online: false,
+            focus: None,
+            dictation: None,
         };
 
         match key_store(ctx, &args) {
@@ -573,7 +672,17 @@ impl MorphApp for App {
                 let mut config = CompanionConfig::new(CLIENT);
                 config.device_name = device_name(&args);
                 config.voice = args.voice.clone();
-                log::info!("companion: device name {}", config.device_name);
+                if let Some(silence) = dictation_silence(ctx, &args) {
+                    config.dictation_silence = silence;
+                }
+                log::info!(
+                    "companion: device name {}, dictation silence {:.1} s",
+                    config.device_name,
+                    config
+                        .dictation_silence
+                        .max(handlr_companion::DICTATION_SILENCE)
+                        .as_secs_f64()
+                );
                 app.companion = Some(Companion::spawn(config, keys));
             }
             Err(e) => {
@@ -671,6 +780,10 @@ impl MorphApp for App {
         match self.screen.hit(touch.x, touch.y) {
             Some(Hit::Approve) => self.send(Input::Approve),
             Some(Hit::Deny) => self.send(Input::Deny),
+            Some(Hit::Start) => self.send(Input::StartDictation),
+            Some(Hit::Submit) => self.send(Input::Submit),
+            Some(Hit::Scratch) => self.send(Input::Scratch),
+            Some(Hit::Clear) => self.send(Input::Clear),
             Some(Hit::Field) => self.field_focused = true,
             Some(Hit::Pair) => self.pair(),
             None => {
