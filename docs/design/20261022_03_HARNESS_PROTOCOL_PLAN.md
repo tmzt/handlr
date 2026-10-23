@@ -784,3 +784,9 @@ flow after they're submitted". A dictated message sent to the viewed agent
 shows as typed input (the 16:38 EDT amendment's amber input box) from the
 moment it is sent until the session shows it as the user's entry in the
 flow, where it then stays as ordinary scrollback.
+
+## Amendment — 2026-10-23 17:34 EDT: a correction to the previous amendment's reference (living section L3)
+
+The previous amendment cites "the 16:38 EDT amendment's amber input box";
+that amendment, "a tapped answer dismisses its card and shows as typed
+input", is at 16:39 EDT.
