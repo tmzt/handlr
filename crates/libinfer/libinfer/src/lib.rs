@@ -211,6 +211,111 @@ impl SessionBuilder {
     }
 }
 
+/// A fixed reply to a set of whole utterances (plan 20261022_07, decision 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route {
+    /// The utterances that take this route, compared after
+    /// [`normalize_utterance`].
+    pub phrases: Vec<String>,
+    /// What the turn answers.
+    pub reply: String,
+}
+
+impl Route {
+    pub fn new(phrases: &[&str], reply: impl Into<String>) -> Self {
+        Self {
+            phrases: phrases.iter().map(|p| p.to_string()).collect(),
+            reply: reply.into(),
+        }
+    }
+}
+
+/// `text` lowercased and trimmed, with runs of whitespace folded to one
+/// space and `.`, `,`, `!` and `?` dropped.
+pub fn normalize_utterance(text: &str) -> String {
+    let kept: String = text
+        .chars()
+        .filter(|c| !matches!(c, '.' | ',' | '!' | '?'))
+        .collect();
+    kept.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+/// Wraps an engine, answering some whole utterances itself
+/// (plan 20260831_02, B.3; plan 20261022_07, decision 4).
+///
+/// A turn whose latest user message, normalised, equals one of a route's
+/// phrases is answered with that route's reply: the inner engine is not
+/// called and no tool runs, so a route can never send anything to an
+/// agent. Every other turn goes to the inner engine unchanged.
+///
+/// Like every engine, it returns the reply and leaves the session to the
+/// caller, which appends it as a model message the same way as any other
+/// reply.
+pub struct RoutingReasoningEngine {
+    inner: std::sync::Arc<dyn ReasoningEngine>,
+    /// Normalised phrase to reply.
+    routes: std::collections::HashMap<String, String>,
+}
+
+impl RoutingReasoningEngine {
+    /// Routes `routes` around `inner`. Where two routes share a phrase, the
+    /// first wins.
+    pub fn new(inner: std::sync::Arc<dyn ReasoningEngine>, routes: Vec<Route>) -> Self {
+        let mut table = std::collections::HashMap::new();
+        for route in routes {
+            for phrase in &route.phrases {
+                let phrase = normalize_utterance(phrase);
+                if !phrase.is_empty() {
+                    table.entry(phrase).or_insert_with(|| route.reply.clone());
+                }
+            }
+        }
+        Self {
+            inner,
+            routes: table,
+        }
+    }
+
+    /// The reply for `utterance`, if it takes a route.
+    pub fn route(&self, utterance: &str) -> Option<&str> {
+        self.routes
+            .get(&normalize_utterance(utterance))
+            .map(String::as_str)
+    }
+}
+
+#[async_trait]
+impl ReasoningEngine for RoutingReasoningEngine {
+    async fn process_transcript(
+        &self,
+        transcript: &str,
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        if let Some(reply) = self.route(transcript) {
+            log::info!("libinfer: routed {transcript:?} without the engine");
+            return Ok(Some(reply.to_string()));
+        }
+        self.inner.process_transcript(transcript, executor).await
+    }
+
+    async fn process_turns(
+        &self,
+        turns: &[Message],
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        if let Some(latest) = turns.iter().rev().find(|m| m.role == "user") {
+            if let Some(reply) = self.route(&latest.content) {
+                log::info!("libinfer: routed {:?} without the engine", latest.content);
+                return Ok(Some(reply.to_string()));
+            }
+        }
+        self.inner.process_turns(turns, executor).await
+    }
+}
+
 /// Handler trait for custom mock logic.
 #[async_trait]
 pub trait MockHandler: Send + Sync {
@@ -488,5 +593,166 @@ mod tests {
         assert_eq!(built[0], initial_msgs[0]);
         assert_eq!(built[1].role, "system");
         assert_eq!(built[1].content, "Injected context");
+    }
+
+    fn user(text: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: text.to_string(),
+            name: None,
+            thought_signature: None,
+        }
+    }
+
+    fn router() -> (std::sync::Arc<MockReasoningEngine>, RoutingReasoningEngine) {
+        let inner = std::sync::Arc::new(MockReasoningEngine::with_response("From the engine."));
+        let routes = vec![Route::new(
+            &["never mind", "cancel", "forget it", "nothing"],
+            "Okay.",
+        )];
+        let engine = RoutingReasoningEngine::new(inner.clone(), routes);
+        (inner, engine)
+    }
+
+    #[test]
+    fn normalizing_folds_case_space_and_punctuation() {
+        assert_eq!(normalize_utterance("  Never   Mind. "), "never mind");
+        assert_eq!(normalize_utterance("Forget it!?"), "forget it");
+        assert_eq!(normalize_utterance("\tNOTHING,\n"), "nothing");
+        assert_eq!(normalize_utterance("never mind ."), "never mind");
+    }
+
+    #[tokio::test]
+    async fn every_phrase_is_routed_in_several_spellings() {
+        let (inner, engine) = router();
+        let executor = MockToolExecutor::new();
+        for said in [
+            "never mind",
+            "Never mind.",
+            "NEVER  MIND!",
+            "cancel",
+            "  cancel ",
+            "Cancel?",
+            "forget it",
+            "Forget it.",
+            "FORGET, IT",
+            "nothing",
+            "NOTHING!",
+            "Nothing.",
+        ] {
+            let reply = engine.process_turns(&[user(said)], &executor).await;
+            assert_eq!(reply, Ok(Some("Okay.".to_string())), "{said:?}");
+        }
+        assert_eq!(
+            engine.process_transcript("Never mind.", &executor).await,
+            Ok(Some("Okay.".to_string()))
+        );
+        assert!(inner.recorded_transcripts().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_phrase_inside_a_longer_utterance_is_not_routed() {
+        let (inner, engine) = router();
+        let executor = MockToolExecutor::new();
+        for said in ["never mind the build", "cancel the build", "nothing yet?"] {
+            let reply = engine.process_turns(&[user(said)], &executor).await;
+            assert_eq!(reply, Ok(Some("From the engine.".to_string())), "{said:?}");
+        }
+        assert_eq!(
+            inner.recorded_transcripts(),
+            vec!["never mind the build", "cancel the build", "nothing yet?"]
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_latest_user_message_is_matched() {
+        let (inner, engine) = router();
+        let executor = MockToolExecutor::new();
+        // An earlier "cancel" does not route a later request.
+        let turns = [user("cancel"), user("list the panes")];
+        let reply = engine.process_turns(&turns, &executor).await;
+        assert_eq!(reply, Ok(Some("From the engine.".to_string())));
+        // Context after the user's message does not hide it.
+        let mut context = user("[herdr context]");
+        context.role = "system".to_string();
+        let turns = [user("never mind"), context];
+        let reply = engine.process_turns(&turns, &executor).await;
+        assert_eq!(reply, Ok(Some("Okay.".to_string())));
+        assert_eq!(inner.recorded_transcripts(), vec!["list the panes"]);
+    }
+
+    #[tokio::test]
+    async fn a_routed_turn_calls_no_tool_and_not_the_inner_engine() {
+        struct CallsATool;
+        #[async_trait]
+        impl MockHandler for CallsATool {
+            async fn handle(
+                &self,
+                _transcript: &str,
+                executor: &dyn ToolExecutor,
+            ) -> Result<Option<String>, String> {
+                executor
+                    .execute_tool("run_command", &serde_json::json!({"command": "continue"}))
+                    .await?;
+                Ok(Some("Sent.".to_string()))
+            }
+        }
+        let inner = std::sync::Arc::new(MockReasoningEngine::with_handler(CallsATool));
+        let engine =
+            RoutingReasoningEngine::new(inner.clone(), vec![Route::new(&["never mind"], "Okay.")]);
+        let executor = MockToolExecutor::new();
+
+        let reply = engine
+            .process_turns(&[user("Never mind.")], &executor)
+            .await;
+        assert_eq!(reply, Ok(Some("Okay.".to_string())));
+        assert!(inner.recorded_transcripts().is_empty());
+        assert!(inner.recorded_tool_calls().is_empty());
+        assert!(executor.recorded_calls().is_empty());
+
+        // The same engine still reaches its tools for anything else.
+        let reply = engine.process_turns(&[user("continue")], &executor).await;
+        assert_eq!(reply, Ok(Some("Sent.".to_string())));
+        assert_eq!(executor.recorded_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_routed_reply_is_appended_to_the_session() {
+        // The caller's side of a turn: load, add the user's message, run
+        // the engine, and append both, as handlr's turn service does.
+        let dir = tempdir().unwrap();
+        let manager = SessionManager::with_dir(dir.path().to_path_buf()).unwrap();
+        let (_, engine) = router();
+        let executor = MockToolExecutor::new();
+
+        let mut turns = manager.load_session("s").unwrap();
+        turns.push(user("Forget it."));
+        let reply = engine.process_turns(&turns, &executor).await.unwrap();
+        manager.append_message("s", &user("Forget it.")).unwrap();
+        let model = Message {
+            role: "model".to_string(),
+            content: reply.unwrap(),
+            name: None,
+            thought_signature: None,
+        };
+        manager.append_message("s", &model).unwrap();
+
+        let history = manager.load_session("s").unwrap();
+        assert_eq!(history, vec![user("Forget it."), model]);
+        assert_eq!(history[1].content, "Okay.");
+    }
+
+    #[test]
+    fn the_first_route_wins_a_shared_phrase() {
+        let inner = std::sync::Arc::new(MockReasoningEngine::new(None));
+        let engine = RoutingReasoningEngine::new(
+            inner,
+            vec![
+                Route::new(&["stop"], "First."),
+                Route::new(&["Stop!"], "Second."),
+            ],
+        );
+        assert_eq!(engine.route("stop"), Some("First."));
+        assert_eq!(engine.route("stop it"), None);
     }
 }
