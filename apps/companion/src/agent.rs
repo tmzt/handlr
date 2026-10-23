@@ -557,6 +557,9 @@ const SLOP: f32 = 10.0;
 const DECAY: f32 = 3.2;
 /// Slower than this (points per second), a fling stops.
 const MIN_FLING: f32 = 30.0;
+/// How long the agent must be quiet, in seconds, before continue is
+/// suggested after a finished turn.
+const QUIET_FOR_CONTINUE: f32 = 30.0;
 
 /// Where things are on the screen, for the current layout and scroll.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -669,6 +672,8 @@ pub struct AgentScreen {
     speaking: bool,
     /// The session has not answered yet.
     loading: bool,
+    /// Seconds since the entries or the status last changed.
+    quiet_for: f32,
     /// The card a message is being taken in reply to.
     reply: Option<AgentCard>,
     dirty: bool,
@@ -704,6 +709,9 @@ impl AgentScreen {
         // Scrolled back, the view holds still: it stays on the entry at its
         // top, or, when that one has left the window, on the next one that
         // is still there, at the same place on screen.
+        if self.status != status || self.entries != entries {
+            self.quiet_for = 0.0;
+        }
         let keep = if self.follow {
             Vec::new()
         } else {
@@ -1017,8 +1025,15 @@ impl AgentScreen {
         if self.dictation.is_some() || self.status == "working" {
             return Vec::new();
         }
+        // Continue after something broke at once; after a finished turn,
+        // or with no card, only once the agent has been quiet a while
+        // (owner, 2026-10-23: "it should probably also show after an idle
+        // period has passed, such as 30s").
         match self.pinned_card().filter(|c| c.live).map(|c| c.kind) {
-            Some(CardKind::Broke | CardKind::Finished) => vec![Suggestion::Continue],
+            Some(CardKind::Broke) => vec![Suggestion::Continue],
+            Some(CardKind::Finished) | None if self.quiet_for >= QUIET_FOR_CONTINUE => {
+                vec![Suggestion::Continue]
+            }
             _ => Vec::new(),
         }
     }
@@ -1174,6 +1189,12 @@ impl AgentScreen {
 
     /// Carries a fling on by `dt`. Returns whether the view moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
+        let was = self.quiet_for >= QUIET_FOR_CONTINUE;
+        self.quiet_for += dt.as_secs_f32();
+        if !was && self.quiet_for >= QUIET_FOR_CONTINUE {
+            // The suggestion row may appear.
+            self.settle();
+        }
         if self.fling == 0.0 || self.drag.is_some() {
             return false;
         }
@@ -1955,14 +1976,17 @@ mod tests {
 
     #[test]
     fn suggestions_follow_the_pinned_card() {
-        // Finished: cont, in yellow, above the buttons.
+        // Finished: no cont at first; after 30 s of quiet, cont, in yellow,
+        // above the buttons.
         let mut a = screen(
             conversation(3),
             vec![card(CardKind::Finished, 3, true)],
             Some(0),
         );
-        a.status = "idle".into();
-        a.settle();
+        assert!(a.frame().suggestions.is_empty(), "not right after a turn");
+        a.tick(Duration::from_secs(29));
+        assert!(a.frame().suggestions.is_empty());
+        a.tick(Duration::from_secs(1));
         let row = a.frame().suggestions.clone();
         assert_eq!(row.len(), 1);
         assert_eq!(row[0].hit, AgentHit::Suggest(Suggestion::Continue));
