@@ -16,6 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::Duration;
 
+use handlr_speech::LocalTime;
 use libhandlr_proto::common::{self, methods, protocols};
 use libhandlr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
@@ -480,16 +481,18 @@ enum Sent {
     Respond(Suggestion, String),
     /// `speech.summarize` of the reply being read with this serial.
     Summarize(u64),
+    /// `client.options`, with read aloud as it was then.
+    Options,
 }
 
 /// A reply to read aloud, in its turn (plan 20261023_05, decisions 5 and
-/// 6, as amended at 15:45 EDT): the daemon is asked how to say it, and
-/// later replies wait for it, up to `SUMMARY_WAIT`.
+/// 6, as amended at 15:45 and 16:28 EDT): the daemon is asked how to say
+/// it, and later replies wait for it, up to `SUMMARY_WAIT`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Reading {
     serial: u64,
-    /// The reply as the view has it, read through `speakable` when there
-    /// is no summary.
+    /// The reply as the view has it, read through `handlr_speech` when the
+    /// daemon does not say how to read it.
     text: String,
     /// When the summary was asked for.
     asked_at: Duration,
@@ -623,6 +626,9 @@ pub struct State {
     notices: VecDeque<String>,
     /// The driver's clock, as last ticked.
     now: Duration,
+    /// The phone's local time of day, as the driver last gave it: clock
+    /// times in a reply read here are read relative to it.
+    local_time: LocalTime,
     /// herdr's focus, as last learned.
     focus: Option<common::FocusInfo>,
     dictation: Option<Dictating>,
@@ -688,6 +694,7 @@ impl State {
             tapped: Vec::new(),
             notices: VecDeque::new(),
             now: Duration::ZERO,
+            local_time: LocalTime::default(),
             focus: None,
             dictation: None,
             silence: DICTATION_SILENCE,
@@ -695,6 +702,13 @@ impl State {
             agents: Vec::new(),
             view: None,
         }
+    }
+
+    /// Sets the phone's local time of day, for reading clock times in a
+    /// reply as relative when the daemon does not say how to read it.
+    /// The driver gives it with every [`Input::Tick`].
+    pub fn set_local_time(&mut self, now: LocalTime) {
+        self.local_time = now;
     }
 
     /// Sets the silence that submits a dictated message, raised to
@@ -774,8 +788,9 @@ impl State {
         out.push(Output::Event(Event::Disconnected { retry_in_ms }));
         // No summary will come on this connection: what waits is read as
         // it is.
+        let now = self.local_time;
         for r in self.reading.iter_mut().filter(|r| r.ready.is_none()) {
-            r.ready = Some(speakable(&r.text));
+            r.ready = Some(handlr_speech::read_aloud(&r.text, now));
         }
         self.read_in_order();
         self.flush_notices(&mut out);
@@ -847,6 +862,9 @@ impl State {
                 // From now: what is already in the view is not read.
                 if let Some(v) = self.view.as_mut() {
                     v.read_upto = newest_reply(&v.entries);
+                }
+                if self.online() {
+                    self.send_options(&mut out);
                 }
             }
         }
@@ -1538,8 +1556,9 @@ impl State {
                     message,
                 })),
                 Sent::List => log::warn!("agents.list: {message}"),
+                Sent::Options => log::warn!("client.options: {message}"),
                 Sent::Summarize(serial) => {
-                    log::info!("speech.summarize: {message}; reading the reply as it is");
+                    log::info!("speech.summarize: {message}; reading the reply here");
                     self.summarized(serial, None, out);
                 }
                 Sent::Peek(pane_id) => {
@@ -1597,6 +1616,8 @@ impl State {
                         server: hello.server,
                     }));
                     out.push(event(Event::Vocabulary(hello.vocabulary)));
+                    // The connection's options start off: say read aloud's.
+                    self.send_options(out);
                     // herdr's focus, for the dictation mode's target.
                     out.push(self.request(methods::AGENTS_LIST, common::Empty {}, Sent::List));
                     // An open view is peeked again at once.
@@ -1698,12 +1719,21 @@ impl State {
                     self.summarized(serial, None, out);
                 }
             },
-            Sent::Interrupt | Sent::ConfirmReply(_) => {}
+            Sent::Interrupt | Sent::ConfirmReply(_) | Sent::Options => {}
         }
     }
 
+    /// `client.options` with read aloud as it is (plan 20261023_05, A4):
+    /// the daemon may ask Gemini for summaries only while it is on.
+    fn send_options(&mut self, out: &mut Vec<Output>) {
+        let params = common::ClientOptionsParams {
+            spoken_output: self.read_aloud,
+        };
+        out.push(self.request(methods::CLIENT_OPTIONS, params, Sent::Options));
+    }
+
     /// Ask the daemon how to say a reply, and queue it to be read in its
-    /// turn. Offline, it is read as it is.
+    /// turn. Offline, it is read through `handlr_speech` here.
     fn read_reply(&mut self, pane_id: &str, ts: String, text: String, out: &mut Vec<Output>) {
         let serial = self.next_reading;
         self.next_reading += 1;
@@ -1716,7 +1746,7 @@ impl State {
             out.push(self.request(methods::SPEECH_SUMMARIZE, params, Sent::Summarize(serial)));
             None
         } else {
-            Some(speakable(&text))
+            Some(handlr_speech::read_aloud(&text, self.local_time))
         };
         self.reading.push_back(Reading {
             serial,
@@ -1729,29 +1759,32 @@ impl State {
         }
     }
 
-    /// The daemon's answer for a reply being read: its summary, or `None`
-    /// to read it through `speakable` (not complex, or no summary).
+    /// The daemon's answer for a reply being read: what to say (A3), or
+    /// `None` to read it through `handlr_speech` here (no answer, or an
+    /// error).
     fn summarized(&mut self, serial: u64, spoken: Option<String>, out: &mut Vec<Output>) {
+        let now = self.local_time;
         if let Some(r) = self.reading.iter_mut().find(|r| r.serial == serial) {
             let spoken = spoken
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty());
-            r.ready = Some(spoken.unwrap_or_else(|| speakable(&r.text)));
+            r.ready = Some(spoken.unwrap_or_else(|| handlr_speech::read_aloud(&r.text, now)));
         }
         self.read_in_order();
         self.flush_notices(out);
     }
 
     /// Move the replies that are ready to the notices, in order: the first
-    /// still waiting holds the rest, until `SUMMARY_WAIT` reads it as it is.
+    /// still waiting holds the rest, until `SUMMARY_WAIT` reads it here.
     fn read_in_order(&mut self) {
         let now = self.now;
+        let local_time = self.local_time;
         while let Some(front) = self.reading.front_mut() {
             let text = match front.ready.take() {
                 Some(text) => text,
                 None if now.saturating_sub(front.asked_at) >= SUMMARY_WAIT => {
-                    log::info!("no summary in time; reading the reply as it is");
-                    speakable(&front.text)
+                    log::info!("no answer in time; reading the reply here");
+                    handlr_speech::read_aloud(&front.text, local_time)
                 }
                 None => break,
             };
@@ -2069,150 +2102,6 @@ fn newest_reply(entries: &[common::Entry]) -> Option<String> {
         .rev()
         .find(|e| is_reply(e))
         .map(|e| e.ts.clone())
-}
-
-/// A reply as it is read aloud: without code blocks, Markdown emphasis,
-/// headings or list bullets, on one line. A link is read as its text, and
-/// a path or inline code as its English words only: a path as "the" and
-/// the words of its last part ("docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md"
-/// is "the overview screen plan"), an identifier as its words
-/// (`AgentInfo.asking` is "agent info asking"), and a commit hash not at
-/// all.
-pub fn speakable(text: &str) -> String {
-    let mut lines = Vec::new();
-    let mut in_code = false;
-    for line in text.lines() {
-        let t = line.trim();
-        if t.starts_with("```") {
-            in_code = !in_code;
-            continue;
-        }
-        if in_code || t.is_empty() {
-            continue;
-        }
-        let t = t.trim_start_matches('#').trim_start();
-        let t = t
-            .strip_prefix("- ")
-            .or_else(|| t.strip_prefix("* "))
-            .unwrap_or(t);
-        lines.push(spoken_line(&unlink(t)));
-    }
-    lines
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// `[text](target)` as `text`.
-fn unlink(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut rest = line;
-    while let Some(open) = rest.find('[') {
-        let Some(close) = rest[open..].find("](").map(|c| open + c) else {
-            break;
-        };
-        let Some(end) = rest[close..].find(')').map(|e| close + e) else {
-            break;
-        };
-        out.push_str(&rest[..open]);
-        out.push_str(&rest[open + 1..close]);
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    out
-}
-
-/// A line's words, with inline code and paths read as their English words.
-/// A word's punctuation stays; brackets left empty go.
-fn spoken_line(line: &str) -> String {
-    let mut out: Vec<String> = Vec::new();
-    for (i, part) in line.split('`').enumerate() {
-        let code = i % 2 == 1;
-        for word in part.split_whitespace() {
-            let punct = |c: char| matches!(c, ',' | ';' | ':' | '.' | '(' | ')' | '"' | '!' | '?');
-            let start = word.len() - word.trim_start_matches(punct).len();
-            let end = word.trim_end_matches(punct).len().max(start);
-            let core = &word[start..end];
-            if code || looks_like_path(core) {
-                let spoken = spoken_code(core);
-                out.push(format!("{}{spoken}{}", &word[..start], &word[end..]));
-            } else {
-                out.push(word.replace('*', ""));
-            }
-        }
-    }
-    out.retain(|w| !w.is_empty());
-    out.join(" ")
-        .replace("( )", "")
-        .replace("()", "")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace(" .", ".")
-        .replace(" ,", ",")
-}
-
-/// Whether a bare word is a path or file name: it has a `/`, or ends in a
-/// known extension.
-fn looks_like_path(word: &str) -> bool {
-    const EXT: [&str; 9] = [
-        ".md", ".rs", ".toml", ".json", ".jsonl", ".sh", ".txt", ".log", ".apk",
-    ];
-    word.len() > 1 && (word.contains('/') || EXT.iter().any(|e| word.ends_with(e)))
-}
-
-/// Inline code or a path as its English words.
-fn spoken_code(code: &str) -> String {
-    const EXT: [&str; 9] = [
-        "md", "rs", "toml", "json", "jsonl", "sh", "txt", "log", "apk",
-    ];
-    let is_path = code.contains('/') || looks_like_path(code);
-    // A number or a version reads as it is.
-    if code
-        .chars()
-        .all(|c| c.is_ascii_digit() || matches!(c, '.' | '-' | '+'))
-    {
-        return code.to_string();
-    }
-    // A commit hash: no words to read.
-    if code.len() >= 7 && code.chars().all(|c| c.is_ascii_hexdigit()) {
-        return String::new();
-    }
-    let last = if is_path {
-        code.trim_end_matches('/')
-            .rsplit('/')
-            .next()
-            .unwrap_or(code)
-    } else {
-        code
-    };
-    let mut words = Vec::new();
-    for piece in last.split(|c: char| !c.is_ascii_alphanumeric()) {
-        // camelCase and PascalCase into words.
-        let mut word = String::new();
-        let mut prev_lower = false;
-        for c in piece.chars() {
-            if c.is_ascii_uppercase() && prev_lower {
-                words.push(std::mem::take(&mut word));
-            }
-            prev_lower = c.is_ascii_lowercase();
-            word.push(c.to_ascii_lowercase());
-        }
-        words.push(word);
-    }
-    words.retain(|w| w.len() > 1 && w.chars().all(|c| c.is_ascii_alphabetic()));
-    // A file's extension is not read.
-    if is_path {
-        if words.last().is_some_and(|w| EXT.contains(&w.as_str())) {
-            words.pop();
-        }
-        if words.is_empty() {
-            return String::new();
-        }
-        return format!("the {}", words.join(" "));
-    }
-    words.join(" ")
 }
 
 /// An agent of `agents.list` as a message target, as the focus names it.
@@ -3698,9 +3587,88 @@ mod tests {
                    "text": "## Result\n\nThe **tests** pass:\n```\nok\n```\n- `fmt` is clean"})
         );
         assert!(said(&out).is_empty());
-        // Not complex: read through `speakable`.
+        // No `spoken` (an older daemon): read through the rules here.
         let out = s.incoming(response(asked[0].id.clone(), json!({"complex": false})));
         assert_eq!(said(&out), ["Result The tests pass: fmt is clean"]);
+    }
+
+    /// The rules as the client reads a reply itself, at noon EDT.
+    fn here(text: &str) -> String {
+        handlr_speech::read_aloud(text, NOON_EDT)
+    }
+
+    const NOON_EDT: LocalTime = LocalTime {
+        hour: 12,
+        minute: 0,
+        second: 0,
+        utc_offset_minutes: -240,
+    };
+
+    fn options(out: &[Output]) -> Vec<Value> {
+        requests(out, "client.options")
+            .into_iter()
+            .map(|r| r.params.clone())
+            .collect()
+    }
+
+    #[test]
+    fn read_aloud_is_sent_as_an_option_on_toggling_and_after_hello() {
+        // Off at hello: said as off.
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(
+            id,
+            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
+        ));
+        assert_eq!(options(&out), [json!({"spoken_output": false})]);
+        // Toggled: sent each time.
+        let out = s.input(Input::ReadAloud(true));
+        assert_eq!(options(&out), [json!({"spoken_output": true})]);
+        let id = requests(&out, "client.options")[0].id.clone();
+        assert!(s.incoming(response(id, json!({}))).is_empty());
+        let out = s.input(Input::ReadAloud(false));
+        assert_eq!(options(&out), [json!({"spoken_output": false})]);
+        // Offline, nothing is sent; after the reconnect's hello, the value
+        // as it is now.
+        s.disconnected(1000);
+        assert!(options(&s.input(Input::ReadAloud(true))).is_empty());
+        let out = s.connected();
+        assert!(options(&out).is_empty(), "not before hello");
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(
+            id,
+            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
+        ));
+        assert_eq!(options(&out), [json!({"spoken_output": true})]);
+        // A refused option is only logged.
+        let id = requests(&out, "client.options")[0].id.clone();
+        let refused = Response::err(
+            Some(id),
+            libhandlr_proto::ErrorObject::new(-32601, "no such method"),
+        );
+        assert!(s.incoming(Incoming::Response(refused)).is_empty());
+    }
+
+    #[test]
+    fn a_reply_is_read_as_the_daemon_says() {
+        let (mut s, asked, _) = reading(&[PATHS]);
+        let out = s.incoming(response(
+            asked[0].id.clone(),
+            json!({"spoken": "I changed three files: the speech the mod the common", "complex": true}),
+        ));
+        assert_eq!(
+            said(&out),
+            ["I changed three files: the speech the mod the common"]
+        );
+    }
+
+    #[test]
+    fn a_reply_read_here_reads_times_by_the_phones_clock() {
+        let (mut s, asked, _) = reading(&["Pushed at 11:57:00."]);
+        s.set_local_time(NOON_EDT);
+        let out = s.incoming(response(asked[0].id.clone(), json!({"complex": false})));
+        assert_eq!(said(&out), ["Pushed three minutes ago."]);
     }
 
     fn said(out: &[Output]) -> Vec<String> {
@@ -3744,7 +3712,10 @@ mod tests {
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].params["text"], PLAIN);
         assert!(said(&out).is_empty());
-        let out = s.incoming(response(asked[0].id.clone(), json!({"complex": false})));
+        let out = s.incoming(response(
+            asked[0].id.clone(),
+            json!({"spoken": PLAIN, "complex": false}),
+        ));
         assert_eq!(said(&out), [PLAIN]);
     }
 
@@ -3771,14 +3742,14 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_summary_is_read_through_speakable() {
+    fn a_refused_summary_is_read_through_the_rules_here() {
         let (mut s, asked, _) = reading(&[BACKQUOTES]);
         let refused = Incoming::Response(Response::err(
             Some(asked[0].id.clone()),
             libhandlr_proto::ErrorObject::new(-32015, "no summary: no key"),
         ));
         let out = s.incoming(refused);
-        assert_eq!(said(&out), [speakable(BACKQUOTES)]);
+        assert_eq!(said(&out), [here(BACKQUOTES)]);
         assert!(!events(&out).iter().any(|e| matches!(e, Event::Error(_))));
     }
 
@@ -3786,12 +3757,15 @@ mod tests {
     fn a_summary_that_does_not_come_holds_the_next_reply_until_the_wait() {
         let (mut s, asked, _) = reading(&[PATHS, PLAIN]);
         // The second is ready; the first holds it.
-        let out = s.incoming(response(asked[1].id.clone(), json!({"complex": false})));
+        let out = s.incoming(response(
+            asked[1].id.clone(),
+            json!({"spoken": PLAIN, "complex": false}),
+        ));
         assert!(said(&out).is_empty());
         assert!(said(&s.input(Input::Tick(secs(209.0)))).is_empty());
         // At the wait, the first is read as it is, then the second.
         let out = s.input(Input::Tick(secs(210.0)));
-        assert_eq!(said(&out), [speakable(PATHS), PLAIN.to_string()]);
+        assert_eq!(said(&out), [here(PATHS), PLAIN.to_string()]);
         // Its summary arriving late is not read again.
         let out = s.incoming(response(
             asked[0].id.clone(),
@@ -3804,7 +3778,7 @@ mod tests {
     fn a_closed_connection_reads_what_waits_as_it_is() {
         let (mut s, _, _) = reading(&[BACKQUOTES]);
         let out = s.disconnected(1000);
-        assert_eq!(said(&out), [speakable(BACKQUOTES)]);
+        assert_eq!(said(&out), [here(BACKQUOTES)]);
     }
 
     #[test]
@@ -3813,29 +3787,6 @@ mod tests {
         let out = s.input(Input::Tick(secs(200.0)));
         let out = peek_answer(&mut s, &out, "idle", asking());
         assert!(!events(&out).iter().any(|e| matches!(e, Event::Say(_))));
-    }
-
-    #[test]
-    fn paths_and_code_are_read_as_their_english_words() {
-        assert_eq!(
-            speakable("Wrote docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md and pushed."),
-            "Wrote the overview screen plan and pushed."
-        );
-        assert_eq!(
-            speakable(
-                "Up as a Draft: [The overview (home) screen](docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md) (`355f5f0`)."
-            ),
-            "Up as a Draft: The overview (home) screen."
-        );
-        assert_eq!(
-            speakable("A new field, `AgentInfo.asking`, in libhandlr_proto 0.2.0."),
-            "A new field, agent info asking, in libhandlr_proto 0.2.0."
-        );
-        assert_eq!(
-            speakable("They go in `src/overview/` and `apps/companion/src/agent/`."),
-            "They go in the overview and the agent."
-        );
-        assert_eq!(speakable("Code -32014 is new."), "Code -32014 is new.");
     }
 
     #[test]

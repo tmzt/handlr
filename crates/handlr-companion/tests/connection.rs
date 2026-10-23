@@ -72,8 +72,9 @@ impl Conn {
         self.stream.write_all(&line).unwrap();
     }
 
-    /// Reads `hello` and answers it, then the `agents.list` that follows
-    /// (for herdr's focus, plan 20261023_02), returning hello's params.
+    /// Reads `hello` and answers it, then the `client.options` (plan
+    /// 20261023_05, A4) and `agents.list` (for herdr's focus, plan
+    /// 20261023_02) that follow, returning hello's params.
     fn greet(&mut self) -> Value {
         let hello = self.read();
         assert_eq!(hello["method"], "hello");
@@ -82,6 +83,10 @@ impl Conn {
             "result": {"server": "handlr", "server_version": "0.1.0", "protocol_version": 1,
                        "session_id": "companion:test", "vocabulary": ["claude", "hr"]}
         }));
+        let options = self.read();
+        assert_eq!(options["method"], "client.options");
+        assert_eq!(options["params"], json!({"spoken_output": false}));
+        self.write(json!({"jsonrpc": "2.0", "id": options["id"], "result": {}}));
         let list = self.read();
         assert_eq!(list["method"], "agents.list");
         self.write(json!({"jsonrpc": "2.0", "id": list["id"], "result": {"agents": []}}));

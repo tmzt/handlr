@@ -223,7 +223,8 @@ impl Net {
                             }
                         }
                         Some(input) => {
-                            let mut outputs = self.state.input(self.tick());
+                            let tick = self.tick();
+                            let mut outputs = self.state.input(tick);
                             outputs.extend(self.state.input(input));
                             self.emit_offline(outputs);
                         }
@@ -235,8 +236,11 @@ impl Net {
     }
 
     /// The clock now, as an input. Given before every input and message,
-    /// so the state's times are those of what it is told.
-    fn tick(&self) -> Input {
+    /// so the state's times are those of what it is told. The phone's
+    /// local time of day goes with it, for reading clock times as relative
+    /// when the daemon cannot say how to read a reply.
+    fn tick(&mut self) -> Input {
+        self.state.set_local_time(local_now());
         Input::Tick(self.start.elapsed())
     }
 
@@ -476,13 +480,15 @@ impl Net {
         while end.is_none() {
             tokio::select! {
                 _ = ticks.tick() => {
-                    let outputs = self.state.input(self.tick());
+                    let tick = self.tick();
+                    let outputs = self.state.input(tick);
                     end = self.carry_out(outputs, &mut write).await;
                 }
                 message = messages.recv() => match message {
                     Some(message) => match serde_json::from_slice::<Incoming>(&message) {
                         Ok(message) => {
-                            let mut outputs = self.state.input(self.tick());
+                            let tick = self.tick();
+                            let mut outputs = self.state.input(tick);
                             if is_paired_hello(&message) {
                                 self.emit(Event::Paired {
                                     name: self.config.device_name.clone(),
@@ -503,7 +509,8 @@ impl Net {
                         }
                     }
                     Some(input) => {
-                        let mut outputs = self.state.input(self.tick());
+                        let tick = self.tick();
+                            let mut outputs = self.state.input(tick);
                         outputs.extend(self.state.input(input));
                         end = self.carry_out(outputs, &mut write).await;
                     }
@@ -613,6 +620,33 @@ async fn tcp_connect(addr: &str) -> std::io::Result<TcpStream> {
         }
     }
     Err(last)
+}
+
+/// The phone's local time of day, as `handlr_speech` reads it.
+fn local_now() -> handlr_speech::LocalTime {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let now = secs as libc::time_t;
+    // SAFETY: localtime_r writes only into `tm`, which is a valid, owned
+    // value; `now` is a valid time_t.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
+        // UTC, then.
+        let seconds = secs % 86_400;
+        return handlr_speech::LocalTime {
+            hour: (seconds / 3600) as u8,
+            minute: (seconds / 60 % 60) as u8,
+            second: (seconds % 60) as u8,
+            utc_offset_minutes: 0,
+        };
+    }
+    handlr_speech::LocalTime {
+        hour: tm.tm_hour as u8,
+        minute: tm.tm_min as u8,
+        second: tm.tm_sec as u8,
+        utc_offset_minutes: (tm.tm_gmtoff / 60) as i16,
+    }
 }
 
 #[cfg(test)]

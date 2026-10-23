@@ -1731,6 +1731,7 @@ name = "handlr-companion"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "handlr-speech",
  "libc",
  "libhandlr_proto",
  "log",
