@@ -233,3 +233,40 @@ scale 1 it reads a pairing-sized code (version 11), but not the densest test
 code (version 18 at level H). The PNG of that code reads back at scale 8, so
 the limit is `rqrr`'s sampling, not the encoder. Scale 1 is tested on its
 own.
+
+## Amendment — 2026-10-22 23:07 EDT: the pairing URL holds no secret; devices accept the data URL
+
+On the owner's instruction, with plan 20261022_02's amendment of the same
+time (pairing by public keys).
+
+**Decision 1.**
+- The pairing URL's fragment is the version 2 pairing string: the
+  server's key and its addresses, with no secret, name or expiry.
+- The URL is about 170 characters for two addresses, version 9 or 10 at
+  level M.
+
+**Decision 6 is void.**
+- The code, the URL, the data URL and the PNG hold only public data, so
+  the URL can be shown, logged or kept. `--qr-png` still writes a new
+  file and never overwrites one, though the 0600 mode is no longer needed
+  for secrecy.
+- The "single use, expires in N s" line goes. The prompt for the device
+  code replaces it.
+
+**Step 3, as amended at 22:55 EDT.** `handlr pair` prints the pairing URL
+and the data URL, then reads the device code (plan 02's amendment of this
+time).
+
+**A new step 5: devices accept three forms.** `handlr-companion`'s
+`Input::Pair` takes any of these:
+- the `handlr://` URL;
+- the bare `handlr1…` string;
+- a `data:image/png;base64,` URL, which it decodes and reads with `png`
+  and `rqrr`, and which must hold one of the other two forms.
+
+The phone and the tty app get this from the crate. Step 4's deep link is
+unchanged.
+
+**Done when:** a test passes a `handlr pair` data URL to `Input::Pair`,
+the companion shows its code, the code is added with `link.pair_add`,
+and the companion connects.
