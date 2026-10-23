@@ -418,3 +418,32 @@ itself, which decides who can reach the port at all.
 7. **Sibling repository rule**: the drift test depends on libdevice by git
    revision. If that revision is not pushed, the test is `#[ignore]` until
    it is, or the drift check is a script in `tools/` instead.
+
+## Amendment — 2026-10-23 19:07 EDT: one phone at a time, and TOTP rules for the token and the number
+
+The owner (2026-10-23): "one phone at time, totp rules", then "yes" to
+this reading. It answers open questions 2, 3 and 4 and replaces, where
+they disagree: section 2.2's validity ("from `issued` to `issued + 600`
+seconds"), section 2.3's 120-second pending timeout, section 2.4's
+`expires_in: 600`, and section 2.5's 120 seconds on the phone.
+
+- **One phone at a time** (question 4): a token pairs one phone; there is
+  no `--count`. While one phone's confirmation is pending, a second phone
+  presenting any token is refused, and `handlr pair` says so.
+- **TOTP rules** (questions 2 and 3), after RFC 6238's conventions:
+  - **The number is six digits**, shown `482 913`, as authenticator apps
+    show a code.
+  - **The token lives in 30-second steps.** `issued` is rounded down to a
+    30-second step; a token is valid in its own step and one step either
+    side for clock drift (about 90 seconds in all). `handlr pair` mints a
+    fresh token every step while it waits and redraws the QR code and URL,
+    as an authenticator's code rolls over, so a photographed code is
+    stale within about a minute and a half. `link.pair_begin`'s
+    `expires_in` is the seconds left in the current step plus one step.
+  - **The pending confirmation is one step:** answered within 30 seconds,
+    or the pairing is dropped and its token spent; the phone says the Mac
+    did not answer and offers to scan again.
+  - **Single use is unchanged:** a token is spent when a phone presents
+    it, whatever its step.
+
+Open questions 1, 5, 6 and 7 stay open.
