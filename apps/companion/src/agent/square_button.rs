@@ -37,13 +37,40 @@ fn draw_glyph(
     draw_row(list, ctx, term, &row, pos);
 }
 
+/// The state the buttons are drawn in.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Look {
+    pub read_aloud: bool,
+    pub speaking: bool,
+    pub recording: bool,
+    /// The button under a finger, drawn pressed in: 2 pt down and darker
+    /// (owner, 2026-10-23: "a visual effect like pressing it should have
+    /// like a depress effect").
+    pub pressed: Option<AgentHit>,
+}
+
+/// How far a pressed button sinks, and how much darker it gets.
+pub const DEPRESS: f32 = 2.0;
+const DARKEN: f32 = 0.7;
+
+/// `rect` and `bg` as drawn: moved down and darkened while pressed.
+pub fn depressed(rect: Rect, bg: [f32; 4], pressed: bool, s: f32) -> (Rect, [f32; 4]) {
+    if !pressed {
+        return (rect, bg);
+    }
+    let rect = Rect::new(rect.x, rect.y + DEPRESS * s, rect.w, rect.h);
+    (
+        rect,
+        [bg[0] * DARKEN, bg[1] * DARKEN, bg[2] * DARKEN, bg[3]],
+    )
+}
+
 /// Draws `b` at `rect`: the take-a-message button as a white record dot on
-/// blue, the play button as its glyph (bright when `read_aloud`), and the
-/// rest as labelled buttons.
+/// blue, the play button as its glyph (bright when read aloud is on), and
+/// the rest as labelled buttons; pressed in while a finger is on it.
 pub struct SquareButton;
 
 impl SquareButton {
-    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         list: &mut DrawList,
         ctx: &DrawContext,
@@ -51,14 +78,19 @@ impl SquareButton {
         b: &FlowButton,
         rect: Rect,
         s: f32,
-        read_aloud: bool,
-        speaking: bool,
-        recording: bool,
+        look: &Look,
     ) {
+        let Look {
+            read_aloud,
+            speaking,
+            recording,
+            pressed,
+        } = *look;
+        let (rect, bg) = depressed(rect, b.bg, pressed == Some(b.hit), s);
         let px = 26.0 * s;
         match b.hit {
             AgentHit::Message | AgentHit::Reply => {
-                fill(list, rect, b.bg, 10.0 * s);
+                fill(list, rect, bg, 10.0 * s);
                 let d = DOT * s;
                 let dot = Rect::new(
                     rect.x + (rect.w - d) * 0.5,
@@ -69,7 +101,7 @@ impl SquareButton {
                 fill(list, dot, if recording { RECORDING } else { FG }, d * 0.5);
             }
             AgentHit::ReadAloud => {
-                fill(list, rect, b.bg, 10.0 * s);
+                fill(list, rect, bg, 10.0 * s);
                 // Bright when on, dull when off; skip while a reply is read.
                 let color = if read_aloud { FG } else { DIM };
                 let (glyph, fallback) = if read_aloud && speaking {
@@ -80,14 +112,14 @@ impl SquareButton {
                 draw_glyph(list, ctx, term, glyph, fallback, rect, px, color);
             }
             AgentHit::Submit if b.label.is_empty() => {
-                fill(list, rect, b.bg, 10.0 * s);
+                fill(list, rect, bg, 10.0 * s);
                 draw_glyph(list, ctx, term, SEND_GLYPH, ">", rect, px, FG);
             }
             AgentHit::Clear if b.label.is_empty() => {
-                fill(list, rect, b.bg, 10.0 * s);
+                fill(list, rect, bg, 10.0 * s);
                 draw_glyph(list, ctx, term, CANCEL_GLYPH, "x", rect, px, FG);
             }
-            _ => button(list, ctx, b.label, rect, b.bg, s),
+            _ => button(list, ctx, b.label, rect, bg, s),
         }
     }
 }
