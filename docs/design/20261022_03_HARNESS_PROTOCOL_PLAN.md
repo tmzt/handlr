@@ -257,3 +257,113 @@ its JSONL file.
 
 Open question 1 is settled: the session id identifies the session even
 when several agents of the same kind share a directory.
+
+## Amendment — 2026-10-23 02:28 EDT: approved; session context for Gemini first; living sections
+
+The owner approved this plan, and asked to keep it open for amendments.
+This amendment does four things:
+- reorders the steps;
+- adds the session context for Gemini, pending questions and the agent
+  view;
+- adds `recent-unwrapped` for shell panes;
+- names living sections.
+
+The status stays `Draft` until the first implementing commit sets it to
+`In implementation` (Rule 1.5).
+
+**Why.** On 2026-10-23, `herdr pane read` of a Claude Code pane returned
+exactly the visible frame: 43 lines, byte-identical for `visible` and for
+`recent` with `--lines 200`. A screenshot of the same pane in Termux
+matched it. Claude Code draws full-screen, so herdr holds no scrollback
+for it. Gemini's turn context, the last 50 terminal lines, therefore never
+contains an agent's earlier replies or the question it is waiting on. The
+agent's transcript does, which is what decision 3's readers already read.
+
+**Living sections (Rule 1.6).** These stay open after implementation
+starts. New entries are appended as amendments, and an entry is fixed
+once it is implemented:
+- **L1, session sources:** which agents have readers and how each is found
+  (decision 3, the 16:23 EDT amendment, and this one).
+- **L2, Gemini's session context:** what goes into the turn, its limits,
+  and redaction (decision 7 below).
+- **L3, the agent view:** what the companion shows (decision 9 below).
+- **The open questions** (section 4).
+
+**7. The session context for Gemini (new; living section L2).**
+`HerdrContextContributor` adds a `### Agent sessions` section to the turn
+for some agents:
+- **Which agents:** the focused agent; any agent the utterance names, by
+  the naming plan's names and aliases; and any agent with a pending
+  question.
+- **What each gets:** its spoken name, its last 6 `Text` entries (user and
+  assistant, in order, each cut to 800 characters), one line counting the
+  tool calls in between ("12 tool calls"), and its pending question if any.
+- **Limits:** 6 KB per agent and 12 KB in all. The oldest entries are
+  dropped first, and the pending question is always kept.
+- **Redaction, before anything is added:**
+  - strings that look like secrets are replaced with `[redacted]`: API
+    keys (`AIza…`, `sk-…`, `ghp_…`, `xox…`), PEM blocks, JWTs, and runs
+    of more than 40 base64 or hex characters;
+  - any line that mentions a path under `.private/` or a `.env` file has
+    its value removed.
+- **Shell and other panes without a session** keep the terminal tail, now
+  read with `source: recent-unwrapped` and 80 lines (`libherdr` gains the
+  `source` parameter).
+
+**8. Pending questions (new).** An agent's pending question is the final
+paragraph of its last assistant `Text` entry, when:
+- that paragraph ends with `?`, or contains a line that does; and
+- no user entry follows it; and
+- the pane's `agent_status` is `idle` or `blocked`.
+
+It is carried as `pending_question: {text, ts}` (the text cut to 400
+characters, after redaction) in:
+- the session object of `agents.list`;
+- `session.peek`;
+- the Gemini context.
+
+When a watched agent goes from `working` to `idle` or `blocked` with a
+new pending question, the companion is sent a notice: "<spoken name> is
+asking: <the question, cut to 200 characters>". It goes through the
+existing notice queue and its rules for when notices are spoken.
+
+**9. The agent view (new; living section L3).**
+- **Access:** `session.peek` is also available to companion principals.
+  It is read-only.
+- **The view:** the app shows an agent's entries in a terminal style: a dark
+  theme, the user's turns on a grey band, the agent's replies in plain
+  text, tool calls as dim one-line summaries, and the pending question
+  highlighted at the end.
+- **Opening it:** tap the focus line, or an agent's notice.
+- **The font:** libmsdf's terminal preset (Noto Sans Mono with the symbol
+  page, requested of libmsdf on 2026-10-23). Until it is released, the app
+  uses its current font.
+- **Answering:** the view's "Take a message" button starts dictation (plan
+  20261023_02) with this agent as the fixed target.
+
+**Steps, reordered (replacing section 3's order):**
+1. **Session readers.** The old step 1, with the 16:23 EDT lookup by id.
+   It adds the pending-question rule (decision 8) and the redaction
+   (decision 7), each with tests:
+   - the 2026-10-23 transcript's last reply, ending in a question, gives a
+     pending question;
+   - each secret pattern is redacted.
+2. **Gemini's session context** (decision 7) and `recent-unwrapped` for
+   shell panes.
+
+   **Done when:**
+   - a test turn with the mock context contains the `### Agent sessions`
+     section within its limits;
+   - live, asking the phone "what is the handlr agent waiting on?" while
+     this session ends on a question gets that question back in substance.
+3. **Pending-question notices** (decision 8).
+
+   **Done when:** a watched mock agent going idle with a question gives
+   one notice, and the same question does not give a second.
+4. **The agent view** (decision 9), in the companion protocol,
+   `handlr-companion` and `apps/companion`.
+
+   **Done when,** on the S23: open the handlr agent's view, see its last
+   replies and its pending question, and take a message to it from there.
+5. **The harness methods:** the old step 2.
+6. **`handlr mcp`:** the old step 3.
