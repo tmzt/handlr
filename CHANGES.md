@@ -1062,3 +1062,13 @@ said "not `ping`". Now the companion client sends `ping` after 30 s
 make it again when the ping goes unanswered for 10 s (`PING_WAIT`). Any
 message from the daemon counts as heard, so a busy link is never pinged.
 The daemon already answers `ping`; nothing else changes on its side.
+
+## 2026-10-23 18:00 EDT — plan 20261022_05, decision 3: the project is the directory by default
+
+The owner (2026-10-23): "the herdr session name isn't useful compared to
+the agent/dir name, it could be an option for others that use them
+properly but I just use the tabs". Decision 3 named an agent's project by
+herdr's workspace label, falling back to the cwd's last part only when
+agents shared a label. Now `[naming] project_from` chooses: `"directory"`
+(the default) names it by the cwd's last part, using the label only when
+there is no cwd; `"workspace"` keeps decision 3 as it was.
