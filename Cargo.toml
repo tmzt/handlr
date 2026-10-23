@@ -48,6 +48,7 @@ members = [
     ".",
     "crates/handlr-audio",
     "crates/handlr-companion",
+    "crates/handlr-speech",
     "crates/libhandlr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",
@@ -59,6 +60,7 @@ members = [
 default-members = [
     ".",
     "crates/handlr-companion",
+    "crates/handlr-speech",
     "crates/libhandlr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",
