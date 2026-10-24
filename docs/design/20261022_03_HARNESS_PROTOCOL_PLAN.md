@@ -1569,3 +1569,25 @@ always give a card.
 
 Tests: a turn of 3 minutes or more gives a finished card; a shorter one
 gives none.
+
+## Amendment — 2026-10-24 16:15 EDT: a keyboard glyph left of the record button (living section L3)
+
+The owner (2026-10-24), after libmorph was asked for soft keyboard support:
+"for us, we'll add a keyboard glyph to the left of record but not as a button
+(no background) but same hit box".
+1. **Where:** in the controls row, immediately left of the record button, on
+   the overview and in the agent view.
+2. **What:** a keyboard glyph alone, drawn as strokes (the face has no
+   keyboard character), in the controls' text colour. There is no background,
+   border or fill, but its touch target is the record button's size.
+3. **What it does:** a tap opens the soft keyboard for a typed message. In the
+   agent view the message goes to that agent; on the overview it goes to the
+   agent herdr has in focus, as dictation does. The typed text shows in the
+   dictation card's place, and its Send sends it.
+4. **Until libmorph has text input:** the glyph is drawn dim and ignores taps.
+5. **Microphone off** (the settings plan) does not dim it, since typing needs
+   no microphone.
+
+Tests: the glyph sits left of record with record's hit box and no fill; it is
+dim and inert without text input; a tap asks for the keyboard when text input
+exists.
