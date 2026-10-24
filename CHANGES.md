@@ -1541,3 +1541,17 @@ new `view::newer_slots`) and the companion commit after it.
   with its own id, so nothing was needed upstream.
 - handlr-companion's version is not bumped for the new event field, as
   with the earlier ones.
+
+## 2026-10-24 11:40 EDT — plan 20261023_04 (the overview), departure: the general agent's centre button and the live transcript
+
+Agreed with the owner (2026-10-24), from plan 20261024_03 (the general
+agent as a realtime chat) and its amendment of the same time. The
+overview's plan is frozen, so its part is recorded here.
+- **The centre button.** The overview's controls row gets the general
+  agent's centre button between record and the right-hand button. It is
+  an X while voice input can be cancelled. It is hidden when the general
+  agent is off (the settings plan), except for the X.
+- **The live transcript.** The Gemini strip shows the chat's latest line
+  as it is heard or spoken, and the overlay (A5) shows the whole
+  transcript live: partial words dim, then final; the reply as it
+  streams; action lines in the accent.
