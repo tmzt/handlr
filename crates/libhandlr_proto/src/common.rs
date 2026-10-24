@@ -325,7 +325,7 @@ pub struct Entry {
     pub summary: String,
     /// The links in `summary` (plan 20261022_03, the 21:57 EDT amendment):
     /// its `http://` and `https://` URLs, and its `docs/…` paths' repowiki
-    /// pages when the daemon has a `[repowiki] url`. Left out of the wire
+    /// pages when the daemon has a `[urls] repowiki_url`. Left out of the wire
     /// when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
