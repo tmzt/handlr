@@ -1177,3 +1177,15 @@ lines with no conversation in them (`api-request-blob`, `api-request`,
 returned 100. Those lines are now recognised from their first bytes and
 not counted: the budget is 2 MiB of conversation lines, with at most
 32 MiB read per call.
+
+## 2026-10-23 22:45 EDT — plan 20261022_03: details of the 22:31 EDT entry
+
+- Peer messages delivered as user lines (not queued) are `isMeta` with
+  `origin.kind: peer`; they are read too, before `isMeta` lines are
+  skipped.
+- An `informational` system line is a compaction entry only when it
+  speaks of compaction (one in the session read did not); the app shows
+  a compaction once when the boundary and its notice come together.
+- Gemini's session context labels a context line by its origin (`- task
+  [ts]: …`, `- peer:<name> [ts]: …`) instead of `user`, and its heading
+  says these are not the user speaking.
