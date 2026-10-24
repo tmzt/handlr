@@ -1492,3 +1492,45 @@ Tests: each level gives its grade.
 The previous amendment names "the 12:2x EDT amendment". It is the amendment
 of 2026-10-24 12:21 EDT, "memory pressure in grades, least recently used
 first, with a full drop on low memory".
+
+## Amendment — 2026-10-24 15:56 EDT: a colour for every session, and other sessions' questions as cards at the bottom (living section L3)
+
+The owner (2026-10-24): "should we add in-app notifications when a session
+we've interacted with in the last hour has a question?"; "why not at the bottom
+under the scroll area but with a different card header (such as a color
+assigned to each session, including ours, using 4 color and light/dark
+variants that's about 16 colors)"; "we apply the color band on overview as
+well".
+1. **A colour per session,** this one included.
+   - **The palette:** 16 colours, 8 hues with a light and a dark variant each,
+     as theme roles `session_1` to `session_16` (plan 20261024_05; a theme that
+     leaves them out takes its default's).
+   - **The assignment:** each session gets one from a hash of its session id,
+     kept for its life, so the same agent always has the same colour.
+   - **Where it shows:** a band on the session's overview card, and in its
+     agent view's header.
+2. **Another session's question, at the bottom.** When a session you
+   interacted with in the last hour asks a question or needs an approval,
+   and you are anywhere in the app but its own view, a card appears at the
+   bottom under the scroll area, where the pinned card sits.
+   - "Interacted" means you opened its view, sent it a message, or answered
+     one of its cards.
+   - The card's header is in that session's colour and names it: "<agent> is
+     asking", or "<agent> needs approval".
+   - It sits above this view's own pinned card, if there is one.
+3. **Using the card:** a tap opens that session's view at the question. A
+   swipe down dismisses it, and the question stays on the overview and in
+   that view's jump line. Several at once collapse to the newest, with "+N".
+4. **Sound:** the ding plays when *Ding when an agent is done* and *All sound*
+   are on. In the background, the system alert covers it instead
+   (CHANGES.md, the alerts).
+5. **The client** keeps each session's last interaction time, and tells the
+   app which sessions have a live question.
+
+Tests:
+- a session's colour is stable across reopenings and themes;
+- the band shows on the overview card and the view's header;
+- a question from a session used within the hour shows a card in its
+  colour, and one from a session not used doesn't;
+- a tap opens that session, and a swipe dismisses it;
+- several collapse to "+N".
