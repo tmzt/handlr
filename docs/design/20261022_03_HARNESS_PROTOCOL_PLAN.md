@@ -1279,3 +1279,25 @@ points come from `speech.summarize`": the expanded card's points are
 daemon fills when `[summary] cards` is on and Gemini answers. When
 `spoken` is absent, the spoken text is the reply's own read-aloud text as
 before, and the points list is absent.
+
+## Amendment — 2026-10-24 12:08 EDT: a summary card's short form never reads as cut off (living section L3)
+
+The owner (2026-10-24), of a Finished card showing only "Written and
+pushed:": "the last card says Written and pushed: implying there's more";
+then "yes". This adds to the short form (item 1 of the three-forms
+amendment):
+1. **With a summary:** when the card carries the daemon's summary (`[summary]
+   cards`, CHANGES.md), the short form is that summary, not the reply's
+   first line.
+2. **Without one** (no Gemini, or not yet arrived), the short form is the
+   reply's opening, up to 3 lines:
+   - a first line ending in ":" always takes the lines after it, so a list
+     it introduces starts showing;
+   - when the opening is cut, its last line ends with "…", and a small dim
+     "more" sits at the card's bottom right.
+
+Tests:
+- a card with a summary shows the summary;
+- "Written and pushed:" followed by a list shows the lead-in and the
+  list's first lines, then "…" and "more";
+- a short reply shows whole, with no "more".
