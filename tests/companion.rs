@@ -1294,7 +1294,7 @@ async fn give_plan_session(daemon: &Daemon) {
 async fn a_plan_question_is_marked_and_its_paths_and_urls_link() {
     // Plan 20261022_03, the 21:57 EDT amendment.
     let mut cfg = confirming();
-    cfg.repowiki.url = Some("http://wiki:8088/".to_string());
+    cfg.urls.repowiki_url = Some("http://wiki:8088/".to_string());
     let env = start(cfg).await;
     give_plan_session(&env.daemon).await;
     set_status(&env.daemon, AgentStatus::Idle).await;
@@ -1336,7 +1336,7 @@ async fn a_plan_question_is_marked_and_its_paths_and_urls_link() {
     let q = &r["result"]["agents"][0]["session"]["pending_question"];
     assert_eq!(q["links"][0]["url"], plan_url, "{r}");
 
-    // Without `[repowiki] url`, the question is still about the plan, and
+    // Without `[urls] repowiki_url`, the question is still about the plan, and
     // only its web link links.
     let env = start(confirming()).await;
     give_plan_session(&env.daemon).await;

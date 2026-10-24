@@ -88,7 +88,7 @@ allow_arbitrary_commands = false
 # Links from `docs/…` paths in the companion's agent view to their pages on
 # repowiki (`~/src/repowiki`). Each agent's site is its directory's parent
 # and own name joined with `--` (`~/src/handlr` is `src--handlr`); a path
-# links to `<url>/#/<site>/<path without .md>`. Without a url nothing is
-# linked.
-# [repowiki]
-# url = "http://localhost:8088"
+# links to `<repowiki_url>/#/<site>/<path without .md>`. Without it no
+# path is linked (web links always are).
+# [urls]
+# repowiki_url = "http://localhost:8088"

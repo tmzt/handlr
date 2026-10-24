@@ -54,7 +54,7 @@ pub struct Daemon {
     pub agents: Vec<AgentConfig>,
     /// How agents are named and addressed (`[naming]`).
     pub naming: NamingConfig,
-    /// `[repowiki] url`: where `docs/…` paths link to, if anywhere.
+    /// `[urls] repowiki_url`: where `docs/…` paths link to, if anywhere.
     pub repowiki: Option<String>,
     pub broker: Arc<Broker>,
     pub watches: Arc<WatchRegistry>,
@@ -115,7 +115,7 @@ impl Daemon {
             client,
             agents: config.agents.clone(),
             naming: config.naming.clone(),
-            repowiki: config.repowiki.url.clone(),
+            repowiki: config.urls.repowiki_url.clone(),
             watches: Arc::new(WatchRegistry::new()),
             events,
             // SAFETY: getuid has no preconditions and cannot fail.

@@ -322,7 +322,7 @@ pub struct Peeked {
 impl Peeked {
     /// Give the entries and the pending question their links (the 21:57
     /// EDT amendment): web links always, and repowiki links when
-    /// `[repowiki] url` is set and the agent's directory has a site.
+    /// `[urls] repowiki_url` is set and the agent's directory has a site.
     pub fn link(&mut self, repowiki: Option<&str>, cwd: Option<&str>) {
         let linker = links::Linker::new(repowiki, cwd);
         for entry in &mut self.entries {

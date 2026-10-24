@@ -1,7 +1,7 @@
 //! Repowiki links and plan questions (docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md,
 //! the 21:57 EDT amendment, living section L3).
 //!
-//! With `[repowiki] url` set, every `docs/…` path in an entry's or a pending
+//! With `[urls] repowiki_url` set, every `docs/…` path in an entry's or a pending
 //! question's (redacted) text gets a [`Link`] to its page on repowiki:
 //! `<url>/#/<site>/<path without .md>`, where the site is the agent's
 //! directory's parent and own name joined with `--` (repowiki's own rule:
@@ -205,7 +205,7 @@ fn web_links(text: &str) -> Vec<(usize, Link)> {
 }
 
 /// Where links point: the repowiki's url and the agent's site, when
-/// `[repowiki] url` is set and the directory has a site; web links need
+/// `[urls] repowiki_url` is set and the directory has a site; web links need
 /// neither.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Linker {
