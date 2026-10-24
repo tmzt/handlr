@@ -181,9 +181,21 @@ fn print_event(event: Event) {
             pinned,
             loading,
             typed,
+            loading_earlier,
+            start,
+            terminal_on,
         } => {
             if let Some(t) = typed {
                 println!("* typed: {t}");
+            }
+            if let Some(t) = terminal_on {
+                println!("* terminal on: {t}");
+            }
+            if loading_earlier {
+                println!("* loading earlier…");
+            }
+            if start {
+                println!("* start of session");
             }
             let loading = if loading { ", loading" } else { "" };
             println!(

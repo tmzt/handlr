@@ -22,7 +22,7 @@ use libhandlr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::view::{AgentCard, Cards, Facts, PendingConfirm};
+use crate::view::{AgentCard, Sections};
 use crate::wire;
 
 /// What the app tells the client.
@@ -63,10 +63,18 @@ pub enum Input {
     /// The Scratch button: remove the last utterance.
     Scratch,
     /// Open the agent view of this pane (plan 20261022_03, step 4): its
-    /// session is peeked now, and again while it is open.
+    /// session is subscribed to (plan 20261023_03, section 6), and the
+    /// daemon pushes its sections while the view is open.
     OpenAgent(String),
-    /// Close the agent view.
+    /// Close the agent view: its subscription ends.
     CloseAgent,
+    /// The agent view's flow came within a screen of its top: page in the
+    /// sections before the oldest held (`session.history`, A7).
+    LoadEarlier,
+    /// Follow herdr's focus (plan 20261023_03, decision 2 and section 6):
+    /// on, an open view moves to the pane `focus.changed` names. Off by
+    /// default.
+    Follow(bool),
     /// A card's Approve or Deny: answers this confirmation, whichever is
     /// being asked.
     Answer { confirm_id: u64, approve: bool },
@@ -205,15 +213,11 @@ pub const COUNTDOWN_SECS: u64 = 3;
 /// come back from STT.
 pub const HEARD_WAIT: Duration = Duration::from_secs(3);
 
-/// The least time between two peeks of the open agent view (plan
-/// 20261022_03, step 4), and how often it is peeked while the agent works
-/// or is blocked. A notice for the agent, or a change of its status, asks
-/// for a peek at once, within this limit.
-pub const PEEK_INTERVAL: Duration = Duration::from_secs(5);
-/// How often the view is peeked while the agent is idle.
-pub const PEEK_IDLE_INTERVAL: Duration = Duration::from_secs(15);
-/// The entries the agent view asks for: the most `session.peek` gives.
-pub const VIEW_ENTRIES: usize = common::PEEK_ENTRIES_MAX;
+/// The sections the agent view's subscription backfills: the most one
+/// delivery holds (plan 20261023_03, section 6).
+pub const VIEW_SECTIONS: usize = common::SECTIONS_MAX;
+/// The sections one history page asks for (A5).
+pub const HISTORY_PAGE: usize = common::HISTORY_SECTIONS_DEFAULT;
 
 /// How often the agents are listed while the overview shows and nothing
 /// else asked (plan 20261023_04, decision 6).
@@ -365,6 +369,14 @@ pub enum Event {
         /// A response sent from the view that the session has not shown
         /// yet, shown as typed input.
         typed: Option<String>,
+        /// A history page is on its way: "loading earlier…" at the top.
+        loading_earlier: bool,
+        /// A history page reached the session's first line: "start of
+        /// session" at the top.
+        start: bool,
+        /// herdr's focus, shown, when the terminal is on another pane than
+        /// the view's: the view does not follow it.
+        terminal_on: Option<String>,
     },
     Error(String),
 }
@@ -579,8 +591,12 @@ enum Sent {
     Focus(String),
     /// `agents.send` of a dictated message.
     Message,
-    /// `session.peek` for the agent view of this pane.
-    Peek(String),
+    /// `session.subscribe` for the agent view of this pane.
+    Subscribe(String),
+    /// `session.unsubscribe`.
+    Unsubscribe,
+    /// `session.history` for this subscription.
+    History(u64),
     /// `agents.send` of a suggested response.
     Respond(Suggestion, String),
     /// `speech.summarize` of the reply being read with this serial.
@@ -769,36 +785,75 @@ pub struct State {
     pending_shown: Vec<String>,
     /// The open agent view.
     view: Option<AgentView>,
+    /// Follow herdr's focus with the open view (off by default).
+    follow: bool,
 }
 
-/// The open agent view (plan 20261022_03, step 4).
+/// The open agent view (plan 20261022_03, step 4), fed by its session
+/// subscription (plan 20261023_03, section 6, A7).
 #[derive(Debug)]
 struct AgentView {
     pane_id: String,
     status: String,
+    /// Every section given, by serial, for the life of the view.
+    sections: Sections,
+    /// The entries and cards of `sections`, flattened as last changed.
     entries: Vec<common::Entry>,
     pending_question: Option<common::PendingQuestion>,
-    cards: Cards,
-    /// A peek is on its way.
-    peeking: bool,
-    /// When the last peek was sent.
-    peeked_at: Option<Duration>,
+    /// The subscription, once `session.subscribe` answered on this
+    /// connection.
+    subscription: Option<u64>,
+    /// A `session.subscribe` is on its way.
+    subscribing: bool,
+    /// A `session.history` is on its way.
+    history: bool,
+    /// A history page reached the session's first line.
+    start: bool,
     /// The session has answered at least once.
     answered: bool,
-    /// The session file the entries come from; another one starts fresh.
-    session_id: Option<String>,
+    /// The replies (by time) already in the view when they were seen:
+    /// only replies that arrive later, live, are read aloud.
+    seen_replies: std::collections::HashSet<String>,
     /// The time of the pending question a tapped Yes or No answered: its
     /// card goes at once, before the session shows the answer.
     replied_to: Option<String>,
     /// The response sent, until the session shows it or the agent works.
     typed: Option<String>,
-    /// A notice or a status change asks for a peek as soon as allowed.
-    wanted: bool,
     /// The event as last given.
     shown: Option<Event>,
-    /// The newest reply already read aloud or seen before reading began:
-    /// its time.
-    read_upto: Option<String>,
+}
+
+impl AgentView {
+    fn new(pane_id: String, status: String) -> Self {
+        AgentView {
+            pane_id,
+            status,
+            sections: Sections::default(),
+            entries: Vec::new(),
+            pending_question: None,
+            subscription: None,
+            subscribing: false,
+            history: false,
+            start: false,
+            answered: false,
+            seen_replies: Default::default(),
+            replied_to: None,
+            typed: None,
+            shown: None,
+        }
+    }
+
+    /// Re-flatten the entries after the sections changed.
+    fn reflatten(&mut self) {
+        self.entries = self.sections.flatten(|_| false).0;
+    }
+
+    /// Every reply now held counts as seen.
+    fn see_all(&mut self) {
+        for e in self.entries.iter().filter(|e| is_reply(e)) {
+            self.seen_replies.insert(e.ts.clone());
+        }
+    }
 }
 
 impl State {
@@ -842,6 +897,7 @@ impl State {
             list_wanted: false,
             pending_shown: Vec::new(),
             view: None,
+            follow: false,
         }
     }
 
@@ -916,13 +972,12 @@ impl State {
             d.quiet_from = None;
         }
         self.show_dictation(&mut out);
-        // The view keeps what it showed; its approvals are withdrawn.
+        // The view keeps what it showed; its subscription died with the
+        // connection, and its approvals are withdrawn.
         if let Some(v) = self.view.as_mut() {
-            v.peeking = false;
-            v.wanted = true;
-            // The next peek replaces what the view held instead of merging
-            // onto it, so the newest entries are certain after a gap.
-            v.session_id = None;
+            v.subscription = None;
+            v.subscribing = false;
+            v.history = false;
         }
         self.recompute_view(&mut out);
         if self.turn.take().is_some() {
@@ -999,10 +1054,19 @@ impl State {
             Input::Scratch => self.scratch(&mut out),
             Input::OpenAgent(pane_id) => self.open_agent(pane_id, &mut out),
             Input::CloseAgent => {
+                self.unsubscribe(&mut out);
                 // Back on the overview: its list is refreshed.
                 self.view = None;
                 self.list_wanted = true;
                 self.list_if_due(&mut out);
+            }
+            Input::LoadEarlier => self.load_earlier(&mut out),
+            Input::Follow(on) => {
+                self.follow = on;
+                if on {
+                    let focus = self.focus.clone();
+                    self.follow_focus(focus.as_ref(), &mut out);
+                }
             }
             Input::Answer {
                 confirm_id,
@@ -1019,7 +1083,7 @@ impl State {
                 self.read_aloud = on;
                 // From now: what is already in the view is not read.
                 if let Some(v) = self.view.as_mut() {
-                    v.read_upto = newest_reply(&v.entries);
+                    v.see_all();
                 }
                 if self.online() {
                     self.send_options(&mut out);
@@ -1032,15 +1096,31 @@ impl State {
     /// The agent view as it stands, if one is open.
     pub fn agent_view(&self) -> Option<Event> {
         let v = self.view.as_ref()?;
-        let (cards, pinned) = v.cards.placed(&v.entries);
+        // A question answered from the view goes at once.
+        let answered = v
+            .replied_to
+            .as_ref()
+            .is_some_and(|ts| v.pending_question.as_ref().is_some_and(|q| &q.ts == ts));
+        let (entries, cards, pinned) = v
+            .sections
+            .flatten(|c| answered && c.live && c.kind == crate::view::CardKind::Question);
+        let terminal_on = self
+            .focus
+            .as_ref()
+            .filter(|f| f.pane_id != v.pane_id)
+            .map(|f| f.name.clone())
+            .filter(|n| !n.is_empty());
         Some(Event::AgentView {
             name: self.agent_name(&v.pane_id),
             status: v.status.clone(),
-            entries: v.entries.clone(),
+            entries,
             cards,
             pinned,
             loading: !v.answered,
             typed: v.typed.clone(),
+            loading_earlier: v.history,
+            start: v.start,
+            terminal_on,
         })
     }
 
@@ -1073,112 +1153,105 @@ impl State {
         if self.view.as_ref().is_some_and(|v| v.pane_id == pane_id) {
             return self.show_view(out);
         }
+        // Another agent's view: its subscription ends.
+        self.unsubscribe(out);
         let status = self
             .agents
             .iter()
             .find(|a| a.pane_id == pane_id)
             .map(|a| a.status.clone())
             .unwrap_or_default();
-        self.view = Some(AgentView {
-            pane_id,
-            status,
-            entries: Vec::new(),
-            pending_question: None,
-            cards: Cards::default(),
-            peeking: false,
-            peeked_at: None,
-            answered: false,
-            session_id: None,
-            replied_to: None,
-            typed: None,
-            wanted: true,
-            shown: None,
-            read_upto: None,
-        });
+        self.view = Some(AgentView::new(pane_id, status));
         if self.online() {
             // Names and statuses, for the view's title and its target.
             self.ask_list(out);
         }
-        self.peek_if_due(out);
+        self.subscribe(out);
         self.recompute_view(out);
     }
 
-    /// Peeks the open view's session if it is due: asked for, or its
-    /// interval passed, and never within `PEEK_INTERVAL` of the last.
-    fn peek_if_due(&mut self, out: &mut Vec<Output>) {
-        if self.background {
+    /// Subscribes the open view to its pane's session, if it has no
+    /// subscription on this connection: from its newest serial when it
+    /// holds any (a reconnect), so only what it missed comes.
+    fn subscribe(&mut self, out: &mut Vec<Output>) {
+        if !self.online() {
             return;
         }
-        let (online, now) = (self.online(), self.now);
         let Some(v) = self.view.as_mut() else {
             return;
         };
-        if !online || v.peeking {
+        if v.subscription.is_some() || v.subscribing {
             return;
         }
-        let interval = if matches!(v.status.as_str(), "idle" | "done") {
-            PEEK_IDLE_INTERVAL
-        } else {
-            PEEK_INTERVAL
-        };
-        let due = match v.peeked_at {
-            None => true,
-            Some(at) => {
-                let since = now.saturating_sub(at);
-                since >= interval || (v.wanted && since >= PEEK_INTERVAL)
-            }
-        };
-        if !due {
-            return;
-        }
-        v.peeking = true;
-        v.wanted = false;
-        v.peeked_at = Some(now);
+        v.subscribing = true;
         let pane_id = v.pane_id.clone();
-        let params = common::SessionPeekParams {
+        let params = common::SessionSubscribeParams {
             pane_id: pane_id.clone(),
-            entries: VIEW_ENTRIES,
+            sections: VIEW_SECTIONS,
+            after: v.sections.newest(),
         };
-        out.push(self.request(methods::SESSION_PEEK, params, Sent::Peek(pane_id)));
+        out.push(self.request(methods::SESSION_SUBSCRIBE, params, Sent::Subscribe(pane_id)));
     }
 
-    /// Applies the card rules to the open view and gives it if it changed;
-    /// gives the pending panes if they changed.
-    fn recompute_view(&mut self, out: &mut Vec<Output>) {
-        self.show_pending(out);
-        let Some(v) = self.view.as_ref() else {
+    /// Ends the open view's subscription, if it has one.
+    fn unsubscribe(&mut self, out: &mut Vec<Output>) {
+        let Some(id) = self.view.as_mut().and_then(|v| v.subscription.take()) else {
             return;
         };
-        let name = self.agent_name(&v.pane_id);
-        let confirms: Vec<PendingConfirm> = self
-            .confirms
-            .iter()
-            .filter(|c| c.pane_id == v.pane_id)
-            .map(|c| PendingConfirm {
-                confirm_id: c.id,
-                text: c.text.clone(),
-            })
-            .collect();
-        let turn = self
-            .agents
-            .iter()
-            .find(|a| a.pane_id == v.pane_id)
-            .and_then(|a| a.turn.clone());
-        let v = self.view.as_mut().expect("checked above");
-        // A question answered from the view is no longer asked.
-        let pending_question = v
-            .pending_question
-            .as_ref()
-            .filter(|q| v.replied_to.as_deref() != Some(q.ts.as_str()));
-        let facts = Facts {
-            name: &name,
-            status: &v.status,
-            entries: &v.entries,
-            pending_question,
-            confirms: &confirms,
-            turn: turn.as_ref(),
+        if self.online() {
+            let params = common::SessionUnsubscribeParams {
+                subscription_id: id,
+            };
+            out.push(self.request(methods::SESSION_UNSUBSCRIBE, params, Sent::Unsubscribe));
+        }
+    }
+
+    /// Pages in the sections before the oldest held (A7): one page at a
+    /// time, and none once a page reached the session's start.
+    fn load_earlier(&mut self, out: &mut Vec<Output>) {
+        if !self.online() {
+            return;
+        }
+        let Some(v) = self.view.as_mut() else {
+            return;
         };
-        v.cards.update(&facts);
+        let (Some(id), Some(before)) = (v.subscription, v.sections.oldest()) else {
+            return;
+        };
+        if v.history || v.start {
+            return;
+        }
+        v.history = true;
+        let params = common::SessionHistoryParams {
+            subscription_id: id,
+            before,
+            sections: HISTORY_PAGE,
+        };
+        out.push(self.request(methods::SESSION_HISTORY, params, Sent::History(id)));
+        self.show_view(out);
+    }
+
+    /// With Follow on, an open view moves to herdr's focus when it names
+    /// another pane with an agent (plan 20261023_03, decision 2).
+    fn follow_focus(&mut self, focus: Option<&common::FocusInfo>, out: &mut Vec<Output>) {
+        if !self.follow {
+            return;
+        }
+        let Some(focus) = focus.filter(|f| f.agent.is_some()) else {
+            return;
+        };
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|v| v.pane_id != focus.pane_id)
+        {
+            self.open_agent(focus.pane_id.clone(), out);
+        }
+    }
+
+    /// Gives the pending panes if they changed, and the view if it did.
+    fn recompute_view(&mut self, out: &mut Vec<Output>) {
+        self.show_pending(out);
         self.show_view(out);
     }
 
@@ -1191,15 +1264,6 @@ impl State {
         if v.shown.as_ref() != Some(&event) {
             v.shown = Some(event.clone());
             out.push(Output::Event(event));
-        }
-    }
-
-    /// A notice or a status change for `pane_id`: the open view of it
-    /// wants a peek.
-    fn view_wants_peek(&mut self, pane_id: &str, out: &mut Vec<Output>) {
-        if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
-            v.wanted = true;
-            self.peek_if_due(out);
         }
     }
 
@@ -1297,7 +1361,6 @@ impl State {
             self.submit(false, out);
         }
         self.show_dictation(out);
-        self.peek_if_due(out);
         self.list_if_due(out);
         if !self.reading.is_empty() {
             self.read_in_order();
@@ -1770,11 +1833,25 @@ impl State {
                     log::info!("speech.summarize: {message}; reading the reply here");
                     self.summarized(serial, None, out);
                 }
-                Sent::Peek(pane_id) => {
+                Sent::Subscribe(pane_id) => {
                     if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
-                        v.peeking = false;
+                        v.subscribing = false;
+                        v.answered = true;
                     }
-                    out.push(event(Event::Error(format!("session.peek: {message}"))));
+                    out.push(event(Event::Error(format!("session.subscribe: {message}"))));
+                    self.show_view(out);
+                }
+                Sent::Unsubscribe => log::debug!("session.unsubscribe: {message}"),
+                Sent::History(id) => {
+                    if let Some(v) = self.view.as_mut().filter(|v| v.subscription == Some(id)) {
+                        v.history = false;
+                    }
+                    // The session changed under the page: the reset that
+                    // follows brings the new one.
+                    if error.code != libhandlr_proto::envelope::codes::SESSION_CHANGED {
+                        log::warn!("session.history: {message}");
+                    }
+                    self.show_view(out);
                 }
                 Sent::Focus(target) => {
                     log::info!("dictation: focus {target:?}: {message}");
@@ -1829,11 +1906,8 @@ impl State {
                     self.send_options(out);
                     // herdr's focus, for the dictation mode's target.
                     self.ask_list(out);
-                    // An open view is peeked again at once.
-                    if let Some(v) = self.view.as_mut() {
-                        v.peeked_at = None;
-                    }
-                    self.peek_if_due(out);
+                    // An open view subscribes again, from what it holds.
+                    self.subscribe(out);
                 }
                 Err(e) => {
                     let message = format!("a bad hello result: {e}");
@@ -1920,15 +1994,41 @@ impl State {
                     "a bad agents.send result: {e}"
                 )))),
             },
-            Sent::Peek(pane_id) => match parse::<common::SessionPeekResult>(result) {
-                Ok(peek) => self.peeked(&pane_id, peek, out),
+            Sent::Subscribe(pane_id) => match parse::<common::SessionSubscribeResult>(result) {
+                Ok(r) => {
+                    let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) else {
+                        // The view closed or moved on while it was asked.
+                        let params = common::SessionUnsubscribeParams {
+                            subscription_id: r.subscription_id,
+                        };
+                        out.push(self.request(
+                            methods::SESSION_UNSUBSCRIBE,
+                            params,
+                            Sent::Unsubscribe,
+                        ));
+                        return;
+                    };
+                    v.subscribing = false;
+                    v.subscription = Some(r.subscription_id);
+                    self.delivered(r.delivery, out);
+                }
                 Err(e) => {
                     if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
-                        v.peeking = false;
+                        v.subscribing = false;
                     }
-                    log::warn!("a bad session.peek result: {e}");
+                    log::warn!("a bad session.subscribe result: {e}");
                 }
             },
+            Sent::History(id) => match parse::<common::SessionHistoryResult>(result) {
+                Ok(page) => self.paged(id, page, out),
+                Err(e) => {
+                    if let Some(v) = self.view.as_mut().filter(|v| v.subscription == Some(id)) {
+                        v.history = false;
+                    }
+                    log::warn!("a bad session.history result: {e}");
+                }
+            },
+            Sent::Unsubscribe => {}
             Sent::Summarize(serial) => match parse::<common::SpeechSummarizeResult>(result) {
                 // Gemini's version when there is one, else the rules'.
                 Ok(r) => self.summarized(serial, r.summary.or(Some(r.read)), out),
@@ -1942,8 +2042,9 @@ impl State {
     }
 
     /// To the background and back (owner, 2026-10-23: "in any case it should
-    /// be a single sleeping socket"). Back in front: one catch-up, a peek
-    /// of the open view and a list, then the usual timers.
+    /// be a single sleeping socket"). Back in front: one catch-up list (the
+    /// daemon itself sends the open view what it held), then the usual
+    /// timers.
     fn set_background(&mut self, on: bool, out: &mut Vec<Output>) {
         if on == self.background {
             return;
@@ -1966,15 +2067,11 @@ impl State {
                 out.push(self.request(methods::PING, params, Sent::Ping));
             }
         }
+        // The daemon holds the view's deliveries while the link sleeps and
+        // sends the catch-up itself on waking.
         if !on {
-            if let Some(v) = self.view.as_mut() {
-                v.wanted = true;
-                v.peeked_at = None;
-                v.session_id = None;
-            }
             self.list_wanted = true;
             self.listed_at = None;
-            self.peek_if_due(out);
             self.list_if_due(out);
         }
     }
@@ -2097,42 +2194,46 @@ impl State {
         }
     }
 
-    /// A `session.peek` answered for `pane_id`.
-    fn peeked(&mut self, pane_id: &str, peek: common::SessionPeekResult, out: &mut Vec<Output>) {
-        let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) else {
-            return; // the view closed, or moved to another agent
+    /// A delivery for the open view's subscription, or the first one in
+    /// `session.subscribe`'s result (plan 20261023_03, 4.2 as amended by
+    /// A5 and A6): a reset replaces what is held; otherwise each section
+    /// goes in at its serial, replacing the one held there, and `removed`
+    /// ones go. Sections of another session file are ignored without a
+    /// reset.
+    fn delivered(&mut self, d: common::SessionDelivery, out: &mut Vec<Output>) {
+        let read_aloud = self.read_aloud;
+        let Some(v) = self.view.as_mut() else {
+            return;
         };
-        v.peeking = false;
+        let first = !v.answered;
         v.answered = true;
-        v.status = peek.status;
-        let first = v.entries.is_empty() && v.read_upto.is_none();
-        match peek.session {
-            Some(session) => {
-                // Keep what the view already showed and lay the new batch
-                // over it, so entries scrolled back to do not vanish when
-                // the newest 200 move on (owner, 2026-10-23: "it might be
-                // the scroll back, it shows and then disappears when it
-                // lands"). A different session file starts fresh.
-                let same_session = v.session_id.is_some() && v.session_id == session.session_id;
-                v.entries = if same_session {
-                    merge_entries(std::mem::take(&mut v.entries), session.entries)
-                } else {
-                    session.entries
-                };
-                v.session_id = session.session_id;
-                v.pending_question = session.pending_question;
-                log::info!(
-                    "agent view: {} entries, newest {}{}",
-                    v.entries.len(),
-                    v.entries.last().map_or("none", |e| e.ts.as_str()),
-                    if same_session { "" } else { " (fresh)" }
-                );
+        if let Some(status) = d.status {
+            v.status = status;
+        }
+        if let Some(question) = d.pending_question {
+            v.pending_question = question;
+        }
+        if d.session.is_none() {
+            // No session to show: why is in `reason`.
+            v.sections.clear();
+            v.start = false;
+            if d.reason.as_deref() == Some(common::delivery_reasons::PANE_CLOSED) {
+                // No more deliveries come; the subscription is over.
+                v.subscription = None;
             }
-            None => {
-                v.entries.clear();
-                v.pending_question = None;
+        } else {
+            if d.reset {
+                v.sections.clear();
+                v.start = false;
+            }
+            for serial in d.removed {
+                v.sections.remove(serial);
+            }
+            for section in d.sections {
+                v.sections.put(section);
             }
         }
+        v.reflatten();
         // The typed response goes once the session shows it as the user's,
         // or the agent works on it.
         if let Some(t) = v.typed.as_deref() {
@@ -2144,32 +2245,18 @@ impl State {
                 v.typed = None;
             }
         }
-        // The replies after the last one read, read aloud in order, each
-        // as the daemon says (plan 20261023_05); the first peek's backfill
-        // is not.
-        let newest = newest_reply(&v.entries);
+        // Replies not seen before, read aloud in order, each as the daemon
+        // says (plan 20261023_05); the first backfill's are not.
         let mut replies = Vec::new();
-        if self.read_aloud && !first {
-            let after = match &v.read_upto {
-                None => 0,
-                Some(ts) => v
-                    .entries
-                    .iter()
-                    .rposition(|e| is_reply(e) && e.ts == *ts)
-                    .map_or(v.entries.len(), |i| i + 1),
-            };
-            replies = v.entries[after..]
-                .iter()
-                .filter(|e| is_reply(e))
-                .map(|e| (e.ts.clone(), e.summary.clone()))
-                .collect();
+        for e in v.entries.iter().filter(|e| is_reply(e)) {
+            if v.seen_replies.insert(e.ts.clone()) && read_aloud && !first {
+                replies.push((e.ts.clone(), e.summary.clone()));
+            }
         }
-        if newest.is_some() {
-            v.read_upto = newest;
-        }
+        let pane_id = v.pane_id.clone();
         let ends_on_reply = v.status == "working" && v.entries.last().is_some_and(is_reply);
         for (ts, text) in replies {
-            self.read_reply(pane_id, ts, text, out);
+            self.read_reply(&pane_id, ts, text, out);
         }
         // herdr says working but the session ends on a reply: the daemon's
         // turn says whether it stopped (plan 20261023_04, A4), so the list
@@ -2190,16 +2277,35 @@ impl State {
         self.flush_notices(out);
     }
 
+    /// A `session.history` page for subscription `id` (A5, A7): its
+    /// sections go in at their serials, and none of its replies is read
+    /// aloud.
+    fn paged(&mut self, id: u64, page: common::SessionHistoryResult, out: &mut Vec<Output>) {
+        let Some(v) = self.view.as_mut().filter(|v| v.subscription == Some(id)) else {
+            return;
+        };
+        v.history = false;
+        if page.start {
+            v.start = true;
+        }
+        for section in page.sections {
+            v.sections.put(section);
+        }
+        v.reflatten();
+        v.see_all();
+        self.show_view(out);
+    }
+
     /// `agents.list` answered: the view's status, and a message target
     /// fixed to the viewed agent before its names were known.
     fn list_learned(&mut self, out: &mut Vec<Output>) {
         if let Some(v) = self.view.as_mut()
             && let Some(a) = self.agents.iter().find(|a| a.pane_id == v.pane_id)
         {
-            if a.status != v.status && !v.status.is_empty() {
-                v.wanted = true;
+            // The subscription's own status is newer, once it answered.
+            if !v.answered {
+                v.status = a.status.clone();
             }
-            v.status = a.status.clone();
         }
         let fixed = self
             .dictation
@@ -2212,7 +2318,6 @@ impl State {
                 d.target = target;
             }
         }
-        self.peek_if_due(out);
         self.recompute_view(out);
     }
 
@@ -2253,6 +2358,22 @@ impl State {
                     }
                 }
             }
+            methods::SESSION_DELIVERY => {
+                if let Some(d) = parse_or_log::<common::SessionDelivery>(note) {
+                    let ours = self
+                        .view
+                        .as_ref()
+                        .is_some_and(|v| v.subscription == Some(d.subscription_id));
+                    if ours {
+                        self.delivered(d, out);
+                    } else {
+                        log::debug!(
+                            "a delivery for subscription {}, not ours",
+                            d.subscription_id
+                        );
+                    }
+                }
+            }
             methods::CONFIRM_REQUESTED => {
                 if let Some(c) = parse_or_log::<wire::ConfirmRequested>(note) {
                     self.requested(c, out);
@@ -2265,7 +2386,6 @@ impl State {
             }
             wire::methods::NOTICE => {
                 if let Some(n) = parse_or_log::<wire::Notice>(note) {
-                    self.view_wants_peek(&n.pane_id, out);
                     self.notices.push_back(n.text);
                     while self.notices.len() > NOTICE_CAP {
                         self.notices.pop_front();
@@ -2280,7 +2400,9 @@ impl State {
             }
             wire::methods::FOCUS_CHANGED => {
                 if let Some(f) = parse_or_log::<wire::FocusChanged>(note) {
-                    self.set_focus(f.focus, out);
+                    self.set_focus(f.focus.clone(), out);
+                    // Follow on: the view moves to it.
+                    self.follow_focus(f.focus.as_ref(), out);
                     // The overview's focus bar moves with it.
                     self.list_wanted = true;
                     self.list_if_due(out);
@@ -2501,44 +2623,9 @@ impl State {
     }
 }
 
-/// The most entries an agent view keeps as peeks merge onto it.
-pub const VIEW_KEEP: usize = 1000;
-
-/// `newer` (the latest peek, oldest first) laid over `kept`: the kept
-/// entries older than `newer`'s first stay, and `newer` replaces the rest,
-/// so an entry that changed between peeks is updated. With no overlap the
-/// two may not meet, so `newer` alone, rather than a gap.
-fn merge_entries(mut kept: Vec<common::Entry>, newer: Vec<common::Entry>) -> Vec<common::Entry> {
-    let same = |a: &common::Entry, b: &common::Entry| {
-        a.ts == b.ts && a.role == b.role && a.kind == b.kind && a.tool == b.tool
-    };
-    let Some(first) = newer.first() else {
-        return kept;
-    };
-    match kept.iter().position(|e| same(e, first)) {
-        Some(i) => {
-            kept.truncate(i);
-            kept.extend(newer);
-            let over = kept.len().saturating_sub(VIEW_KEEP);
-            kept.drain(..over);
-            kept
-        }
-        None => newer,
-    }
-}
-
 /// An agent's reply: its prose, which is what reading aloud reads.
 fn is_reply(e: &common::Entry) -> bool {
     e.role == common::Role::Assistant && e.kind == common::EntryKind::Text
-}
-
-/// The time of the newest reply in `entries`.
-fn newest_reply(entries: &[common::Entry]) -> Option<String> {
-    entries
-        .iter()
-        .rev()
-        .find(|e| is_reply(e))
-        .map(|e| e.ts.clone())
 }
 
 /// An agent of `agents.list` as a message target, as the focus names it.
@@ -3683,12 +3770,97 @@ mod tests {
         })
     }
 
-    fn peek_answer(s: &mut State, out: &[Output], status: &str, session: Value) -> Vec<Output> {
-        let peek = requests(out, "session.peek")[0].clone();
-        s.incoming(response(
-            peek.id,
-            json!({"session": session, "status": status}),
+    /// The file hash the scripted sessions' serials carry.
+    const FILE: u32 = 0x3fa9_c21e;
+
+    fn serial(line: u32, slot: u8) -> String {
+        common::Serial::new(FILE, line, slot).to_string()
+    }
+
+    /// The sections the daemon would give for `session` (the shape of a
+    /// `session.peek` answer: `entries` and `pending_question`): each entry
+    /// a section on its own line, and the pending question a live Question
+    /// card after its reply.
+    fn sections_of(session: &Value) -> Vec<Value> {
+        let mut sections = Vec::new();
+        let entries = session["entries"].as_array().cloned().unwrap_or_default();
+        let q = &session["pending_question"];
+        for (i, e) in entries.iter().enumerate() {
+            let line = i as u32 + 1;
+            let kind = match (e["role"].as_str(), e["kind"].as_str()) {
+                _ if e.get("origin").is_some() => "context",
+                (Some("user"), Some("text")) => "turn",
+                (_, Some("text")) => "text",
+                _ => "tool",
+            };
+            sections.push(json!({"serial": serial(line, 0), "kind": kind, "entries": [e]}));
+            if q.is_object() && q["ts"] == e["ts"] && kind == "text" {
+                let mut card = json!({"card": "question", "live": true,
+                    "title": "the handlr agent is asking", "text": q["text"]});
+                if q["about_plan"] == true {
+                    card["about_plan"] = json!(true);
+                }
+                if q.get("links").is_some() {
+                    card["links"] = q["links"].clone();
+                }
+                sections.push(json!({"serial": serial(line, 128), "kind": "card", "card": card}));
+            }
+        }
+        sections
+    }
+
+    /// A reset delivery of `session` (null: no session) for subscription 1.
+    fn delivery_of(status: &str, session: &Value) -> Value {
+        if session.is_null() {
+            return json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+                "reset": true, "session": null, "reason": "no_session", "sections": [],
+                "status": status, "pending_question": null});
+        }
+        json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+            "reset": true, "session": {"session_id": "s1", "matched": "id"}, "reason": null,
+            "sections": sections_of(session), "status": status,
+            "pending_question": session["pending_question"]})
+    }
+
+    /// The daemon gives the open view `session`: as `session.subscribe`'s
+    /// answer when `out` asked for it, else as a `session.delivery`.
+    fn session_answer(s: &mut State, out: &[Output], status: &str, session: Value) -> Vec<Output> {
+        let delivery = delivery_of(status, &session);
+        match requests(out, "session.subscribe").first() {
+            Some(sub) => {
+                let id = sub.id.clone();
+                s.incoming(response(
+                    id,
+                    json!({"subscription_id": 1, "delivery": delivery}),
+                ))
+            }
+            None => s.incoming(note("session.delivery", delivery)),
+        }
+    }
+
+    /// A delivery for subscription 1 of these sections, not a reset.
+    fn deliver(s: &mut State, sections: Vec<Value>, removed: Vec<String>) -> Vec<Output> {
+        s.incoming(note(
+            "session.delivery",
+            json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+                "reset": false, "session": {"session_id": "s1", "matched": "id"},
+                "reason": null, "sections": sections, "removed": removed}),
         ))
+    }
+
+    fn text_at(line: u32, slot: u8, summary: &str) -> Value {
+        json!({"serial": serial(line, slot), "kind": "text", "entries": [
+            {"ts": format!("{line}.{slot}"), "role": "assistant", "kind": "text", "summary": summary}
+        ]})
+    }
+
+    fn summaries(s: &State) -> Vec<String> {
+        match s.agent_view() {
+            Some(Event::AgentView { entries, .. }) => {
+                entries.into_iter().map(|e| e.summary).collect()
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     fn asking() -> Value {
@@ -3702,7 +3874,7 @@ mod tests {
         })
     }
 
-    /// Online with the view of w2:pZ open and its first peek answered with
+    /// Online with the view of w2:pZ open and its subscription answered with
     /// `session`; the clock at 100 s.
     fn viewing(status: &str, session: Value) -> State {
         let mut s = online();
@@ -3713,106 +3885,8 @@ mod tests {
             list.id,
             json!({"agents": [agent_info("w2:pZ", status)]}),
         ));
-        peek_answer(&mut s, &out, status, session);
+        session_answer(&mut s, &out, status, session);
         s
-    }
-
-    #[test]
-    fn opening_the_view_peeks_and_lists() {
-        let mut s = online();
-        let out = s.input(Input::OpenAgent("w2:pZ".into()));
-        let peeks = requests(&out, "session.peek");
-        assert_eq!(peeks.len(), 1, "{out:?}");
-        assert_eq!(peeks[0].params, json!({"pane_id": "w2:pZ", "entries": 200}));
-        assert_eq!(requests(&out, "agents.list").len(), 1);
-        // Shown at once, empty, until the peek answers.
-        let (entries, cards, pinned) = view_of(&out).expect("a view");
-        assert!(entries.is_empty() && cards.is_empty() && pinned.is_none());
-
-        let out = peek_answer(&mut s, &out, "idle", asking());
-        let (entries, cards, pinned) = view_of(&out).expect("the view again");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].kind, crate::view::CardKind::Question);
-        assert_eq!(cards[0].at, 2);
-        assert_eq!(pinned, Some(0));
-        match s.agent_view() {
-            Some(Event::AgentView { name, status, .. }) => {
-                assert_eq!((name.as_str(), status.as_str()), ("the agent", "idle"))
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-
-    #[test]
-    fn the_view_is_named_from_agents_list_and_closes() {
-        let mut s = viewing("idle", asking());
-        match s.agent_view() {
-            Some(Event::AgentView { name, .. }) => assert_eq!(name, "the handlr agent"),
-            other => panic!("{other:?}"),
-        }
-        s.input(Input::CloseAgent);
-        assert!(s.agent_view().is_none());
-        // Closed, it is no longer peeked.
-        assert!(requests(&s.input(Input::Tick(secs(200.0))), "session.peek").is_empty());
-    }
-
-    #[test]
-    fn the_view_is_peeked_at_most_every_5_s() {
-        let mut s = viewing("working", json!(null));
-        // Working: every 5 s.
-        assert!(requests(&s.input(Input::Tick(secs(104.9))), "session.peek").is_empty());
-        let out = s.input(Input::Tick(secs(105.0)));
-        assert_eq!(requests(&out, "session.peek").len(), 1);
-        // One at a time: nothing more until it is answered.
-        assert!(requests(&s.input(Input::Tick(secs(111.0))), "session.peek").is_empty());
-        let out2 = peek_answer(&mut s, &out, "idle", json!(null));
-        assert!(requests(&out2, "session.peek").is_empty());
-        // Idle: every 15 s, from the last at 105 s.
-        assert!(requests(&s.input(Input::Tick(secs(119.0))), "session.peek").is_empty());
-        let out = s.input(Input::Tick(secs(120.0)));
-        assert_eq!(requests(&out, "session.peek").len(), 1);
-        peek_answer(&mut s, &out, "idle", json!(null));
-
-        // A notice for the agent asks at once, within the 5 s limit.
-        let notice = |s: &mut State, pane: &str| {
-            s.incoming(note(
-                "notice",
-                json!({"id": 1, "kind": "agent_status", "pane_id": pane, "text": "x"}),
-            ))
-        };
-        s.input(Input::Tick(secs(122.0)));
-        assert!(requests(&notice(&mut s, "w2:pZ"), "session.peek").is_empty());
-        let out = s.input(Input::Tick(secs(125.0)));
-        assert_eq!(requests(&out, "session.peek").len(), 1, "due at 125 s");
-        peek_answer(&mut s, &out, "idle", json!(null));
-        s.input(Input::Tick(secs(131.0)));
-        assert_eq!(requests(&notice(&mut s, "w2:pZ"), "session.peek").len(), 1);
-        // Another agent's notice does not.
-        let mut s = viewing("idle", json!(null));
-        s.input(Input::Tick(secs(110.0)));
-        assert!(requests(&notice(&mut s, "w9:p1"), "session.peek").is_empty());
-    }
-
-    #[test]
-    fn a_pending_confirmation_for_the_agent_is_a_live_card_that_fades() {
-        let mut s = viewing("working", json!(null));
-        // confirm_requested is for w2:pZ.
-        let out = s.incoming(confirm_requested(7));
-        let (_, cards, pinned) = view_of(&out).expect("the view");
-        assert_eq!(cards.len(), 1);
-        assert_eq!(cards[0].kind, crate::view::CardKind::Approval);
-        assert_eq!(cards[0].confirm_id, Some(7));
-        assert!(cards[0].live);
-        assert_eq!(pinned, Some(0));
-
-        let out = s.incoming(note(
-            "confirm.resolved",
-            json!({"confirm_id": 7, "outcome": "sent"}),
-        ));
-        let (_, cards, pinned) = view_of(&out).expect("the view");
-        assert!(!cards[0].live, "resolved: faded");
-        assert_eq!(pinned, None);
     }
 
     #[test]
@@ -3850,23 +3924,423 @@ mod tests {
     }
 
     #[test]
-    fn a_question_resolves_when_the_user_answers() {
+    fn opening_the_view_subscribes_and_lists() {
+        let mut s = online();
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let subs = requests(&out, "session.subscribe");
+        assert_eq!(subs.len(), 1, "{out:?}");
+        assert_eq!(subs[0].params, json!({"pane_id": "w2:pZ", "sections": 200}));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        assert!(requests(&out, "session.peek").is_empty());
+        // Shown at once, empty and loading, until the subscription answers.
+        let (entries, cards, pinned) = view_of(&out).expect("a view");
+        assert!(entries.is_empty() && cards.is_empty() && pinned.is_none());
+        assert!(matches!(
+            s.agent_view(),
+            Some(Event::AgentView { loading: true, .. })
+        ));
+
+        let out = session_answer(&mut s, &out, "idle", asking());
+        let (entries, cards, pinned) = view_of(&out).expect("the view again");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].kind, crate::view::CardKind::Question);
+        assert_eq!(cards[0].at, 2);
+        assert_eq!(pinned, Some(0));
+        match s.agent_view() {
+            Some(Event::AgentView {
+                name,
+                status,
+                loading,
+                ..
+            }) => {
+                assert_eq!((name.as_str(), status.as_str()), ("the agent", "idle"));
+                assert!(!loading);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_view_is_named_from_agents_list_and_closing_unsubscribes() {
         let mut s = viewing("idle", asking());
-        let out = s.input(Input::Tick(secs(115.0)));
-        let answered = json!({
-            "session_id": "s1", "matched": "id",
-            "entries": [
-                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
-                {"ts": "2", "role": "assistant", "kind": "text", "summary": "Done.\n\nShall I go on?"},
-                {"ts": "3", "role": "user", "kind": "text", "summary": "yes"}
-            ]
-        });
-        let out = peek_answer(&mut s, &out, "working", answered);
+        match s.agent_view() {
+            Some(Event::AgentView { name, .. }) => assert_eq!(name, "the handlr agent"),
+            other => panic!("{other:?}"),
+        }
+        let out = s.input(Input::CloseAgent);
+        assert_eq!(
+            requests(&out, "session.unsubscribe")[0].params,
+            json!({"subscription_id": 1})
+        );
+        assert!(s.agent_view().is_none());
+        // Closed, nothing is asked for it, and its late deliveries are
+        // ignored.
+        assert!(requests(&s.input(Input::Tick(secs(200.0))), "session.peek").is_empty());
+        let out = deliver(&mut s, vec![text_at(9, 0, "late")], vec![]);
+        assert!(view_of(&out).is_none());
+    }
+
+    #[test]
+    fn an_approval_card_comes_from_the_daemon_and_fades() {
+        let mut s = viewing("working", asking());
+        // A confirmation for the pane makes no card of the client's own.
+        let out = s.incoming(confirm_requested(7));
+        assert!(view_of(&out).is_none(), "{out:?}");
+        let approval = |live: bool| {
+            json!({"serial": serial(2, 64), "kind": "card", "card": {
+                "card": "approval", "live": live, "title": "Approval needed",
+                "text": "Approve sending \"continue\" to Claude?", "confirm_id": 7}})
+        };
+        let out = deliver(&mut s, vec![approval(true)], vec![]);
         let (_, cards, pinned) = view_of(&out).expect("the view");
+        let kinds: Vec<_> = cards.iter().map(|c| (c.kind, c.live)).collect();
+        assert_eq!(
+            kinds,
+            [
+                (crate::view::CardKind::Approval, true),
+                (crate::view::CardKind::Question, true)
+            ]
+        );
+        assert_eq!(cards[0].confirm_id, Some(7));
+        assert_eq!(pinned, Some(0), "an approval outranks the question");
+        let out = deliver(&mut s, vec![approval(false)], vec![]);
+        let (_, cards, pinned) = view_of(&out).expect("the view");
+        assert_eq!(cards.len(), 2, "resent in place, not added");
+        assert!(!cards[0].live, "resolved: faded");
+        assert_eq!(pinned, Some(1));
+    }
+
+    #[test]
+    fn a_question_resolves_when_the_daemon_says_so() {
+        let mut s = viewing("idle", asking());
+        let resolved = json!({"serial": serial(2, 128), "kind": "card", "card": {
+            "card": "question", "live": false, "title": "the handlr agent is asking",
+            "text": "Shall I go on?"}});
+        let yes = json!({"serial": serial(3, 0), "kind": "turn", "entries": [
+            {"ts": "3", "role": "user", "kind": "text", "summary": "yes"}]});
+        let out = deliver(&mut s, vec![resolved, yes], vec![]);
+        let (entries, cards, pinned) = view_of(&out).expect("the view");
+        assert_eq!(entries.len(), 3);
         assert_eq!(cards.len(), 1);
         assert!(!cards[0].live);
         assert_eq!(cards[0].at, 2, "still at its reply");
         assert_eq!(pinned, None);
+        // A card that no longer stands goes.
+        let out = deliver(&mut s, vec![], vec![serial(2, 128)]);
+        let (_, cards, _) = view_of(&out).expect("the view");
+        assert!(cards.is_empty());
+    }
+
+    #[test]
+    fn a_disconnect_keeps_the_view_and_subscribes_from_its_newest_on_hello() {
+        let mut s = viewing("idle", asking());
+        s.input(Input::Tick(secs(101.0)));
+        s.disconnected(1000);
+        let before = summaries(&s);
+        assert_eq!(before.len(), 2);
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(id, json!({"server": "handlr"})));
+        let subs = requests(&out, "session.subscribe");
+        assert_eq!(subs.len(), 1, "{out:?}");
+        assert_eq!(
+            subs[0].params,
+            json!({"pane_id": "w2:pZ", "sections": 200, "after": serial(2, 128)})
+        );
+        assert!(requests(&out, "session.peek").is_empty());
+        // Only what was missed comes, not a reset: what was shown stays.
+        let sub = subs[0].id.clone();
+        s.incoming(response(
+            sub,
+            json!({"subscription_id": 4, "delivery": {
+                "subscription_id": 4, "pane_id": "w2:pZ", "agent": "claude",
+                "session": {"session_id": "s1", "matched": "id"}, "reason": null,
+                "sections": [text_at(3, 0, "missed")]}}),
+        ));
+        assert_eq!(
+            summaries(&s),
+            [&before[..], &["missed".to_string()]].concat()
+        );
+        // Deliveries for the old subscription are ignored.
+        deliver(&mut s, vec![text_at(4, 0, "old")], vec![]);
+        assert_eq!(summaries(&s).len(), 3);
+    }
+
+    #[test]
+    fn sections_append_reset_replace_and_drop() {
+        let mut s = viewing("working", json!(null));
+        assert!(summaries(&s).is_empty());
+        // Appended, in serial order.
+        deliver(
+            &mut s,
+            vec![text_at(1, 0, "one"), text_at(2, 0, "two")],
+            vec![],
+        );
+        assert_eq!(summaries(&s), ["one", "two"]);
+        // A resent section replaces in place; a removed one goes.
+        deliver(
+            &mut s,
+            vec![text_at(1, 0, "one, grown")],
+            vec![serial(2, 0)],
+        );
+        assert_eq!(summaries(&s), ["one, grown"]);
+        // Another session file's sections, without a reset: ignored.
+        let mut other = text_at(5, 0, "other file");
+        other["serial"] = json!(common::Serial::new(FILE + 1, 5, 0).to_string());
+        deliver(&mut s, vec![other.clone()], vec![]);
+        assert_eq!(summaries(&s), ["one, grown"]);
+        // With a reset, they replace everything.
+        s.incoming(note(
+            "session.delivery",
+            json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+                "reset": true, "session": {"session_id": "s2", "matched": "id"},
+                "reason": null, "sections": [other]}),
+        ));
+        assert_eq!(summaries(&s), ["other file"]);
+        // No session: nothing shown, and not loading.
+        let out = s.incoming(note(
+            "session.delivery",
+            json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+                "session": null, "reason": "pane_closed"}),
+        ));
+        assert!(matches!(
+            view_of(&out),
+            Some((entries, _, _)) if entries.is_empty()
+        ));
+        // A closed pane ends the subscription: no unsubscribe on close.
+        let out = s.input(Input::CloseAgent);
+        assert!(requests(&out, "session.unsubscribe").is_empty());
+    }
+
+    #[test]
+    fn status_and_question_change_only_when_given() {
+        let mut s = viewing("idle", asking());
+        // Absent: unchanged.
+        deliver(&mut s, vec![], vec![]);
+        assert!(s.view.as_ref().unwrap().pending_question.is_some());
+        s.incoming(note(
+            "session.delivery",
+            json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+                "session": {"session_id": "s1", "matched": "id"}, "reason": null,
+                "status": "working", "pending_question": null}),
+        ));
+        let v = s.view.as_ref().unwrap();
+        assert_eq!(v.status, "working");
+        assert!(v.pending_question.is_none(), "null clears it");
+    }
+
+    /// The sections, as (line, slot, kind), in the order the view holds.
+    fn held(s: &State) -> Vec<String> {
+        s.view
+            .as_ref()
+            .unwrap()
+            .sections
+            .iter()
+            .map(|x| x.serial.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_view_is_in_serial_order_however_sections_arrive() {
+        // Twelve sections, two to a line, and a card.
+        let all: Vec<Value> = (1..=6)
+            .flat_map(|line| [text_at(line, 0, "a"), text_at(line, 1, "b")])
+            .chain([json!({"serial": serial(6, 194), "kind": "card", "card": {
+                "card": "finished", "live": true, "title": "Finished", "text": "b"}})])
+            .collect();
+        let sorted: Vec<String> = all
+            .iter()
+            .map(|x| x["serial"].as_str().unwrap().to_string())
+            .collect();
+        // In order, in one delivery.
+        let mut a = viewing("idle", json!(null));
+        deliver(&mut a, all.clone(), vec![]);
+        // Shuffled, duplicated, and split between live deliveries and a
+        // history page.
+        let mut b = viewing("idle", json!(null));
+        let order = [9, 3, 12, 0, 7, 7, 5, 11, 1, 3, 10, 9];
+        deliver(
+            &mut b,
+            order[..4].iter().map(|&i| all[i].clone()).collect(),
+            vec![],
+        );
+        deliver(
+            &mut b,
+            order[4..8].iter().map(|&i| all[i].clone()).collect(),
+            vec![],
+        );
+        let out = b.input(Input::LoadEarlier);
+        let page = requests(&out, "session.history")[0].clone();
+        b.incoming(response(
+            page.id,
+            json!({"sections": [all[2].clone(), all[4].clone(), all[6].clone(), all[8].clone(),
+                                all[0].clone()],
+                   "start": false}),
+        ));
+        deliver(
+            &mut b,
+            order[8..].iter().map(|&i| all[i].clone()).collect(),
+            vec![],
+        );
+        assert_eq!(held(&a), sorted);
+        assert_eq!(held(&b), sorted);
+        assert_eq!(a.agent_view(), b.agent_view());
+        // A resent section replaces in place, never adds a copy.
+        deliver(&mut b, vec![text_at(3, 1, "b, again")], vec![]);
+        assert_eq!(held(&b), sorted);
+        assert_eq!(summaries(&b)[5], "b, again");
+    }
+
+    fn history_marks(s: &State) -> (bool, bool) {
+        match s.agent_view() {
+            Some(Event::AgentView {
+                loading_earlier,
+                start,
+                ..
+            }) => (loading_earlier, start),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn scrolling_back_pages_in_history_one_page_at_a_time_to_the_start() {
+        let mut s = viewing("idle", json!(null));
+        // Nothing held: nothing to page back from.
+        assert!(requests(&s.input(Input::LoadEarlier), "session.history").is_empty());
+        deliver(&mut s, vec![text_at(300, 0, "newest")], vec![]);
+        let out = s.input(Input::LoadEarlier);
+        let pages = requests(&out, "session.history");
+        assert_eq!(
+            pages[0].params,
+            json!({"subscription_id": 1, "before": serial(300, 0), "sections": 100})
+        );
+        assert_eq!(history_marks(&s), (true, false));
+        // One in flight at a time.
+        assert!(requests(&s.input(Input::LoadEarlier), "session.history").is_empty());
+        let id = pages[0].id.clone();
+        s.incoming(response(
+            id,
+            json!({"sections": [text_at(100, 0, "older")], "start": false}),
+        ));
+        assert_eq!(summaries(&s), ["older", "newest"]);
+        assert_eq!(history_marks(&s), (false, false));
+        // The next page is from the new oldest; its error SESSION_CHANGED
+        // waits for the reset.
+        let out = s.input(Input::LoadEarlier);
+        let page = requests(&out, "session.history")[0].clone();
+        assert_eq!(page.params["before"], json!(serial(100, 0)));
+        let changed = Response::err(
+            Some(page.id.clone()),
+            libhandlr_proto::ErrorObject::new(-32014, "the session changed"),
+        );
+        let out = s.incoming(Incoming::Response(changed));
+        assert!(!events(&out).iter().any(|e| matches!(e, Event::Error(_))));
+        assert_eq!(history_marks(&s), (false, false));
+        // A page that reaches the start: no more are asked.
+        let out = s.input(Input::LoadEarlier);
+        let page = requests(&out, "session.history")[0].clone();
+        s.incoming(response(
+            page.id,
+            json!({"sections": [text_at(1, 0, "first")], "start": true}),
+        ));
+        assert_eq!(history_marks(&s), (false, true));
+        assert_eq!(summaries(&s), ["first", "older", "newest"]);
+        assert!(requests(&s.input(Input::LoadEarlier), "session.history").is_empty());
+        // A reset clears the start.
+        session_answer(&mut s, &[], "idle", asking());
+        assert_eq!(history_marks(&s), (false, false));
+    }
+
+    #[test]
+    fn history_pages_are_not_read_aloud_but_live_replies_are() {
+        let mut s = viewing("working", json!(null));
+        s.input(Input::ReadAloud(true));
+        deliver(&mut s, vec![text_at(50, 0, "live")], vec![]);
+        let out = s.input(Input::LoadEarlier);
+        let page = requests(&out, "session.history")[0].clone();
+        let out = s.incoming(response(
+            page.id,
+            json!({"sections": [text_at(10, 0, "old")], "start": false}),
+        ));
+        assert!(requests(&out, "speech.summarize").is_empty());
+        let out = deliver(&mut s, vec![text_at(51, 0, "newer")], vec![]);
+        let asked = requests(&out, "speech.summarize");
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].params["text"], "newer");
+    }
+
+    fn focus_on(pane: &str) -> Value {
+        json!({"pane_id": pane, "agent": "Claude", "name": format!("Claude in {pane}"),
+               "spoken": "Claude"})
+    }
+
+    #[test]
+    fn follow_off_leaves_the_subscription_where_it_is() {
+        let mut s = viewing("idle", asking());
+        let out = s.incoming(note("focus.changed", json!({"focus": focus_on("w9:p1")})));
+        assert!(requests(&out, "session.subscribe").is_empty());
+        assert!(requests(&out, "session.unsubscribe").is_empty());
+        match s.agent_view() {
+            Some(Event::AgentView { terminal_on, .. }) => {
+                assert_eq!(terminal_on.as_deref(), Some("Claude in w9:p1"))
+            }
+            other => panic!("{other:?}"),
+        }
+        // Back on the view's pane: no line.
+        s.incoming(note("focus.changed", json!({"focus": focus_on("w2:pZ")})));
+        assert!(matches!(
+            s.agent_view(),
+            Some(Event::AgentView {
+                terminal_on: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn follow_on_moves_the_subscription_to_the_focus() {
+        let mut s = viewing("idle", asking());
+        s.input(Input::Follow(true));
+        let out = s.incoming(note("focus.changed", json!({"focus": focus_on("w9:p1")})));
+        assert_eq!(
+            requests(&out, "session.unsubscribe")[0].params,
+            json!({"subscription_id": 1})
+        );
+        let subs = requests(&out, "session.subscribe");
+        assert_eq!(subs[0].params, json!({"pane_id": "w9:p1", "sections": 200}));
+        // A fresh view of the new pane.
+        assert!(summaries(&s).is_empty());
+        // A pane with no agent is not followed.
+        let out = s.incoming(note(
+            "focus.changed",
+            json!({"focus": {"pane_id": "w9:p2", "name": "a shell"}}),
+        ));
+        assert!(requests(&out, "session.subscribe").is_empty());
+    }
+
+    #[test]
+    fn a_stopped_turn_asks_the_list_while_herdr_says_working() {
+        // Plan 20261023_04, A4: the view's session ends on a reply while
+        // herdr says working; the list's turn says whether it stopped.
+        let ended = json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text", "summary": "All 12 tests pass."}
+            ]
+        });
+        let mut s = viewing("working", ended.clone());
+        let out = s.input(Input::Tick(secs(105.0)));
+        let out = session_answer(&mut s, &out, "working", ended.clone());
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        let mut stopped = agent_info("w2:pZ", "working");
+        stopped["turn"] = json!({"state": "stopped", "line": "All 12 tests pass."});
+        answer_list(&mut s, &out, json!([stopped]));
+        // Known stopped: the next deliveries ask no more lists.
+        s.input(Input::Tick(secs(110.0)));
+        let out = session_answer(&mut s, &[], "working", ended);
+        assert!(requests(&out, "agents.list").is_empty());
     }
 
     #[test]
@@ -3890,18 +4364,6 @@ mod tests {
         let out = s.input(Input::Submit);
         let send = message_send(&out).expect("agents.send");
         assert_eq!(send.params["pane_id"], "w2:pZ");
-    }
-
-    #[test]
-    fn a_disconnect_keeps_the_view_and_peeks_again_on_hello() {
-        let mut s = viewing("idle", asking());
-        s.input(Input::Tick(secs(101.0)));
-        s.disconnected(1000);
-        assert!(s.agent_view().is_some());
-        let out = s.connected();
-        let id = sent(&out)[0].id.clone();
-        let out = s.incoming(response(id, json!({"server": "handlr"})));
-        assert_eq!(requests(&out, "session.peek").len(), 1, "{out:?}");
     }
 
     #[test]
@@ -4017,7 +4479,7 @@ mod tests {
     fn replies_are_read_aloud_from_when_play_is_on() {
         let mut s = viewing("working", asking());
         s.input(Input::ReadAloud(true));
-        // A later peek with a tool call, its output, and a new reply.
+        // A later delivery with a tool call, its output, and a new reply.
         let out = s.input(Input::Tick(secs(200.0)));
         let session = json!({
             "session_id": "s1", "matched": "id",
@@ -4030,7 +4492,7 @@ mod tests {
                  "summary": "## Result\n\nThe **tests** pass:\n```\nok\n```\n- `fmt` is clean"}
             ]
         });
-        let out = peek_answer(&mut s, &out, "idle", session);
+        let out = session_answer(&mut s, &out, "idle", session);
         // The daemon is asked how to say the new reply, and only that one.
         let asked = requests(&out, "speech.summarize");
         assert_eq!(asked.len(), 1, "{out:?}");
@@ -4163,7 +4625,7 @@ mod tests {
                                 "kind": "text", "summary": text}));
         }
         let session = json!({"session_id": "s1", "matched": "id", "entries": entries});
-        let out = peek_answer(&mut s, &out, "idle", session);
+        let out = session_answer(&mut s, &out, "idle", session);
         let asked = requests(&out, "speech.summarize")
             .into_iter()
             .cloned()
@@ -4250,7 +4712,7 @@ mod tests {
     fn nothing_is_read_with_play_off() {
         let mut s = viewing("working", asking());
         let out = s.input(Input::Tick(secs(200.0)));
-        let out = peek_answer(&mut s, &out, "idle", asking());
+        let out = session_answer(&mut s, &out, "idle", asking());
         assert!(!events(&out).iter().any(|e| matches!(e, Event::Say(_))));
     }
 
@@ -4277,7 +4739,7 @@ mod tests {
         };
         assert_eq!(loading(&out), Some(true));
         // No session at all: answered, so no longer loading.
-        let out = peek_answer(&mut s, &out, "idle", Value::Null);
+        let out = session_answer(&mut s, &out, "idle", Value::Null);
         assert_eq!(loading(&out), Some(false));
     }
 
@@ -4504,7 +4966,7 @@ mod tests {
                 {"ts": "3", "role": "user", "kind": "text", "summary": "Yes, go on"}
             ]
         });
-        let out = peek_answer(&mut s, &out, "idle", session);
+        let out = session_answer(&mut s, &out, "idle", session);
         assert_eq!(typed(&out), Some(None));
     }
 
@@ -4540,7 +5002,7 @@ mod tests {
                             "summary": "Built it.\n\nInstall it on the S23?"}));
         let session = json!({"session_id": "s1", "matched": "id", "entries": entries,
                              "pending_question": {"text": "Install it on the S23?", "ts": "10"}});
-        let out = peek_answer(&mut s, &out, "idle", session);
+        let out = session_answer(&mut s, &out, "idle", session);
         let asked = requests(&out, "speech.summarize")[0].clone();
         s.incoming(response(
             asked.id,
@@ -4697,7 +5159,7 @@ mod tests {
         let out = s.input(Input::OpenAgent("w2:pZ".into()));
         // Opening the view lists, as before, for its name.
         answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
-        peek_answer(&mut s, &out, "working", running());
+        session_answer(&mut s, &out, "working", running());
         let mut asked = 0;
         for t in 1..=60 {
             let out = s.input(Input::Tick(secs(f64::from(t))));
@@ -4714,39 +5176,6 @@ mod tests {
         // Back on the overview: listed at once.
         let out = s.input(Input::CloseAgent);
         assert_eq!(requests(&out, "agents.list").len(), 1);
-    }
-
-    #[test]
-    fn a_stopped_turn_finishes_the_view_while_herdr_says_working() {
-        // Plan 20261023_04, A4: the view's session ends on a reply while
-        // herdr says working; the list's turn says it stopped.
-        let ended = json!({
-            "session_id": "s1", "matched": "id",
-            "entries": [
-                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
-                {"ts": "2", "role": "assistant", "kind": "text", "summary": "All 12 tests pass."}
-            ]
-        });
-        let mut s = viewing("working", ended.clone());
-        // herdr says working and the list's turn is not known: no card.
-        assert!(matches!(
-            s.agent_view(),
-            Some(Event::AgentView { cards, .. }) if cards.is_empty()
-        ));
-        // The next peek, 5 s on, asks the list for the turn.
-        let out = s.input(Input::Tick(secs(105.0)));
-        let out = peek_answer(&mut s, &out, "working", ended.clone());
-        let mut stopped = agent_info("w2:pZ", "working");
-        stopped["turn"] = json!({"state": "stopped", "line": "All 12 tests pass."});
-        let out = answer_list(&mut s, &out, json!([stopped]));
-        let (_, cards, pinned) = view_of(&out).expect("the view again");
-        assert_eq!(cards.len(), 1, "{out:?}");
-        assert_eq!(cards[0].kind, crate::view::CardKind::Finished);
-        assert_eq!(pinned, Some(0));
-        // Known stopped: the next peeks ask no more lists.
-        let out = s.input(Input::Tick(secs(110.0)));
-        let out = peek_answer(&mut s, &out, "working", ended);
-        assert!(requests(&out, "agents.list").is_empty());
     }
 
     #[test]
@@ -4867,7 +5296,7 @@ mod tests {
         for t in (110..=360).step_by(10) {
             sent.extend(s.input(Input::Tick(secs(t as f64))));
         }
-        for method in ["session.peek", "agents.list", "ping"] {
+        for method in ["session.peek", "session.subscribe", "agents.list", "ping"] {
             assert!(requests(&sent, method).is_empty(), "{method}: {sent:?}");
         }
         // After 4.5 minutes of quiet, one ping keeps the socket, saying the
@@ -4879,42 +5308,13 @@ mod tests {
         let ping = requests(&out, "ping")[0].clone();
         s.incoming(response(ping.id, json!({})));
         let out = s.input(Input::Background(false));
-        assert_eq!(requests(&out, "session.peek").len(), 1, "{out:?}");
+        // The daemon held the view's deliveries and sends them itself: the
+        // client asks nothing for the view.
+        assert!(requests(&out, "session.peek").is_empty(), "{out:?}");
+        assert!(requests(&out, "session.subscribe").is_empty(), "{out:?}");
         // Resumed: a ping says so at once.
         let pings = requests(&out, "ping");
         assert_eq!(pings.len(), 1, "{out:?}");
         assert_eq!(pings[0].params["active"], true);
-    }
-
-    #[test]
-    fn scrolled_back_entries_stay_as_newer_peeks_land() {
-        let e = |ts: &str| common::Entry {
-            ts: ts.to_string(),
-            role: common::Role::Assistant,
-            kind: common::EntryKind::Text,
-            tool: None,
-            summary: format!("at {ts}"),
-            links: Vec::new(),
-            origin: None,
-        };
-        let kept: Vec<_> = ["1", "2", "3", "4"].iter().map(|t| e(t)).collect();
-        // The newest window moved on: 1 and 2 left it, 5 arrived, 3 changed.
-        let mut three = e("3");
-        three.summary = "at 3, with its result".into();
-        let merged = merge_entries(kept.clone(), vec![three.clone(), e("4"), e("5")]);
-        let ts: Vec<&str> = merged.iter().map(|x| x.ts.as_str()).collect();
-        assert_eq!(ts, ["1", "2", "3", "4", "5"]);
-        assert_eq!(merged[2], three, "a changed entry is updated");
-        // No overlap: the newer batch alone, not a gap.
-        let merged = merge_entries(kept, vec![e("9")]);
-        assert_eq!(merged.len(), 1);
-    }
-
-    #[test]
-    fn after_a_reconnect_the_next_peek_starts_fresh() {
-        let mut s = viewing("working", asking());
-        s.disconnected(1000);
-        let v = s.view.as_ref().unwrap();
-        assert_eq!(v.session_id, None, "the next peek replaces, not merges");
     }
 }

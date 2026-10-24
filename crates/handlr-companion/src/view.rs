@@ -1,37 +1,25 @@
-//! The agent view's priority cards (plan 20261022_03, decision 9, as
-//! amended at 02:34 EDT: "the agent view as terminal scrollback with
-//! priority cards", "L3-1: pinned to the bottom, scrolling overrides" and
-//! "L3-2: rules for now").
+//! The agent view's sections (plan 20261023_03, the 14:54 EDT amendment,
+//! A6 and A7, and the 22:55 EDT amendment, items 1–3).
 //!
-//! A card sits at its place in the agent's transcript and is found by four
-//! rules from data the client already has, highest priority first:
-//! 1. **Approval needed:** a handlr confirmation pending for this pane;
-//! 2. **The agent is asking:** its pending question (decision 8);
-//! 3. **Something broke:** an error result, or failing tests, as the last
-//!    tool result of the last turn; or the pane `blocked`;
-//! 4. **Finished:** the agent is idle after a turn that ended with a reply,
-//!    shown with the reply's first paragraph; or the daemon's turn says
-//!    stopped and the reply is the newest entry, whatever herdr says (plan
-//!    20261023_04, A4: herdr says working while a background agent runs).
+//! The daemon numbers every unit of the agent view (a turn's prompt, a
+//! block of text, a tool call and its result, a context line, a priority
+//! card) with a [`Serial`] derived from the session file, and runs the
+//! four card rules itself. The client keeps every section it has been
+//! given, for the life of the view, in a map sorted by serial
+//! ([`Sections`]): no cap and no trimming, so scrolling back can page in
+//! the whole session. Whatever order sections arrive in (a history page
+//! after live deliveries, a resent section, a reconnect's backfill), the
+//! view shows them in serial order, and a serial already held is replaced
+//! in place, never added twice.
 //!
-//! A card is live until it is resolved: the confirmation resolves, a user
-//! entry follows the question (an entry with an `origin` is context, not
-//! the user), a later tool result succeeds (or the pane
-//! is no longer blocked), or the agent works again. [`Cards`] remembers the
-//! cards it has seen while the view is open, so a resolved one stays in
-//! the flow, faded, instead of vanishing. The pinned card is the highest
-//! live one.
+//! For the app, the map is flattened into the entries of its non-card
+//! sections and the cards placed among them ([`Sections::flatten`]); the
+//! pinned card is the highest live one, the newest of its kind.
 
-use libhandlr_proto::common::{Entry, EntryKind, Link, PendingQuestion, Role, Turn};
+use std::collections::BTreeMap;
 
-/// The kinds of card, highest priority first (the order compares so).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CardKind {
-    Approval,
-    Question,
-    Broke,
-    Finished,
-}
+pub use libhandlr_proto::common::CardKind;
+use libhandlr_proto::common::{Entry, EntryKind, Link, Role, Section, SectionKind, Serial};
 
 /// A card as the view shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,380 +43,125 @@ pub struct AgentCard {
     pub links: Vec<Link>,
 }
 
-/// The links of `links` whose text is in `text`.
-fn links_in(links: &[Link], text: &str) -> Vec<Link> {
-    links
-        .iter()
-        .filter(|l| text.contains(&l.text))
-        .cloned()
-        .collect()
-}
-
-/// The longest text a Broke or Finished card carries, in characters.
-pub const CARD_TEXT_MAX: usize = 300;
-
-/// A handlr confirmation pending for the viewed pane.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingConfirm {
-    pub confirm_id: u64,
-    /// The question, as spoken.
-    pub text: String,
-}
-
-/// What the rules read.
-#[derive(Debug, Clone, Copy)]
-pub struct Facts<'a> {
-    /// The agent's shown name.
-    pub name: &'a str,
-    /// herdr's `agent_status`.
-    pub status: &'a str,
-    pub entries: &'a [Entry],
-    pub pending_question: Option<&'a PendingQuestion>,
-    /// Confirmations pending for this pane, oldest first.
-    pub confirms: &'a [PendingConfirm],
-    /// The turn `agents.list` last gave for the pane, from its session.
-    pub turn: Option<&'a Turn>,
-}
-
-/// Where a found card goes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Anchor {
-    /// After this entry.
-    Entry(Entry),
-    /// After the newest entry when the card is first seen: a confirmation,
-    /// or the pane being blocked, which no entry marks.
-    Newest,
-}
-
-/// A live card, as the rules found it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Found {
-    pub kind: CardKind,
-    pub anchor: Anchor,
-    pub title: String,
-    pub text: String,
-    pub confirm_id: Option<u64>,
-    pub about_plan: bool,
-    pub links: Vec<Link>,
-}
-
-/// The live cards the four rules find now, highest priority first.
-pub fn live_cards(f: &Facts) -> Vec<Found> {
-    let mut found = Vec::new();
-    // 1. Approval needed.
-    for c in f.confirms {
-        found.push(Found {
-            kind: CardKind::Approval,
-            anchor: Anchor::Newest,
-            title: "Approval needed".to_string(),
-            text: c.text.clone(),
-            confirm_id: Some(c.confirm_id),
-            about_plan: false,
-            links: Vec::new(),
-        });
-    }
-    // 2. The agent is asking.
-    let mut question_at = None;
-    if let Some(q) = f.pending_question {
-        let reply = f
-            .entries
-            .iter()
-            .rposition(|e| is_reply(e) && e.ts == q.ts)
-            .or_else(|| f.entries.iter().rposition(is_reply));
-        question_at = reply;
-        found.push(Found {
-            kind: CardKind::Question,
-            anchor: reply.map_or(Anchor::Newest, |i| Anchor::Entry(f.entries[i].clone())),
-            title: format!("{} is asking", f.name),
-            text: q.text.clone(),
-            confirm_id: None,
-            about_plan: q.about_plan,
-            links: links_in(&q.links, &q.text),
-        });
-    }
-    // 3. Something broke: the pane blocked, or the last turn's last tool
-    // result failed.
-    if f.status == "blocked" {
-        found.push(Found {
-            kind: CardKind::Broke,
-            anchor: Anchor::Newest,
-            title: "Something broke".to_string(),
-            text: format!("{} is blocked and needs your input.", f.name),
-            confirm_id: None,
-            about_plan: false,
-            links: Vec::new(),
-        });
-    }
-    let turn = f
-        .entries
-        .iter()
-        .rposition(is_user_said)
-        .map_or(0, |i| i + 1);
-    if let Some(result) = f.entries[turn..]
-        .iter()
-        .rev()
-        .find(|e| e.kind == EntryKind::ToolResult)
-        && (is_error(&result.summary) || fails_tests(&result.summary))
-    {
-        let text = result
-            .summary
-            .strip_prefix("error: ")
-            .unwrap_or(&result.summary);
-        let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-        let what = match &result.tool {
-            Some(tool) => format!("{tool}: {}", first.trim()),
-            None => first.trim().to_string(),
-        };
-        let text = cut(&what, CARD_TEXT_MAX);
-        found.push(Found {
-            kind: CardKind::Broke,
-            anchor: Anchor::Entry(result.clone()),
-            title: "Something broke".to_string(),
-            links: links_in(&result.links, &text),
-            text,
-            confirm_id: None,
-            about_plan: false,
-        });
-    }
-    // 4. Finished: idle after a turn that ended with a reply, or the turn
-    // stopped on the newest entry. The question card already stands for a
-    // reply that asks.
-    // Context after the reply (a notification, a recap) does not end it.
-    let newest = f.entries.iter().rev().find(|e| e.origin.is_none());
-    let stopped = matches!(f.turn, Some(Turn::Stopped { .. })) && newest.is_some_and(is_reply);
-    if matches!(f.status, "idle" | "done") || stopped {
-        let last_text = f
-            .entries
-            .iter()
-            .rposition(|e| e.kind == EntryKind::Text && e.origin.is_none());
-        if let Some(i) = last_text.filter(|&i| is_reply(&f.entries[i]))
-            && question_at != Some(i)
-        {
-            let text = cut(first_paragraph(&f.entries[i].summary), CARD_TEXT_MAX);
-            found.push(Found {
-                kind: CardKind::Finished,
-                anchor: Anchor::Entry(f.entries[i].clone()),
-                title: "Finished".to_string(),
-                links: links_in(&f.entries[i].links, &text),
-                text,
-                confirm_id: None,
-                about_plan: false,
-            });
-        }
-    }
-    found
-}
-
-fn is_reply(e: &Entry) -> bool {
-    e.role == Role::Assistant && e.kind == EntryKind::Text
-}
-
 /// The user's own words: a user text entry with no `origin`. An entry
 /// with one (a task notification, a peer's message, a recap) is context,
-/// never the user speaking, and makes no card of its own.
+/// never the user speaking.
 pub fn is_user_said(e: &Entry) -> bool {
     e.role == Role::User && e.kind == EntryKind::Text && e.origin.is_none()
 }
 
-/// A tool result the reader marked as an error (decision 2).
-pub fn is_error(summary: &str) -> bool {
-    summary.starts_with("error: ")
-}
-
-/// Whether a tool result reports failing tests: cargo's `test result:
-/// FAILED`, a count such as `2 failed` (pytest, jest, go), or a line
-/// starting `FAIL` (jest, go).
-pub fn fails_tests(summary: &str) -> bool {
-    if summary.contains("test result: FAILED") {
-        return true;
-    }
-    if summary.lines().any(|l| {
-        let l = l.trim_start();
-        l.starts_with("FAIL ") || l.starts_with("--- FAIL") || l == "FAIL"
-    }) {
-        return true;
-    }
-    let words: Vec<&str> = summary.split_whitespace().collect();
-    words.windows(2).any(|w| {
-        let count = w[0].trim_start_matches(['(', '[', ',']);
-        let failed = w[1].trim_end_matches([',', ';', '.', ')', ']']);
-        failed.eq_ignore_ascii_case("failed") && count.parse::<u64>().is_ok_and(|n| n > 0)
-    })
-}
-
-/// The first paragraph of a reply: up to its first blank line.
-pub fn first_paragraph(text: &str) -> &str {
-    let text = text.trim();
-    let mut end = text.len();
-    let mut offset = 0;
-    for line in text.split_inclusive('\n') {
-        if line.trim().is_empty() {
-            end = offset;
-            break;
-        }
-        offset += line.len();
-    }
-    text[..end].trim()
-}
-
-/// `s` cut to `max` characters, ending in "…" when it was cut.
-fn cut(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let kept: String = s.chars().take(max.saturating_sub(1)).collect();
-    format!("{kept}\u{2026}")
-}
-
-/// What identifies a card across refreshes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CardId {
-    Confirm(u64),
-    /// Blocked, from the newest entry when it was first seen.
-    Blocked(Option<Entry>),
-    /// A card at an entry.
-    At(CardKind, Entry),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Remembered {
-    id: CardId,
-    kind: CardKind,
-    /// The entry it follows; `None` before every entry.
-    anchor: Option<Entry>,
-    title: String,
-    text: String,
-    confirm_id: Option<u64>,
-    about_plan: bool,
-    links: Vec<Link>,
-    live: bool,
-}
-
-/// Resolved cards kept at most; the oldest go first.
-pub const RESOLVED_KEPT: usize = 32;
-
-/// The cards of one open view: live ones by the rules, and resolved ones
-/// as they were last seen.
+/// The sections of one agent view, by packed serial.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Cards {
-    known: Vec<Remembered>,
+pub struct Sections {
+    map: BTreeMap<u64, Section>,
+    /// The session file the sections are of (the serials' prefix), once
+    /// known.
+    file: Option<u32>,
 }
 
-impl Cards {
-    /// Apply the rules to `facts`: new live cards are added, known ones
-    /// that are no longer found are resolved.
-    pub fn update(&mut self, facts: &Facts) {
-        let newest = facts.entries.last().cloned();
-        let was_live: Vec<bool> = self.known.iter().map(|r| r.live).collect();
-        for r in &mut self.known {
-            r.live = false;
-        }
-        for f in live_cards(facts) {
-            let id = match (&f.anchor, f.confirm_id) {
-                (_, Some(id)) => CardId::Confirm(id),
-                (Anchor::Entry(e), None) => CardId::At(f.kind, e.clone()),
-                (Anchor::Newest, None) => {
-                    // The same blocked spell continues while it is live.
-                    let ongoing = self.known.iter().zip(&was_live).find_map(|(r, &live)| {
-                        (live && matches!(r.id, CardId::Blocked(_)) && r.kind == f.kind)
-                            .then(|| r.id.clone())
-                    });
-                    ongoing.unwrap_or_else(|| CardId::Blocked(newest.clone()))
-                }
-            };
-            match self.known.iter_mut().find(|r| r.id == id) {
-                Some(r) => {
-                    r.live = true;
-                    r.title = f.title;
-                    r.text = f.text;
-                    r.about_plan = f.about_plan;
-                    r.links = f.links;
-                }
-                None => {
-                    let anchor = match f.anchor {
-                        Anchor::Entry(e) => Some(e),
-                        Anchor::Newest => newest.clone(),
-                    };
-                    self.known.push(Remembered {
-                        id,
-                        kind: f.kind,
-                        anchor,
-                        title: f.title,
-                        text: f.text,
-                        confirm_id: f.confirm_id,
-                        about_plan: f.about_plan,
-                        links: f.links,
-                        live: true,
-                    });
-                }
-            }
-        }
-        // Resolved cards whose entry has left the window go, and at most
-        // `RESOLVED_KEPT` stay.
-        self.known.retain(|r| {
-            r.live
-                || match &r.anchor {
-                    None => true,
-                    Some(a) => facts.entries.contains(a),
-                }
-        });
-        let resolved = self.known.iter().filter(|r| !r.live).count();
-        let mut drop = resolved.saturating_sub(RESOLVED_KEPT);
-        self.known.retain(|r| {
-            if !r.live && drop > 0 {
-                drop -= 1;
-                false
-            } else {
-                true
-            }
-        });
+impl Sections {
+    /// Drop everything: a reset, or another session.
+    pub fn clear(&mut self) {
+        self.map.clear();
+        self.file = None;
     }
 
-    /// The cards placed in `entries`, in flow order (by place, then
-    /// priority), and the index of the pinned one: the highest live card,
-    /// the newest of its kind.
-    pub fn placed(&self, entries: &[Entry]) -> (Vec<AgentCard>, Option<usize>) {
-        let mut cards: Vec<AgentCard> = self
-            .known
-            .iter()
-            .filter_map(|r| {
-                let at = match &r.anchor {
-                    None => 0,
-                    Some(a) => match entries.iter().rposition(|e| e == a) {
-                        Some(i) => i + 1,
-                        // A live card whose entry left the window: first.
-                        None if r.live => 0,
-                        None => return None,
-                    },
-                };
-                Some(AgentCard {
-                    kind: r.kind,
-                    live: r.live,
-                    at,
-                    title: r.title.clone(),
-                    text: r.text.clone(),
-                    confirm_id: r.confirm_id,
-                    about_plan: r.about_plan,
-                    links: r.links.clone(),
-                })
-            })
-            .collect();
-        cards.sort_by_key(|c| (c.at, c.kind));
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    /// The session file held, if known.
+    pub fn file(&self) -> Option<u32> {
+        self.file
+    }
+
+    /// Insert `section`, or replace the one with its serial. A section of
+    /// another session file than the one held is ignored (`false`).
+    pub fn put(&mut self, section: Section) -> bool {
+        let file = section.serial.file;
+        match self.file {
+            Some(held) if held != file => return false,
+            Some(_) => {}
+            None => self.file = Some(file),
+        }
+        self.map.insert(section.serial.to_u64(), section);
+        true
+    }
+
+    /// Drop the section at `serial`, if held.
+    pub fn remove(&mut self, serial: Serial) {
+        if self.file == Some(serial.file) {
+            self.map.remove(&serial.to_u64());
+        }
+    }
+
+    /// The oldest serial held.
+    pub fn oldest(&self) -> Option<Serial> {
+        self.map.keys().next().map(|k| Serial::from_u64(*k))
+    }
+
+    /// The newest serial held.
+    pub fn newest(&self) -> Option<Serial> {
+        self.map.keys().next_back().map(|k| Serial::from_u64(*k))
+    }
+
+    /// The sections, in serial order.
+    pub fn iter(&self) -> impl Iterator<Item = &Section> {
+        self.map.values()
+    }
+
+    /// The entries of the non-card sections, in serial order, and the
+    /// cards placed among them (each `at` the number of entries before
+    /// it), with the index of the pinned one: the highest live card, the
+    /// newest of its kind. `hide` drops a card the user has just answered.
+    pub fn flatten(
+        &self,
+        hide: impl Fn(&AgentCard) -> bool,
+    ) -> (Vec<Entry>, Vec<AgentCard>, Option<usize>) {
+        let mut entries = Vec::new();
+        let mut cards = Vec::new();
+        for section in self.map.values() {
+            match (&section.kind, &section.card) {
+                (SectionKind::Card, Some(body)) => {
+                    let card = AgentCard {
+                        kind: body.card,
+                        live: body.live,
+                        at: entries.len(),
+                        title: body.title.clone(),
+                        text: body.text.clone(),
+                        confirm_id: body.confirm_id,
+                        about_plan: body.about_plan,
+                        links: body.links.clone(),
+                    };
+                    if !hide(&card) {
+                        cards.push(card);
+                    }
+                }
+                // A card without a body, or a kind from a newer daemon:
+                // its entries, if any, are shown as they are.
+                _ => entries.extend(section.entries.iter().cloned()),
+            }
+        }
         let pinned = cards
             .iter()
             .enumerate()
             .filter(|(_, c)| c.live)
-            .min_by_key(|(_, c)| (c.kind, std::cmp::Reverse(c.at)))
+            .min_by_key(|(i, c)| (c.kind, std::cmp::Reverse(*i)))
             .map(|(i, _)| i);
-        (cards, pinned)
+        (entries, cards, pinned)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use libhandlr_proto::common::CardBody;
 
-    fn entry(ts: &str, role: Role, kind: EntryKind, summary: &str) -> Entry {
+    pub fn entry(ts: &str, role: Role, kind: EntryKind, summary: &str) -> Entry {
         Entry {
             ts: ts.to_string(),
             role,
@@ -440,397 +173,104 @@ mod tests {
         }
     }
 
-    fn context(ts: &str, origin: &str, text: &str) -> Entry {
-        Entry {
-            origin: Some(origin.to_string()),
-            ..user(ts, text)
+    pub const FILE: u32 = 0x3fa9_c21e;
+
+    pub fn text(line: u32, slot: u8, summary: &str) -> Section {
+        Section {
+            serial: Serial::new(FILE, line, slot),
+            kind: SectionKind::Text,
+            entries: vec![entry(
+                &line.to_string(),
+                Role::Assistant,
+                EntryKind::Text,
+                summary,
+            )],
+            card: None,
         }
     }
 
-    fn user(ts: &str, text: &str) -> Entry {
-        entry(ts, Role::User, EntryKind::Text, text)
-    }
-
-    fn reply(ts: &str, text: &str) -> Entry {
-        entry(ts, Role::Assistant, EntryKind::Text, text)
-    }
-
-    fn call(ts: &str) -> Entry {
-        entry(
-            ts,
-            Role::Assistant,
-            EntryKind::ToolUse,
-            "Bash {\"command\":\"cargo test\"}",
-        )
-    }
-
-    fn result(ts: &str, text: &str) -> Entry {
-        entry(ts, Role::Tool, EntryKind::ToolResult, text)
-    }
-
-    fn facts<'a>(
-        status: &'a str,
-        entries: &'a [Entry],
-        pending_question: Option<&'a PendingQuestion>,
-        confirms: &'a [PendingConfirm],
-    ) -> Facts<'a> {
-        Facts {
-            name: "Claude",
-            status,
-            entries,
-            pending_question,
-            confirms,
-            turn: None,
+    pub fn card(line: u32, slot: u8, kind: CardKind, live: bool) -> Section {
+        Section {
+            serial: Serial::new(FILE, line, slot),
+            kind: SectionKind::Card,
+            entries: Vec::new(),
+            card: Some(CardBody {
+                card: kind,
+                live,
+                title: format!("{kind:?}"),
+                text: "t".to_string(),
+                confirm_id: (kind == CardKind::Approval).then_some(u64::from(line)),
+                about_plan: false,
+                links: Vec::new(),
+            }),
         }
     }
 
-    fn kinds(found: &[Found]) -> Vec<CardKind> {
-        found.iter().map(|f| f.kind).collect()
-    }
-
-    fn question(ts: &str) -> PendingQuestion {
-        PendingQuestion {
-            text: "Shall I go on?".to_string(),
-            ts: ts.to_string(),
-            about_plan: false,
-            plan: None,
-            links: Vec::new(),
-        }
-    }
-
-    fn confirm(id: u64) -> PendingConfirm {
-        PendingConfirm {
-            confirm_id: id,
-            text: "Approve sending \"continue\" to Claude?".to_string(),
-        }
+    fn summaries(s: &Sections) -> Vec<String> {
+        s.flatten(|_| false)
+            .0
+            .into_iter()
+            .map(|e| e.summary)
+            .collect()
     }
 
     #[test]
-    fn rule_1_a_pending_confirmation_needs_approval() {
-        let entries = [user("1", "go"), reply("2", "Working on it.")];
-        let confirms = [confirm(7)];
-        let found = live_cards(&facts("working", &entries, None, &confirms));
-        assert_eq!(kinds(&found), [CardKind::Approval]);
-        assert_eq!(found[0].confirm_id, Some(7));
-        assert_eq!(found[0].anchor, Anchor::Newest);
-        assert_eq!(found[0].text, "Approve sending \"continue\" to Claude?");
+    fn sections_are_held_in_serial_order_and_replaced_in_place() {
+        let mut s = Sections::default();
+        assert!(s.put(text(5, 0, "five")));
+        assert!(s.put(text(2, 0, "two")));
+        assert!(s.put(text(5, 1, "five b")));
+        assert_eq!(summaries(&s), ["two", "five", "five b"]);
+        // Resent: replaced, not added.
+        assert!(s.put(text(2, 0, "two, grown")));
+        assert_eq!(summaries(&s), ["two, grown", "five", "five b"]);
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.oldest(), Some(Serial::new(FILE, 2, 0)));
+        assert_eq!(s.newest(), Some(Serial::new(FILE, 5, 1)));
+        s.remove(Serial::new(FILE, 5, 0));
+        assert_eq!(summaries(&s), ["two, grown", "five b"]);
     }
 
     #[test]
-    fn rule_2_the_pending_question_sits_at_its_reply() {
-        let entries = [
-            user("1", "go"),
-            reply("2", "Done.\n\nShall I go on?"),
-            call("3"),
-        ];
-        let q = question("2");
-        let found = live_cards(&facts("idle", &entries, Some(&q), &[]));
-        // The question stands for the reply: no Finished card for it.
-        assert_eq!(kinds(&found), [CardKind::Question]);
-        assert_eq!(found[0].anchor, Anchor::Entry(entries[1].clone()));
-        assert_eq!(found[0].title, "Claude is asking");
-        assert_eq!(found[0].text, "Shall I go on?");
+    fn another_files_sections_are_ignored() {
+        let mut s = Sections::default();
+        s.put(text(1, 0, "one"));
+        let mut other = text(9, 0, "elsewhere");
+        other.serial.file = FILE + 1;
+        assert!(!s.put(other));
+        assert_eq!(summaries(&s), ["one"]);
+        s.clear();
+        assert_eq!(s.file(), None);
     }
 
     #[test]
-    fn rule_3_an_error_or_failing_tests_in_the_last_turn_or_blocked() {
-        let error = [
-            user("1", "test it"),
-            call("2"),
-            result("3", "error: exit status 101\nmore"),
-        ];
-        let found = live_cards(&facts("working", &error, None, &[]));
-        assert_eq!(kinds(&found), [CardKind::Broke]);
-        assert_eq!(found[0].text, "Bash: exit status 101");
-        assert_eq!(found[0].anchor, Anchor::Entry(error[2].clone()));
-
-        let failing = [
-            user("1", "test it"),
-            call("2"),
-            result(
-                "3",
-                "running 4 tests\ntest result: FAILED. 3 passed; 1 failed",
-            ),
-        ];
+    fn cards_are_placed_among_the_entries_and_the_highest_live_is_pinned() {
+        let mut s = Sections::default();
+        s.put(text(1, 0, "a"));
+        s.put(card(1, 130, CardKind::Broke, true));
+        s.put(text(2, 0, "b"));
+        s.put(card(2, 128, CardKind::Question, true));
+        s.put(card(3, 64, CardKind::Approval, false));
+        let (entries, cards, pinned) = s.flatten(|_| false);
+        assert_eq!(entries.len(), 2);
+        let placed: Vec<(CardKind, usize, bool)> =
+            cards.iter().map(|c| (c.kind, c.at, c.live)).collect();
         assert_eq!(
-            kinds(&live_cards(&facts("working", &failing, None, &[]))),
-            [CardKind::Broke]
-        );
-
-        // An error before the last user entry is not this turn's.
-        let earlier = [call("1"), result("2", "error: boom"), user("3", "again")];
-        assert!(live_cards(&facts("working", &earlier, None, &[])).is_empty());
-
-        // Blocked: a card at the newest entry.
-        let quiet = [user("1", "go")];
-        let found = live_cards(&facts("blocked", &quiet, None, &[]));
-        assert_eq!(kinds(&found), [CardKind::Broke]);
-        assert_eq!(found[0].anchor, Anchor::Newest);
-        assert_eq!(found[0].text, "Claude is blocked and needs your input.");
-    }
-
-    #[test]
-    fn failing_tests_are_recognised() {
-        assert!(fails_tests("test result: FAILED. 1 passed; 2 failed"));
-        assert!(fails_tests("=== 2 failed, 10 passed in 0.3s ==="));
-        assert!(fails_tests("Tests: 1 failed, 4 passed, 5 total"));
-        assert!(fails_tests("FAIL src/app.test.js"));
-        assert!(fails_tests("--- FAIL: TestThing (0.00s)"));
-        assert!(!fails_tests("test result: ok. 12 passed; 0 failed"));
-        assert!(!fails_tests("nothing failed"));
-        assert!(!fails_tests("src/notify.rs"));
-    }
-
-    #[test]
-    fn rule_4_idle_after_a_reply_is_finished_with_its_first_paragraph() {
-        let entries = [
-            user("1", "go"),
-            call("2"),
-            result("3", "ok"),
-            reply(
-                "4",
-                "All 12 tests pass.\nThe build is clean.\n\nDetails follow.",
-            ),
-        ];
-        let found = live_cards(&facts("idle", &entries, None, &[]));
-        assert_eq!(kinds(&found), [CardKind::Finished]);
-        assert_eq!(found[0].text, "All 12 tests pass.\nThe build is clean.");
-        assert_eq!(found[0].anchor, Anchor::Entry(entries[3].clone()));
-        // Working, or a turn that has not replied, is not finished.
-        assert!(live_cards(&facts("working", &entries, None, &[])).is_empty());
-        let unanswered = [reply("1", "Hi."), user("2", "go")];
-        assert!(live_cards(&facts("idle", &unanswered, None, &[])).is_empty());
-    }
-
-    #[test]
-    fn rule_4_a_stopped_turn_is_finished_while_herdr_says_working() {
-        let entries = [user("1", "go"), reply("2", "All 12 tests pass.")];
-        let stopped = Turn::Stopped {
-            line: "All 12 tests pass.".to_string(),
-        };
-        let with = |turn, entries| Facts {
-            turn: Some(turn),
-            ..facts("working", entries, None, &[])
-        };
-        assert_eq!(
-            kinds(&live_cards(&with(&stopped, &entries))),
-            [CardKind::Finished]
-        );
-        // Working, by the session: no card.
-        let working = Turn::Working {
-            line: "All 12 tests pass.".to_string(),
-        };
-        assert!(live_cards(&with(&working, &entries)).is_empty());
-        // A stopped turn the view has seen go on (a tool call after the
-        // reply): the list is older than the session.
-        let went_on = [entries[0].clone(), entries[1].clone(), call("3")];
-        assert!(live_cards(&with(&stopped, &went_on)).is_empty());
-    }
-
-    #[test]
-    fn context_entries_are_not_the_user_and_make_no_card() {
-        let ctx = |ts| {
+            placed,
             [
-                context(ts, "task", "Background command finished"),
-                context(ts, "peer:docs-writer", "Rebased."),
-                context(ts, "agent:a1", "Report."),
-                context(ts, "recap", "You asked for the build."),
-                context(ts, "compact", "Conversation compacted"),
-            ]
-        };
-        // Finished stays finished with context after the reply, idle or
-        // stopped by the session.
-        let mut entries = vec![user("1", "go"), reply("2", "All 12 tests pass.")];
-        entries.extend(ctx("3"));
-        let found = live_cards(&facts("idle", &entries, None, &[]));
-        assert_eq!(kinds(&found), [CardKind::Finished]);
-        assert_eq!(found[0].anchor, Anchor::Entry(entries[1].clone()));
-        let stopped = Turn::Stopped {
-            line: "All 12 tests pass.".to_string(),
-        };
-        let working = Facts {
-            turn: Some(&stopped),
-            ..facts("working", &entries, None, &[])
-        };
-        assert_eq!(kinds(&live_cards(&working)), [CardKind::Finished]);
-        // A question stays asked past context, at its reply.
-        let mut asked = vec![user("1", "go"), reply("2", "Done.\n\nShall I go on?")];
-        asked.extend(ctx("3"));
-        let q = question("2");
-        let mut cards = Cards::default();
-        cards.update(&facts("idle", &asked, Some(&q), &[]));
-        let (placed, pinned) = cards.placed(&asked);
-        assert_eq!(placed.len(), 1);
-        assert_eq!(
-            (placed[0].kind, placed[0].at, placed[0].live),
-            (CardKind::Question, 2, true)
-        );
-        assert_eq!(pinned, Some(0));
-        // A failure in the turn is still the turn's after a notification.
-        let mut broke = vec![user("1", "test it"), call("2"), result("3", "error: boom")];
-        broke.extend(ctx("4"));
-        let found = live_cards(&facts("working", &broke, None, &[]));
-        assert_eq!(kinds(&found), [CardKind::Broke]);
-        assert_eq!(found[0].anchor, Anchor::Entry(broke[2].clone()));
-        // No card is ever at a context entry, and none is the user's.
-        for e in ctx("5") {
-            assert!(!is_user_said(&e));
-            let entries = [user("1", "go"), e];
-            assert!(live_cards(&facts("idle", &entries, None, &[])).is_empty());
-        }
-        assert!(is_user_said(&user("1", "go")));
-    }
-
-    #[test]
-    fn the_rules_are_ordered_by_priority() {
-        let entries = [
-            user("1", "go"),
-            call("2"),
-            result("3", "error: boom"),
-            reply("4", "It failed.\n\nShall I go on?"),
-        ];
-        let q = question("4");
-        let confirms = [confirm(3)];
-        let found = live_cards(&facts("blocked", &entries, Some(&q), &confirms));
-        assert_eq!(
-            kinds(&found),
-            [
-                CardKind::Approval,
-                CardKind::Question,
-                CardKind::Broke,
-                CardKind::Broke
+                (CardKind::Broke, 1, true),
+                (CardKind::Question, 2, true),
+                (CardKind::Approval, 2, false)
             ]
         );
-    }
-
-    #[test]
-    fn a_resolved_card_stays_faded_in_the_flow() {
-        let mut cards = Cards::default();
-        let asked = vec![user("1", "go"), reply("2", "Shall I go on?")];
-        let q = question("2");
-        cards.update(&facts("idle", &asked, Some(&q), &[]));
-        let (placed, pinned) = cards.placed(&asked);
-        assert_eq!(placed.len(), 1);
-        assert!(placed[0].live);
-        assert_eq!(placed[0].at, 2);
-        assert_eq!(pinned, Some(0));
-
-        // The user answers: the question is resolved, and stays in place.
-        let answered = vec![
-            user("1", "go"),
-            reply("2", "Shall I go on?"),
-            user("3", "yes"),
-        ];
-        cards.update(&facts("working", &answered, None, &[]));
-        let (placed, pinned) = cards.placed(&answered);
-        assert_eq!(placed.len(), 1);
-        assert!(!placed[0].live);
-        assert_eq!((placed[0].kind, placed[0].at), (CardKind::Question, 2));
-        assert_eq!(pinned, None);
-    }
-
-    #[test]
-    fn each_card_resolves_its_own_way() {
-        let mut cards = Cards::default();
-        let entries = vec![user("1", "go"), call("2"), result("3", "error: boom")];
-        let confirms = [confirm(9)];
-        cards.update(&facts("blocked", &entries, None, &confirms));
-        let live = |cards: &Cards, entries: &[Entry]| -> Vec<CardKind> {
-            cards
-                .placed(entries)
-                .0
-                .into_iter()
-                .filter(|c| c.live)
-                .map(|c| c.kind)
-                .collect()
-        };
-        assert_eq!(
-            live(&cards, &entries),
-            [CardKind::Approval, CardKind::Broke, CardKind::Broke]
-        );
-
-        // The confirmation resolves; the pane is no longer blocked.
-        cards.update(&facts("working", &entries, None, &[]));
-        assert_eq!(live(&cards, &entries), [CardKind::Broke]);
-
-        // A later tool result succeeds.
-        let mut later = entries.clone();
-        later.extend([call("4"), result("5", "ok")]);
-        cards.update(&facts("working", &later, None, &[]));
-        assert!(live(&cards, &later).is_empty());
-        assert_eq!(cards.placed(&later).0.len(), 3, "all three stay, faded");
-
-        // Finished, then the agent works again.
-        later.push(reply("6", "Fixed."));
-        cards.update(&facts("idle", &later, None, &[]));
-        assert_eq!(live(&cards, &later), [CardKind::Finished]);
-        cards.update(&facts("working", &later, None, &[]));
-        assert!(live(&cards, &later).is_empty());
-    }
-
-    #[test]
-    fn a_confirmation_keeps_its_place_as_entries_arrive() {
-        let mut cards = Cards::default();
-        let mut entries = vec![user("1", "go")];
-        let confirms = [confirm(4)];
-        cards.update(&facts("working", &entries, None, &confirms));
-        entries.push(call("2"));
-        cards.update(&facts("working", &entries, None, &confirms));
-        let (placed, _) = cards.placed(&entries);
-        assert_eq!(placed.len(), 1);
-        assert_eq!(placed[0].at, 1, "after the entry it was asked at");
-    }
-
-    #[test]
-    fn the_pin_is_the_highest_live_card() {
-        let mut cards = Cards::default();
-        let entries = vec![
-            user("1", "go"),
-            call("2"),
-            result("3", "error: boom"),
-            reply("4", "Shall I go on?"),
-        ];
-        let q = question("4");
-        cards.update(&facts("idle", &entries, Some(&q), &[]));
-        let (placed, pinned) = cards.placed(&entries);
-        // In flow order: the error at 3, the question at 4.
-        assert_eq!(
-            placed.iter().map(|c| c.kind).collect::<Vec<_>>(),
-            [CardKind::Broke, CardKind::Question]
-        );
-        assert_eq!(placed[pinned.unwrap()].kind, CardKind::Question);
-
-        // A confirmation outranks it.
-        let confirms = [confirm(2)];
-        cards.update(&facts("idle", &entries, Some(&q), &confirms));
-        let (placed, pinned) = cards.placed(&entries);
-        assert_eq!(placed[pinned.unwrap()].kind, CardKind::Approval);
-
-        // Resolved, the pin goes to the next live card.
-        cards.update(&facts("idle", &entries, Some(&q), &[]));
-        let (placed, pinned) = cards.placed(&entries);
-        assert_eq!(placed[pinned.unwrap()].kind, CardKind::Question);
-
-        // Nothing live: nothing pinned.
-        cards.update(&facts("working", &entries[..1], None, &[]));
-        assert_eq!(cards.placed(&entries[..1]).1, None);
-    }
-
-    #[test]
-    fn the_newest_of_two_live_cards_of_a_kind_is_pinned() {
-        let mut cards = Cards::default();
-        let entries = vec![user("1", "go")];
-        cards.update(&facts("working", &entries, None, &[confirm(1)]));
-        let more = vec![user("1", "go"), call("2")];
-        cards.update(&facts("working", &more, None, &[confirm(1), confirm(2)]));
-        let (placed, pinned) = cards.placed(&more);
-        assert_eq!(placed[pinned.unwrap()].confirm_id, Some(2));
-    }
-
-    #[test]
-    fn first_paragraphs() {
-        assert_eq!(first_paragraph("One.\nTwo.\n\nThree."), "One.\nTwo.");
-        assert_eq!(first_paragraph("\n\nOnly.\n"), "Only.");
-        assert_eq!(first_paragraph(""), "");
+        assert_eq!(pinned, Some(1), "the question outranks the error");
+        // Two live of a kind: the newest.
+        s.put(card(4, 64, CardKind::Approval, true));
+        s.put(card(5, 64, CardKind::Approval, true));
+        let (_, cards, pinned) = s.flatten(|_| false);
+        assert_eq!(cards[pinned.unwrap()].confirm_id, Some(5));
+        // A hidden card is not placed.
+        let (_, cards, _) = s.flatten(|c| c.kind == CardKind::Approval);
+        assert!(cards.iter().all(|c| c.kind != CardKind::Approval));
     }
 }
