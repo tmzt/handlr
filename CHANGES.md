@@ -1106,3 +1106,8 @@ The owner: "we haven't fixed the agent names on the overview screen". The
 workspace label ("cc-highbay"), and the overview's cards show that field.
 It now carries the project as named (`[naming] project_from`, the
 directory by default), falling back to herdr's label only with no name.
+
+## 2026-10-23 21:34 EDT — a correction to the previous entry
+
+The previous entry cites "the 16:58 EDT change"; the change it means,
+"the project is the directory by default", is at 18:00 EDT.
