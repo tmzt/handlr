@@ -1653,3 +1653,38 @@ no fade out". The settings screen's modal stack uses libcontrols'
 `ModalTransition::Timed { open_secs: 0.18, close_secs: 0.0 }`, in place of
 the default 0.12 s close. A zero close is instant, so the choice acts in
 the same frame and nothing fades. Opening keeps its 0.18 s.
+
+## 2026-10-24 12:35 EDT — plan 20261024_02, decision 3: a Notifications section; notifications asked for only from it
+
+Agreed with the owner (2026-10-24): "we should explain notifications and
+only request them when requested in settings, same as termux/connectbot";
+then "Approve the plan". This adds to decision 3, between Display and
+Battery:
+- **Notifications**
+  - **Explanation,** in dim text: "handlr shows one ongoing notification
+    while it's connected, which lets it stay connected in the background.
+    It can also alert you when an agent finishes or needs an answer.
+    Notifications stay off until you turn them on here."
+  - ***Notifications*** (a toggle, off):
+    - turning it on asks for `POST_NOTIFICATIONS` (Android 13+), through
+      libmorph's `request_permissions`;
+    - when Android won't ask again, it opens the app's notification
+      settings instead;
+    - the toggle shows the real permission each time the screen opens or
+      is returned to.
+- **Never asked for otherwise:** not at launch, and not on connecting.
+- **Without the permission,** the foreground service still runs (libmorph
+  0.4.0), and its notification shows only in the running-apps list
+  (libmobile's `NotificationHidden`). The section then reads "Off: handlr
+  stays connected, but its notification shows only in the running apps
+  list."
+- **Until libmorph 0.4.0 is wired in,** the section is built, and turning
+  the toggle on says it needs an app update, as the battery rows do.
+
+Tests:
+- the section's place and text;
+- the toggle stays off until turned on;
+- turning it on asks once, through the battery-like stub;
+- a refusal that won't be asked again opens the settings page;
+- the toggle follows the real permission;
+- nothing is asked at start.
