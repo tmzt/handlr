@@ -1301,3 +1301,32 @@ Tests:
 - "Written and pushed:" followed by a list shows the lead-in and the
   list's first lines, then "…" and "more";
 - a short reply shows whole, with no "more".
+
+## Amendment — 2026-10-24 12:12 EDT: closed views are kept in memory and reopen at once (living section L3)
+
+The owner (2026-10-24): "if the session is cached do we need loading
+session when opening it?"; then, adding a way to clear it (the settings
+plan, the same time). Today closing the agent view drops its outline and
+contents, so reopening shows "(loading session)".
+1. **Kept on close.** The client keeps a closed view's outline, contents
+   and place, for the 8 most recently opened panes, the least recent
+   dropped first. Contents past 20 screens are already forgotten, so each
+   stays small.
+2. **Reopened from the cache.** A cached pane shows at once, with no
+   "(loading session)" and no placeholders where contents are held. It
+   subscribes with `after`, `from` and `epoch` to resume, and only what is
+   newer comes over the link, going below.
+3. **Where it opens:** at the bottom, following, with the jump line's
+   state showing what happened while it was closed.
+4. **Stale caches:** another epoch or a new session file merges by serial,
+   as a reset does. "(loading session)" shows only for a pane not opened
+   since the app started, or after the cache is cleared.
+5. **Later:** plan 20261023_09's on-phone store keeps the same cache across
+   app restarts, and this moves onto it then.
+
+Tests:
+- a closed and reopened view shows its sections with no loading state and
+  resumes with `from`;
+- a ninth pane drops the least recent;
+- a new epoch merges;
+- clearing the cache empties it.
