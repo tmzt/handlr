@@ -1771,3 +1771,43 @@ commit, and the companion literals commit after it.
      the card store (both go to the client half);
    - the summary prompt's temperature, still not applied, as before.
 8. **The bookend mark** is `Slot.bookend: bool`, so `Slot` stays `Copy`.
+
+## 2026-10-24 12:59 EDT — plan 20261024_02: the settings copy in SETTINGS_COPY.md, the ⓘ texts, and the notification's content
+
+Agreed with the owner (2026-10-24): "remember this is an app for coders and
+power users but even we have trouble understanding Google/Samsung
+policies"; "libmorph should allow naming the notification/app title, and 1
+line sent to ip is meaningless, estimated data usage would be better or the
+state of the current session (finish summary or what it's working on)";
+"move that copy to a buildtime libtypedmd file SETTINGS_COPY.md"; then "yes
+plan and impl" (plan 20261024_04, the Markdown renderer). This adds to the
+entry "Background and Notifications as two sections, with ⓘ modals".
+1. **The copy is in `apps/companion/SETTINGS_COPY.md`,** compiled in at build
+   time (plan 20261024_04, decision 6).
+2. **The ⓘ texts are precise about the mechanisms.** Each says what Android
+   or One UI does, what the setting changes, and what is still not
+   guaranteed:
+   - *Stay connected in the background:* the cached-app freezer, Doze, App
+     Standby; a `specialUse` foreground service; its required notification
+     appears only in the running apps list without `POST_NOTIFICATIONS`; Doze
+     can still delay the network unless battery optimization is off.
+   - *Alert when an agent needs you:* a question, an approval or a finished
+     turn, while handlr isn't on screen; needs `POST_NOTIFICATIONS`, asked
+     only here; relies on the background connection.
+   - *Battery optimization:* lifts App Standby's limits and some of Doze's
+     network limits; doesn't stop Doze; doesn't override "Restricted".
+   - *Samsung battery (app sleeping):* One UI's sleeping and deep sleeping
+     apps and its freezer; add handlr to "Never sleeping apps"; Android's
+     exemption doesn't cover this list.
+   - *General agent:* what you ask Gemini (voice turns, later the chat
+     button); the daemon's spoken summaries are separate, under `[summary]`.
+3. **The notification shows the session's state** (with libmorph 0.4.0's
+   `NotificationContent` title and text; the app's label stays "handlr"):
+   - **Title:** the agent that matters most (needs you, then working, then
+     done), or a count with several ("handlr · 1 needs you, 2 working").
+   - **Text:** that agent's state, as the jump line gives it: `question: …`,
+     `approval: …`, `working: <newest line>`, `done: <summary>`.
+   - **All idle:** "All agents idle · <n> MB this session", the client's
+     count of bytes over the link since connecting.
+   - **Updates:** at most every 2 s, by `update_text`, only on a change.
+   - **Tap:** opens that agent.
