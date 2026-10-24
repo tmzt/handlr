@@ -1469,3 +1469,20 @@ Tests:
 - the nearest is brighter;
 - overlapping labels give way to the nearest;
 - a label without a summary reads "Done · time".
+
+## Amendment — 2026-10-24 13:45 EDT: Android's running trim levels mapped onto the memory grades (living section L3)
+
+libmorph 0.4.1's `on_trim_memory(TrimLevel)` reports that, while a foreground
+service runs, Android counts the process as foreground and sends only the
+running levels (`RunningModerate`, `RunningLow`, `RunningCritical`), never
+`UiHidden` or `Background`. On the S23, only `on_trim_memory` fires. The
+owner (2026-10-24): "Yes, write the mapping and start that build". This adds
+to the grades of the 12:2x EDT amendment ("memory pressure in grades"):
+
+| Android level | handlr grade |
+|---|---|
+| `RunningModerate`, `UiHidden` | keep the most recent closed view, the open view ±5 screens |
+| `RunningLow`, `Background`, `Moderate` | page out every closed view, the open view ±1 screen |
+| `RunningCritical`, `Complete`, `on_low_memory` | the full drop |
+
+Tests: each level gives its grade.
