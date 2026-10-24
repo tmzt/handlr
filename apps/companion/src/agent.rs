@@ -793,8 +793,51 @@ struct Drag {
     last_t: Duration,
     /// Past the slop: a scroll, not a tap.
     moved: bool,
-    /// Pixels per second, smoothed.
-    velocity: f32,
+    /// The latest samples, oldest first, for the release speed. It is
+    /// measured over a span, not between two moves, because moves can
+    /// arrive together, microseconds apart, and divide into absurd speeds
+    /// (the S23 logged flings of 2.7 million px/s, the "snap back").
+    samples: [(Duration, f32); SAMPLES],
+    sampled: usize,
+}
+
+impl Drag {
+    fn sample(&mut self, t: Duration, y: f32) {
+        if self.sampled == SAMPLES {
+            self.samples.copy_within(1.., 0);
+            self.sampled -= 1;
+        }
+        self.samples[self.sampled] = (t, y);
+        self.sampled += 1;
+    }
+}
+
+/// The finger's speed at release, in pixels per second: over the span
+/// from the window's start to the last move, none for a span too short to
+/// measure, and at most `MAX_FLING`.
+fn release_speed(d: &Drag, s: f32) -> f32 {
+    let samples = &d.samples[..d.sampled];
+    let Some(&(last_t, last_y)) = samples.last() else {
+        return 0.0;
+    };
+    // The oldest sample within the window; past it, the newest before it,
+    // so the span is not cut short when moves come in bursts.
+    let i = samples
+        .iter()
+        .position(|&(t, _)| last_t.saturating_sub(t) <= SPEED_WINDOW)
+        .unwrap_or(0);
+    let i = if last_t.saturating_sub(samples[i].0) < SPEED_SPAN_MIN {
+        i.saturating_sub(1)
+    } else {
+        i
+    };
+    let (first_t, first_y) = samples[i];
+    let span = last_t.saturating_sub(first_t);
+    if span < SPEED_SPAN_MIN {
+        return 0.0;
+    }
+    let v = (last_y - first_y) / span.as_secs_f32();
+    v.clamp(-MAX_FLING * s, MAX_FLING * s)
 }
 
 /// A movement under this many points is a tap.
@@ -806,6 +849,14 @@ pub(crate) const FLING_DT_MAX: f32 = 1.0 / 30.0;
 pub(crate) const DECAY: f32 = 3.2;
 /// Slower than this (points per second), a fling stops.
 pub(crate) const MIN_FLING: f32 = 30.0;
+/// The fastest fling (points per second), as libcontrols' scroll pane.
+pub(crate) const MAX_FLING: f32 = 8000.0;
+/// The span the release speed is measured over, back from the last move.
+const SPEED_WINDOW: Duration = Duration::from_millis(80);
+/// Samples kept for it.
+const SAMPLES: usize = 16;
+/// A shorter span gives no speed: too little to measure.
+const SPEED_SPAN_MIN: Duration = Duration::from_millis(16);
 /// How long the agent must be quiet, in seconds, before continue is
 /// suggested after a finished turn.
 const QUIET_FOR_CONTINUE: f32 = 30.0;
@@ -1971,7 +2022,8 @@ impl AgentScreen {
                     last_y: y,
                     last_t: now,
                     moved: false,
-                    velocity: 0.0,
+                    samples: [(now, y); SAMPLES],
+                    sampled: 1,
                 });
                 None
             }
@@ -1983,15 +2035,7 @@ impl AgentScreen {
                     d.moved = true;
                 }
                 let dy = y - d.last_y;
-                let dt = now.saturating_sub(d.last_t).as_secs_f32();
-                if dt > 0.0 {
-                    let v = dy / dt;
-                    d.velocity = if d.velocity == 0.0 {
-                        v
-                    } else {
-                        0.6 * v + 0.4 * d.velocity
-                    };
-                }
+                d.sample(now, y);
                 d.last_y = y;
                 d.last_t = now;
                 self.drag = Some(d);
@@ -2005,8 +2049,9 @@ impl AgentScreen {
                 if d.moved {
                     // A finger that stopped before lifting does not fling.
                     let still = now.saturating_sub(d.last_t) > Duration::from_millis(100);
-                    if !still && d.velocity.abs() > MIN_FLING * s {
-                        self.fling = d.velocity;
+                    let velocity = release_speed(&d, s);
+                    if !still && velocity.abs() > MIN_FLING * s {
+                        self.fling = velocity;
                     }
                     log::info!(
                         "agent view: drag ended at {:.0}, fling {:.0}",
@@ -2786,6 +2831,36 @@ mod tests {
         let (now_top, now_delta) = a.top_entry().unwrap();
         assert_eq!(now_top, top);
         assert!((now_delta - delta).abs() < 0.5);
+    }
+
+    #[test]
+    fn moves_arriving_together_do_not_throw_the_view() {
+        // The S23's "snap back": moves microseconds apart gave flings of
+        // millions of pixels a second, which ran the view to the top.
+        let mut a = screen(conversation(40), vec![], None);
+        let t = drag(&mut a, 800.0, 1100.0, 5, Duration::ZERO);
+        let us = Duration::from_micros(1);
+        a.touch(1, TouchPhase::Moved, 540.0, 1140.0, t + us);
+        a.touch(1, TouchPhase::Ended, 540.0, 1140.0, t + 2 * us);
+        let s = a.scale();
+        assert!(a.fling.abs() <= MAX_FLING * s, "{}", a.fling);
+        assert!(a.fling > 0.0, "still a fling, the finger's own speed");
+        let lifted = a.offset();
+        for _ in 0..200 {
+            a.tick(MS);
+        }
+        let far = MAX_FLING * s / DECAY;
+        assert!(
+            lifted - a.offset() <= far + 1.0,
+            "{} > {far}",
+            lifted - a.offset()
+        );
+        // A drag too short to measure gives no fling.
+        let mut b = screen(conversation(40), vec![], None);
+        b.touch(1, TouchPhase::Started, 540.0, 800.0, Duration::ZERO);
+        b.touch(1, TouchPhase::Moved, 540.0, 900.0, us);
+        b.touch(1, TouchPhase::Ended, 540.0, 900.0, 2 * us);
+        assert_eq!(b.fling, 0.0);
     }
 
     #[test]
