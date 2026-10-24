@@ -1343,3 +1343,29 @@ Small departures in `src/tail.rs`, `crates/handlr-companion` and
   in the view; its confirmation is still asked as before.
 - **Step 6: the view's status is the subscription's** once it has
   answered; until then it is `agents.list`'s.
+
+## 2026-10-24 00:13 EDT — plan 20261022_03 L3, the ribbon and jump-line amendments: readings in implementing them
+
+Living section L3, the 23:54 EDT (ribbon) and 00:05 EDT (jump line)
+amendments, built in `420c8f9` (handlr-companion) and `cc5ba56` (companion).
+- **Index from the client for now.** `ViewSection.index` is the section's
+  position among the sections held (`view::section_index`). It shifts when
+  a page lands above, until plan 20261024_01 sends the daemon's index. The
+  place is held by serial, so the shift never moves the view.
+- **Jump-line text, item 2 read literally:** `-- jump to end --` with nothing
+  new, and `-- N new: <newest first line> --` otherwise, `-- 1 new: … --` for
+  one. "New" means a serial newer than the newest held when the view left
+  the bottom, so history pages and replaced sections don't count.
+- **Jump-line place:** its 28 pt is always reserved directly below the
+  scrollback's window, above the pinned card, the suggestions and the
+  controls. It is blank while following.
+- **Cards' `at` is 0 in sections,** recomputed when flattened, so a page
+  landing doesn't mark every later card as changed.
+- **Positions move down by the marker row,** which is now always there.
+- **The assembled flow stays:** cached blocks are put together into one
+  `Flow` for the kept span, so drawing, hits and links are unchanged.
+- **Running heights are summed again in full** on each change (O(n)
+  additions), not only from the changed slot on.
+- **A block is also laid out again** when its pin changes, or when the
+  neighbour of a leading compaction line changes (`NoticeLine::repeats` now
+  takes a "previous entry is a compaction" flag).
