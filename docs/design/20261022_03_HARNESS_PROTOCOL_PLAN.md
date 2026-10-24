@@ -1534,3 +1534,19 @@ Tests:
   colour, and one from a session not used doesn't;
 - a tap opens that session, and a swipe dismisses it;
 - several collapse to "+N".
+
+## Amendment — 2026-10-24 16:00 EDT: other sessions' finished turns as one-line cards too (living section L3)
+
+The owner (2026-10-24): "same for finished with one-line"; then "build the
+session colours and question cards now". This adds to item 2 of the amendment
+of 2026-10-24 15 ("a colour for every session"). When a session you interacted with in
+the last hour finishes a turn, and you are anywhere in the app but its own
+view, a card appears at the bottom in that session's colour, as for a
+question, but one line high: "<agent> finished: <short form>", with the
+daemon's summary when it has one. A tap opens that session, a swipe dismisses
+it, and it hides itself after 10 s. A question from the same or another
+session takes the place of a finished card. Several finished cards collapse
+to the newest, with "+N".
+
+Tests: a finished turn from a session used within the hour shows a one-line
+card in its colour; it hides after 10 s; a question replaces it.
