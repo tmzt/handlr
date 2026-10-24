@@ -497,6 +497,7 @@ impl App {
                 loading_earlier,
                 start,
                 terminal_on,
+                new_content,
             } => {
                 if let Some(agent) = &mut self.agent {
                     agent.set_loading(loading);
@@ -504,6 +505,7 @@ impl App {
                     agent.set_terminal_on(terminal_on);
                     agent.set_content(name, status, sections, pinned, &changed);
                     agent.set_history(loading_earlier, start);
+                    agent.set_new_content(new_content);
                 }
             }
             // herdr's focus shows on the cards, from the list it refreshes.
@@ -572,8 +574,10 @@ impl App {
                 }
             }
             AgentHit::JumpToEnd => {
-                if let Some(agent) = &mut self.agent {
-                    agent.jump_to_end();
+                // A new outline waiting: the client swaps it in, and the
+                // view, at the bottom, follows it.
+                if self.agent.as_mut().is_some_and(|a| a.jump_to_end()) {
+                    self.send(Input::ApplyOutline);
                 }
             }
             AgentHit::Suggest(Suggestion::Discuss) => {
@@ -996,6 +1000,11 @@ impl MorphApp for App {
         // (plan 20261023_03, A7).
         if self.agent.as_mut().is_some_and(|a| a.take_load_earlier()) {
             self.send(Input::LoadEarlier);
+        }
+        // Where the window is, for the contents fetched around it and an
+        // outline held aside while scrolled back (plan 20261024_01).
+        if let Some(window) = self.agent.as_mut().and_then(|a| a.take_window()) {
+            self.send(Input::Window(window));
         }
     }
 

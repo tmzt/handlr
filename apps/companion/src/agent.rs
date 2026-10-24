@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use std::collections::{HashMap, HashSet};
 
+use handlr_companion::view::{SectionKind, ViewWindow};
 use handlr_companion::{AgentCard, CardKind, Shows, Suggestion, ViewSection};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
 use libhandlr_proto::common::{Entry, EntryKind, Link, Role, Serial};
@@ -779,9 +780,68 @@ pub fn lay_out_block(shows: &Shows, pinned: bool, after_compact: bool, width: f3
             y = lay_out_card(card, pinned, y, pen, &targets, &mut flow);
             flow.targets = targets;
         }
+        Shows::Pending { kind, lines, chars } => {
+            y = lay_out_pending(*kind, *lines, *chars, pen, &mut flow);
+        }
     }
     flow.height = y;
     flow
+}
+
+/// A placeholder's fill: dimmer than the band.
+const PLACEHOLDER: [f32; 4] = [0.08, 0.085, 0.10, 1.0];
+
+/// A placeholder's row.
+pub const PENDING_ROW: &str = "\u{2026}";
+
+/// The estimated height of a section not yet held (plan 20261024_01,
+/// decision 7), from its slot's `lines` and `chars`: its text wrapped at
+/// the view's font as the layout would wrap plain text, and a block's
+/// fixed parts. A Text or Turn block is its lines, or its characters'
+/// wrapped rows when more, at the text size after its gap (a turn on its
+/// band); a tool call is its call and result lines, at most two; a context
+/// entry and a resolved card are one dim line.
+pub fn estimate_height(kind: SectionKind, lines: u32, chars: u32, width: f32, s: f32) -> f32 {
+    let pen = Pen::new(width, s);
+    let tool_line = term_h(TOOL_PT * s);
+    match kind {
+        SectionKind::Tool => lines.clamp(1, 2) as f32 * (2.0 * s + tool_line),
+        SectionKind::Context => 4.0 * s + tool_line,
+        // In the scrollback a card is mostly resolved: one dim line. A
+        // live one comes with its contents (the newest slots).
+        SectionKind::Card => tool_line + 4.0 * s,
+        _ => {
+            let cols = pen.cols(TEXT_PT).max(1) as u32;
+            let rows = lines.max(chars.div_ceil(cols)).max(1);
+            let band = if kind == SectionKind::Turn {
+                8.0 * s
+            } else {
+                0.0
+            };
+            10.0 * s + rows as f32 * term_h(TEXT_PT * s) + band
+        }
+    }
+}
+
+/// A slot without contents: a dim block of its estimated height with a
+/// short "…" row; the y after it.
+fn lay_out_pending(kind: SectionKind, lines: u32, chars: u32, pen: Pen, flow: &mut Flow) -> f32 {
+    let s = pen.s;
+    let h = estimate_height(kind, lines, chars, pen.width, s);
+    flow.fills.push(Fill {
+        rect: Rect::new(pen.pad, 2.0 * s, pen.text_w, (h - 4.0 * s).max(1.0)),
+        color: PLACEHOLDER,
+        radius: 4.0 * s,
+    });
+    flow.rows.push(Row {
+        text: PENDING_ROW.to_string(),
+        x: pen.pad + 4.0 * s,
+        y: 2.0 * s,
+        px: TOOL_PT * s,
+        color: DIM,
+        mono: true,
+    });
+    h
 }
 
 /// A finger on the flow.
@@ -940,6 +1000,12 @@ pub struct JumpLine {
 const JUMP_H: f32 = 28.0;
 /// The jump line with nothing new.
 pub const JUMP_TO_END: &str = "-- jump to end --";
+/// The jump line while a new outline is held aside (CHANGES.md,
+/// 2026-10-24 00:36 EDT, item 3).
+pub const NEW_CONTENT: &str = "-- new content --";
+/// How far from the window contents are kept, in screens; beyond, the
+/// client forgets them (plan 20261024_01, decision 6).
+pub const FORGET_SCREENS: f32 = 20.0;
 
 /// The first line of what a section shows: its first entry's text (a
 /// turn's prompt, a reply, a tool call's summary), or its card's title.
@@ -949,6 +1015,7 @@ fn first_line(shows: &Shows) -> Option<String> {
             .iter()
             .find_map(|e| e.summary.lines().map(str::trim).find(|l| !l.is_empty()))?,
         Shows::Card(card) => card.title.trim(),
+        Shows::Pending { .. } => return None,
     };
     (!line.is_empty()).then(|| line.to_string())
 }
@@ -1138,6 +1205,15 @@ pub struct AgentScreen {
     /// The newest section held when the view left the bottom: those after
     /// it are new, for the jump line.
     left_at: Option<u64>,
+    /// Packed serial to its slot's place in `slots`.
+    slot_index: HashMap<u64, usize>,
+    /// A new outline is held aside by the client: the jump line reads
+    /// `-- new content --`.
+    new_content: bool,
+    /// The window on the ribbon, by index, as last worked out, and as last
+    /// taken for the client.
+    window: Option<ViewWindow>,
+    window_taken: Option<ViewWindow>,
     dirty: bool,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
@@ -1183,7 +1259,18 @@ impl AgentScreen {
         }
         let changed: HashSet<u64> = changed.iter().map(|s| s.to_u64()).collect();
         let is_entries = |b: Option<&Block>| matches!(b.map(|b| &b.shows), Some(Shows::Entries(_)));
-        let mut entries_changed = changed.iter().any(|k| is_entries(self.blocks.get(k)));
+        let is_pending =
+            |b: Option<&Block>| matches!(b.map(|b| &b.shows), Some(Shows::Pending { .. }));
+        let now_pending: HashSet<u64> = sections
+            .iter()
+            .filter(|v| matches!(v.shows, Shows::Pending { .. }))
+            .map(|v| v.serial.to_u64())
+            .collect();
+        // Contents fetched for a placeholder, or forgotten, are not the
+        // agent's activity.
+        let mut entries_changed = changed
+            .iter()
+            .any(|k| is_entries(self.blocks.get(k)) && !now_pending.contains(k));
         if self.status != status {
             self.quiet_for = 0.0;
         }
@@ -1193,7 +1280,8 @@ impl AgentScreen {
         for v in sections {
             let key = v.serial.to_u64();
             if changed.contains(&key) || !self.blocks.contains_key(&key) {
-                entries_changed |= matches!(v.shows, Shows::Entries(_));
+                entries_changed |=
+                    matches!(v.shows, Shows::Entries(_)) && !is_pending(self.blocks.get(&key));
                 self.blocks.insert(key, Block::new(v.shows));
             }
             slots.push(Slot {
@@ -1203,6 +1291,12 @@ impl AgentScreen {
             });
         }
         self.slots = slots;
+        self.slot_index = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.serial.to_u64(), i))
+            .collect();
         if self.blocks.len() != self.slots.len() {
             // Sections gone: their blocks go too.
             let held: HashSet<u64> = self.slots.iter().map(|s| s.serial.to_u64()).collect();
@@ -1259,9 +1353,9 @@ impl AgentScreen {
 
     /// The slot of the section `serial` (packed), if held.
     fn slot_of(&self, serial: u64) -> Option<usize> {
-        self.slots
-            .binary_search_by_key(&serial, |s| s.serial.to_u64())
-            .ok()
+        // By map: in outline mode the slots are in index order, which a
+        // late card can take out of serial order.
+        self.slot_index.get(&serial).copied()
     }
 
     /// The slot whose block is at `y` of the flow: the last that starts at
@@ -1533,7 +1627,7 @@ impl AgentScreen {
             .iter()
             .filter_map(|s| match &self.blocks[&s.serial.to_u64()].shows {
                 Shows::Entries(e) => Some(e.clone()),
-                Shows::Card(_) => None,
+                Shows::Card(_) | Shows::Pending { .. } => None,
             })
             .flatten()
             .collect()
@@ -1712,6 +1806,7 @@ impl AgentScreen {
         self.frame = self.arrange(self.compact());
         self.place_hits();
         self.check_earlier();
+        self.note_window();
         self.dirty = true;
     }
 
@@ -1890,12 +1985,13 @@ impl AgentScreen {
     /// sections arrived since the view left the bottom; "jump to end" when
     /// none did.
     fn jump_text(&self, cols: usize) -> String {
+        if self.new_content {
+            return NEW_CONTENT.to_string();
+        }
+        // Newer than the newest when the view left the bottom, wherever
+        // the slot is (a late card's index can be out of serial order).
         let new = self.left_at.map_or(0, |at| {
-            self.slots
-                .iter()
-                .rev()
-                .take_while(|s| s.serial.to_u64() > at)
-                .count()
+            self.slots.iter().filter(|s| s.serial.to_u64() > at).count()
         });
         let message = self
             .slots
@@ -1910,11 +2006,59 @@ impl AgentScreen {
         format!("{lead}{} --", one_line(&message, room))
     }
 
-    /// Jumps to the bottom and follows again: the jump line's tap.
-    pub fn jump_to_end(&mut self) {
+    /// Jumps to the bottom and follows again: the jump line's tap. Returns
+    /// whether a new outline was waiting, for the client to apply it.
+    pub fn jump_to_end(&mut self) -> bool {
         self.fling = 0.0;
         let bottom = self.max_offset();
         self.scroll_to(bottom);
+        std::mem::take(&mut self.new_content)
+    }
+
+    /// Whether the client holds a new outline aside (the event's
+    /// `new_content`).
+    pub fn set_new_content(&mut self, on: bool) {
+        if on != self.new_content {
+            self.new_content = on;
+            self.settle();
+        }
+    }
+
+    /// The window on the ribbon, by index, when it changed since last
+    /// taken: for [`handlr_companion::Input::Window`].
+    pub fn take_window(&mut self) -> Option<ViewWindow> {
+        if self.window == self.window_taken {
+            return None;
+        }
+        self.window_taken = self.window;
+        self.window
+    }
+
+    /// Works out the window on the ribbon: the indexes it shows, those
+    /// within `KEEP_SCREENS` screens of it, and those within
+    /// `FORGET_SCREENS`.
+    fn note_window(&mut self) {
+        if self.slots.is_empty() {
+            self.window = None;
+            return;
+        }
+        let screen = self.frame.viewport.h.max(1.0);
+        let span = |lo: f32, hi: f32| {
+            let a = self.slot_at(lo).unwrap_or(0);
+            let b = self.slot_at(hi).unwrap_or(0).max(a);
+            (self.slots[a].index, self.slots[b].index)
+        };
+        let top = self.offset;
+        let bottom = top + screen;
+        self.window = Some(ViewWindow {
+            shown: span(top, bottom),
+            near: span(top - KEEP_SCREENS * screen, bottom + KEEP_SCREENS * screen),
+            keep: span(
+                top - FORGET_SCREENS * screen,
+                bottom + FORGET_SCREENS * screen,
+            ),
+            scrolled_back: !self.follow,
+        });
     }
 
     /// The suggested responses for the row, by the pinned card and the
@@ -2021,7 +2165,7 @@ impl AgentScreen {
         let follow = self.offset >= max - 1.0;
         if self.follow && !follow {
             // Leaving the bottom: what arrives from now on is new.
-            self.left_at = self.slots.last().map(|s| s.serial.to_u64());
+            self.left_at = self.slots.iter().map(|s| s.serial.to_u64()).max();
         }
         self.follow = follow;
         if self.rows_short() {
@@ -2030,6 +2174,7 @@ impl AgentScreen {
         self.frame = self.arrange(self.compact());
         self.place_hits();
         self.check_earlier();
+        self.note_window();
         self.dirty = true;
     }
 
@@ -3921,5 +4066,210 @@ mod tests {
         a.jump_to_end();
         assert_eq!(a.frame().viewport, view);
         assert!(a.offset() > offset);
+    }
+
+    // Plan 20261024_01, step 5, and CHANGES.md 2026-10-24 00:36 EDT.
+
+    /// The slot of index `i`, on line `i + 1`: its contents if `held`,
+    /// else pending.
+    fn outline_section(i: u64, held: bool) -> ViewSection {
+        let serial = Serial::new(FILE, i as u32 + 1, 0);
+        let shows = if held {
+            Shows::Entries(vec![entry(
+                Role::Assistant,
+                EntryKind::Text,
+                &format!(
+                    "Reply {i}.\n\nWith a second paragraph long enough to wrap at the phone's width, and then some more words to wrap again."
+                ),
+            )])
+        } else {
+            Shows::Pending {
+                kind: SectionKind::Text,
+                lines: 2,
+                chars: 40,
+            }
+        };
+        ViewSection {
+            index: i,
+            serial,
+            shows,
+        }
+    }
+
+    /// `n` slots, those in `held` with contents.
+    fn outline_sections(n: u64, held: std::ops::Range<u64>) -> Vec<ViewSection> {
+        (0..n)
+            .map(|i| outline_section(i, held.contains(&i)))
+            .collect()
+    }
+
+    fn outline_screen(n: u64, held: std::ops::Range<u64>) -> AgentScreen {
+        let mut a = AgentScreen::new();
+        a.set_layout(PHONE);
+        give(&mut a, "idle", outline_sections(n, held), None);
+        a
+    }
+
+    #[test]
+    fn the_ribbon_is_as_long_as_the_outline_before_any_contents() {
+        let a = outline_screen(300, 0..0);
+        let s = PHONE.scale;
+        let each = estimate_height(SectionKind::Text, 2, 40, PHONE.w, s);
+        assert!(each > 0.0);
+        assert_eq!(a.slots().len(), 300);
+        assert!(
+            a.slots()
+                .iter()
+                .all(|slot| (slot.height - each).abs() < 0.01)
+        );
+        let expected = ribbon_top(s) + 300.0 * each + 16.0 * s;
+        assert!((a.flow().height - expected).abs() < 0.5);
+        // Following, at the bottom of the whole session.
+        assert!(a.following());
+        assert_eq!(a.offset(), a.max_offset());
+        // Longer text is estimated taller: wrapped at the text's columns.
+        let wide = estimate_height(SectionKind::Text, 1, 2000, PHONE.w, s);
+        let cols = Pen::new(PHONE.w, s).cols(TEXT_PT) as f32;
+        let rows = (2000.0 / cols).ceil();
+        assert!((wide - (10.0 * s + rows * term_h(TEXT_PT * s))).abs() < 0.01);
+        // A tool call is at most its two lines; a turn has its band.
+        assert!(
+            estimate_height(SectionKind::Tool, 40, 4000, PHONE.w, s)
+                < estimate_height(SectionKind::Text, 40, 4000, PHONE.w, s)
+        );
+        assert!(
+            estimate_height(SectionKind::Turn, 2, 40, PHONE.w, s)
+                > estimate_height(SectionKind::Text, 2, 40, PHONE.w, s)
+        );
+    }
+
+    #[test]
+    fn contents_replacing_estimates_do_not_move_the_view() {
+        let mut a = outline_screen(300, 290..300);
+        scrolled_back(&mut a);
+        let (serial, delta) = a.place().unwrap();
+        let at = on_screen(&a, serial);
+        let top = a.slot_of(serial.to_u64()).unwrap() as u64;
+        let height_before = a.flow().height;
+        // The contents around the window arrive, the top one's among them:
+        // the real heights differ from the estimates.
+        let near = top.saturating_sub(40)..(top + 40).min(300);
+        give(&mut a, "idle", outline_sections(300, near.start..300), None);
+        assert!(
+            (a.flow().height - height_before).abs() > 1.0,
+            "heights changed"
+        );
+        let (now, now_delta) = a.place().unwrap();
+        assert_eq!(now, serial);
+        assert!((now_delta - delta).abs() < 0.01);
+        assert!((on_screen(&a, serial) - at).abs() < 0.01);
+        assert!(!a.following());
+        // Forgotten again (far away now): back to estimates, still held.
+        give(&mut a, "idle", outline_sections(300, 290..300), None);
+        assert_eq!(a.place().unwrap().0, serial);
+        assert!((on_screen(&a, serial) - at).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_slot_without_contents_is_a_dim_placeholder_with_an_ellipsis() {
+        let a = outline_screen(40, 30..40);
+        // Laid out in the kept span: the bottom's screens hold both kinds.
+        let flow = a.flow();
+        let placeholders = flow.fills.iter().filter(|f| f.color == PLACEHOLDER).count();
+        let rows = flow.rows.iter().filter(|r| r.text == PENDING_ROW).count();
+        assert!(
+            placeholders > 0 && placeholders == rows,
+            "{placeholders} {rows}"
+        );
+        assert!(flow.rows.iter().any(|r| r.text.starts_with("Reply 35.")));
+        // Each placeholder fills its slot's estimated height.
+        let i = a.slot_of(Serial::new(FILE, 1, 0).to_u64()).unwrap();
+        let est = estimate_height(SectionKind::Text, 2, 40, PHONE.w, PHONE.scale);
+        assert!((a.slots()[i].height - est).abs() < 0.01);
+        // A placeholder is not news for the jump line.
+        assert_eq!(first_line(&outline_section(0, false).shows), None);
+    }
+
+    #[test]
+    fn the_marker_row_says_start_of_session_at_index_0() {
+        let mut a = outline_screen(300, 290..300);
+        // The client says the outline is held from index 0.
+        a.set_history(false, true);
+        assert_eq!(a.flow().rows[0].text, START_OF_SESSION);
+        // Scrolled to the very top, it shows above index 0's block.
+        a.scroll_to(0.0);
+        assert_eq!(a.slots()[0].index, 0);
+        assert!(
+            a.tops[0] - a.offset() < a.frame().viewport.h,
+            "index 0 in the window"
+        );
+        let marker = &a.flow().rows[0];
+        assert!(marker.y < a.tops[0]);
+    }
+
+    #[test]
+    fn the_window_is_reported_by_index_and_scrolled_back() {
+        let mut a = outline_screen(300, 290..300);
+        let w = a.take_window().expect("a window");
+        assert!(!w.scrolled_back);
+        assert_eq!(w.shown.1, 299);
+        assert!(w.near.0 < w.shown.0 && w.keep.0 <= w.near.0);
+        assert_eq!(a.take_window(), None, "unchanged: not again");
+        scrolled_back(&mut a);
+        let w = a.take_window().expect("moved");
+        assert!(w.scrolled_back);
+        let (serial, _) = a.place().unwrap();
+        let top = a.slots()[a.slot_of(serial.to_u64()).unwrap()].index;
+        assert_eq!(w.shown.0, top);
+        assert!(w.shown.1 < 299);
+    }
+
+    #[test]
+    fn the_jump_line_says_new_content_and_its_tap_swaps_and_jumps_to_the_end() {
+        let mut a = outline_screen(300, 290..300);
+        // While following, a new outline is swapped in at once: no line.
+        a.set_new_content(false);
+        assert!(a.frame().jump.is_none());
+        scrolled_back(&mut a);
+        let (serial, _) = a.place().unwrap();
+        let at = on_screen(&a, serial);
+        // A new outline held aside: the old ribbon stays as it was.
+        a.set_new_content(true);
+        let jump = |a: &AgentScreen| a.frame().jump.clone().expect("shown").text;
+        assert_eq!(jump(&a), NEW_CONTENT);
+        assert!((on_screen(&a, serial) - at).abs() < 0.01);
+        // The tap: to the end, following, and the client is to apply it.
+        assert!(a.jump_to_end());
+        assert!(a.following());
+        assert!(!a.jump_to_end(), "only once");
+        // The new ribbon comes: still at its bottom.
+        give(&mut a, "idle", outline_sections(320, 310..320), None);
+        a.set_new_content(false);
+        assert!(a.following());
+        assert_eq!(a.offset(), a.max_offset());
+        assert_eq!(a.slots().len(), 320);
+    }
+
+    #[test]
+    fn a_late_cards_index_out_of_serial_order_keeps_the_place() {
+        // Index 150 is a card on a line before index 140's (a Finished card
+        // after context lines takes the next index).
+        let mut sections = outline_sections(200, 0..200);
+        sections[150].serial = Serial::new(FILE, 140, 200);
+        let mut a = AgentScreen::new();
+        a.set_layout(PHONE);
+        a.set_content("Claude".into(), "idle".into(), sections.clone(), None, &[]);
+        scrolled_back(&mut a);
+        let (serial, delta) = a.place().unwrap();
+        let at = on_screen(&a, serial);
+        // A section below the window replaced: the place holds.
+        let changed = [sections[199].serial];
+        sections[199] = ViewSection {
+            shows: Shows::Entries(vec![entry(Role::Assistant, EntryKind::Text, "grown")]),
+            ..sections[199].clone()
+        };
+        a.set_content("Claude".into(), "idle".into(), sections, None, &changed);
+        assert_eq!(a.place().unwrap(), (serial, delta));
+        assert!((on_screen(&a, serial) - at).abs() < 0.01);
     }
 }
