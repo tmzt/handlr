@@ -25,7 +25,8 @@ pub mod view;
 pub mod wire;
 
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -119,6 +120,8 @@ pub fn default_socket_path() -> PathBuf {
 pub struct Companion {
     inputs: tokio::sync::mpsc::UnboundedSender<Input>,
     events: mpsc::Receiver<Event>,
+    /// The `net` thread's count of bytes over the link.
+    bytes: Arc<AtomicU64>,
 }
 
 impl Companion {
@@ -127,11 +130,25 @@ impl Companion {
     pub fn spawn(config: CompanionConfig, keys: Box<dyn KeyStore>) -> Self {
         let (inputs, inputs_rx) = tokio::sync::mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::channel();
+        let bytes = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&bytes);
         thread::Builder::new()
             .name("net".into())
-            .spawn(move || net::run(config, keys, inputs_rx, events_tx))
+            .spawn(move || net::run(config, keys, inputs_rx, events_tx, counted))
             .expect("spawning the net thread");
-        Companion { inputs, events }
+        Companion {
+            inputs,
+            events,
+            bytes,
+        }
+    }
+
+    /// The bytes sent to and received from the daemon since the client
+    /// started, over every connection: each socket line with its newline,
+    /// each link message's plaintext (CHANGES.md, 2026-10-24 12:59 EDT,
+    /// item 3, "n MB this session").
+    pub fn link_bytes(&self) -> u64 {
+        self.bytes.load(Ordering::Relaxed)
     }
 
     pub fn send(&self, input: Input) {

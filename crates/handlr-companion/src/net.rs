@@ -26,7 +26,15 @@
 //! Liveness is the operating system's: link sockets have `SO_KEEPALIVE`,
 //! and a connection ends only on an error or end of stream. The client does
 //! not `ping`.
+//!
+//! Every message's bytes, both ways, are added to the count the app reads
+//! as [`Companion::link_bytes`](crate::Companion::link_bytes): the
+//! notification's "n MB this session" (CHANGES.md, 2026-10-24 12:59 EDT,
+//! item 3). A socket line counts its newline; a link message counts its
+//! plaintext, without the Noise framing, and `hello` in the handshake is
+//! not counted.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -96,6 +104,7 @@ pub(crate) fn run(
     keys: Box<dyn KeyStore>,
     inputs: UnboundedReceiver<Input>,
     events: mpsc::Sender<Event>,
+    bytes: Arc<AtomicU64>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -119,6 +128,7 @@ pub(crate) fn run(
         pairing_until: None,
         inputs,
         events,
+        bytes,
     };
     runtime.block_on(net.run());
 }
@@ -137,6 +147,8 @@ struct Net {
     pairing_until: Option<tokio::time::Instant>,
     inputs: UnboundedReceiver<Input>,
     events: mpsc::Sender<Event>,
+    /// The bytes sent and received since the thread began.
+    bytes: Arc<AtomicU64>,
 }
 
 /// How a session ended.
@@ -165,17 +177,25 @@ enum Writer {
 
 impl Writer {
     /// Sends one JSON-RPC message: a line on the socket, a message on the
-    /// link.
-    async fn send(&mut self, message: &[u8]) -> Result<(), String> {
+    /// link. Its bytes are added to `bytes` once sent.
+    async fn send(&mut self, message: &[u8], bytes: &AtomicU64) -> Result<(), String> {
         match self {
             Writer::Unix(write) => {
                 let mut line = Vec::with_capacity(message.len() + 1);
                 line.extend_from_slice(message);
                 line.push(b'\n');
-                write.write_all(&line).await.map_err(|e| e.to_string())
+                write.write_all(&line).await.map_err(|e| e.to_string())?;
+                bytes.fetch_add(line.len() as u64, Ordering::Relaxed);
             }
-            Writer::Link(write) => write.send_message(message).await.map_err(|e| e.to_string()),
+            Writer::Link(write) => {
+                write
+                    .send_message(message)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                bytes.fetch_add(message.len() as u64, Ordering::Relaxed);
+            }
         }
+        Ok(())
     }
 }
 
@@ -473,18 +493,20 @@ impl Net {
             Conn::Unix(stream, hello) => {
                 let (read, write) = stream.into_split();
                 (
-                    read_lines(read, messages_tx),
+                    read_lines(read, messages_tx, Arc::clone(&self.bytes)),
                     Writer::Unix(write),
                     Some(hello),
                 )
             }
             Conn::Link(stream) => {
                 let (read, write) = stream.into_split();
+                let bytes = Arc::clone(&self.bytes);
                 let reader = tokio::spawn(async move {
                     let mut read = read;
                     loop {
                         match read.recv_message().await {
                             Ok(message) => {
+                                bytes.fetch_add(message.len() as u64, Ordering::Relaxed);
                                 if messages_tx.send(message).is_err() {
                                     break;
                                 }
@@ -501,7 +523,7 @@ impl Net {
         };
         let mut end = None;
         if let Some(hello) = first
-            && let Err(e) = write.send(&hello).await
+            && let Err(e) = write.send(&hello, &self.bytes).await
         {
             log::debug!("writing to the daemon: {e}");
             end = Some(End::Closed);
@@ -566,7 +588,7 @@ impl Net {
                             continue;
                         }
                     };
-                    if let Err(e) = write.send(&message).await {
+                    if let Err(e) = write.send(&message, &self.bytes).await {
                         log::debug!("writing to the daemon: {e}");
                         return Some(End::Closed);
                     }
@@ -599,10 +621,12 @@ fn is_paired_hello(message: &Incoming) -> bool {
     )
 }
 
-/// Reads lines from the daemon's socket into `lines` until it closes.
+/// Reads lines from the daemon's socket into `lines` until it closes,
+/// adding each line's bytes, its newline included, to `bytes`.
 fn read_lines(
     read: tokio::net::unix::OwnedReadHalf,
     lines: UnboundedSender<Vec<u8>>,
+    bytes: Arc<AtomicU64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut read = BufReader::new(read);
@@ -615,7 +639,8 @@ fn read_lines(
                     log::warn!("a line from the daemon is over {MAX_LINE} bytes");
                     break;
                 }
-                Ok(_) => {
+                Ok(n) => {
+                    bytes.fetch_add(n as u64, Ordering::Relaxed);
                     if lines.send(line).is_err() {
                         break;
                     }

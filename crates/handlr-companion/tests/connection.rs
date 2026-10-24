@@ -43,6 +43,7 @@ fn accept(listener: &UnixListener) -> Conn {
                 return Conn {
                     reader: BufReader::new(stream.try_clone().unwrap()),
                     stream,
+                    bytes: 0,
                 };
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -57,12 +58,15 @@ fn accept(listener: &UnixListener) -> Conn {
 struct Conn {
     stream: UnixStream,
     reader: BufReader<UnixStream>,
+    /// The bytes read and written, newlines included.
+    bytes: u64,
 }
 
 impl Conn {
     fn read(&mut self) -> Value {
         let mut line = String::new();
         self.reader.read_line(&mut line).expect("a line within 5 s");
+        self.bytes += line.len() as u64;
         serde_json::from_str(&line).unwrap()
     }
 
@@ -70,6 +74,7 @@ impl Conn {
         let mut line = serde_json::to_vec(&value).unwrap();
         line.push(b'\n');
         self.stream.write_all(&line).unwrap();
+        self.bytes += line.len() as u64;
     }
 
     /// Reads `hello` and answers it, then the `client.options` (plan
@@ -168,6 +173,30 @@ fn hello_then_a_turn_and_its_say() {
             stopped: vec![]
         }
     );
+}
+
+#[test]
+fn the_client_counts_the_bytes_over_the_link_across_connections() {
+    let dir = short_dir();
+    let (socket, keys) = paths(&dir);
+    let listener = UnixListener::bind(&socket).unwrap();
+    let c = companion(&socket, &keys, 50, 400);
+    let mut conn = accept(&listener);
+    conn.greet();
+    expect_connected(&c);
+    // Every line both ways, newlines included, once its event is out.
+    assert_eq!(c.link_bytes(), conn.bytes);
+    let first = conn.bytes;
+    drop(conn);
+    // A new connection adds to the count: it is the session's.
+    let mut conn = accept(&listener);
+    conn.greet();
+    loop {
+        if let Event::Agents(_) = next_event(&c) {
+            break;
+        }
+    }
+    assert_eq!(c.link_bytes(), first + conn.bytes);
 }
 
 #[test]
