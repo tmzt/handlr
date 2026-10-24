@@ -1361,3 +1361,31 @@ Tests:
 - reopening one from disk shows it at once and resumes;
 - low memory pages everything out and trims the open view to ±1 screen;
 - Clear cache empties both.
+
+## Amendment — 2026-10-24 12:21 EDT: memory pressure in grades, least recently used first, with a full drop on low memory (living section L3)
+
+The owner (2026-10-24): "the low memory response should be oldest since
+last used first depending on pressure, full drop on lowmemory to prevent
+kill"; then "yes". This replaces item 3 of the previous amendment.
+Within each grade, the least recently used views go first.
+- **`UI_HIDDEN`** (libmorph's `on_trim_memory`, stage 2): closed views are
+  paged out, keeping only the most recent one in memory. The open view
+  keeps contents within ±5 screens.
+- **`BACKGROUND`** (stage 2): every closed view is paged out. The open view
+  keeps ±1 screen.
+- **`LowMemory`** (libmorph's `on_low_memory`, stage 1): a full drop, so the
+  app is not killed:
+  - every cached view is paged out;
+  - the open view keeps only what is on screen, and its outline;
+  - every layout and shimmer cache of blocks off screen is freed.
+
+  Anything needed again is read back from disk or fetched.
+
+Until libmorph 0.4.0 delivers them, the three are tested behind
+`Input::Memory(Pressure)`.
+
+Tests:
+- each grade pages out in least-recently-used order and keeps the stated
+  range;
+- the full drop leaves only the screen's blocks and the outline;
+- scrolling after it reads back from disk.
