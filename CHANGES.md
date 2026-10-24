@@ -1322,3 +1322,24 @@ Small departures needed to make step 4 work (`src/server/subscriptions.rs`,
   machine's `~/.local/state`.
 - **A closed pane's subscription ends by itself**: after the
   `pane_closed` delivery its id is unknown (`SUBSCRIPTION_NOT_FOUND`).
+
+## 2026-10-23 23:40 EDT — plan 20261023_03, steps 5 to 7: the tail's sizes, the focus row, and where the view's cards and status come from
+
+Small departures in `src/tail.rs`, `crates/handlr-companion` and
+`apps/companion`:
+- **Step 5: `handlr session tail --entries N` counts sections**, as A5
+  made the backfill's size (`sections`); each printed line starts with
+  its section's serial, as A2 replaced `seq`. Only the CLI is built; the
+  live check of section 10.6 and A8.8 against herdr is the owner's.
+- **Step 7: the focus row is the focused agent's card.** Section 7 makes
+  the main screen's focus line a control with a chevron. Since plan
+  20261023_04 the main screen is the overview, which has no focus line:
+  its focused agent's card, which a tap already opened, is the control,
+  and its heading now ends in `›`.
+- **Step 6: Approval cards come only from the daemon.** The client no
+  longer makes an Approval card from `confirm.requested`; the daemon's
+  card sections carry them (A3, A4), so the view never shows one twice.
+  A pane with no session here has no sections, and so no Approval card
+  in the view; its confirmation is still asked as before.
+- **Step 6: the view's status is the subscription's** once it has
+  answered; until then it is `agents.list`'s.
