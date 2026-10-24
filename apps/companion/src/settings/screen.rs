@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use libcontrols::{
     ControlAction, DismissReason, DrawContext, EventResponse, Label, ModalEvent, ModalStack,
-    ModalState, MouseButton, MouseEvent, NodeFlags, NodeId, Rect, Router, ScrollAxis, ScrollPane,
-    ScrollState, TextAlign,
+    ModalState, ModalTransition, MouseButton, MouseEvent, NodeFlags, NodeId, Rect, Router,
+    ScrollAxis, ScrollPane, ScrollState, TextAlign,
 };
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
@@ -177,7 +177,12 @@ impl SettingsScreen {
             router: Router::new(),
             nodes: None,
             scroll: ScrollState::new(),
-            modals: Arc::new(ModalState::new()),
+            // Closing is at once, with no fade (owner, 2026-10-24: "closing
+            // a confirm modal shouldn't have a delay, no fade out").
+            modals: Arc::new(ModalState::new().with_transition(ModalTransition::Timed {
+                open_secs: 0.18,
+                close_secs: 0.0,
+            })),
             settings,
             battery,
             battery_state,
