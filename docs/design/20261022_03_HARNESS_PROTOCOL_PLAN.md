@@ -1550,3 +1550,9 @@ to the newest, with "+N".
 
 Tests: a finished turn from a session used within the hour shows a one-line
 card in its colour; it hides after 10 s; a question replaces it.
+
+## Amendment — 2026-10-24 16:00 EDT: a correction to the previous amendment's reference (living section L3)
+
+The previous amendment cites "the amendment of 2026-10-24 15", a time cut
+short by a mistake in my command. It means the amendment of 2026-10-24 15:56 EDT, "a colour for
+every session, and other sessions' questions as cards at the bottom".
