@@ -13,7 +13,7 @@
 //! every input and message and every [`TICK`]; a test gives any times it
 //! likes.
 
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
 use handlr_speech::LocalTime;
@@ -101,6 +101,44 @@ pub enum Input {
     /// the bottom, following (plan 20261022_03, the 01:06 EDT amendment,
     /// item 5; CHANGES.md, 2026-10-24 01:06 EDT).
     ApplyOutline,
+    /// The settings screen's toggles, as they are now (plan 20261024_02,
+    /// decisions 3 and 4). Given at start and on every change.
+    Settings(Settings),
+    /// Unpair this device (decision 3's *Unpair this device*): the daemon
+    /// is asked to forget it (`link.unpair`), then the pairing is forgotten
+    /// here, answered or not. Offline, it is forgotten here at once.
+    Unpair,
+}
+
+/// The settings the client acts on (plan 20261024_02, decisions 3 and 4).
+/// Each is on by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settings {
+    /// *All sound*: off, nothing is said ([`Event::Say`]), no ding is
+    /// given, and no reply is queued to be read aloud.
+    pub sound: bool,
+    /// *Ding when an agent is done*: [`Event::Ding`] once per new
+    /// Finished card. Only while `sound` is on.
+    pub ding: bool,
+    /// *Microphone*: off, the STT gate is never armed ([`Event::Arm`]),
+    /// utterances are ignored, and no message is dictated.
+    pub microphone: bool,
+    /// *General agent (Gemini)*: off, no Gemini turn is started, and
+    /// `client.options` says so. An utterance goes to the agent in view as
+    /// a message, and on the overview does nothing (the 11:37 EDT
+    /// amendment).
+    pub general_agent: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Settings {
+            sound: true,
+            ding: true,
+            microphone: true,
+            general_agent: true,
+        }
+    }
 }
 
 /// A tapped suggestion on its way: its own approval, once confirmed.
@@ -408,6 +446,17 @@ pub enum Event {
         /// Empty when none is held aside, or once they are below the end.
         held_newer: Vec<crate::view::Slot>,
     },
+    /// An agent finished a turn: a new Finished card, on the overview's
+    /// list or in the agent view (plan 20261024_02, decision 3). Play the
+    /// ding. Given once per card, and not with the ding or sound off.
+    Ding,
+    /// The pairing was forgotten ([`Input::Unpair`]): the link key and the
+    /// server record are gone, and the client is unpaired. `daemon`: the
+    /// daemon answered that it forgot this device too; otherwise it still
+    /// lists it until it is removed from `auth.toml`.
+    Unpaired {
+        daemon: bool,
+    },
     Error(String),
 }
 
@@ -427,6 +476,10 @@ pub enum Output {
     Send(Request),
     /// Close the connection, for this reason, and reconnect later.
     Close(String),
+    /// Forget the pairing: delete the link key and the server record,
+    /// close the connection, and give [`Event::Unpaired`] with `daemon`
+    /// (plan 20261024_02, decision 3).
+    Forget { daemon: bool },
 }
 
 /// Notices held at most, the oldest dropped beyond it (decision 4).
@@ -448,6 +501,10 @@ pub const PING_WAIT: Duration = Duration::from_secs(10);
 /// short, because a socket that slept (or was frozen by the system) is
 /// often dead, and the view would sit stale until it was found out.
 pub const PING_WAIT_RESUME: Duration = Duration::from_secs(3);
+
+/// How long `link.unpair` may go unanswered before the pairing is
+/// forgotten anyway.
+pub const UNPAIR_WAIT: Duration = Duration::from_secs(5);
 
 /// Whether an utterance answers a confirmation with approval: the whole
 /// utterance is "approve" or "approved", in any case, ignoring punctuation
@@ -639,6 +696,8 @@ enum Sent {
     Options,
     /// `ping`, after a quiet spell.
     Ping,
+    /// `link.unpair`.
+    Unpair,
     /// `session.content` for this subscription (plan 20261024_01): the
     /// slots asked for, as (index, serial, rev) when asked, under the
     /// view's outline generation `generation`.
@@ -856,6 +915,13 @@ pub struct State {
     view: Option<AgentView>,
     /// Follow herdr's focus with the open view (off by default).
     follow: bool,
+    /// The settings screen's toggles (plan 20261024_02).
+    settings: Settings,
+    /// A `link.unpair` is on its way, since this time.
+    unpairing: Option<Duration>,
+    /// Panes whose finished turn the agent view has dinged: the list's
+    /// next stopped turn for them is the same one, and is not dinged again.
+    dinged: HashSet<String>,
 }
 
 /// The open agent view (plan 20261022_03, step 4), fed by its session
@@ -921,6 +987,12 @@ struct AgentView {
     /// Bumped with each new outline: a `slots_only` answer for an older
     /// one is dropped.
     generation: u64,
+    /// The live Finished card as last shown, by serial.
+    finished: Option<common::Serial>,
+    /// The agent has worked since the view opened, or since its last
+    /// ding: a Finished card shown after that is new (plan 20261024_02).
+    /// The one shown on opening is not.
+    worked: bool,
 }
 
 impl AgentView {
@@ -952,6 +1024,8 @@ impl AgentView {
             hole: (0, Duration::ZERO),
             unavailable: HashMap::new(),
             generation: 0,
+            finished: None,
+            worked: false,
         }
     }
 
@@ -1179,6 +1253,9 @@ impl State {
             pending_shown: Vec::new(),
             view: None,
             follow: false,
+            settings: Settings::default(),
+            unpairing: None,
+            dinged: HashSet::new(),
         }
     }
 
@@ -1235,6 +1312,25 @@ impl State {
         vec![self.request(methods::HELLO, params, Sent::Hello)]
     }
 
+    /// The settings as last given.
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Drops what the settings silence (plan 20261024_02, decision 4):
+    /// every [`Event::Say`] with sound off, the ding with it or sound off,
+    /// and arming the STT gate with the microphone off.
+    fn gate(&self, mut out: Vec<Output>) -> Vec<Output> {
+        let s = self.settings;
+        out.retain(|o| match o {
+            Output::Event(Event::Say(_)) => s.sound,
+            Output::Event(Event::Ding) => s.sound && s.ding,
+            Output::Event(Event::Arm) => s.microphone,
+            _ => true,
+        });
+        out
+    }
+
     /// The connection closed or could not be made.
     pub fn disconnected(&mut self, retry_in_ms: u32) -> Vec<Output> {
         let mut out = Vec::new();
@@ -1282,7 +1378,11 @@ impl State {
         }
         self.read_in_order();
         self.flush_notices(&mut out);
-        out
+        // `link.unpair` will not be answered now: forgotten here.
+        if self.unpairing.take().is_some() {
+            out.push(Output::Forget { daemon: false });
+        }
+        self.gate(out)
     }
 
     /// Something the app said.
@@ -1385,8 +1485,73 @@ impl State {
                     self.send_options(&mut out);
                 }
             }
+            Input::Settings(settings) => self.set_settings(settings, &mut out),
+            Input::Unpair => self.unpair(&mut out),
         }
-        out
+        self.gate(out)
+    }
+
+    /// The settings changed (plan 20261024_02, decisions 3 and 4).
+    fn set_settings(&mut self, settings: Settings, out: &mut Vec<Output>) {
+        let before = std::mem::replace(&mut self.settings, settings);
+        if before == settings {
+            return;
+        }
+        log::info!(
+            "settings: sound {}, ding {}, microphone {}, general agent {}",
+            settings.sound,
+            settings.ding,
+            settings.microphone,
+            settings.general_agent
+        );
+        if before.sound && !settings.sound {
+            // Nothing more is read: what waits is dropped, and what is
+            // being said stops.
+            self.reading.clear();
+            self.notices.clear();
+            if self.speaking {
+                out.push(event(Event::StopSpeaking));
+            }
+            let now = self.now;
+            if let Some(d) = self.dictation.as_mut()
+                && d.read_back != ReadBack::No
+            {
+                d.read_back = ReadBack::No;
+                d.quiet_from = Some(now);
+            }
+        }
+        if before.microphone && !settings.microphone {
+            // No dictation without the microphone.
+            self.clear_dictation(out);
+        }
+        // Read aloud is off in effect without sound, so the daemon makes no
+        // summaries for it.
+        let spoken = |s: Settings| self.read_aloud && s.sound;
+        let options =
+            before.general_agent != settings.general_agent || spoken(before) != spoken(settings);
+        if options && self.online() {
+            self.send_options(out);
+        }
+    }
+
+    /// Asks the daemon to forget this device, or, offline, forgets the
+    /// pairing at once (plan 20261024_02, decision 6).
+    fn unpair(&mut self, out: &mut Vec<Output>) {
+        if self.unpairing.is_some() {
+            return;
+        }
+        if self.online() {
+            log::info!("unpairing: asking the daemon to forget this device");
+            self.unpairing = Some(self.now);
+            out.push(self.request(
+                methods::LINK_UNPAIR,
+                common::LinkUnpairParams {},
+                Sent::Unpair,
+            ));
+        } else {
+            log::info!("unpairing: offline; forgetting the pairing here only");
+            out.push(Output::Forget { daemon: false });
+        }
     }
 
     /// The agent view as it stands, if one is open.
@@ -1854,6 +2019,7 @@ impl State {
         let Some(event) = self.agent_view() else {
             return;
         };
+        self.view_ding(&event, out);
         let v = self.view.as_mut().expect("a view");
         if !v
             .shown
@@ -1862,6 +2028,65 @@ impl State {
         {
             v.shown = Some(event.clone());
             out.push(Output::Event(event));
+        }
+    }
+
+    /// A ding for the view's agent when a new live Finished card shows:
+    /// one that was not shown before, after the agent has worked since the
+    /// view opened or since its last ding (plan 20261024_02, decision 3).
+    fn view_ding(&mut self, view: &Event, out: &mut Vec<Output>) {
+        let Event::AgentView {
+            sections, status, ..
+        } = view
+        else {
+            return;
+        };
+        let finished = sections.iter().rev().find_map(|x| match &x.shows {
+            crate::view::Shows::Card(c) if c.live && c.kind == common::CardKind::Finished => {
+                Some(x.serial)
+            }
+            _ => None,
+        });
+        let Some(v) = self.view.as_mut() else {
+            return;
+        };
+        if status == "working" {
+            v.worked = true;
+        }
+        if finished == v.finished {
+            return;
+        }
+        v.finished = finished;
+        if finished.is_some() && v.worked {
+            v.worked = false;
+            self.dinged.insert(v.pane_id.clone());
+            log::info!("ding: the viewed agent finished");
+            out.push(event(Event::Ding));
+        }
+    }
+
+    /// A ding for each agent whose turn newly finished since the agents
+    /// were last listed: stopped on a reply now, and not before, or before
+    /// on another reply (plan 20261024_02, decision 3). An agent not listed
+    /// before is not dinged, nor a finish the agent view already dinged.
+    fn ding_finished(&mut self, agents: &[common::AgentInfo], out: &mut Vec<Output>) {
+        for a in agents {
+            let Some(before) = self.agents.iter().find(|b| b.pane_id == a.pane_id) else {
+                continue;
+            };
+            match &a.turn {
+                Some(common::Turn::Stopped { .. }) if before.turn != a.turn => {
+                    if !self.dinged.remove(&a.pane_id) {
+                        log::info!("ding: an agent finished");
+                        out.push(event(Event::Ding));
+                    }
+                }
+                Some(common::Turn::Stopped { .. }) => {}
+                // Working again: a ding the view gave is for an older turn.
+                _ => {
+                    self.dinged.remove(&a.pane_id);
+                }
+            }
         }
     }
 
@@ -1948,6 +2173,14 @@ impl State {
     fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
         self.now = self.now.max(now);
         self.keep_alive(out);
+        if self
+            .unpairing
+            .is_some_and(|at| self.now >= at + UNPAIR_WAIT)
+        {
+            log::warn!("unpairing: no answer in time; forgetting the pairing here");
+            self.unpairing = None;
+            out.push(Output::Forget { daemon: false });
+        }
         if let Some(by_button) = d_waiting(&self.dictation).filter(|_| !self.unheard()) {
             self.submit(by_button, out);
         }
@@ -1974,6 +2207,10 @@ impl State {
     /// Take a message whose first parts are `parts`, already in it.
     fn start_dictation_with(&mut self, parts: Vec<String>, out: &mut Vec<Output>) {
         if self.dictation.is_some() {
+            return;
+        }
+        if !self.settings.microphone {
+            log::info!("dictation: the microphone is off");
             return;
         }
         // From the agent view, the message is for that agent.
@@ -2020,6 +2257,10 @@ impl State {
     }
 
     fn read_back(&mut self, out: &mut Vec<Output>) {
+        // Nothing is said with sound off, so nothing waits for it.
+        if !self.settings.sound {
+            return;
+        }
         let Some(d) = self.dictation.as_mut() else {
             return;
         };
@@ -2304,7 +2545,7 @@ impl State {
                 log::warn!("ignoring a request from the daemon: {}", request.method);
             }
         }
-        out
+        self.gate(out)
     }
 
     fn tap(&mut self, out: &mut Vec<Output>) {
@@ -2328,6 +2569,11 @@ impl State {
         self.voice_ended = None;
         let text = text.trim().to_string();
         if text.is_empty() {
+            return;
+        }
+        // A late utterance from before the microphone went off.
+        if !self.settings.microphone {
+            log::debug!("ignoring an utterance: the microphone is off");
             return;
         }
         if !self.online() {
@@ -2390,6 +2636,17 @@ impl State {
     }
 
     fn start_turn(&mut self, text: String, out: &mut Vec<Output>) {
+        if !self.settings.general_agent {
+            // No Gemini (plan 20261024_02, the 11:37 EDT amendment): in the
+            // agent view, what was said is a message to its agent; on the
+            // overview, nothing.
+            if self.view.is_some() {
+                self.start_dictation_with(vec![text], out);
+            } else {
+                log::info!("the general agent is off: no turn");
+            }
+            return;
+        }
         let id = self.next_turn;
         self.next_turn += 1;
         self.turn = Some(Turn { id, tapped: false });
@@ -2428,6 +2685,12 @@ impl State {
                 }
                 Sent::Options => log::warn!("client.options: {message}"),
                 Sent::Ping => {}
+                Sent::Unpair => {
+                    log::warn!("link.unpair: {message}; forgetting the pairing here");
+                    if self.unpairing.take().is_some() {
+                        out.push(Output::Forget { daemon: false });
+                    }
+                }
                 sent @ Sent::Content { .. } => {
                     // The session changed under the range: the reset that
                     // follows brings the new outline.
@@ -2535,6 +2798,7 @@ impl State {
             Sent::List => match parse::<common::AgentsListResult>(result) {
                 Ok(list) => {
                     self.listing = false;
+                    self.ding_finished(&list.agents, out);
                     if !self.listed || list.agents != self.agents {
                         out.push(event(Event::Agents(list.agents.clone())));
                     }
@@ -2652,6 +2916,13 @@ impl State {
                 }
             },
             Sent::Interrupt | Sent::ConfirmReply(_) | Sent::Options | Sent::Ping => {}
+            Sent::Unpair => {
+                // The daemon forgot this device and closes the link.
+                log::info!("unpairing: the daemon forgot this device");
+                if self.unpairing.take().is_some() {
+                    out.push(Output::Forget { daemon: true });
+                }
+            }
         }
     }
 
@@ -2736,8 +3007,9 @@ impl State {
     /// the daemon may ask Gemini for summaries only while it is on.
     fn send_options(&mut self, out: &mut Vec<Output>) {
         let params = common::ClientOptionsParams {
-            spoken_output: self.read_aloud,
+            spoken_output: self.read_aloud && self.settings.sound,
             background: self.background,
+            general_agent: self.settings.general_agent,
         };
         out.push(self.request(methods::CLIENT_OPTIONS, params, Sent::Options));
     }
@@ -2820,7 +3092,8 @@ impl State {
     /// ones go. Sections of another session file are ignored without a
     /// reset.
     fn delivered(&mut self, mut d: common::SessionDelivery, out: &mut Vec<Output>) {
-        let read_aloud = self.read_aloud;
+        // Nothing is queued to be read with sound off (plan 20261024_02).
+        let read_aloud = self.read_aloud && self.settings.sound;
         let Some(v) = self.view.as_mut() else {
             return;
         };
@@ -3183,6 +3456,10 @@ impl State {
     /// Says the held notices, oldest first, unless speaking, listening or
     /// confirming.
     fn flush_notices(&mut self, out: &mut Vec<Output>) {
+        if !self.settings.sound {
+            self.notices.clear();
+            return;
+        }
         if self.speaking || self.listening || !self.confirms.is_empty() {
             return;
         }
@@ -5320,20 +5597,20 @@ mod tests {
         ));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": false, "background": false})]
+            [json!({"spoken_output": false, "background": false, "general_agent": true})]
         );
         // Toggled: sent each time.
         let out = s.input(Input::ReadAloud(true));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": true, "background": false})]
+            [json!({"spoken_output": true, "background": false, "general_agent": true})]
         );
         let id = requests(&out, "client.options")[0].id.clone();
         assert!(s.incoming(response(id, json!({}))).is_empty());
         let out = s.input(Input::ReadAloud(false));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": false, "background": false})]
+            [json!({"spoken_output": false, "background": false, "general_agent": true})]
         );
         // Offline, nothing is sent; after the reconnect's hello, the value
         // as it is now.
@@ -5348,7 +5625,7 @@ mod tests {
         ));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": true, "background": false})]
+            [json!({"spoken_output": true, "background": false, "general_agent": true})]
         );
         // A refused option is only logged.
         let id = requests(&out, "client.options")[0].id.clone();
@@ -6706,5 +6983,322 @@ mod tests {
         s.input(window((30, 32), (0, 32), (0, 32), false));
         assert_eq!(ribbon(&s), [(0, true), (1, true), (2, true)]);
         assert_eq!(summaries(&s), ["new", "new", "new"]);
+    }
+
+    // The settings screen (plan 20261024_02, step 4).
+
+    fn settings(sound: bool, ding: bool, microphone: bool, general_agent: bool) -> Input {
+        Input::Settings(Settings {
+            sound,
+            ding,
+            microphone,
+            general_agent,
+        })
+    }
+
+    #[test]
+    fn settings_start_on() {
+        let s = State::new("test");
+        assert_eq!(s.settings(), Settings::default());
+        assert_eq!(
+            Settings::default(),
+            Settings {
+                sound: true,
+                ding: true,
+                microphone: true,
+                general_agent: true
+            }
+        );
+    }
+
+    #[test]
+    fn with_sound_off_nothing_is_said_or_queued_to_be_read() {
+        let mut s = viewing("working", asking());
+        s.input(Input::ReadAloud(true));
+        // Read aloud is off in effect: the daemon is told.
+        let out = s.input(settings(false, true, true, true));
+        assert_eq!(
+            options(&out),
+            [json!({"spoken_output": false, "background": false, "general_agent": true})]
+        );
+        // A new reply is not sent to be measured, nor read.
+        let out = s.input(Input::Tick(secs(200.0)));
+        let mut entries = asking()["entries"].as_array().unwrap().clone();
+        entries.push(json!({"ts": "10", "role": "assistant", "kind": "text",
+                            "summary": "All done."}));
+        let session = json!({"session_id": "s1", "matched": "id", "entries": entries});
+        let out = session_answer(&mut s, &out, "idle", session);
+        assert!(requests(&out, "speech.summarize").is_empty(), "{out:?}");
+        assert!(said(&out).is_empty());
+        // Nor a notice, nor a confirmation's question; its card still comes.
+        let out = s.incoming(notice("Claude is done."));
+        assert!(said(&out).is_empty(), "{out:?}");
+        let out = s.incoming(confirm_requested(7));
+        assert!(said(&out).is_empty(), "{out:?}");
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Confirm { confirm_id: 7, .. }))
+        );
+        // Back on: said again, and read aloud is on again for the daemon.
+        let out = s.input(settings(true, true, true, true));
+        assert_eq!(options(&out)[0]["spoken_output"], true);
+        // The notice from while it was off is not kept; a new one waits
+        // for the confirmation, then is said.
+        let out = s.incoming(notice("Codex is done."));
+        assert!(said(&out).is_empty(), "the confirmation holds it: {out:?}");
+        let out = s.input(Input::Answer {
+            confirm_id: 7,
+            approve: false,
+        });
+        assert_eq!(said(&out), ["Codex is done."]);
+    }
+
+    #[test]
+    fn turning_sound_off_stops_what_is_being_said() {
+        let mut s = online();
+        s.input(Input::Speaking(true));
+        let out = s.input(settings(false, true, true, true));
+        assert!(events(&out).contains(&Event::StopSpeaking), "{out:?}");
+        // Off again changes nothing more.
+        assert!(s.input(settings(false, true, true, true)).is_empty());
+    }
+
+    #[test]
+    fn with_the_microphone_off_nothing_listens_or_is_dictated() {
+        let mut s = online();
+        s.input(settings(true, true, false, true));
+        assert!(!events(&s.input(Input::Tap)).contains(&Event::Arm));
+        let out = s.input(Input::Utterance("hello".into()));
+        assert!(requests(&out, "turn.start").is_empty(), "{out:?}");
+        let out = s.input(Input::StartDictation);
+        assert!(dictation_of(&out).is_none(), "{out:?}");
+        assert!(!events(&out).contains(&Event::Arm));
+        // On again: a tap arms the gate.
+        s.input(settings(true, true, true, true));
+        assert!(events(&s.input(Input::Tap)).contains(&Event::Arm));
+    }
+
+    #[test]
+    fn turning_the_microphone_off_ends_a_dictation() {
+        let mut s = dictating();
+        let out = s.input(settings(true, true, false, true));
+        assert!(!dictation_of(&out).unwrap().active, "{out:?}");
+    }
+
+    #[test]
+    fn with_the_general_agent_off_no_turn_starts() {
+        let mut s = online();
+        let out = s.input(settings(true, true, true, false));
+        assert_eq!(
+            options(&out),
+            [json!({"spoken_output": false, "background": false, "general_agent": false})]
+        );
+        // On the overview, an utterance does nothing.
+        let out = s.input(Input::Utterance("what's going on".into()));
+        assert!(requests(&out, "turn.start").is_empty(), "{out:?}");
+        assert!(dictation_of(&out).is_none());
+        // Other settings changing leave it off for the daemon.
+        let out = s.input(settings(true, false, true, false));
+        assert!(options(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn with_the_general_agent_off_an_utterance_in_the_view_is_a_message() {
+        let mut s = viewing("idle", asking());
+        s.input(settings(true, true, true, false));
+        let out = s.input(Input::Utterance("Run the tests again.".into()));
+        assert!(requests(&out, "turn.start").is_empty(), "{out:?}");
+        let card = dictation_of(&out).expect("a message");
+        assert!(card.active);
+        assert_eq!(card.text, "Run the tests again.");
+        assert_eq!(card.target.unwrap().pane_id, "w2:pZ");
+    }
+
+    /// An agent's entry in `agents.list` with its turn.
+    fn agent_turn(pane: &str, turn: Value) -> Value {
+        let mut a = agent_info(pane, "idle");
+        a["turn"] = turn;
+        a
+    }
+
+    fn working() -> Value {
+        json!({"state": "working", "line": "Reading files"})
+    }
+
+    fn stopped(line: &str) -> Value {
+        json!({"state": "stopped", "line": line})
+    }
+
+    fn dings(out: &[Output]) -> usize {
+        events(out).iter().filter(|e| **e == Event::Ding).count()
+    }
+
+    /// Online, the hello's `agents.list` answered with `agents`; the clock
+    /// at 0.
+    fn listed(agents: Value) -> (State, Vec<Output>) {
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(
+            id,
+            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
+        ));
+        let list = requests(&out, "agents.list")[0].id.clone();
+        let out = s.incoming(response(list, json!({"agents": agents})));
+        (s, out)
+    }
+
+    /// The next list, due at `at` seconds, answered with `agents`.
+    fn relist(s: &mut State, at: f64, agents: Value) -> Vec<Output> {
+        let out = s.input(Input::Tick(secs(at)));
+        let list = requests(&out, "agents.list")[0].id.clone();
+        s.incoming(response(list, json!({"agents": agents})))
+    }
+
+    #[test]
+    fn a_ding_once_per_finished_turn_on_the_list() {
+        // Finished before the app knew it: no ding.
+        let (mut s, out) = listed(json!([agent_turn("w1:p1", stopped("Old."))]));
+        assert_eq!(dings(&out), 0);
+        let out = relist(&mut s, 15.0, json!([agent_turn("w1:p1", working())]));
+        assert_eq!(dings(&out), 0);
+        // Working, then stopped: one ding, and none for the same turn again.
+        let out = relist(&mut s, 30.0, json!([agent_turn("w1:p1", stopped("Done."))]));
+        assert_eq!(dings(&out), 1, "{out:?}");
+        let out = relist(&mut s, 45.0, json!([agent_turn("w1:p1", stopped("Done."))]));
+        assert_eq!(dings(&out), 0);
+        // A turn missed between two lists still dings; so does each agent.
+        let out = relist(
+            &mut s,
+            60.0,
+            json!([
+                agent_turn("w1:p1", stopped("Again.")),
+                agent_turn("w2:p2", working())
+            ]),
+        );
+        assert_eq!(dings(&out), 1);
+        let out = relist(
+            &mut s,
+            75.0,
+            json!([
+                agent_turn("w1:p1", working()),
+                agent_turn("w2:p2", stopped("Ok."))
+            ]),
+        );
+        assert_eq!(dings(&out), 1);
+    }
+
+    #[test]
+    fn no_ding_with_the_ding_or_sound_off() {
+        for (sound, ding) in [(true, false), (false, true)] {
+            let (mut s, _) = listed(json!([agent_turn("w1:p1", working())]));
+            s.input(settings(sound, ding, true, true));
+            let out = relist(&mut s, 15.0, json!([agent_turn("w1:p1", stopped("Done."))]));
+            assert_eq!(dings(&out), 0, "sound {sound}, ding {ding}");
+        }
+    }
+
+    fn finished_at(line: u32) -> Value {
+        json!({"serial": serial(line, 0), "kind": "card", "card": {
+            "card": "finished", "live": true, "title": "Finished", "text": "Done."}})
+    }
+
+    /// A delivery for subscription 1 with herdr's `status`.
+    fn deliver_status(s: &mut State, status: &str, sections: Vec<Value>) -> Vec<Output> {
+        s.incoming(note(
+            "session.delivery",
+            json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+                "reset": false, "session": {"session_id": "s1", "matched": "id"},
+                "reason": null, "sections": sections, "removed": [], "status": status}),
+        ))
+    }
+
+    #[test]
+    fn a_ding_once_per_new_finished_card_in_the_view() {
+        // The card shown on opening is not new.
+        let mut s = viewing("idle", json!(null));
+        let out = deliver_status(&mut s, "idle", vec![text_at(1, 0, "a"), finished_at(2)]);
+        assert_eq!(dings(&out), 0, "{out:?}");
+        // The agent works, then finishes: one ding.
+        let out = deliver_status(&mut s, "working", vec![text_at(3, 0, "b")]);
+        assert_eq!(dings(&out), 0);
+        let out = deliver_status(&mut s, "idle", vec![finished_at(4)]);
+        assert_eq!(dings(&out), 1, "{out:?}");
+        // The same card again, or more of the session: no more.
+        let out = deliver_status(&mut s, "idle", vec![finished_at(4), text_at(1, 1, "c")]);
+        assert_eq!(dings(&out), 0);
+
+        // Back on the overview, the list's stopped turn is the same one.
+        let out = s.input(Input::CloseAgent);
+        let out = match requests(&out, "agents.list").first() {
+            Some(list) => list.id.clone(),
+            None => {
+                let out = s.input(Input::Tick(secs(130.0)));
+                requests(&out, "agents.list")[0].id.clone()
+            }
+        };
+        let out = s.incoming(response(
+            out,
+            json!({"agents": [agent_turn("w2:pZ", stopped("Done."))]}),
+        ));
+        assert_eq!(dings(&out), 0, "{out:?}");
+    }
+
+    #[test]
+    fn unpairing_online_asks_the_daemon_then_forgets() {
+        let mut s = online();
+        let out = s.input(Input::Unpair);
+        let asked = requests(&out, "link.unpair");
+        assert_eq!(asked.len(), 1, "{out:?}");
+        assert_eq!(asked[0].params, json!({}));
+        let id = asked[0].id.clone();
+        // Asked once.
+        assert!(requests(&s.input(Input::Unpair), "link.unpair").is_empty());
+        let out = s.incoming(response(id, json!({})));
+        assert_eq!(out, [Output::Forget { daemon: true }]);
+    }
+
+    #[test]
+    fn unpairing_forgets_on_a_refusal_a_timeout_or_a_disconnect() {
+        // Refused (the local socket): forgotten here.
+        let mut s = online();
+        let out = s.input(Input::Unpair);
+        let id = requests(&out, "link.unpair")[0].id.clone();
+        let out = s.incoming(Incoming::Response(Response::err(
+            Some(id),
+            libhandlr_proto::ErrorObject::new(
+                -32001,
+                "link.unpair is served only over a paired link",
+            ),
+        )));
+        assert_eq!(out, [Output::Forget { daemon: false }]);
+
+        // No answer in UNPAIR_WAIT.
+        let mut s = online();
+        s.input(Input::Tick(secs(10.0)));
+        s.input(Input::Unpair);
+        assert!(
+            !s.input(Input::Tick(secs(14.9)))
+                .contains(&Output::Forget { daemon: false })
+        );
+        assert!(
+            s.input(Input::Tick(secs(15.0)))
+                .contains(&Output::Forget { daemon: false })
+        );
+
+        // The link closes first.
+        let mut s = online();
+        s.input(Input::Unpair);
+        assert!(
+            s.disconnected(1000)
+                .contains(&Output::Forget { daemon: false })
+        );
+    }
+
+    #[test]
+    fn unpairing_offline_forgets_at_once() {
+        let mut s = State::new("test");
+        assert_eq!(s.input(Input::Unpair), [Output::Forget { daemon: false }]);
     }
 }

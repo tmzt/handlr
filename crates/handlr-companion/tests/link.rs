@@ -468,3 +468,61 @@ fn an_invalid_string_is_refused_before_connecting() {
     assert_eq!(keys.server().unwrap(), None);
     assert!(keys.static_key().unwrap().is_none());
 }
+
+// Unpairing (plan 20261024_02, decision 6 and step 4).
+
+/// Keys in `dir` paired with `server` at `addresses`; the client's public
+/// key.
+fn paired_keys(dir: &tempfile::TempDir, server: &[u8; 32], addresses: Vec<String>) -> [u8; 32] {
+    let mut keys = FileKeyStore::new(keys_dir(dir));
+    let client = keys.generate_static_key().unwrap().public();
+    keys.set_server(ServerRecord {
+        name: "phone".into(),
+        public_key: *server,
+        addresses,
+        session_id: None,
+    })
+    .unwrap();
+    client
+}
+
+fn assert_forgotten(dir: &tempfile::TempDir) {
+    let mut keys = FileKeyStore::new(keys_dir(dir));
+    assert!(keys.static_key().unwrap().is_none());
+    assert_eq!(keys.server().unwrap(), None);
+}
+
+#[test]
+fn unpairing_online_forgets_after_the_daemon_answers() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let client = paired_keys(&dir, &server.key.public, vec![server.addr.clone()]);
+    server.authorized.lock().unwrap().insert(client);
+    let c = companion(&dir);
+    server.next_seen();
+    expect_connected(&c);
+
+    c.send(Input::Unpair);
+    // The in-test server answers link.unpair with `{}`.
+    assert_eq!(next_event(&c), Event::Unpaired { daemon: true });
+    assert_forgotten(&dir);
+    // It does not connect to the server again.
+    assert!(
+        server
+            .seen
+            .recv_timeout(Duration::from_millis(500))
+            .is_err()
+    );
+}
+
+#[test]
+fn unpairing_offline_forgets_at_once() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    // Paired, but the server is not reachable.
+    paired_keys(&dir, &server.key.public, vec![closed_addr()]);
+    let c = companion(&dir);
+    c.send(Input::Unpair);
+    assert_eq!(next_event(&c), Event::Unpaired { daemon: false });
+    assert_forgotten(&dir);
+}

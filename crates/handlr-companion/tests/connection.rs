@@ -87,7 +87,7 @@ impl Conn {
         assert_eq!(options["method"], "client.options");
         assert_eq!(
             options["params"],
-            json!({"spoken_output": false, "background": false})
+            json!({"spoken_output": false, "background": false, "general_agent": true})
         );
         self.write(json!({"jsonrpc": "2.0", "id": options["id"], "result": {}}));
         let list = self.read();

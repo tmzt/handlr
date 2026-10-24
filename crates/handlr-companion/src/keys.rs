@@ -24,6 +24,12 @@ pub trait KeyStore: Send {
     /// The paired server, if any.
     fn server(&mut self) -> Result<Option<ServerRecord>, String>;
     fn set_server(&mut self, server: ServerRecord) -> Result<(), String>;
+    /// Deletes the static key and the server record: the client is no
+    /// longer paired (plan 20261024_02, *Unpair this device*). Nothing
+    /// stored is not an error. A store that cannot delete says so.
+    fn forget(&mut self) -> Result<(), String> {
+        Err("this key store cannot forget a pairing".to_string())
+    }
 }
 
 /// The server a client is paired with.
@@ -181,6 +187,17 @@ impl KeyStore for FileKeyStore {
         let text = toml::to_string(&file).map_err(|e| e.to_string())?;
         self.write_private(&self.server_path(), text.as_bytes())
     }
+
+    fn forget(&mut self) -> Result<(), String> {
+        for path in [self.server_path(), self.key_path()] {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -239,5 +256,23 @@ mod tests {
         };
         keys.set_server(record.clone()).unwrap();
         assert_eq!(keys.server().unwrap(), Some(record));
+    }
+
+    #[test]
+    fn forgetting_deletes_the_key_and_the_server_record() {
+        let (_dir, mut keys) = store();
+        // Nothing stored: nothing to do.
+        keys.forget().unwrap();
+        keys.generate_static_key().unwrap();
+        keys.set_server(ServerRecord {
+            name: "m4".to_string(),
+            public_key: [9u8; 32],
+            addresses: vec!["127.0.0.1:7347".into()],
+            session_id: None,
+        })
+        .unwrap();
+        keys.forget().unwrap();
+        assert!(keys.static_key().unwrap().is_none());
+        assert_eq!(keys.server().unwrap(), None);
     }
 }

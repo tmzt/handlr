@@ -137,6 +137,10 @@ fn print_event(event: Event) {
         Event::PairFailed(why) => println!("! pairing failed: {why}"),
         Event::StopSpeaking => println!("* stop speaking"),
         Event::Arm => println!("* listening"),
+        Event::Ding => println!("* ding: an agent is done"),
+        Event::Unpaired { daemon } => {
+            println!("* unpaired{}", if daemon { "" } else { " here only" })
+        }
         Event::Answered { approve, .. } => {
             println!("* {}", if approve { "approving" } else { "denying" })
         }

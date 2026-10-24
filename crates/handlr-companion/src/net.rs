@@ -18,6 +18,11 @@
 //! `paired: true` gives [`Event::Paired`] (plan 20261022_02, amendment of
 //! 23:07 EDT).
 //!
+//! [`Input::Unpair`] asks the daemon to forget this device, and the state
+//! answers with [`Output::Forget`]: the key and the server record are
+//! deleted, the connection ends, and [`Event::Unpaired`] is given (plan
+//! 20261024_02, decision 6). The next connection is the local socket's.
+//!
 //! Liveness is the operating system's: link sockets have `SO_KEEPALIVE`,
 //! and a connection ends only on an error or end of stream. The client does
 //! not `ping`.
@@ -248,15 +253,32 @@ impl Net {
         let _ = self.events.send(event);
     }
 
-    /// Gives events while there is no connection. The state sends nothing
-    /// while offline, so anything else is only logged.
-    fn emit_offline(&self, outputs: Vec<Output>) {
+    /// Gives events while there is no connection, and forgets the pairing
+    /// when told to. The state sends nothing while offline, so anything
+    /// else is only logged.
+    fn emit_offline(&mut self, outputs: Vec<Output>) {
         for output in outputs {
             match output {
                 Output::Event(e) => self.emit(e),
+                Output::Forget { daemon } => self.forget(daemon),
                 other => log::warn!("nothing to send it on: {other:?}"),
             }
         }
+    }
+
+    /// Deletes the key and the server record, so the next connection is
+    /// the local socket's, and gives [`Event::Unpaired`].
+    fn forget(&mut self, daemon: bool) {
+        if let Err(e) = self.keys.forget() {
+            log::error!("unpairing: {e}");
+            self.emit(Event::Error(format!("forgetting the pairing: {e}")));
+            return;
+        }
+        log::info!("unpairing: the pairing is forgotten");
+        self.server = None;
+        self.pairing_until = None;
+        self.state.set_session_id(None);
+        self.emit(Event::Unpaired { daemon });
     }
 
     /// Starts a connection in the state and returns its `hello`, serialized.
@@ -510,7 +532,7 @@ impl Net {
                     }
                     Some(input) => {
                         let tick = self.tick();
-                            let mut outputs = self.state.input(tick);
+                        let mut outputs = self.state.input(tick);
                         outputs.extend(self.state.input(input));
                         end = self.carry_out(outputs, &mut write).await;
                     }
@@ -523,7 +545,7 @@ impl Net {
     }
 
     /// Carries out the state's outputs; `Some` when the session must end.
-    async fn carry_out(&self, outputs: Vec<Output>, write: &mut Writer) -> Option<End> {
+    async fn carry_out(&mut self, outputs: Vec<Output>, write: &mut Writer) -> Option<End> {
         for output in outputs {
             match output {
                 Output::Event(e) => self.emit(e),
@@ -542,6 +564,11 @@ impl Net {
                 }
                 Output::Close(reason) => {
                     log::warn!("closing the connection: {reason}");
+                    return Some(End::Closed);
+                }
+                // Unpaired: the connection was the pairing's.
+                Output::Forget { daemon } => {
+                    self.forget(daemon);
                     return Some(End::Closed);
                 }
             }
