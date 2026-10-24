@@ -576,16 +576,17 @@ impl App {
             }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
             AgentHit::Link(index) => {
-                let url = self
+                let _url = self
                     .agent
                     .as_ref()
                     .and_then(|a| a.link(index))
                     .map(|l| l.url.clone())
                     .unwrap_or_default();
-                // TODO(libmorph): open `url` in the phone's browser once
+                // TODO(libmorph): open `_url` in the phone's browser once
                 // libmorph (and libmobile) have an outbound "open this link"
                 // call; they only receive links today.
-                log::info!("link: opening is not available yet ({url})");
+                // Never the URL itself: a query or fragment may be a secret.
+                log::info!("link: opening is not available yet");
             }
             AgentHit::ReadAloud if self.read_aloud && self.speaking => {
                 log::info!("read aloud: skip");
