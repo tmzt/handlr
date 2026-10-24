@@ -973,3 +973,32 @@ whether or not a page lands during it; and a delivery of one section lays
 out one block (counted). On the S23: scrolling back through a long session
 to its start moves smoothly at the finger's speed, with no jumps as pages
 land.
+
+## Amendment — 2026-10-24 00:05 EDT: a one-line "jump to end" message below the scrollback (living section L3)
+
+The owner (2026-10-24): "the UI will have a jump to end one line message
+like -- (message) -- below the scroll"; then "yes" to this amendment. It
+adds to the previous amendment (the ribbon, 2026-10-23 23:54 EDT).
+
+1. **When.** While the view is scrolled back (not following), one line
+   sits just below the scrollback, above the suggestions and the
+   controls. While following, it is hidden.
+2. **What.** Dim text, centred: `-- <newest message> --`, the first line
+   of the newest section's text (a turn's prompt, a reply, a tool call's
+   one-line summary, or a card's title), cut to fit with "…". When
+   sections have arrived since the view left the bottom, it leads with
+   their count: `-- 3 new: <newest message> --`. With nothing new, it
+   reads `-- jump to end --`.
+3. **Tap.** Tapping it jumps to the bottom and follows again, as
+   scrolling to the bottom does.
+4. **Fixed height.** The line's height is reserved for the scrollback's
+   window whether or not it shows, so it appearing or going never moves
+   the scrollback.
+5. **Source.** The newest section is always held, from its delivery: in
+   outline mode (plan 20261024_01), its contents come inline with the
+   newest slots.
+
+Tests: the line is hidden while following and shown when scrolled back;
+its text for nothing new, one new section and several; a long message
+cut with "…"; a tap follows again at the bottom; and showing or hiding it
+does not move the scrollback.
