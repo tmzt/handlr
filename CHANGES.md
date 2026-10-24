@@ -2196,3 +2196,12 @@ time.
 - **Themes** (in implementation): new optional roles `session_1` to `session_16`,
   8 hues in a light and a dark variant each, defined in both defaults and
   inherited by any theme that leaves them out.
+
+## 2026-10-24 16:11 EDT — plan 20261022_03 L3: a pull to refresh leaves the pinned card whole
+
+The owner (2026-10-24): "pull to refresh shouldn't collapse pinned cards
+either". The pinned card folded to its bar as soon as a finger moved, a pull
+at the bottom included. It now folds only while the view is scrolled back or
+the scrollbar is held (`AgentScreen::compact`), so a pull past the end, which
+keeps the view at the bottom, leaves it whole. An expanded card still never
+folds (the entry before).
