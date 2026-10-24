@@ -92,7 +92,7 @@ impl SquareButton {
             // colour stands in `bg`), not buttons.
             AgentHit::Suggest(
                 handlr_companion::Suggestion::Approve
-                | handlr_companion::Suggestion::Improve
+                | handlr_companion::Suggestion::Discuss
                 | handlr_companion::Suggestion::Implement,
             ) => {
                 let px = 19.0 * s;

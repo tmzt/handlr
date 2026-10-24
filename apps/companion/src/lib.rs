@@ -566,13 +566,13 @@ impl App {
                     agent.jump_to_pin();
                 }
             }
-            AgentHit::Suggest(Suggestion::Improve) => {
+            AgentHit::Suggest(Suggestion::Discuss) => {
                 // A message in reply to the plan's card, its start already
                 // in it.
                 if let Some(agent) = &mut self.agent {
                     agent.begin_reply();
                 }
-                self.send(Input::Respond(Suggestion::Improve));
+                self.send(Input::Respond(Suggestion::Discuss));
             }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
             AgentHit::Link(index) => {

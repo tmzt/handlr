@@ -380,8 +380,8 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
         (CardKind::Question, _) if card.about_plan => vec![
             (AgentHit::Suggest(Suggestion::Approve), "approve", GREEN),
             (
-                AgentHit::Suggest(Suggestion::Improve),
-                "improve",
+                AgentHit::Suggest(Suggestion::Discuss),
+                "discuss",
                 link_spans::LINK,
             ),
             (
@@ -659,7 +659,7 @@ pub fn suggestion_colour(s: Suggestion) -> [f32; 4] {
         Suggestion::No => RED,
         Suggestion::Continue | Suggestion::Compact => YELLOW,
         Suggestion::Approve | Suggestion::Implement => GREEN,
-        Suggestion::Improve => link_spans::LINK,
+        Suggestion::Discuss => link_spans::LINK,
     }
 }
 
@@ -1649,7 +1649,7 @@ mod tests {
     }
 
     #[test]
-    fn a_plan_question_offers_approve_improve_and_implement() {
+    fn a_plan_question_offers_approve_discuss_and_implement() {
         let entries = conversation(1);
         let flow = lay_out_flow(&entries, &[plan_card(4)], None, 1080.0, 2.0);
         let buttons: Vec<(AgentHit, &str)> =
@@ -1658,7 +1658,7 @@ mod tests {
             buttons,
             [
                 (AgentHit::Suggest(Suggestion::Approve), "approve"),
-                (AgentHit::Suggest(Suggestion::Improve), "improve"),
+                (AgentHit::Suggest(Suggestion::Discuss), "discuss"),
                 (AgentHit::Suggest(Suggestion::Implement), "implement"),
                 (AgentHit::Reply, ""),
             ]
@@ -1667,7 +1667,7 @@ mod tests {
         let a = screen(entries, vec![plan_card(4)], Some(0));
         for hit in [
             AgentHit::Suggest(Suggestion::Approve),
-            AgentHit::Suggest(Suggestion::Improve),
+            AgentHit::Suggest(Suggestion::Discuss),
             AgentHit::Suggest(Suggestion::Implement),
         ] {
             let r = a.rect_of(hit).expect("on the pinned card");
