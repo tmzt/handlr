@@ -1182,3 +1182,45 @@ amendment of the same time). In the agent view's controls row:
   become send, X, record;
 - with the general agent off (the settings plan), the centre is empty,
   except for the X while dictating.
+
+## Amendment — 2026-10-24 11:54 EDT: full text in the scrollback; tool calls fold and expand on tap (living section L3)
+
+The owner (2026-10-24): "if we're going to ellipsize sections they should
+expand on tap like cards. generally I don't want to though, only spoken
+messages should be shortened"; then "yes". This replaces the 500-character
+cut of every entry the view shows (`ENTRY_SUMMARY_MAX`, applied by the
+daemon to `Entry.summary`), and the app's fixed cuts of tool calls and
+resolved cards.
+
+1. **Full text.** Prompts, replies, notices and context lines show whole,
+   never ellipsized.
+   - **The daemon:** sections carry each entry's full redacted text, up to
+     the reader's limit (`TEXT_MAX`, 32 KiB), in `Entry.text`. This is a
+     new, appended, serde-defaulted field, so libhandlr_proto gets a patch
+     release.
+   - **`Entry.summary`:** it stays the 500-character form, for older
+     clients, speech, the jump line and the overview.
+   - **Old daemons:** the app shows `text` when present, and `summary`
+     otherwise.
+2. **Tool calls fold.**
+   - **Folded:** a tool section shows its call and result at their first
+     lines, marked "…" when there is more.
+   - **Tap:** expands it in place to the whole call and result (the
+     reader's `TOOL_TEXT_MAX`, 4,000 characters). Tapping again folds it.
+   - **The view:** it does not move, because the anchor holds by section.
+   - **Remembered:** an expanded section stays expanded while the view is
+     open.
+3. **Cards.** A resolved card in the scrollback folds and expands on tap,
+   as the pinned card does.
+4. **Speech is summarised; nothing else is.** Reading aloud, spoken
+   summaries and the jump line keep their short forms.
+
+Tests:
+- a 2,000-character reply shows whole;
+- `summary` is used when `text` is absent;
+- a folded tool shows "…" and its first lines, a tap expands it to the
+  whole, and a second tap folds it;
+- expanding does not move the view;
+- a resolved card expands and folds;
+- on the daemon, `Entry.text` carries the full redacted text, and
+  `summary` stays at 500 characters.
