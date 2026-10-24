@@ -1137,3 +1137,34 @@ Tests:
   fling;
 - a touch outside the strip scrolls as before;
 - it is not a target once faded.
+
+## Amendment — 2026-10-24 11:32 EDT: the scrollbar's band works even when invisible, and a visibility setting (living section L3)
+
+The owner (2026-10-24): "touching the scrollbar band should work as a
+scrollbar even when invisible, we should have a Scrollbar visibility with
+the arrow-based option selector in libcontrols (left/right arrows select
+options) Disabled, Hidden, Always"; then "yes". This replaces item 3's
+"the thumb is a target while it shows" in the 11:09 EDT amendment. The
+scrollback keeps a 12 pt margin at the right, the band's width, so no
+content sits under it.
+
+1. **The band.** Unless visibility is *Disabled*, the 12 pt strip at the
+   right edge of the scrollback is always a scrollbar:
+   - touching it shows the thumb and moves it to the finger, centred;
+   - dragging moves the view in proportion to the calculated length, with
+     no fling;
+   - the 2 s visibility starts when the finger lifts.
+2. **Scrollbar visibility**, a setting (the settings plan, 20261024_02):
+   - *Disabled*: no thumb and no band; the strip is plain scrollback;
+   - *Hidden* (default): the thumb is drawn while scrolling and 2 s after;
+     the band always works;
+   - *Always*: the thumb is always drawn; the band always works.
+
+   Until the settings screen exists, it is *Hidden*.
+
+Tests:
+- a touch in the band with the thumb faded moves the view there and
+  drags;
+- the thumb is centred under the finger;
+- with *Disabled*, a touch in the band scrolls as content does;
+- with *Always*, the thumb is drawn at rest.
