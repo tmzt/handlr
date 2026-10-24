@@ -241,3 +241,19 @@ released. The status becomes `In implementation` with step 1's commit.
 The previous amendment names "the 11:3x EDT amendment" for open question
 3. It means the amendment of 2026-10-24 11:37 EDT, "the general agent
 toggle stops user-directed Gemini turns only".
+
+## Amendment — 2026-10-24 12:12 EDT: Clear cache, in the Device section
+
+The owner (2026-10-24): "add a Clear cache (n MB) black text in the same
+section of settings, no confirm, just cached sessions not models". This
+adds a row to decision 3's Device section, before *Unpair this device*:
+- *Clear cache (n MB)*, in the normal text colour (not red), with no
+  confirmation. A tap empties the cached sessions: the closed views kept
+  in memory (plan 20261022_03 L3, the amendment of the same time), and,
+  once plan 20261023_09 is built, the stored scrollback. Voice models,
+  settings and pairing are untouched. *n* is the cache's size in MB, one
+  decimal under 10. It is shown as "Clear cache (0 MB)" and does nothing
+  when empty.
+
+The row is built with the session cache, in the full-text build after
+this plan's steps.
