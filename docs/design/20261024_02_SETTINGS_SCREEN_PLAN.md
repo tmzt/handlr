@@ -191,3 +191,19 @@ behind a stub and shown as "Battery settings need an app update".
    sound?
 3. **General agent off, on the overview:** should the record button do
    nothing (as written), or send to the agent herdr has in focus?
+
+## Amendment — 2026-10-24 11:32 EDT: a Display section with the scrollbar's visibility
+
+The owner (2026-10-24): "we should have a Scrollbar visibility with the
+arrow-based option selector in libcontrols (left/right arrows select
+options) Disabled, Hidden, Always"; then "yes". This adds to decision 3,
+between Voice and Battery:
+- **Display**
+  - *Scrollbar*: libcontrols' `ArrowLabel` (‹ Hidden ›). The arrows step
+    through *Disabled*, *Hidden* (default) and *Always*, wrapping at both
+    ends. Its meaning is in plan 20261022_03's L3 amendment of the same
+    time.
+
+It is saved in `settings.toml` (decision 5) and its control lives in
+`settings/option_row.rs`. Step 5's tests also step the arrows both ways
+and keep the value.
