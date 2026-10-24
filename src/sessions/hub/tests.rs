@@ -855,3 +855,220 @@ async fn a_three_mebibyte_burst_arrives_whole_over_several_checks() {
     let want: Vec<u32> = (2..3002).collect();
     assert_eq!(got, want);
 }
+
+/// The outline's serials by index, `None` for a removed index.
+fn outline_serials(o: &Outline) -> Vec<Option<Serial>> {
+    (0..o.len()).map(|i| o.slot(i).map(|s| s.serial)).collect()
+}
+
+#[test]
+fn indexes_run_from_0_without_gaps_and_read_the_same_twice_and_after_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let path = fixture("claude_basic.jsonl");
+    let t = tailer(home.path(), "claude", &path);
+    let sections = all(&t);
+    let (outline, epoch) = t.outline().unwrap();
+    assert_eq!(epoch, 0);
+    assert_eq!(outline.len(), sections.len() as u64);
+    assert_eq!(outline.last(), Some(7));
+    // Contiguous, in serial order, every index a section.
+    let serials: Vec<Option<Serial>> = sections.iter().map(|s| Some(s.serial)).collect();
+    assert_eq!(outline_serials(&outline), serials);
+    assert!(outline.removed().is_empty());
+    for (i, s) in sections.iter().enumerate() {
+        let slot = outline.slot(i as u64).unwrap();
+        assert_eq!((slot.index, slot.kind, slot.rev), (i as u64, s.kind, 0));
+        assert_eq!((slot.lines, slot.chars), sections::size(s));
+        assert!(slot.lines >= 1 && slot.chars >= 1, "{slot:?}");
+    }
+    // The contents by index carry it.
+    let c = t.content(Some(2), Some(4), 50, false).unwrap();
+    let got: Vec<(u64, Serial)> = c.sections.iter().map(|s| (s.index, s.serial)).collect();
+    assert_eq!(
+        got,
+        [
+            (2, sections[2].serial),
+            (3, sections[3].serial),
+            (4, sections[4].serial)
+        ]
+    );
+    assert_eq!(c.sections[2].card, sections[4].card);
+    // Read again, and by a new tailer as after a restart (in the same
+    // live state: the file long quiet): the same.
+    assert_eq!(t.outline().unwrap().0, outline);
+    let again = tailer(home.path(), "claude", &path);
+    again.check();
+    assert_eq!(again.outline().unwrap().0, outline);
+}
+
+#[test]
+fn appended_sections_take_the_next_indexes_as_a_fresh_read_numbers_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    write(&path, &[user(1, "go"), reply(2, "On it.")]);
+    let t = tailer(dir.path(), "claude", &path);
+    t.set_live("Claude", &AgentStatus::Working);
+    t.ensure_outline().unwrap();
+    t.check();
+    let mut lines = Vec::new();
+    for i in 0..20u32 {
+        lines.push(calls(10 + i, &[(&format!("c{i}"), "ls")]));
+        lines.push(results(11 + i, &[(&format!("c{i}"), "a\nb\nc", false)]));
+        lines.push(reply(12 + i, &format!("Step {i}.")));
+    }
+    let mut numbered: Vec<u64> = Vec::new();
+    for chunk in lines.chunks(7) {
+        append_lines(&path, chunk);
+        while let Some(batch) = t.check() {
+            assert!(batch.outlined);
+            numbered.extend(batch.slots.iter().filter(|s| s.rev == 0).map(|s| s.index));
+            for s in &batch.sections {
+                assert_eq!(
+                    batch
+                        .slots
+                        .iter()
+                        .find(|x| x.serial == s.serial)
+                        .unwrap()
+                        .index,
+                    s.index
+                );
+            }
+        }
+    }
+    // Each new one numbered once, next after the last.
+    let (outline, _) = t.outline().unwrap();
+    assert_eq!(numbered, (2..outline.len()).collect::<Vec<u64>>());
+    // A tool section that got its result in a later check was replaced.
+    let fresh = tailer(dir.path(), "claude", &path);
+    fresh.set_live("Claude", &AgentStatus::Working);
+    let (read, _) = fresh.outline().unwrap();
+    assert_eq!(outline_serials(&read), outline_serials(&outline));
+}
+
+#[test]
+fn a_replaced_section_keeps_its_index_and_a_removed_index_is_never_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    write(
+        &path,
+        &[user(1, "go"), reply(2, "All good.\n\nShall I push?")],
+    );
+    let t = tailer(dir.path(), "claude", &path);
+    t.set_live("Claude", &AgentStatus::Idle);
+    t.check();
+    let (outline, _) = t.outline().unwrap();
+    // The turn, the reply, and the live Question card.
+    assert_eq!(outline.len(), 3);
+    let question = outline.slot(2).unwrap();
+    assert_eq!((question.serial.slot, question.rev), (128, 0));
+    let step = |lines: &[String], status: &AgentStatus| -> Vec<Batch> {
+        append_lines(&path, lines);
+        t.set_live("Claude", status);
+        let mut batches = Vec::new();
+        while let Some(batch) = t.check() {
+            batches.push(batch);
+        }
+        batches
+    };
+    // Answered: the card resolves in place, its rev bumped.
+    step(&[user(3, "yes")], &AgentStatus::Working);
+    let (o, _) = t.outline().unwrap();
+    let resolved = o.slot(2).unwrap();
+    assert_eq!((resolved.serial, resolved.rev), (question.serial, 1));
+    assert_eq!(o.index_of(question.serial), Some(2));
+    assert_eq!(o.slot(3).unwrap().serial.line, 3);
+    // A reply that would end the turn: a live Finished card at index 5.
+    step(&[reply(4, "Pushed.")], &AgentStatus::Idle);
+    let (o, _) = t.outline().unwrap();
+    assert_eq!(o.len(), 6);
+    let finished = o.slot(5).unwrap();
+    assert_eq!((finished.serial.line, finished.serial.slot), (4, 194));
+    // The agent carries on: the card goes, its index stays removed.
+    let batches = step(&[calls(5, &[("c1", "git log")])], &AgentStatus::Working);
+    assert!(
+        batches.iter().any(|b| b.removed_index == [5]),
+        "{batches:?}"
+    );
+    let (o, _) = t.outline().unwrap();
+    assert_eq!(o.removed(), [5]);
+    assert!(o.slot(5).is_none());
+    let tool = o.slot(6).unwrap();
+    assert_eq!((tool.serial.line, tool.kind), (5, Tool));
+    // More sections come after it; none takes index 5.
+    step(
+        &[results(6, &[("c1", "ok", false)]), user(7, "and?")],
+        &AgentStatus::Working,
+    );
+    let (o, _) = t.outline().unwrap();
+    assert_eq!(o.removed(), [5]);
+    assert_eq!(o.slot(7).unwrap().serial.line, 7);
+    assert_eq!(o.len(), 8);
+    // The range around it says so.
+    let c = t.content(Some(4), Some(7), 50, true).unwrap();
+    let idx: Vec<u64> = c.slots.iter().map(|s| s.index).collect();
+    assert_eq!((idx, c.removed, c.more), (vec![4, 6, 7], vec![5], false));
+}
+
+#[test]
+fn a_new_or_rewritten_file_starts_again_at_0() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.jsonl");
+    write(&path, &[user(1, "one"), user(2, "two"), user(3, "three")]);
+    let t = tailer(dir.path(), "claude", &path);
+    assert_eq!(t.outline().unwrap().0.len(), 3);
+    // Rewritten shorter, as a replaced file: a new epoch, numbered from 0.
+    write(&path, &[user(1, "fresh")]);
+    assert!(t.check().unwrap().truncated);
+    let (o, epoch) = t.outline().unwrap();
+    assert_eq!((epoch, o.len()), (1, 1));
+    assert_eq!(o.slot(0).unwrap().serial.line, 1);
+    // Another file, as after `/clear`.
+    let other = dir.path().join("t.jsonl");
+    write(&other, &[user(1, "new"), reply(2, "Hi.")]);
+    let (o, epoch) = tailer(dir.path(), "claude", &other).outline().unwrap();
+    assert_eq!((epoch, o.slot(0).unwrap().index, o.len()), (0, 0, 2));
+    assert_eq!(o.slot(0).unwrap().serial.file, file_hash(&other));
+}
+
+#[test]
+fn ranges_take_the_four_shapes_and_say_what_was_cut_and_removed() {
+    let serial = |line| Serial::new(1, line, 0);
+    let section = |line| Section {
+        serial: serial(line),
+        kind: Turn,
+        entries: Vec::new(),
+        card: None,
+        index: 0,
+    };
+    let all: Vec<Section> = (1..=10).map(section).collect();
+    let mut o = Outline::of(&all);
+    o.remove(serial(5));
+    o.remove(serial(6));
+    assert_eq!(o.remove(serial(6)), None, "removed once");
+    let r = |f, t, n| {
+        let r = o.range(f, t, n);
+        (r.indexes, r.removed, r.more)
+    };
+    // From only: the next `limit` from `from`.
+    assert_eq!(r(Some(2), None, 3), (vec![2, 3, 6], vec![4, 5], true));
+    assert_eq!(r(Some(7), None, 50), (vec![7, 8, 9], vec![], false));
+    assert_eq!(r(Some(40), None, 50), (vec![], vec![], false));
+    // To only: the `limit` ending at `to`, oldest first.
+    assert_eq!(r(None, Some(6), 2), (vec![3, 6], vec![4, 5], true));
+    assert_eq!(r(None, Some(1), 5), (vec![0, 1], vec![], false));
+    // Both: the range, cut at `limit` from `from`.
+    assert_eq!(r(Some(1), Some(8), 3), (vec![1, 2, 3], vec![], true));
+    assert_eq!(r(Some(3), Some(6), 3), (vec![3, 6], vec![4, 5], false));
+    assert_eq!(
+        r(Some(3), Some(99), 50),
+        (vec![3, 6, 7, 8, 9], vec![4, 5], false)
+    );
+    // Neither: the newest `limit`.
+    assert_eq!(r(None, None, 2), (vec![8, 9], vec![], true));
+    assert_eq!(r(None, None, 50).0.len(), 8);
+    // A removed section that comes back keeps its index.
+    let back = o.put(&section(6));
+    assert_eq!((back.index, back.rev), (5, 1));
+    assert_eq!(o.removed(), [4]);
+    assert!(Outline::default().range(None, None, 5).indexes.is_empty());
+}

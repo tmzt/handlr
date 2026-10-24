@@ -826,6 +826,10 @@ async fn call(
             let p: common::SessionHistoryParams = params(raw)?;
             subscriptions::history(conn, p).await
         }
+        methods::SESSION_CONTENT => {
+            let p: common::SessionContentParams = params(raw)?;
+            subscriptions::content(conn, p).await
+        }
         methods::SPEECH_SUMMARIZE => {
             // Plan 20261023_05, decision 4: companions only, with
             // session.peek's permission for the pane.

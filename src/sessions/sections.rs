@@ -254,6 +254,7 @@ impl Builder {
                 kind,
                 entries: vec![entry],
                 card: None,
+                index: 0,
             },
         );
         self.changed.insert(key);
@@ -460,6 +461,7 @@ fn card(serial: Serial, body: CardBody) -> Section {
         kind: SectionKind::Card,
         entries: Vec::new(),
         card: Some(body),
+        index: 0,
     }
 }
 
@@ -542,6 +544,29 @@ pub fn first_paragraph(text: &str) -> &str {
         offset += line.len();
     }
     text[..end].trim()
+}
+
+/// A section's size for the outline (plan 20261024_01, decision 2): the
+/// lines and characters of what a client shows of it, its entries'
+/// summaries (already cut by the readers), or a card's title and text.
+pub fn size(section: &Section) -> (u32, u32) {
+    let count =
+        |text: &str| -> (usize, usize) { (text.lines().count().max(1), text.chars().count()) };
+    let (mut lines, mut chars) = (0usize, 0usize);
+    if let Some(card) = &section.card {
+        for text in [&card.title, &card.text] {
+            let (l, c) = count(text);
+            lines += l;
+            chars += c;
+        }
+    }
+    for entry in &section.entries {
+        let (l, c) = count(&entry.summary);
+        lines += l;
+        chars += c;
+    }
+    let fit = |n: usize| n.min(u32::MAX as usize) as u32;
+    (fit(lines), fit(chars))
 }
 
 /// The sections of `built` and `cards` merged in serial order.

@@ -11,6 +11,14 @@
 //! session file resets it, and a different agent is checked against the
 //! principal again (decision 10).
 //!
+//! In outline mode (plan 20261024_01, decision 3, as amended at 00:03
+//! EDT) a delivery carries slots in place of sections: the first one and
+//! each reset carry the outline from its start, at most `SLOTS_MAX` slots
+//! a delivery, continued as soon as each has left until it is complete;
+//! later ones carry new and replaced slots and removed indexes. Only the
+//! newest `LIVE_INLINE` indexes' contents ride along; the rest are asked
+//! for with `session.content`.
+//!
 //! The journal task records every confirmation that reaches a session's
 //! pane in that session's approval journal (A4).
 
@@ -19,9 +27,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libhandlr_proto::common::{
-    self, PendingQuestion, SECTIONS_MAX, SUBSCRIPTIONS_MAX, Section, SessionDelivery,
-    SessionHistoryParams, SessionHistoryResult, SessionRef, SessionSubscribeParams,
-    SessionSubscribeResult, SessionUnsubscribeParams, delivery_reasons, methods,
+    self, LIVE_INLINE, PendingQuestion, SECTIONS_MAX, SLOTS_MAX, SUBSCRIPTIONS_MAX, Section,
+    SessionContentParams, SessionContentResult, SessionDelivery, SessionHistoryParams,
+    SessionHistoryResult, SessionRef, SessionSubscribeParams, SessionSubscribeResult,
+    SessionUnsubscribeParams, Slot, delivery_reasons, methods,
 };
 use libhandlr_proto::envelope::codes;
 use libhandlr_proto::{ErrorObject, Id, Notification};
@@ -34,6 +43,7 @@ use super::{CoreEvent, Daemon};
 use crate::core::agents::AgentRef;
 use crate::core::confirm::{ConfirmEvent, Lifetime};
 use crate::sessions::hub::{self, Batch, LineIndex, Snapshot, Tailer};
+use crate::sessions::sections::REACH;
 use crate::sessions::{Located, redact};
 
 /// The least time between two deliveries of a subscription.
@@ -44,6 +54,8 @@ pub const RECHECK: Duration = Duration::from_secs(2);
 pub const DELIVERY_BYTES_MAX: usize = 256 * 1024;
 /// The sections a reset carries when a delivery outgrew its limits.
 pub const RESET_SECTIONS: usize = 50;
+/// How soon an outline's next chunk is tried once the last has left.
+pub const OUTLINE_PACE: Duration = Duration::from_millis(20);
 
 /// One subscription, as its connection holds it.
 pub(super) struct Subscription {
@@ -51,8 +63,12 @@ pub(super) struct Subscription {
     cancel: CancellationToken,
     /// The tailer of the session it is on, if any.
     tailer: Mutex<Option<Arc<Tailer>>>,
-    /// One history request at a time.
+    /// One history or content request at a time.
     history: tokio::sync::Mutex<()>,
+    /// The file and epoch of the session the client was last given a
+    /// reset or a change of session for: what `session.content` answers
+    /// from.
+    delivered: Mutex<Option<(u32, u64)>>,
 }
 
 impl Subscription {
@@ -68,6 +84,11 @@ struct Waiting {
     /// Each section's JSON length.
     sizes: BTreeMap<u64, usize>,
     removed: BTreeSet<u64>,
+    /// Outline mode: slots and removed indexes by index, and the
+    /// outline's highest index.
+    slots: BTreeMap<u64, Slot>,
+    removed_index: BTreeSet<u64>,
+    last: Option<u64>,
     reset: bool,
     /// A change of session or reason to carry.
     session_changed: bool,
@@ -79,6 +100,8 @@ impl Waiting {
     fn is_empty(&self) -> bool {
         self.sections.is_empty()
             && self.removed.is_empty()
+            && self.slots.is_empty()
+            && self.removed_index.is_empty()
             && !self.reset
             && !self.session_changed
             && self.status.is_none()
@@ -102,6 +125,22 @@ impl Waiting {
         self.sizes.remove(&key);
         self.removed.insert(key);
     }
+
+    fn add_slot(&mut self, slot: Slot) {
+        self.removed_index.remove(&slot.index);
+        self.slots.insert(slot.index, slot);
+    }
+
+    fn remove_index(&mut self, index: u64) {
+        self.slots.remove(&index);
+        self.removed_index.insert(index);
+    }
+}
+
+/// Whether `index` is among the newest `LIVE_INLINE` of an outline whose
+/// highest index is `last`.
+fn inline(index: u64, last: Option<u64>) -> bool {
+    last.is_some_and(|last| index.saturating_add(LIVE_INLINE) > last)
 }
 
 /// A subscription's task and its state.
@@ -124,6 +163,14 @@ struct Task {
     last_sent: Option<Instant>,
     /// The backfill size asked for.
     sections: usize,
+    /// Outline mode (plan 20261024_01).
+    outline: bool,
+    /// The next index of an outline still being sent, if one is.
+    outline_next: Option<u64>,
+    /// The file and epoch the subscription is on, once open.
+    opened: Option<(u32, u64)>,
+    /// Outline mode: the highest index the client has been told of.
+    outline_last: Option<u64>,
 }
 
 /// `session.subscribe`: resolve the pane, check the principal, and answer
@@ -168,6 +215,7 @@ pub(super) async fn subscribe(
         cancel: CancellationToken::new(),
         tailer: Mutex::new(None),
         history: tokio::sync::Mutex::new(()),
+        delivered: Mutex::new(None),
     });
     let mut task = Task {
         conn: Arc::clone(conn),
@@ -185,8 +233,12 @@ pub(super) async fn subscribe(
         last_seq: 0,
         last_sent: None,
         sections: p.sections,
+        outline: p.outline,
+        outline_next: None,
+        opened: None,
+        outline_last: None,
     };
-    task.open(p.after).await;
+    task.open(p.after, p.from).await;
     let delivery = task.take_delivery();
     let (ready, ready_rx) = oneshot::channel();
     conn.add_subscription(Arc::clone(&sub), request_id.clone(), ready);
@@ -243,6 +295,54 @@ pub(super) async fn history(conn: &Conn, p: SessionHistoryParams) -> Result<Valu
     })
 }
 
+/// `session.content`: an index range of the subscription's current
+/// session file, as slots or sections (plan 20261024_01, decision 4, as
+/// amended at 00:03 EDT). It counts against the same one-at-a-time limit
+/// as `session.history`.
+pub(super) async fn content(conn: &Conn, p: SessionContentParams) -> Result<Value, ErrorObject> {
+    if !(1..=SECTIONS_MAX).contains(&p.limit) {
+        return Err(ErrorObject::new(
+            codes::INVALID_PARAMS,
+            format!("limit must be 1 to {SECTIONS_MAX}"),
+        ));
+    }
+    if let (Some(from), Some(to)) = (p.from, p.to)
+        && from > to
+    {
+        return Err(ErrorObject::new(
+            codes::INVALID_PARAMS,
+            format!("from ({from}) is past to ({to})"),
+        ));
+    }
+    let Some(sub) = conn.subscription(p.subscription_id) else {
+        return Err(not_found(p.subscription_id));
+    };
+    let _one = sub.history.lock().await;
+    let tailer = sub.tailer.lock().unwrap().clone();
+    let delivered = *sub.delivered.lock().unwrap();
+    let Some(tailer) = tailer.filter(|t| delivered == Some((t.file, t.epoch()))) else {
+        return Err(ErrorObject::new(
+            codes::SESSION_CHANGED,
+            "the subscription's session file has changed; a reset follows",
+        ));
+    };
+    let content = tokio::task::spawn_blocking(move || {
+        tailer.content(p.from, p.to, p.limit, p.slots_only).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+    .ok_or_else(|| ErrorObject::new(codes::INTERNAL_ERROR, "the session file could not be read"))?;
+    conn::ok(SessionContentResult {
+        sections: content.sections,
+        slots: content.slots,
+        removed_index: content.removed,
+        first: 0,
+        last: content.last,
+        more: content.more,
+    })
+}
+
 fn not_found(id: u64) -> ErrorObject {
     ErrorObject::new(
         codes::SUBSCRIPTION_NOT_FOUND,
@@ -270,8 +370,9 @@ impl Task {
 
     /// Locate the pane's session and make the first delivery: a backfill,
     /// only what follows `after` when that is still of this file, or a
-    /// reason.
-    async fn open(&mut self, after: Option<common::Serial>) {
+    /// reason. In outline mode, the outline from `from` when `after` is
+    /// of this file, else from 0.
+    async fn open(&mut self, after: Option<common::Serial>, from: Option<u64>) {
         self.waiting = Waiting {
             reset: true,
             session_changed: true,
@@ -282,6 +383,9 @@ impl Task {
         self.set_tailer(None);
         self.located = None;
         self.session = None;
+        self.outline_next = None;
+        self.opened = None;
+        self.outline_last = None;
         let daemon = Arc::clone(self.daemon());
         if !self.permitted {
             return self.no_session(delivery_reasons::NOT_PERMITTED);
@@ -332,6 +436,10 @@ impl Task {
         self.reason = None;
         self.question = snap.live.pending_question.clone();
         self.waiting.question = Some(self.question.clone());
+        if self.outline {
+            return self.open_outline(&tailer, after, from).await;
+        }
+        self.opened = Some((tailer.file, tailer.epoch()));
         let n = self.sections;
         let backfill = tokio::task::spawn_blocking(move || backfill(&tailer, &snap, after, n))
             .await
@@ -351,6 +459,7 @@ impl Task {
     /// No session to deliver from, for `reason`: a reset with no sections.
     fn no_session(&mut self, reason: &str) {
         self.session = None;
+        self.outline_next = None;
         self.reason = Some(reason.to_string());
         self.question = None;
         self.waiting = Waiting {
@@ -362,6 +471,127 @@ impl Task {
         };
     }
 
+    /// The first outline delivery: from `from` when `after` is of the
+    /// tailer's file and `from` within its outline, else a reset from 0.
+    /// A resumed outline also resends the slots within `REACH` lines
+    /// before `after`, which may have changed, as a catch-up does.
+    async fn open_outline(
+        &mut self,
+        tailer: &Arc<Tailer>,
+        after: Option<common::Serial>,
+        from: Option<u64>,
+    ) {
+        let reading = Arc::clone(tailer);
+        let got = tokio::task::spawn_blocking(move || reading.outline().ok())
+            .await
+            .ok()
+            .flatten();
+        let Some((outline, epoch)) = got else {
+            return self.no_session(delivery_reasons::NO_SESSION);
+        };
+        self.opened = Some((tailer.file, epoch));
+        let resume = after
+            .zip(from)
+            .filter(|(a, f)| a.file == tailer.file && *f <= outline.len());
+        self.waiting.reset = resume.is_none();
+        if let Some((after, from)) = resume {
+            let reach = after.line.saturating_sub(REACH);
+            for i in (0..from).rev() {
+                match outline.slot(i) {
+                    Some(slot) if slot.serial.line >= reach => self.waiting.add_slot(slot),
+                    Some(_) => break,
+                    None => {}
+                }
+            }
+        }
+        self.waiting.last = outline.last();
+        self.outline_next = Some(resume.map_or(0, |(_, f)| f));
+        self.fill_chunk().await;
+    }
+
+    /// Add the outline's next chunk to the waiting delivery: slots up to
+    /// `SLOTS_MAX` in all, the removed indexes among them, and, with the
+    /// last chunk, the contents of the newest `LIVE_INLINE` indexes.
+    async fn fill_chunk(&mut self) {
+        let Some(next) = self.outline_next else {
+            return;
+        };
+        let Some(tailer) = self.sub.tailer.lock().unwrap().clone() else {
+            self.outline_next = None;
+            return;
+        };
+        let reading = Arc::clone(&tailer);
+        let got = tokio::task::spawn_blocking(move || reading.outline().ok())
+            .await
+            .ok()
+            .flatten();
+        let Some((outline, _)) = got.filter(|(_, e)| Some((tailer.file, *e)) == self.opened) else {
+            self.outline_next = None;
+            return; // a reset is on its way
+        };
+        let room = SLOTS_MAX.saturating_sub(self.waiting.slots.len()) as u64;
+        if room == 0 {
+            return;
+        }
+        let end = next.saturating_add(room).min(outline.len());
+        for i in next..end {
+            match outline.slot(i) {
+                Some(slot) => self.waiting.add_slot(slot),
+                None => self.waiting.remove_index(i),
+            }
+        }
+        self.waiting.last = outline.last();
+        if end < outline.len() {
+            self.outline_next = Some(end);
+            return;
+        }
+        self.outline_next = None;
+        // The contents of every waiting slot at the end: this chunk's, and
+        // those a resumed outline resends.
+        let live: Vec<Slot> = self
+            .waiting
+            .slots
+            .values()
+            .filter(|s| inline(s.index, outline.last()))
+            .copied()
+            .collect();
+        if live.is_empty() {
+            return;
+        }
+        let reading = Arc::clone(&tailer);
+        let sections = tokio::task::spawn_blocking(move || {
+            let snap = reading.snapshot();
+            reading.read_slots(&snap, &live).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+        for s in sections {
+            self.waiting.add(s);
+        }
+    }
+
+    /// Send the outline's next chunk at once, once the last delivery has
+    /// left.
+    async fn continue_outline(&mut self) {
+        if self.outline_next.is_none() || self.conn.asleep() {
+            return;
+        }
+        if self.conn.written() < self.last_seq {
+            return;
+        }
+        self.fill_chunk().await;
+        if self.waiting.is_empty() {
+            return;
+        }
+        let delivery = self.take_delivery();
+        self.last_seq = self
+            .conn
+            .send_counted(&Notification::new(methods::SESSION_DELIVERY, delivery));
+        self.last_sent = Some(Instant::now());
+    }
+
     fn set_tailer(&self, tailer: Option<Arc<Tailer>>) {
         *self.sub.tailer.lock().unwrap() = tailer;
     }
@@ -369,6 +599,13 @@ impl Task {
     /// The waiting delivery, taken.
     fn take_delivery(&mut self) -> SessionDelivery {
         let w = std::mem::take(&mut self.waiting);
+        if w.reset || w.session_changed {
+            *self.sub.delivered.lock().unwrap() = self.opened.filter(|_| self.session.is_some());
+        }
+        let outlined = self.outline && self.session.is_some();
+        if w.last.is_some() {
+            self.outline_last = w.last;
+        }
         SessionDelivery {
             subscription_id: self.sub.id,
             pane_id: self.pane.pane_id.clone(),
@@ -384,31 +621,77 @@ impl Task {
                 .into_iter()
                 .map(common::Serial::from_u64)
                 .collect(),
+            slots: w.slots.into_values().collect(),
+            removed_index: w.removed_index.into_iter().collect(),
+            first: 0,
+            last: self.outline_last.filter(|_| outlined),
         }
     }
 
     /// Add a batch to the waiting delivery.
     async fn take_batch(&mut self, batch: &Batch) {
         if batch.truncated {
-            return self.open(None).await;
+            return self.open(None, None).await;
         }
         if batch.too_long {
             self.rx = None;
             self.set_tailer(None);
             return self.no_session(delivery_reasons::TOO_LONG);
         }
-        for s in &batch.sections {
-            self.waiting.add(s.clone());
-        }
-        for r in &batch.removed {
-            self.waiting.remove(r.to_u64());
-        }
         if batch.pending_question != self.question {
             self.question = batch.pending_question.clone();
             self.waiting.question = Some(self.question.clone());
         }
+        if self.outline {
+            return self.take_outline_batch(batch).await;
+        }
+        for s in &batch.sections {
+            let mut s = s.clone();
+            s.index = 0; // indexes are for outline mode
+            self.waiting.add(s);
+        }
+        for r in &batch.removed {
+            self.waiting.remove(r.to_u64());
+        }
         if self.waiting.sections.len() > SECTIONS_MAX || self.waiting.bytes() > DELIVERY_BYTES_MAX {
             self.reset_newest().await;
+        }
+    }
+
+    /// Add an outline batch to the waiting delivery: its slots and
+    /// removed indexes, and the contents of those among the newest
+    /// `LIVE_INLINE`. A batch made before the outline was kept is already
+    /// in it. Past `SLOTS_MAX` waiting slots, the outline is sent again
+    /// from 0 as a reset.
+    async fn take_outline_batch(&mut self, batch: &Batch) {
+        if !batch.outlined || self.opened.is_none() {
+            return;
+        }
+        for slot in &batch.slots {
+            self.waiting.add_slot(*slot);
+        }
+        for s in &batch.sections {
+            if inline(s.index, batch.last) {
+                self.waiting.add(s.clone());
+            }
+        }
+        for r in &batch.removed {
+            self.waiting.remove(r.to_u64());
+        }
+        for &i in &batch.removed_index {
+            self.waiting.remove_index(i);
+        }
+        self.waiting.last = batch.last;
+        if self.waiting.slots.len() > SLOTS_MAX {
+            let question = self.waiting.question.take();
+            self.waiting = Waiting {
+                reset: true,
+                status: Some(self.status.clone()),
+                question,
+                ..Waiting::default()
+            };
+            self.outline_next = Some(0);
+            self.fill_chunk().await;
         }
     }
 
@@ -470,7 +753,7 @@ impl Task {
         self.pane = pane;
         if agent_changed {
             self.permitted = self.conn.principal().may_reach(&self.pane.agent);
-            self.open(None).await;
+            self.open(None, None).await;
             return true;
         }
         let tailer = self.sub.tailer.lock().unwrap().clone();
@@ -490,7 +773,7 @@ impl Task {
             (None, None) => false,
         };
         if moved || (session_changed && tailer.is_none() && now.is_some()) {
-            self.open(None).await;
+            self.open(None, None).await;
         }
         true
     }
@@ -532,7 +815,7 @@ impl Task {
                 _ = cancel.cancelled() => break,
                 batch = recv(&mut self.rx) => match batch {
                     Ok(batch) => self.take_batch(&batch).await,
-                    Err(broadcast::error::RecvError::Lagged(_)) => self.open(None).await,
+                    Err(broadcast::error::RecvError::Lagged(_)) => self.open(None, None).await,
                     Err(broadcast::error::RecvError::Closed) => self.rx = None,
                 },
                 _ = recheck.tick() => again = true,
@@ -544,6 +827,7 @@ impl Task {
                     Err(broadcast::error::RecvError::Closed) => break,
                 },
                 _ = gate.tick() => {}
+                _ = tokio::time::sleep(OUTLINE_PACE), if self.outline_next.is_some() => {}
             }
             if again && !self.recheck().await {
                 // The pane is gone: say so, and end.
@@ -552,6 +836,7 @@ impl Task {
                     .send_counted(&Notification::new(methods::SESSION_DELIVERY, delivery));
                 break;
             }
+            self.continue_outline().await;
             self.flush_if_due();
         }
         self.conn.remove_subscription(self.sub.id);

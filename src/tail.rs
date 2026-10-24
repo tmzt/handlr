@@ -6,6 +6,7 @@
 //!
 //! ```text
 //! handlr session tail [--pane <id or name>] [--follow] [--entries N] [--history N]
+//!                     [--outline] [--from N] [--to N]
 //! ```
 //!
 //! Without `--pane` it starts on herdr's focus. `--follow` moves with
@@ -15,15 +16,23 @@
 //! with `session.history`, printing their serials. Each entry is one line:
 //! its section's serial, role, kind and the first line of its summary;
 //! cards, resets, and status and question changes have lines of their own.
+//!
+//! `--outline` subscribes in outline mode (plan 20261024_01): each slot is
+//! printed as `#<index> <serial> <kind> <lines>x<chars> rev <rev>`, and the
+//! contents that ride along as entries are, each line after its index.
+//! `--from N` and `--to N` (either or both; they imply `--outline`) then
+//! fetch that inclusive index range with `session.content` and print its
+//! sections, paging on while a range with both bounds has more.
 
 use std::io::Write;
 use std::path::Path;
 
 use futures_util::StreamExt;
 use libhandlr_proto::common::{
-    self, AgentsListResult, PendingQuestion, SECTIONS_MAX, Section, SectionKind, SessionDelivery,
-    SessionHistoryParams, SessionHistoryResult, SessionSubscribeParams, SessionSubscribeResult,
-    SessionUnsubscribeParams, methods, protocols,
+    self, AgentsListResult, PendingQuestion, SECTIONS_MAX, Section, SectionKind,
+    SessionContentParams, SessionContentResult, SessionDelivery, SessionHistoryParams,
+    SessionHistoryResult, SessionSubscribeParams, SessionSubscribeResult, SessionUnsubscribeParams,
+    Slot, methods, protocols,
 };
 use libhandlr_proto::{Id, Incoming, Request, companion};
 use serde_json::Value;
@@ -45,6 +54,11 @@ pub struct TailOptions {
     pub sections: usize,
     /// Sections to page back after the backfill.
     pub history: usize,
+    /// Subscribe in outline mode.
+    pub outline: bool,
+    /// An index range to fetch with `session.content` once subscribed
+    /// (in outline mode); `None` for no fetch.
+    pub content: Option<(Option<u64>, Option<u64>)>,
 }
 
 impl Default for TailOptions {
@@ -54,6 +68,8 @@ impl Default for TailOptions {
             follow: false,
             sections: common::SUBSCRIBE_SECTIONS_DEFAULT,
             history: 0,
+            outline: false,
+            content: None,
         }
     }
 }
@@ -111,6 +127,27 @@ pub fn section_lines(section: &Section) -> Vec<String> {
     lines
 }
 
+/// A slot's line: `#<index> <serial> <kind> <lines>x<chars> rev <rev>`.
+pub fn slot_line(slot: &Slot) -> String {
+    format!(
+        "#{} {} {} {}x{} rev {}",
+        slot.index,
+        slot.serial,
+        word(&slot.kind),
+        slot.lines,
+        slot.chars,
+        slot.rev
+    )
+}
+
+/// A section's lines, each after its index (outline mode).
+pub fn indexed_lines(section: &Section) -> Vec<String> {
+    section_lines(section)
+        .into_iter()
+        .map(|l| format!("#{} {l}", section.index))
+        .collect()
+}
+
 /// What a tail has printed so far, to tell what changed.
 #[derive(Debug, Default)]
 pub struct Printed {
@@ -158,8 +195,22 @@ pub fn delivery_lines(d: &SessionDelivery, printed: &mut Printed) -> Vec<String>
     for s in &d.removed {
         out.push(format!("{s} removed"));
     }
+    if let Some(last) = d.last {
+        out.push(format!(
+            "-- outline: {} slot(s), last #{last} --",
+            d.slots.len()
+        ));
+    }
+    for i in &d.removed_index {
+        out.push(format!("#{i} removed"));
+    }
+    out.extend(d.slots.iter().map(slot_line));
     for s in &d.sections {
-        out.extend(section_lines(s));
+        if d.last.is_some() {
+            out.extend(indexed_lines(s));
+        } else {
+            out.extend(section_lines(s));
+        }
     }
     out
 }
@@ -286,13 +337,24 @@ pub async fn run(
             focus.pane_id
         }
     };
+    let outline = options.outline || options.content.is_some();
     let mut printed = Printed::default();
-    let (mut sub, oldest) =
-        subscribe(&mut wire, &pane, options.sections, &mut printed, out).await?;
+    let (mut sub, oldest) = subscribe(
+        &mut wire,
+        &pane,
+        options.sections,
+        outline,
+        &mut printed,
+        out,
+    )
+    .await?;
     if options.history > 0
         && let Some(oldest) = oldest
     {
         page_back(&mut wire, sub, oldest, options.history, out).await?;
+    }
+    if let Some((from, to)) = options.content {
+        fetch_content(&mut wire, sub, from, to, out).await?;
     }
     while let Some(note) = wire.note().await? {
         match note.method.as_str() {
@@ -325,9 +387,16 @@ pub async fn run(
                 print(out, &[format!("-- following {} --", focus.name)])?;
                 pane = focus.pane_id;
                 printed = Printed::default();
-                sub = subscribe(&mut wire, &pane, options.sections, &mut printed, out)
-                    .await?
-                    .0;
+                sub = subscribe(
+                    &mut wire,
+                    &pane,
+                    options.sections,
+                    outline,
+                    &mut printed,
+                    out,
+                )
+                .await?
+                .0;
             }
             _ => {}
         }
@@ -341,6 +410,7 @@ async fn subscribe(
     wire: &mut Wire,
     pane: &str,
     sections: usize,
+    outline: bool,
     printed: &mut Printed,
     out: &mut impl Write,
 ) -> Result<(u64, Option<common::Serial>), String> {
@@ -351,6 +421,8 @@ async fn subscribe(
                 pane_id: pane.to_string(),
                 sections,
                 after: None,
+                outline,
+                from: None,
             },
         )
         .await?,
@@ -360,6 +432,59 @@ async fn subscribe(
     print(out, &delivery_lines(&result.delivery, printed))?;
     let oldest = result.delivery.sections.first().map(|s| s.serial);
     Ok((result.subscription_id, oldest))
+}
+
+/// Fetch the index range `from` to `to` with `session.content` and print
+/// its sections; a range with both bounds is paged through while it has
+/// more.
+async fn fetch_content(
+    wire: &mut Wire,
+    sub: u64,
+    mut from: Option<u64>,
+    to: Option<u64>,
+    out: &mut impl Write,
+) -> Result<(), String> {
+    loop {
+        let page: SessionContentResult = parse(
+            wire.call(
+                methods::SESSION_CONTENT,
+                SessionContentParams {
+                    subscription_id: sub,
+                    from,
+                    to,
+                    limit: SECTIONS_MAX,
+                    slots_only: false,
+                },
+            )
+            .await?,
+            "content",
+        )?;
+        let bound = |b: Option<u64>| b.map_or("…".to_string(), |b| format!("#{b}"));
+        print(
+            out,
+            &[format!(
+                "-- content {} to {}: {} section(s){}{} --",
+                bound(from),
+                bound(to),
+                page.sections.len(),
+                if page.removed_index.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} removed", page.removed_index.len())
+                },
+                if page.more { ", more" } else { "" }
+            )],
+        )?;
+        for i in &page.removed_index {
+            print(out, &[format!("#{i} removed")])?;
+        }
+        let lines: Vec<String> = page.sections.iter().flat_map(indexed_lines).collect();
+        print(out, &lines)?;
+        match (page.more, from, to, page.sections.last()) {
+            (true, Some(_), Some(_), Some(last)) => from = Some(last.index + 1),
+            _ => return Ok(()),
+        }
+    }
 }
 
 /// Page back `n` sections below `before`, printing each page, newest page
@@ -438,6 +563,10 @@ mod tests {
             status: None,
             pending_question: None,
             removed: vec![],
+            slots: vec![],
+            removed_index: vec![],
+            first: 0,
+            last: None,
         }
     }
 
@@ -455,6 +584,7 @@ mod tests {
                 entry(Role::Tool, EntryKind::ToolResult, "a\nb"),
             ],
             card: None,
+            index: 0,
         };
         let card = Section {
             serial: Serial::new(0x3fa9_c21e, 9, 130),
@@ -469,6 +599,7 @@ mod tests {
                 about_plan: false,
                 links: vec![],
             }),
+            index: 0,
         };
         let mut printed = Printed::default();
         let mut first = delivery(true, vec![tool.clone(), card]);
@@ -519,6 +650,39 @@ mod tests {
         assert_eq!(
             delivery_lines(&closed, &mut printed),
             ["-- reset (pane_closed) --"]
+        );
+    }
+
+    #[test]
+    fn outline_deliveries_print_their_slots_and_indexed_contents() {
+        let serial = Serial::new(0x3fa9_c21e, 12, 0);
+        let mut d = delivery(true, vec![]);
+        d.slots = vec![Slot {
+            index: 4,
+            serial,
+            kind: SectionKind::Text,
+            lines: 3,
+            chars: 90,
+            rev: 1,
+        }];
+        d.removed_index = vec![2];
+        d.last = Some(4);
+        d.sections = vec![Section {
+            serial,
+            kind: SectionKind::Text,
+            entries: vec![entry(Role::Assistant, EntryKind::Text, "Done.")],
+            card: None,
+            index: 4,
+        }];
+        assert_eq!(
+            delivery_lines(&d, &mut Printed::default()),
+            [
+                "-- reset (backfill) --",
+                "-- outline: 1 slot(s), last #4 --",
+                "#2 removed",
+                "#4 3fa9c21e:12.0 text 3x90 rev 1",
+                "#4 3fa9c21e:12.0 assistant text: Done.",
+            ]
         );
     }
 }

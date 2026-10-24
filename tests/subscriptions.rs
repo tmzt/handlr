@@ -1013,3 +1013,325 @@ async fn session_tail_follows_the_focus_only_when_asked() {
     a.abort();
     b.abort();
 }
+
+fn calls(n: u32, id: &str, command: &str) -> String {
+    json!({"type": "assistant", "timestamp": ts(n), "isSidechain": false,
+        "message": {"role": "assistant", "type": "message",
+                    "content": [{"type": "tool_use", "id": id, "name": "Bash",
+                                 "input": {"command": command}}]}})
+    .to_string()
+}
+
+/// The indexes of a delivery's or a result's slots.
+fn slot_indexes(v: &Value) -> Vec<u64> {
+    v["slots"]
+        .as_array()
+        .map(|a| a.iter().map(|s| s["index"].as_u64().unwrap()).collect())
+        .unwrap_or_default()
+}
+
+fn section_indexes(v: &Value) -> Vec<u64> {
+    v["sections"]
+        .as_array()
+        .map(|a| a.iter().map(|s| s["index"].as_u64().unwrap_or(0)).collect())
+        .unwrap_or_default()
+}
+
+#[tokio::test]
+async fn an_outline_covers_every_index_in_chunks_with_only_the_newest_contents() {
+    let env = start(false).await;
+    let lines: Vec<String> = (0..4500u32)
+        .map(|i| user(i, &format!("prompt {i}")))
+        .collect();
+    write_lines(&env.session(SESSION_A), &lines);
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
+    let sub = r["subscription_id"].as_u64().unwrap();
+    let first = &r["delivery"];
+    assert_eq!(first["reset"], true);
+    assert_eq!(first["last"], 4499);
+    assert_eq!(slot_indexes(first), (0..2000).collect::<Vec<u64>>());
+    assert!(
+        first["sections"].as_array().unwrap().is_empty(),
+        "no contents from the start"
+    );
+    let slot = &first["slots"][7];
+    assert_eq!(slot["kind"], "turn");
+    assert_eq!(slot["lines"], 1);
+    assert_eq!(slot["chars"], "prompt 7".len());
+    assert_eq!(slot["rev"], 0);
+    assert!(slot["serial"].as_str().unwrap().ends_with(":8.0"), "{slot}");
+    // The rest follows by itself, at most SLOTS_MAX a delivery.
+    let mut indexes = slot_indexes(first);
+    let mut contents = Vec::new();
+    while indexes.len() < 4500 {
+        let d = c
+            .delivery(WAIT, |d| d["subscription_id"] == sub)
+            .await
+            .expect("the outline continued");
+        assert_eq!(d["reset"], false);
+        assert!(slot_indexes(&d).len() <= 2000);
+        indexes.extend(slot_indexes(&d));
+        contents.extend(section_indexes(&d));
+    }
+    assert_eq!(indexes, (0..4500).collect::<Vec<u64>>());
+    // Only the newest LIVE_INLINE (8) indexes' contents rode along.
+    assert_eq!(contents, (4492..4500).collect::<Vec<u64>>());
+    // A new section: its slot and its contents.
+    append_lines(&env.session(SESSION_A), &[user(9000, "one more")]);
+    let d = c
+        .delivery(WAIT, |d| {
+            d["subscription_id"] == sub && slot_indexes(d).contains(&4500)
+        })
+        .await
+        .expect("the new slot");
+    assert_eq!(d["last"], 4500);
+    assert_eq!(section_indexes(&d), [4500]);
+    assert_eq!(d["sections"][0]["entries"][0]["summary"], "one more");
+}
+
+#[tokio::test]
+async fn an_outline_resumes_from_an_index_and_content_answers_ranges() {
+    let env = start(false).await;
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    // Three turns and replies: two resolved Finished cards, and a live one
+    // with the pane idle.
+    env.pane(|panes| panes[0].agent_status = Some(handlr::transport::AgentStatus::Idle))
+        .await;
+    let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
+    let sub = r["subscription_id"].as_u64().unwrap();
+    let d = &r["delivery"];
+    assert_eq!(slot_indexes(d), (0..9).collect::<Vec<u64>>());
+    assert_eq!(d["last"], 8);
+    let finished = d["slots"][8]["serial"].as_str().unwrap().to_string();
+    assert!(finished.ends_with(":6.194"), "{d}");
+    assert_eq!(section_indexes(d), (1..9).collect::<Vec<u64>>());
+    // The agent carries on: the live card goes, and a tool comes.
+    append_lines(&env.session(SESSION_A), &[calls(60, "c1", "ls")]);
+    let d = c
+        .delivery(WAIT, |d| {
+            d["subscription_id"] == sub && slot_indexes(d).contains(&9)
+        })
+        .await
+        .expect("the tool's slot");
+    assert_eq!(d["removed_index"], json!([8]), "{d}");
+    assert_eq!(d["removed"], json!([finished]));
+    assert_eq!(d["last"], 9);
+    async fn content(c: &mut Client, sub: u64, mut params: Value) -> Value {
+        params["subscription_id"] = json!(sub);
+        let r = c.call("session.content", params).await;
+        assert!(r.get("error").is_none(), "{r}");
+        r["result"].clone()
+    }
+    // From only.
+    let r = content(&mut c, sub, json!({"from": 6, "limit": 2})).await;
+    assert_eq!(section_indexes(&r), [6, 7]);
+    assert_eq!(r["more"], true);
+    assert_eq!(r["last"], 9);
+    let r = content(&mut c, sub, json!({"from": 7, "limit": 5})).await;
+    assert_eq!(section_indexes(&r), [7, 9]);
+    assert_eq!(r["removed_index"], json!([8]));
+    assert_eq!(r["more"], false);
+    assert_eq!(r["sections"][1]["kind"], "tool");
+    // To only: the newest ending at `to`, oldest first.
+    let r = content(&mut c, sub, json!({"to": 9, "limit": 2})).await;
+    assert_eq!(section_indexes(&r), [7, 9]);
+    assert_eq!(r["removed_index"], json!([8]));
+    assert_eq!(r["more"], true);
+    // Both: cut at the limit from `from`.
+    let r = content(&mut c, sub, json!({"from": 0, "to": 4, "limit": 3})).await;
+    assert_eq!(section_indexes(&r), [0, 1, 2]);
+    assert_eq!(r["more"], true);
+    assert_eq!(r["sections"][0]["entries"][0]["summary"], "prompt 0");
+    let r = content(&mut c, sub, json!({"from": 3, "to": 4})).await;
+    assert_eq!(section_indexes(&r), [3, 4]);
+    assert_eq!(r["more"], false);
+    // Neither: the newest.
+    let r = content(&mut c, sub, json!({"limit": 3})).await;
+    assert_eq!(section_indexes(&r), [6, 7, 9]);
+    assert_eq!(r["more"], true);
+    // Slots only.
+    let r = content(
+        &mut c,
+        sub,
+        json!({"from": 0, "limit": 200, "slots_only": true}),
+    )
+    .await;
+    assert_eq!(slot_indexes(&r), [0, 1, 2, 3, 4, 5, 6, 7, 9]);
+    assert!(r["sections"].as_array().unwrap().is_empty());
+    assert_eq!(r["slots"][8]["kind"], "tool");
+    // Bad ranges and limits are refused.
+    for mut bad in [
+        json!({"limit": 0}),
+        json!({"limit": 201}),
+        json!({"from": 5, "to": 4}),
+    ] {
+        bad["subscription_id"] = json!(sub);
+        let r = c.call("session.content", bad).await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+    }
+    // Far past the start, one more turn, held; then the client goes.
+    let blobs: Vec<String> = (0..400).map(|_| blob()).collect();
+    append_lines(&env.session(SESSION_A), &blobs);
+    append_lines(&env.session(SESSION_A), &[user(65, "held")]);
+    let d = c
+        .delivery(WAIT, |d| {
+            d["subscription_id"] == sub && slot_indexes(d).contains(&10)
+        })
+        .await
+        .expect("the held turn");
+    let held = d["slots"][0]["serial"].clone();
+    assert!(held.as_str().unwrap().ends_with(":408.0"), "{d}");
+    c.call("session.unsubscribe", json!({"subscription_id": sub}))
+        .await;
+    append_lines(
+        &env.session(SESSION_A),
+        &[user(70, "missed one"), user(71, "missed two")],
+    );
+    // Resumed from the next index: only what follows, and the held one,
+    // within reach of it, in case it changed.
+    let r = c
+        .subscribe(json!({"pane_id": "p1", "outline": true, "after": held, "from": 11}))
+        .await;
+    let d = &r["delivery"];
+    assert_eq!(d["reset"], false, "{d}");
+    assert_eq!(slot_indexes(d), [10, 11, 12]);
+    assert_eq!(d["last"], 12);
+    assert_eq!(section_indexes(d), [10, 11, 12]);
+    // Another file's serial: the outline from 0, as a reset.
+    let r = c
+        .subscribe(json!({"pane_id": "p1", "outline": true, "after": "00000001:3.0", "from": 10}))
+        .await;
+    assert_eq!(r["delivery"]["reset"], true);
+    assert_eq!(slot_indexes(&r["delivery"]).first(), Some(&0));
+}
+
+#[tokio::test]
+async fn content_of_a_file_the_subscription_moved_off_is_session_changed() {
+    let env = start(false).await;
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
+    let sub = r["subscription_id"].as_u64().unwrap();
+    let r = c
+        .call(
+            "session.content",
+            json!({"subscription_id": sub, "from": 0}),
+        )
+        .await;
+    assert_eq!(section_indexes(&r["result"]).len(), 8, "{r}");
+    // The phone goes to the background, so the reset waits; meanwhile
+    // `/clear` starts a new file.
+    let r = c.call("ping", json!({"active": false})).await;
+    assert!(r.get("error").is_none(), "{r}");
+    write_lines(&env.session(SESSION_B), &[user(1, "fresh start")]);
+    env.pane(|panes| panes[0].agent_session = Some(session_of(SESSION_B)))
+        .await;
+    env.herdr_event(
+        json!({"event": "pane_updated", "data": {"type": "pane_updated",
+        "pane": {"pane_id": "p1", "terminal_id": "t", "workspace_id": "w1", "tab_id": "t1",
+                 "focused": true, "agent_status": "working", "revision": 2}}}),
+    );
+    let end = Instant::now() + WAIT;
+    loop {
+        let r = c
+            .call(
+                "session.content",
+                json!({"subscription_id": sub, "from": 0}),
+            )
+            .await;
+        if r["error"]["code"] == -32014 {
+            break;
+        }
+        assert!(Instant::now() < end, "never changed: {r}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Awake again: the reset onto the new file, and content from it.
+    c.call("ping", json!({"active": true})).await;
+    let d = c
+        .delivery(WAIT, |d| d["subscription_id"] == sub && d["reset"] == true)
+        .await
+        .expect("the reset");
+    assert_eq!(d["session"]["session_id"], SESSION_B);
+    assert_eq!(slot_indexes(&d), [0]);
+    let r = c
+        .call(
+            "session.content",
+            json!({"subscription_id": sub, "from": 0}),
+        )
+        .await;
+    assert_eq!(
+        r["result"]["sections"][0]["entries"][0]["summary"], "fresh start",
+        "{r}"
+    );
+}
+
+#[tokio::test]
+async fn a_subscription_without_outline_is_as_before_beside_one_with_it() {
+    let env = start(false).await;
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let outlined = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
+    let r = c.subscribe(json!({"pane_id": "p1"})).await;
+    let plain = r["subscription_id"].as_u64().unwrap();
+    let no_outline = |d: &Value| {
+        ["slots", "removed_index", "first", "last"]
+            .iter()
+            .all(|k| d.get(*k).is_none())
+            && d["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s.get("index").is_none())
+    };
+    assert!(no_outline(&r["delivery"]), "{}", r["delivery"]);
+    assert_eq!(lines_of(&r["delivery"]), [1, 2, 3, 4, 5, 6]);
+    // The tailer they share numbers what comes; the plain one is not told.
+    append_lines(&env.session(SESSION_A), &[user(100, "and now?")]);
+    let d = c
+        .delivery(WAIT, |d| {
+            d["subscription_id"] == plain && lines_of(d).contains(&7)
+        })
+        .await
+        .expect("the plain delivery");
+    assert!(no_outline(&d), "{d}");
+    let sub = outlined["subscription_id"].as_u64().unwrap();
+    let d = c
+        .delivery(WAIT, |d| {
+            d["subscription_id"] == sub && !slot_indexes(d).is_empty()
+        })
+        .await
+        .expect("the outline delivery");
+    assert!(section_indexes(&d).iter().all(|&i| i >= 8), "{d}");
+}
+
+#[tokio::test]
+async fn session_tail_prints_the_outline_and_a_content_range() {
+    let env = start(false).await;
+    let (printed, job) = tail(
+        &env,
+        handlr::tail::TailOptions {
+            pane: Some("p1".to_string()),
+            content: Some((Some(0), Some(2))),
+            ..handlr::tail::TailOptions::default()
+        },
+    );
+    let marker = "-- content #0 to #2: 3 section(s) --";
+    let out = printed.wait_for(marker).await;
+    job.abort();
+    assert!(out.contains("-- outline: 8 slot(s), last #7 --"), "{out}");
+    assert!(out.contains(":1.0 turn 1x8 rev 0"), "{out}");
+    let after: Vec<&str> = out
+        .split(marker)
+        .nth(1)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert!(
+        after[0].starts_with("#0 ") && after[0].ends_with("user text: prompt 0"),
+        "{out}"
+    );
+    assert!(
+        after[2].starts_with("#2 ") && after[2].contains(" card finished resolved"),
+        "{out}"
+    );
+}

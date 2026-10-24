@@ -11,7 +11,7 @@
 //! handlr pair [--listen <handlr.sock>] [--name <name>] [--protocols companion,harness]
 //!             [--replace] [--code <code>] [--qr-png <file>]
 //! handlr session tail [--listen <handlr.sock>] [--pane <id or name>] [--follow]
-//!                     [--entries N] [--history N]
+//!                     [--entries N] [--history N] [--outline] [--from N] [--to N]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -48,6 +48,10 @@ struct AppArgs {
     pane: Option<String>,
     entries: Option<String>,
     history: Option<String>,
+    /// `session tail`'s outline mode and content range.
+    outline: bool,
+    from: Option<String>,
+    to: Option<String>,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
@@ -73,6 +77,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         pane: None,
         entries: None,
         history: None,
+        outline: false,
+        from: None,
+        to: None,
     };
 
     while let Some(arg) = args.next() {
@@ -105,6 +112,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--pane" => parsed.pane = args.next(),
             "--entries" => parsed.entries = args.next(),
             "--history" => parsed.history = args.next(),
+            "--outline" => parsed.outline = true,
+            "--from" => parsed.from = args.next(),
+            "--to" => parsed.to = args.next(),
             _ if !arg.starts_with("--") => parsed.positional.push(arg),
             _ => {
                 eprintln!("Unknown argument: {}", arg);
@@ -288,7 +298,7 @@ async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
 
 /// `handlr session tail` (plan 20261023_03, section 8): read-only.
 async fn session(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
-    const USAGE: &str = "usage: handlr session tail [--listen <socket>] [--pane <id or name>] [--follow] [--entries N] [--history N]";
+    const USAGE: &str = "usage: handlr session tail [--listen <socket>] [--pane <id or name>] [--follow] [--entries N] [--history N] [--outline] [--from N] [--to N]";
     if args.positional.first().map(String::as_str) != Some("tail") || args.positional.len() > 1 {
         return Err(USAGE.into());
     }
@@ -307,6 +317,16 @@ async fn session(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
             libhandlr_proto::common::SUBSCRIBE_SECTIONS_DEFAULT,
         )?,
         history: number(&args.history, 0)?,
+        outline: args.outline,
+        content: {
+            let index = |v: &Option<String>| -> Result<Option<u64>, String> {
+                v.as_deref()
+                    .map(|n| n.parse().map_err(|_| format!("not an index: {n}")))
+                    .transpose()
+            };
+            let (from, to) = (index(&args.from)?, index(&args.to)?);
+            (from.is_some() || to.is_some()).then_some((from, to))
+        },
     };
     let mut out = std::io::stdout();
     Ok(handlr::tail::run(&socket, &options, &mut out).await?)

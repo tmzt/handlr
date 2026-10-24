@@ -14,6 +14,16 @@
 //! the index, for backfills and `session.history`: a builder started
 //! [`REACH`] lines before the span and read [`REACH`] lines past it groups
 //! the span exactly as the tailer does (see [`super::sections`]).
+//!
+//! The [`Outline`] numbers the file's sections 0, 1, 2… with no gaps
+//! (plan 20261024_01, decisions 1 and 2). It is built, the first time an
+//! outline subscription or `session.content` needs it, by reading every
+//! section of the file in serial order; from then on each check's new
+//! sections take the next indexes, in serial order, a replaced section
+//! keeps its index and bumps its `rev`, and a removed one's index stays
+//! removed. A file read again (another tailer, or after a restart) is
+//! numbered the same, but for a section that came and went before the
+//! read, or a card that appeared behind sections already numbered.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -22,7 +32,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 
-use libhandlr_proto::common::{PendingQuestion, SERIAL_LINE_MAX, Section, Serial};
+use libhandlr_proto::common::{
+    PendingQuestion, SERIAL_LINE_MAX, Section, SectionKind, Serial, Slot,
+};
 use libherdr::protocol::AgentStatus;
 use tokio::sync::{Notify, broadcast};
 
@@ -42,6 +54,11 @@ pub const KEEP_ITEMS: usize = 256;
 pub const SINCE_MAX_LINES: u32 = 50_000;
 /// How much of a line's start is read to know it as bookkeeping.
 const HEAD: usize = 256;
+/// The lines one span of an outline's build reads.
+const OUTLINE_SPAN: u32 = 4096;
+/// Serials further apart than this, in lines, are read in separate spans
+/// for `session.content`.
+const CONTENT_GAP: u32 = 1024;
 
 /// The first and last lines a scan finished, if any.
 pub type NewLines = Option<(u32, u32)>;
@@ -383,6 +400,254 @@ pub fn since(src: &Source, after: Serial, n: usize) -> std::io::Result<Since> {
     })
 }
 
+/// A slot as the outline keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Kept {
+    serial: Serial,
+    kind: SectionKind,
+    lines: u32,
+    chars: u32,
+    rev: u32,
+    removed: bool,
+}
+
+/// A session file's sections by index (plan 20261024_01, decision 1).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outline {
+    slots: Vec<Kept>,
+    by_serial: HashMap<u64, u64>,
+}
+
+/// What an index range of the outline holds (see [`Outline::range`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Range {
+    /// The indexes of the sections in it, in order.
+    pub indexes: Vec<u64>,
+    /// The removed indexes in the part walked, in order.
+    pub removed: Vec<u64>,
+    /// It was cut at the limit with sections left.
+    pub more: bool,
+}
+
+impl Outline {
+    /// The outline of `sections`, in the order given, numbered from 0.
+    pub fn of(sections: &[Section]) -> Self {
+        let mut outline = Outline::default();
+        for s in sections {
+            outline.put(s);
+        }
+        outline
+    }
+
+    /// The indexes given so far, removed ones among them.
+    pub fn len(&self) -> u64 {
+        self.slots.len() as u64
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// The highest index, if any.
+    pub fn last(&self) -> Option<u64> {
+        self.len().checked_sub(1)
+    }
+
+    /// The index of the section `serial`, removed or not.
+    pub fn index_of(&self, serial: Serial) -> Option<u64> {
+        self.by_serial.get(&serial.to_u64()).copied()
+    }
+
+    pub fn is_removed(&self, index: u64) -> bool {
+        self.slots.get(index as usize).is_some_and(|k| k.removed)
+    }
+
+    /// The removed indexes.
+    pub fn removed(&self) -> Vec<u64> {
+        (0..self.len()).filter(|&i| self.is_removed(i)).collect()
+    }
+
+    /// The slot at `index`, unless it is removed.
+    pub fn slot(&self, index: u64) -> Option<Slot> {
+        let k = self.slots.get(index as usize).filter(|k| !k.removed)?;
+        Some(Slot {
+            index,
+            serial: k.serial,
+            kind: k.kind,
+            lines: k.lines,
+            chars: k.chars,
+            rev: k.rev,
+        })
+    }
+
+    /// The slots of indexes `from` to `from + n - 1`, removed ones left
+    /// out.
+    pub fn slots(&self, from: u64, n: usize) -> Vec<Slot> {
+        let to = from.saturating_add(n as u64).min(self.len());
+        (from..to).filter_map(|i| self.slot(i)).collect()
+    }
+
+    /// Number `section`, or replace the one of its serial: a new serial
+    /// takes the next index; a known one keeps its index, bumps its `rev`
+    /// and stands again if it was removed (the same section, so its index
+    /// names it still; no other section ever takes it).
+    pub fn put(&mut self, section: &Section) -> Slot {
+        let (lines, chars) = sections::size(section);
+        let key = section.serial.to_u64();
+        let index = match self.by_serial.get(&key) {
+            Some(&i) => {
+                let k = &mut self.slots[i as usize];
+                k.kind = section.kind;
+                k.lines = lines;
+                k.chars = chars;
+                k.rev = k.rev.saturating_add(1);
+                k.removed = false;
+                i
+            }
+            None => {
+                let i = self.len();
+                self.slots.push(Kept {
+                    serial: section.serial,
+                    kind: section.kind,
+                    lines,
+                    chars,
+                    rev: 0,
+                    removed: false,
+                });
+                self.by_serial.insert(key, i);
+                i
+            }
+        };
+        self.slot(index).expect("just put")
+    }
+
+    /// Mark the section `serial` removed: its index, if it stood.
+    pub fn remove(&mut self, serial: Serial) -> Option<u64> {
+        let i = self.index_of(serial)?;
+        let k = &mut self.slots[i as usize];
+        if k.removed {
+            return None;
+        }
+        k.removed = true;
+        Some(i)
+    }
+
+    /// The sections of an inclusive index range, `None` open on its side
+    /// (plan 20261024_01, the 00:03 EDT amendment): `from` only, the next
+    /// `limit` from `from` on; `to` only, the `limit` ending at `to`,
+    /// oldest first; both, the range cut at `limit` from `from`; neither,
+    /// the newest `limit`. `more` when sections of the range were left
+    /// past the cut (after it walking forward, before it walking back).
+    pub fn range(&self, from: Option<u64>, to: Option<u64>, limit: usize) -> Range {
+        let mut out = Range::default();
+        let Some(last) = self.last() else {
+            return out;
+        };
+        let hi = to.unwrap_or(last).min(last);
+        match from {
+            Some(lo) => {
+                let mut i = lo;
+                while i <= hi {
+                    if self.is_removed(i) {
+                        out.removed.push(i);
+                    } else if out.indexes.len() == limit {
+                        out.more = true;
+                        break;
+                    } else {
+                        out.indexes.push(i);
+                    }
+                    i += 1;
+                }
+                // Removed indexes past the cut belong to the next request.
+                if out.more {
+                    let cut = out.indexes.last().copied().unwrap_or(lo);
+                    out.removed.retain(|&r| r < cut);
+                }
+            }
+            None => {
+                let mut i = hi;
+                loop {
+                    if self.is_removed(i) {
+                        out.removed.push(i);
+                    } else if out.indexes.len() == limit {
+                        out.more = true;
+                        break;
+                    } else {
+                        out.indexes.push(i);
+                    }
+                    if i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                }
+                if out.more {
+                    let cut = out.indexes.last().copied().unwrap_or(hi);
+                    out.removed.retain(|&r| r > cut);
+                }
+                out.indexes.reverse();
+                out.removed.reverse();
+            }
+        }
+        out
+    }
+}
+
+/// Every section of the file, in serial order, read a span at a time.
+pub fn every_section(src: &Source) -> std::io::Result<Vec<Section>> {
+    let last = src.index.lines();
+    let mut out = Vec::new();
+    let mut a = 1;
+    while a <= last {
+        let b = a.saturating_add(OUTLINE_SPAN - 1).min(last);
+        out.extend(span(src, a, b)?);
+        a = b + 1;
+    }
+    Ok(out)
+}
+
+/// The sections with the serials `wanted`, in the order given; those no
+/// longer found are left out. Serials close together are read in one
+/// span.
+pub fn sections_at(src: &Source, wanted: &[Serial]) -> std::io::Result<Vec<Section>> {
+    let mut lines: Vec<u32> = wanted.iter().map(|s| s.line).collect();
+    lines.sort_unstable();
+    lines.dedup();
+    let keys: HashSet<u64> = wanted.iter().map(|s| s.to_u64()).collect();
+    let mut found: HashMap<u64, Section> = HashMap::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let a = lines[i];
+        let mut b = a;
+        while i + 1 < lines.len() && lines[i + 1] - b <= CONTENT_GAP {
+            i += 1;
+            b = lines[i];
+        }
+        i += 1;
+        for s in span(src, a, b)? {
+            let key = s.serial.to_u64();
+            if keys.contains(&key) {
+                found.insert(key, s);
+            }
+        }
+    }
+    Ok(wanted
+        .iter()
+        .filter_map(|s| found.remove(&s.to_u64()))
+        .collect())
+}
+
+/// What `session.content` answers from (see [`Tailer::content`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Content {
+    /// Each with its index; empty when only slots were asked.
+    pub sections: Vec<Section>,
+    /// When only slots were asked.
+    pub slots: Vec<Slot>,
+    pub removed: Vec<u64>,
+    pub last: Option<u64>,
+    pub more: bool,
+}
+
 /// What a tailer broadcasts after a check that found something.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Batch {
@@ -396,6 +661,15 @@ pub struct Batch {
     pub too_long: bool,
     /// The pending question now.
     pub pending_question: Option<PendingQuestion>,
+    /// The outline was kept when this was made: `sections` carry their
+    /// indexes, and the three fields below are set (plan 20261024_01).
+    pub outlined: bool,
+    /// The slots of `sections`, in index order.
+    pub slots: Vec<Slot>,
+    /// The indexes of `removed` that stood, in order.
+    pub removed_index: Vec<u64>,
+    /// The outline's highest index after this batch.
+    pub last: Option<u64>,
 }
 
 /// What a subscriber reads its backfill from: the tailer's state when it
@@ -426,6 +700,11 @@ struct TailState {
     dirty: bool,
     too_long: bool,
     gone: bool,
+    /// The sections by index, once something has asked for them.
+    outline: Option<Outline>,
+    /// Bumped each time the file is read again from its start, after it
+    /// shrank or was replaced: indexes of another epoch do not apply.
+    epoch: u64,
 }
 
 /// One session file, tailed for its subscribers.
@@ -554,6 +833,8 @@ impl Tailer {
             secrets,
             dirty: true,
             gone: false,
+            outline: None,
+            epoch: 0,
         })
     }
 
@@ -567,14 +848,7 @@ impl Tailer {
         let rx = self.tx.subscribe();
         // The cards as they stand now, so the first batch only changes them.
         self.check_cards_now();
-        let st = self.state.lock().unwrap();
-        let snapshot = Snapshot {
-            index: st.index.clone(),
-            approvals: approval_cards(&st),
-            live: st.live.clone(),
-            too_long: st.too_long,
-            secrets: st.secrets.clone(),
-        };
+        let snapshot = self.snapshot();
         (rx, snapshot)
     }
 
@@ -707,14 +981,87 @@ impl Tailer {
 
     /// A snapshot for a history page: the state now.
     pub fn snapshot(&self) -> Snapshot {
-        let st = self.state.lock().unwrap();
-        Snapshot {
-            index: st.index.clone(),
-            approvals: approval_cards(&st),
-            live: st.live.clone(),
-            too_long: st.too_long,
-            secrets: st.secrets.clone(),
+        snapshot_of(&self.state.lock().unwrap())
+    }
+
+    /// The epoch of the file's reading (see `TailState::epoch`).
+    pub fn epoch(&self) -> u64 {
+        self.state.lock().unwrap().epoch
+    }
+
+    /// Build the outline if it is not kept yet: every section of the file
+    /// read once, under the state's lock, so that each batch after it
+    /// numbers what it adds. Blocks on the file.
+    pub fn ensure_outline(&self) -> std::io::Result<()> {
+        let mut st = self.state.lock().unwrap();
+        if st.outline.is_some() {
+            return Ok(());
         }
+        let snap = snapshot_of(&st);
+        let src = self
+            .source(&snap)
+            .ok_or_else(|| std::io::Error::other(format!("no reader for {}", self.agent)))?;
+        let sections = every_section(&src)?;
+        st.outline = Some(Outline::of(&sections));
+        Ok(())
+    }
+
+    /// The outline as it stands, with its epoch; built first if needed.
+    pub fn outline(&self) -> std::io::Result<(Outline, u64)> {
+        self.ensure_outline()?;
+        let st = self.state.lock().unwrap();
+        Ok((st.outline.clone().unwrap_or_default(), st.epoch))
+    }
+
+    /// `session.content`'s answer for an index range (plan 20261024_01,
+    /// decision 4, as amended at 00:03 EDT): the slots, or the redacted
+    /// sections, each with its index. Blocks on the file.
+    pub fn content(
+        &self,
+        from: Option<u64>,
+        to: Option<u64>,
+        limit: usize,
+        slots_only: bool,
+    ) -> std::io::Result<Content> {
+        self.ensure_outline()?;
+        let (range, slots, last, snap) = {
+            let st = self.state.lock().unwrap();
+            let outline = st.outline.as_ref().expect("just built");
+            let range = outline.range(from, to, limit);
+            let slots: Vec<Slot> = range
+                .indexes
+                .iter()
+                .filter_map(|&i| outline.slot(i))
+                .collect();
+            (range, slots, outline.last(), snapshot_of(&st))
+        };
+        let mut content = Content {
+            removed: range.removed,
+            last,
+            more: range.more,
+            ..Content::default()
+        };
+        if slots_only {
+            content.slots = slots;
+        } else {
+            content.sections = self.read_slots(&snap, &slots)?;
+        }
+        Ok(content)
+    }
+
+    /// The sections of `slots`, each given its slot's index; those no
+    /// longer found are left out. Blocks on the file.
+    pub fn read_slots(&self, snap: &Snapshot, slots: &[Slot]) -> std::io::Result<Vec<Section>> {
+        let Some(src) = self.source(snap) else {
+            return Ok(Vec::new());
+        };
+        let serials: Vec<Serial> = slots.iter().map(|s| s.serial).collect();
+        let index: HashMap<u64, u64> = slots.iter().map(|s| (s.serial.to_u64(), s.index)).collect();
+        let mut sections = sections_at(&src, &serials)?;
+        for s in &mut sections {
+            s.index = index.get(&s.serial.to_u64()).copied().unwrap_or(0);
+        }
+        Ok(sections)
     }
 
     /// Check the file once: what it found, if anything.
@@ -747,6 +1094,7 @@ impl Tailer {
                     fresh.approvals = std::mem::take(&mut st.approvals);
                     fresh.pending = std::mem::take(&mut st.pending);
                     fresh.live = st.live.clone();
+                    fresh.epoch = st.epoch + 1;
                     *st = fresh;
                 }
                 Err(_) => st.gone = true,
@@ -857,12 +1205,33 @@ impl Tailer {
         if out.is_empty() && removed.is_empty() && !question_changed {
             return None;
         }
+        let mut sections: Vec<Section> = out.into_values().collect();
+        let mut slots = Vec::new();
+        let mut removed_index = Vec::new();
+        let outlined = st.outline.is_some();
+        let mut last = None;
+        if let Some(outline) = &mut st.outline {
+            // New sections take the next indexes, in serial order.
+            for s in &mut sections {
+                let slot = outline.put(s);
+                s.index = slot.index;
+                slots.push(slot);
+            }
+            slots.sort_by_key(|s| s.index);
+            removed_index = removed.iter().filter_map(|r| outline.remove(*r)).collect();
+            removed_index.sort_unstable();
+            last = outline.last();
+        }
         Some(Batch {
-            sections: out.into_values().collect(),
+            sections,
             removed,
             truncated: false,
             too_long: false,
             pending_question: question,
+            outlined,
+            slots,
+            removed_index,
+            last,
         })
     }
 
@@ -916,6 +1285,16 @@ fn secret_calls(
         }
     }
     Ok(ids)
+}
+
+fn snapshot_of(st: &TailState) -> Snapshot {
+    Snapshot {
+        index: st.index.clone(),
+        approvals: approval_cards(st),
+        live: st.live.clone(),
+        too_long: st.too_long,
+        secrets: st.secrets.clone(),
+    }
 }
 
 fn approval_cards(st: &TailState) -> Vec<ApprovalCard> {
