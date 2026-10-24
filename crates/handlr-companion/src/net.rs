@@ -105,6 +105,7 @@ pub(crate) fn run(
     inputs: UnboundedReceiver<Input>,
     events: mpsc::Sender<Event>,
     bytes: Arc<AtomicU64>,
+    tap: Tap,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -129,6 +130,7 @@ pub(crate) fn run(
         inputs,
         events,
         bytes,
+        tap,
     };
     runtime.block_on(net.run());
 }
@@ -149,7 +151,13 @@ struct Net {
     events: mpsc::Sender<Event>,
     /// The bytes sent and received since the thread began.
     bytes: Arc<AtomicU64>,
+    /// Sees each event, on this thread, before the app is given it.
+    tap: Tap,
 }
+
+/// A function that sees each event on the `net` thread, with the bytes
+/// over the link so far ([`Companion::spawn_tapped`](crate::Companion::spawn_tapped)).
+pub(crate) type Tap = Box<dyn Fn(&Event, u64) + Send>;
 
 /// How a session ended.
 enum End {
@@ -275,6 +283,7 @@ impl Net {
     }
 
     fn emit(&self, event: Event) {
+        (self.tap)(&event, self.bytes.load(Ordering::Relaxed));
         let _ = self.events.send(event);
     }
 

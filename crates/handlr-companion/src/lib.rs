@@ -128,13 +128,28 @@ impl Companion {
     /// Starts the `net` thread, which connects at once and keeps
     /// reconnecting.
     pub fn spawn(config: CompanionConfig, keys: Box<dyn KeyStore>) -> Self {
+        Self::spawn_tapped(config, keys, |_, _| {})
+    }
+
+    /// As [`spawn`](Self::spawn), with `tap` called on the `net` thread with
+    /// each event, and the bytes over the link so far
+    /// ([`link_bytes`](Self::link_bytes)), just before the event is queued
+    /// for [`poll`](Self::poll). It sees the events while the app's own loop
+    /// does not run, such as an Android app in the background with a
+    /// foreground service (plan 20261024_02, the notification's content and
+    /// alerts). It must be quick: the link waits on it.
+    pub fn spawn_tapped(
+        config: CompanionConfig,
+        keys: Box<dyn KeyStore>,
+        tap: impl Fn(&Event, u64) + Send + 'static,
+    ) -> Self {
         let (inputs, inputs_rx) = tokio::sync::mpsc::unbounded_channel();
         let (events_tx, events) = mpsc::channel();
         let bytes = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&bytes);
         thread::Builder::new()
             .name("net".into())
-            .spawn(move || net::run(config, keys, inputs_rx, events_tx, counted))
+            .spawn(move || net::run(config, keys, inputs_rx, events_tx, counted, Box::new(tap)))
             .expect("spawning the net thread");
         Companion {
             inputs,

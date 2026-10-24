@@ -200,6 +200,39 @@ fn the_client_counts_the_bytes_over_the_link_across_connections() {
 }
 
 #[test]
+fn a_tap_sees_each_event_with_the_bytes_before_the_app_does() {
+    let dir = short_dir();
+    let (socket, keys) = paths(&dir);
+    let listener = UnixListener::bind(&socket).unwrap();
+    let mut config = CompanionConfig::new("test");
+    config.socket = socket.clone();
+    config.backoff_initial = Duration::from_millis(50);
+    config.backoff_max = Duration::from_millis(400);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let tapped = std::sync::Arc::clone(&seen);
+    let c = Companion::spawn_tapped(config, Box::new(FileKeyStore::new(&keys)), move |e, b| {
+        tapped.lock().unwrap().push((e.clone(), b));
+    });
+    let mut conn = accept(&listener);
+    conn.greet();
+    expect_connected(&c);
+    let seen = seen.lock().unwrap();
+    let events: Vec<&Event> = seen.iter().map(|(e, _)| e).collect();
+    // The disconnected events of any attempt before the accept, then the
+    // three the app was given, in the same order.
+    let at = events
+        .iter()
+        .position(|e| matches!(e, Event::Connected { .. }))
+        .expect("connected");
+    assert!(matches!(events[at + 1], Event::Vocabulary(_)));
+    assert_eq!(events[at + 2], &Event::Agents(vec![]));
+    assert_eq!(events.len(), at + 3);
+    // The bytes as they were then: the last is all of them.
+    assert_eq!(seen[at + 2].1, conn.bytes);
+    assert!(seen[at].1 <= seen[at + 2].1);
+}
+
+#[test]
 fn a_dropped_connection_reconnects_with_the_session_id() {
     let dir = short_dir();
     let (socket, keys) = paths(&dir);
