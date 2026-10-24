@@ -1097,6 +1097,19 @@ pub fn ease_in_out(u: f32) -> f32 {
     }
 }
 
+/// When the scrollbar is drawn, and whether its band takes touches (L3,
+/// the band amendment).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollbarVisibility {
+    /// No thumb and no band: the strip is plain scrollback.
+    Disabled,
+    /// The thumb while scrolling and `BAR_HOLD` after; the band always.
+    #[default]
+    Hidden,
+    /// The thumb always; the band always.
+    Always,
+}
+
 /// The scrollbar's thumb held by a finger: its id, the finger's y less the
 /// thumb's top when it came down, and the offset then.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1340,6 +1353,8 @@ pub struct AgentScreen {
     bar: Option<f32>,
     /// The scrollbar's thumb, while a finger drags it.
     thumb: Option<ThumbDrag>,
+    /// The scrollbar's visibility setting.
+    bar_mode: ScrollbarVisibility,
     /// The slots of a new outline held aside that come after the ribbon's
     /// newest (the event's `held_newer`): counted in the scrollbar's
     /// length at their estimated heights.
@@ -2277,6 +2292,33 @@ impl AgentScreen {
         Some((Rect::new(x, y, BAR_W * s, len), range))
     }
 
+    /// The scrollbar's visibility (a setting; `Hidden` until the settings
+    /// screen gives one).
+    pub fn set_scrollbar(&mut self, mode: ScrollbarVisibility) {
+        if mode != self.bar_mode {
+            self.bar_mode = mode;
+            self.dirty = true;
+        }
+    }
+
+    /// The band: the right edge's strip, `BAR_W` and `BAR_SLOP` either
+    /// side, the window's height. A scrollbar unless `Disabled`, drawn or
+    /// not.
+    fn band(&self) -> Option<Rect> {
+        if self.bar_mode == ScrollbarVisibility::Disabled {
+            return None;
+        }
+        let (r, _) = self.thumb_track()?;
+        let s = self.scale();
+        let v = self.frame.viewport;
+        Some(Rect::new(
+            r.x - BAR_SLOP * s,
+            v.y,
+            r.w + 2.0 * BAR_SLOP * s,
+            v.h,
+        ))
+    }
+
     /// The scrollbar's thumb on screen, while it shows.
     pub fn thumb_rect(&self) -> Option<Rect> {
         (self.bar_alpha() > 0.0)
@@ -2284,17 +2326,14 @@ impl AgentScreen {
             .flatten()
     }
 
-    /// The thumb's hit strip while it shows: its length, and `BAR_SLOP`
-    /// either side of it.
-    fn thumb_strip(&self) -> Option<Rect> {
-        let s = self.scale();
-        self.thumb_rect()
-            .map(|r| Rect::new(r.x - BAR_SLOP * s, r.y, r.w + 2.0 * BAR_SLOP * s, r.h))
-    }
-
     /// The thumb's opacity: `BAR_ALPHA` until `BAR_HOLD` after the
     /// scrolling stopped, then down to 0 over `BAR_FADE`.
     pub fn bar_alpha(&self) -> f32 {
+        match self.bar_mode {
+            ScrollbarVisibility::Disabled => return 0.0,
+            ScrollbarVisibility::Always => return BAR_ALPHA,
+            ScrollbarVisibility::Hidden => {}
+        }
         let Some(t) = self.bar else {
             return 0.0;
         };
@@ -2534,17 +2573,23 @@ impl AgentScreen {
                 if self.jump.take().is_some() {
                     log::info!("agent view: jump scroll stopped at {:.0}", self.offset);
                 }
-                // The thumb, while it shows, is a target (item 3).
-                if self.thumb_strip().is_some_and(|r| r.contains([x, y])) {
-                    let top = self.thumb_track().map_or(y, |(r, _)| r.y);
+                // The band is a scrollbar, drawn or not (the band
+                // amendment): on the thumb it is grabbed where touched;
+                // elsewhere the thumb comes to the finger, centred.
+                if self.band().is_some_and(|r| r.contains([x, y])) {
+                    let (r, _) = self.thumb_track()?;
+                    let on_thumb = y >= r.y && y <= r.y + r.h;
                     self.fling = 0.0;
                     self.drag = None;
                     self.thumb = Some(ThumbDrag {
                         id,
-                        grab: y - top,
+                        grab: if on_thumb { y - r.y } else { r.h / 2.0 },
                         from: self.offset,
                     });
                     self.bar = Some(0.0);
+                    if !on_thumb {
+                        self.drag_thumb(y);
+                    }
                     self.placed();
                     return None;
                 }
@@ -5393,31 +5438,70 @@ mod tests {
         a.touch(1, TouchPhase::Moved, x, y + 130.0, MS * 2);
         assert!((at - a.offset() - 100.0).abs() < 0.01, "a 1x drag");
         a.touch(1, TouchPhase::Ended, x, y + 130.0, MS * 30);
-        // On the track, but above the thumb: a drag too.
-        let r = a.thumb_rect().unwrap();
-        a.touch(2, TouchPhase::Started, r.x, r.y - 100.0, MS * 40);
-        assert!(a.thumb.is_none() && a.drag.is_some());
     }
 
     #[test]
-    fn the_thumb_is_not_a_target_once_faded() {
+    fn a_touch_in_the_band_brings_the_thumb_to_the_finger_centred() {
         let mut a = midway();
         let r = a.thumb_rect().unwrap();
-        // Still a target while it fades.
-        for _ in 0..((BAR_HOLD + BAR_FADE / 2).as_millis() / FRAME.as_millis()) {
-            a.tick(FRAME);
-        }
-        assert!(a.bar_alpha() > 0.0 && a.bar_alpha() < BAR_ALPHA);
-        a.touch(1, TouchPhase::Started, r.x, r.y + r.h / 2.0, Duration::ZERO);
-        assert!(a.thumb.is_some());
-        a.touch(1, TouchPhase::Ended, r.x, r.y + r.h / 2.0, MS);
-        // Faded: the same place scrolls.
+        let v = a.frame().viewport;
+        let y = (r.y - 300.0).max(v.y + r.h / 2.0 + 1.0);
+        a.touch(2, TouchPhase::Started, r.x, y, Duration::ZERO);
+        assert!(a.thumb.is_some() && a.drag.is_none());
+        let t = a.thumb_rect().unwrap();
+        assert!(
+            (t.y + t.h / 2.0 - y).abs() < 0.5,
+            "centred: {} vs {y}",
+            t.y + t.h / 2.0
+        );
+    }
+
+    #[test]
+    fn the_band_works_when_the_thumb_has_faded() {
+        let mut a = midway();
+        let r = a.thumb_rect().unwrap();
         for _ in 0..((BAR_HOLD + BAR_FADE).as_millis() / FRAME.as_millis() + 1) {
             a.tick(FRAME);
         }
-        assert_eq!(a.bar, None);
-        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        assert_eq!(a.bar_alpha(), 0.0);
+        let from = a.offset();
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0 + 200.0);
         a.touch(1, TouchPhase::Started, x, y, Duration::from_secs(10));
-        assert!(a.thumb.is_none() && a.drag.is_some());
+        assert!(a.thumb.is_some() && a.drag.is_none());
+        assert!(a.offset() > from, "moved to the finger");
+        assert_eq!(a.bar_alpha(), BAR_ALPHA, "and shown");
+        a.touch(
+            1,
+            TouchPhase::Moved,
+            x,
+            y + 50.0,
+            Duration::from_secs(10) + MS,
+        );
+        a.touch(
+            1,
+            TouchPhase::Ended,
+            x,
+            y + 50.0,
+            Duration::from_secs(10) + MS * 2,
+        );
+        assert_eq!(a.fling, 0.0);
+    }
+
+    #[test]
+    fn disabled_has_no_band_and_always_draws_the_thumb_at_rest() {
+        let mut a = midway();
+        let r = a.thumb_track().unwrap().0;
+        a.set_scrollbar(ScrollbarVisibility::Disabled);
+        assert_eq!(a.thumb_rect(), None);
+        a.touch(1, TouchPhase::Started, r.x, r.y + r.h / 2.0, Duration::ZERO);
+        assert!(a.thumb.is_none() && a.drag.is_some(), "plain scrollback");
+        a.touch(1, TouchPhase::Ended, r.x, r.y + r.h / 2.0, MS * 30);
+        let mut b = midway();
+        b.set_scrollbar(ScrollbarVisibility::Always);
+        for _ in 0..((BAR_HOLD + BAR_FADE).as_millis() / FRAME.as_millis() + 1) {
+            b.tick(FRAME);
+        }
+        assert_eq!(b.bar_alpha(), BAR_ALPHA);
+        assert!(b.thumb_rect().is_some());
     }
 }
