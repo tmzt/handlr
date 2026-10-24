@@ -1111,3 +1111,16 @@ directory by default), falling back to herdr's label only with no name.
 
 The previous entry cites "the 16:58 EDT change"; the change it means,
 "the project is the directory by default", is at 18:00 EDT.
+
+## 2026-10-23 21:40 EDT — plan 20261022_02: the daemon sends a sleeping phone only what needs the user
+
+The owner: "only blockages or done messages should be sent on a sleeping
+conn". The phone's sleep (the 21:29 EDT entry) now tells the daemon too:
+`client.options` gains `background`, sent when the app is suspended and
+resumed. While it is set, the daemon's periodic vocabulary and focus
+pushes (`vocabulary.changed`, `focus.changed`) are held, to go at the
+first check after waking; notices were already only for an agent blocked,
+done or asking, and confirmations always go. libhandlr_proto 0.3.1, a
+patch by the owner's ruling: "I would consider it additive, just patch
+level", "appending to a struct is additive", "same with open enums, not
+closed".
