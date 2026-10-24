@@ -1565,3 +1565,26 @@ short lines summarising the reply point by point, returned in an appended
 libhandlr_proto patch release by the owner's rulings). Without Gemini, or
 when it gives none, `points` is empty. `read`, `summary` and `complex` are
 unchanged.
+
+## 2026-10-24 12:06 EDT — plan 20261023_05 (spoken summaries), departure: the daemon summarises Finished cards itself, under `[summary]`
+
+Agreed with the owner (2026-10-24): "should be daemon option, under
+summary tag"; then "yes". This replaces the entry "points for the expanded
+card" (2026-10-24 11:59 EDT). The points no longer come back from
+`speech.summarize`.
+- **The setting,** in `config.toml`: `[summary] cards = true` (the
+  default). On, the daemon summarises every new Finished card once with
+  Gemini, whether or not a client reads aloud. Off, it summarises only
+  while a client reads aloud, as plan 20261023_05's A4 says. There is no
+  phone toggle for it.
+- **Two fields on the card,** `CardBody.points: Vec<String>` (at most 6
+  short lines) and `CardBody.spoken: Option<String>` (the text to read
+  aloud). Both are appended and serde-defaulted, so libhandlr_proto gets a
+  patch release by the owner's rulings. When they are ready, the card's
+  section is replaced, so every client gets them, the outline included.
+- **Read aloud** uses `CardBody.spoken` when the card has it, and does not
+  ask again. `speech.summarize` stays for replies without a card, and for
+  `cards = false`.
+- **Without Gemini in the daemon** (no key, unreachable, or an error), both
+  fields stay empty. This is not the general agent toggle, which only
+  stops the user's own Gemini turns.
