@@ -1,7 +1,7 @@
 ---
 title: A small Markdown renderer for the app, with links and no HTML
 date: 2026-10-24
-status: Draft
+status: In implementation
 covers:
   - "A crate, `crates/handlr-markdown`, that parses basic CommonMark and
     lays it out as wrapped lines of styled runs, with links"
@@ -126,3 +126,9 @@ None.
 The owner approved the plan and its building on 2026-10-24 ("yes plan
 and impl keep it simple"). The status becomes `In implementation` with
 step 1's commit.
+
+## Amendment — 2026-10-24 13:06 EDT: implementation has started; the document is now immutable
+
+Step 1, `crates/handlr-markdown`, is built in the commit that sets this
+status. From here the plan changes only on the owner's explicit
+instruction.

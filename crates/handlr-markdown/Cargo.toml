@@ -1,0 +1,10 @@
+[package]
+name = "handlr-markdown"
+version = "0.1.0"
+edition = "2024"
+description = "Basic CommonMark laid out as wrapped lines of styled runs, with links and no HTML"
+
+[dependencies]
+# CommonMark only (no GFM), as libtypedmd_pulldown uses it
+# (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, decision 1).
+pulldown-cmark = { version = "0.13", default-features = false }
