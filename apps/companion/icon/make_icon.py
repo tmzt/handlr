@@ -15,6 +15,8 @@ Writes, next to this script:
   icon-1024.png                 master, the source of truth
   icon-512.png                  Play-store size
   foreground-1024.png           the dog alone on transparency (unpadded)
+  artwork-1024.png              the dog centred on a transparent square, for
+                                libmorph's Icon::png (build.rs)
   preview.png                   contact sheet of the masters and every size
   android/res/mipmap-*/ic_launcher{,_round,_foreground}.png
   android/res/mipmap-anydpi-v26/ic_launcher{,_round}.xml
@@ -245,6 +247,11 @@ def main():
     write_png(master.resize((512, 512), Image.LANCZOS), "icon-512.png")
     x0, y0, x1, y1 = content_box(art)
     write_png(art.crop((x0, y0, x1, y1)), "foreground-1024.png")
+    # The master for libmorph's `Icon::png`: the dog alone on a transparent
+    # 1024 square, its farthest pixel just inside the square's inscribed
+    # circle, since libmobile scales the square into the adaptive icon's
+    # centre 66 dp, where launchers keep only that circle.
+    write_png(place(art, MASTER, MASTER / 2 * 0.98, MASTER / 2), "artwork-1024.png")
 
     # Legacy icons, drawn at 4x of xxxhdpi and downscaled. The shape fills
     # LEGACY_FILL of the canvas; the dog keeps its place within the square.

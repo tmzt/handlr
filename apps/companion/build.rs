@@ -23,9 +23,13 @@ fn main() {
         .permission("android.permission.RECORD_AUDIO")
         // The link to handlr, over Tailscale or the LAN.
         .permission("android.permission.INTERNET")
-        // The launcher icon (icon/make_icon.py). Goes away once
-        // libmobile/libmorph support icons (requested on 2026-10-24).
-        .extra_script("icon/android/icon.gradle")
+        // The launcher icon: the magenta circuit dog (icon/make_icon.py) on
+        // its navy, made into every mipmap by libmorph-build 0.2.5.
+        .icon(
+            libmorph_build::gradle::Icon::png("icon/artwork-1024.png")
+                .background_color([0x0F, 0x0F, 0x26])
+                .monochrome_png("icon/artwork-1024.png"),
+        )
         // *Stay connected in the background*: libmorph 0.4.0's foreground
         // service, `specialUse`, with POST_NOTIFICATIONS and WAKE_LOCK
         // (src/notify.rs, whose SERVICE_REASON is the same text).
