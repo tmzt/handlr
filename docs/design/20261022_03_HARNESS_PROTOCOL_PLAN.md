@@ -1087,3 +1087,53 @@ built in step 5.
 Tests: placeholders draw bars, not text; a card's draws one panel; the
 shimmer's band moves with time and wraps every 1.6 s; and no frames are
 asked for the shimmer when no placeholder is on screen.
+
+## Amendment — 2026-10-24 11:09 EDT: two-finger scroll at 5×, and a proportional scrollbar while scrolling (living section L3)
+
+The owner (2026-10-24): "lets make two finger scroll much faster, lets
+also add a Mac style proportional scrollbar only on scroll 4px wide in
+the same gray, it should show progress from the top to the calculated
+length (if new content in timeline)"; "it could be a target when visible
+for 2s after lifting finger, it would have horizontal slop (another 4px on
+each side)"; then "yes, pts is correct". This adds to the ribbon and
+jump-line amendments. One-finger dragging and flinging are unchanged.
+
+1. **Two-finger scroll.**
+   - A drag with two fingers down moves the view 5× the fingers' distance
+     (their mean movement).
+   - Its fling starts at 5× the release speed, under the same cap.
+   - Lifting one finger mid-drag goes back to 1× from that point.
+2. **The scrollbar.**
+   - **Shape:** a 4 pt rounded thumb at the right edge of the scrollback,
+     in the placeholders' gray (the text's colour) at about 35% opacity.
+   - **When:** it shows on any drag, fling, jump scroll or thumb drag. It
+     stays fully visible for 2 s after the finger lifts or the motion
+     stops, then fades out over 0.3 s.
+   - **Length:** the window's share of the ribbon's calculated length,
+     never shorter than 24 pt.
+   - **Position:** from the session's top to the end of that length.
+   - **The calculated length:** every slot of the outline at its laid-out
+     or estimated height. While a new outline is held aside, its sections
+     after the old ribbon's newest are counted too, so the thumb stops
+     short of the bottom at the old end.
+3. **The thumb is a target while it shows.**
+   - **Hit area:** the thumb's length, and 4 pt either side of it
+     horizontally (a 12 pt strip).
+   - **Dragging:** moves the view in proportion to the calculated length,
+     so top to bottom travels the whole session. Contents load where it
+     stops. Letting go leaves the view there, with no fling.
+   - **Visibility:** it stays visible while dragged, and the 2 s starts when
+     it is let go. A touch on the track outside the thumb scrolls as
+     before.
+
+Tests:
+- a two-finger drag moves 5× and its fling starts at 5×, and lifting one
+  finger goes back to 1×;
+- the thumb's length and position at the top, middle and end, and its
+  minimum;
+- the length counts a held-aside outline's newer sections;
+- it shows on scrolling, stays 2 s after lifting, then fades;
+- a touch within 4 pt of the thumb drags it proportionally, with no
+  fling;
+- a touch outside the strip scrolls as before;
+- it is not a target once faded.
