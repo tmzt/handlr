@@ -920,6 +920,9 @@ impl State {
         if let Some(v) = self.view.as_mut() {
             v.peeking = false;
             v.wanted = true;
+            // The next peek replaces what the view held instead of merging
+            // onto it, so the newest entries are certain after a gap.
+            v.session_id = None;
         }
         self.recompute_view(&mut out);
         if self.turn.take().is_some() {
@@ -1967,6 +1970,7 @@ impl State {
             if let Some(v) = self.view.as_mut() {
                 v.wanted = true;
                 v.peeked_at = None;
+                v.session_id = None;
             }
             self.list_wanted = true;
             self.listed_at = None;
@@ -2117,6 +2121,12 @@ impl State {
                 };
                 v.session_id = session.session_id;
                 v.pending_question = session.pending_question;
+                log::info!(
+                    "agent view: {} entries, newest {}{}",
+                    v.entries.len(),
+                    v.entries.last().map_or("none", |e| e.ts.as_str()),
+                    if same_session { "" } else { " (fresh)" }
+                );
             }
             None => {
                 v.entries.clear();
@@ -4898,5 +4908,13 @@ mod tests {
         // No overlap: the newer batch alone, not a gap.
         let merged = merge_entries(kept, vec![e("9")]);
         assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn after_a_reconnect_the_next_peek_starts_fresh() {
+        let mut s = viewing("working", asking());
+        s.disconnected(1000);
+        let v = s.view.as_ref().unwrap();
+        assert_eq!(v.session_id, None, "the next peek replaces, not merges");
     }
 }
