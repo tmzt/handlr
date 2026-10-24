@@ -2029,3 +2029,15 @@ manifest overlay (`icon/android/icon.gradle`, `AndroidManifest.xml`) are gone.
   directory.
 - **The pins:** handlr-audio's libmorph pin moved too, with the root lock.
 - **Checked:** aapt shows `icon='res/mipmap-anydpi-v26/ic_launcher.xml'`.
+
+## 2026-10-24 14:36 EDT — plan 20261024_02: a row's status wraps short of its button
+
+The owner (2026-10-24): "wide labels should wrap in libcontrols, or explicit \n
+if easier, optimized info should be capped in width to leave room for button".
+A link row's subtitle now breaks at each "\n", and wraps at spaces to the room
+left of its "›" or its *Enable* button (widths estimated at 0.5 em a character,
+since layout runs without a font). The row grows by a line for each line past
+the first. The *Battery optimization* row's status ("Optimized: Android may
+hold back handlr's network when idle") wraps beside *Enable*, no longer
+running under it. This is done in the app's own row control, not in
+libcontrols. Toggle rows' labels don't wrap yet.
