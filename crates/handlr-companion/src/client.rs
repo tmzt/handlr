@@ -2315,6 +2315,13 @@ impl State {
                 v.subscription = None;
             }
         } else {
+            log::info!(
+                "view: delivery, reset {}, {} section(s), {} removed, {} held",
+                d.reset,
+                d.sections.len(),
+                d.removed.len(),
+                v.sections.len()
+            );
             if d.reset {
                 v.sections.clear();
                 v.start = false;
@@ -2378,6 +2385,12 @@ impl State {
             return;
         };
         v.history = false;
+        log::info!(
+            "view: history page, {} section(s), start {}, {} held",
+            page.sections.len(),
+            page.start,
+            v.sections.len()
+        );
         if page.start {
             v.start = true;
         }
