@@ -323,15 +323,17 @@ pub struct Entry {
     /// At most `ENTRY_SUMMARY_MAX` characters, cut at a character boundary
     /// with "…".
     pub summary: String,
-    /// The repowiki links for the `docs/…` paths in `summary`, when the
-    /// daemon has a `[repowiki] url` (plan 20261022_03, the 21:57 EDT
-    /// amendment). Left out of the wire when there are none.
+    /// The links in `summary` (plan 20261022_03, the 21:57 EDT amendment):
+    /// its `http://` and `https://` URLs, and its `docs/…` paths' repowiki
+    /// pages when the daemon has a `[repowiki] url`. Left out of the wire
+    /// when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }
 
-/// A link for a `docs/…` path in an entry's or question's text: `text` is
-/// the path as it is written there, `url` its page on repowiki.
+/// A link in an entry's or question's text: `text` is what is written
+/// there (a URL, a Markdown link's text, or a `docs/…` path), `url` where
+/// it goes (the URL, or the path's page on repowiki).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub text: String,
@@ -359,8 +361,7 @@ pub struct PendingQuestion {
     /// one plan path names it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
-    /// The repowiki links for the `docs/…` paths in `text`, as
-    /// [`Entry::links`].
+    /// The links in `text`, as [`Entry::links`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }
