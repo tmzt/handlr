@@ -1065,3 +1065,25 @@ outline held aside has no text of its own: the state line covers it.
 
 Tests: each state's text and colour, the order when several hold, a long
 line cut with "…", and `-- jump to end --` when nothing is new.
+
+## Amendment — 2026-10-24 10:40 EDT: placeholders as faint bars with a slight shimmer (living section L3)
+
+The owner (2026-10-24): "outline boxes shouldn't look like missing content,
+they should be light gray almost clear, maybe with a slight shimmer"; then
+"Approve the plan". This replaces the placeholder of plan 20261024_01,
+decision 7 ("a dim placeholder of its height, with a short '…' row"), as
+built in step 5.
+
+1. **No "missing" look:** no dim block and no "…" row.
+2. **Faint bars:** a section's placeholder is faint rounded bars, one per
+   estimated line, at the text's colour at about 6% opacity. The last bar
+   of a block is shorter, as a paragraph's last line is. A card's
+   placeholder is one faint rounded panel of its estimated height.
+3. **A slight shimmer:** a soft band, about 4% brighter at its centre,
+   sweeps across the visible placeholders from left to right every 1.6 s,
+   the same phase for all. It runs only while a placeholder is on screen.
+4. **Contents replace it in place,** and the view does not move, as now.
+
+Tests: placeholders draw bars, not text; a card's draws one panel; the
+shimmer's band moves with time and wraps every 1.6 s; and no frames are
+asked for the shimmer when no placeholder is on screen.
