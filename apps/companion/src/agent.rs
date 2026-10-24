@@ -788,11 +788,13 @@ pub fn lay_out_block(shows: &Shows, pinned: bool, after_compact: bool, width: f3
     flow
 }
 
-/// A placeholder's fill: dimmer than the band.
-const PLACEHOLDER: [f32; 4] = [0.08, 0.085, 0.10, 1.0];
-
-/// A placeholder's row.
-pub const PENDING_ROW: &str = "\u{2026}";
+/// A placeholder's bars: the text's colour, almost clear (L3, the
+/// amendment on placeholders, item 2).
+const PLACEHOLDER: [f32; 4] = [FG[0], FG[1], FG[2], 0.06];
+/// The shimmer's band at its centre, over the bars (item 3).
+const SHIMMER: [f32; 4] = [FG[0], FG[1], FG[2], 0.04 / 3.0];
+/// One sweep of the shimmer, in seconds.
+const SHIMMER_PERIOD: f32 = 1.6;
 
 /// The estimated height of a section not yet held (plan 20261024_01,
 /// decision 7), from its slot's `lines` and `chars`: its text wrapped at
@@ -823,25 +825,70 @@ pub fn estimate_height(kind: SectionKind, lines: u32, chars: u32, width: f32, s:
     }
 }
 
-/// A slot without contents: a dim block of its estimated height with a
-/// short "…" row; the y after it.
+/// A slot without contents: faint rounded bars, one per estimated line,
+/// the last one shorter, or one faint panel for a card; the y after it.
 fn lay_out_pending(kind: SectionKind, lines: u32, chars: u32, pen: Pen, flow: &mut Flow) -> f32 {
     let s = pen.s;
     let h = estimate_height(kind, lines, chars, pen.width, s);
-    flow.fills.push(Fill {
-        rect: Rect::new(pen.pad, 2.0 * s, pen.text_w, (h - 4.0 * s).max(1.0)),
-        color: PLACEHOLDER,
-        radius: 4.0 * s,
-    });
-    flow.rows.push(Row {
-        text: PENDING_ROW.to_string(),
-        x: pen.pad + 4.0 * s,
-        y: 2.0 * s,
-        px: TOOL_PT * s,
-        color: DIM,
-        mono: true,
-    });
+    let bar = |flow: &mut Flow, y: f32, line: f32, w: f32| {
+        let bh = (line * 0.55).max(2.0 * s);
+        flow.fills.push(Fill {
+            rect: Rect::new(pen.pad, y + (line - bh) / 2.0, w, bh),
+            color: PLACEHOLDER,
+            radius: bh / 2.0,
+        });
+    };
+    match kind {
+        SectionKind::Card => flow.fills.push(Fill {
+            rect: Rect::new(pen.pad, 2.0 * s, pen.text_w, (h - 4.0 * s).max(1.0)),
+            color: PLACEHOLDER,
+            radius: 6.0 * s,
+        }),
+        SectionKind::Tool | SectionKind::Context => {
+            let line = term_h(TOOL_PT * s);
+            let tool = kind == SectionKind::Tool;
+            let n = if tool { lines.clamp(1, 2) } else { 1 };
+            let mut y = if tool { 2.0 * s } else { 4.0 * s };
+            for i in 0..n {
+                let w = if i + 1 == n { 0.45 } else { 0.7 };
+                bar(flow, y, line, pen.text_w * w);
+                y += line + 2.0 * s;
+            }
+        }
+        _ => {
+            let line = term_h(TEXT_PT * s);
+            let band = if kind == SectionKind::Turn {
+                8.0 * s
+            } else {
+                0.0
+            };
+            let rows = ((h - 10.0 * s - band) / line).round().max(1.0) as u32;
+            let mut y = 10.0 * s + band / 2.0;
+            for i in 0..rows {
+                let w = if i + 1 == rows && rows > 1 { 0.6 } else { 1.0 };
+                bar(flow, y, line, pen.text_w * w);
+                y += line;
+            }
+        }
+    }
     h
+}
+
+/// The shimmer's band at `t` seconds into a sweep, over a bar `r` in a
+/// view `w` wide: the parts of the bar under the band, three nested
+/// widths, so that drawn over each other it is softest at its edges.
+fn shimmer_over(r: Rect, t: f32, w: f32) -> Vec<Rect> {
+    let band = w * 0.35;
+    let cx = -band + (w + 2.0 * band) * (t / SHIMMER_PERIOD).fract();
+    let mut out = Vec::new();
+    for k in [1.0, 0.66, 0.33] {
+        let half = band * k / 2.0;
+        let (x0, x1) = ((cx - half).max(r.x), (cx + half).min(r.x + r.w));
+        if x1 > x0 {
+            out.push(Rect::new(x0, r.y, x1 - x0, r.h));
+        }
+    }
+    out
 }
 
 /// A finger on the flow.
@@ -1244,6 +1291,10 @@ pub struct AgentScreen {
     window: Option<ViewWindow>,
     window_taken: Option<ViewWindow>,
     dirty: bool,
+    /// Seconds into the placeholders' shimmer sweep.
+    shimmer: f32,
+    /// A placeholder was on screen at the last draw: the shimmer runs.
+    placeholders_shown: bool,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -2384,6 +2435,10 @@ impl AgentScreen {
     /// Carries a fling, or the jump scroll, on by `dt`. Returns whether
     /// the view moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
+        if self.placeholders_shown {
+            self.shimmer = (self.shimmer + dt.as_secs_f32()) % SHIMMER_PERIOD;
+            self.dirty = true;
+        }
         let was = self.quiet_for >= QUIET_FOR_CONTINUE;
         self.quiet_for += dt.as_secs_f32();
         if !was && self.quiet_for >= QUIET_FOR_CONTINUE {
@@ -2435,12 +2490,20 @@ impl AgentScreen {
         list.push_clip(v.pos(), v.size());
         let dy = v.y - self.offset;
         let visible = |y: f32, h: f32| y + h + dy >= v.y && y + dy <= v.y + v.h;
+        let mut placeholders = false;
         for f in &self.flow.fills {
             if visible(f.rect.y, f.rect.h) {
                 let r = Rect::new(f.rect.x, f.rect.y + dy, f.rect.w, f.rect.h);
                 fill(list, r, f.color, f.radius);
+                if f.color == PLACEHOLDER {
+                    placeholders = true;
+                    for band in shimmer_over(r, self.shimmer, l.w) {
+                        fill(list, band, SHIMMER, f.radius.min(band.w / 2.0));
+                    }
+                }
             }
         }
+        self.placeholders_shown = placeholders;
         for (i, r) in self.flow.rows.iter().enumerate() {
             let h = if r.mono { term_h(r.px) } else { line_h(r.px) };
             if visible(r.y, h) {
@@ -4576,23 +4639,48 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_without_contents_is_a_dim_placeholder_with_an_ellipsis() {
+    fn a_slot_without_contents_is_faint_bars_not_text() {
         let a = outline_screen(40, 30..40);
-        // Laid out in the kept span: the bottom's screens hold both kinds.
         let flow = a.flow();
-        let placeholders = flow.fills.iter().filter(|f| f.color == PLACEHOLDER).count();
-        let rows = flow.rows.iter().filter(|r| r.text == PENDING_ROW).count();
+        let bars = flow.fills.iter().filter(|f| f.color == PLACEHOLDER).count();
+        assert!(bars > 0, "placeholders draw bars");
         assert!(
-            placeholders > 0 && placeholders == rows,
-            "{placeholders} {rows}"
+            !flow.rows.iter().any(|r| r.text == "\u{2026}"),
+            "and no text"
         );
         assert!(flow.rows.iter().any(|r| r.text.starts_with("Reply 35.")));
-        // Each placeholder fills its slot's estimated height.
+        // Each placeholder keeps its slot's estimated height.
         let i = a.slot_of(Serial::new(FILE, 1, 0).to_u64()).unwrap();
         let est = estimate_height(SectionKind::Text, 2, 40, PHONE.w, PHONE.scale);
         assert!((a.slots()[i].height - est).abs() < 0.01);
+        // A text section's bars: one per line, the last one shorter.
+        let mut f = Flow::default();
+        let pen = Pen::new(PHONE.w, PHONE.scale);
+        lay_out_pending(SectionKind::Text, 3, 0, pen, &mut f);
+        assert_eq!(f.fills.len(), 3);
+        assert!(f.fills[2].rect.w < f.fills[0].rect.w);
+        assert!(f.fills.iter().all(|b| b.color[3] < 0.1), "almost clear");
+        // A card's: one panel.
+        let mut c = Flow::default();
+        lay_out_pending(SectionKind::Card, 1, 10, pen, &mut c);
+        assert_eq!(c.fills.len(), 1);
         // A placeholder is not news for the jump line.
         assert_eq!(first_line(&outline_section(0, false).shows), None);
+    }
+
+    #[test]
+    fn the_shimmer_sweeps_every_1_6_s_and_runs_only_over_placeholders() {
+        let bar = Rect::new(0.0, 0.0, 1000.0, 10.0);
+        let at = |t: f32| shimmer_over(bar, t, 1000.0).first().map(|r| r.x);
+        let (a, b) = (at(0.6), at(0.8));
+        assert!(a.unwrap() < b.unwrap(), "it moves left to right");
+        assert_eq!(at(0.6), at(0.6 + SHIMMER_PERIOD), "and wraps");
+        assert!(at(0.0).is_none(), "it starts off the left edge");
+        // With nothing pending on screen, no frames are asked for.
+        let mut full = screen(conversation(10), vec![], None);
+        full.dirty = false;
+        assert!(!full.placeholders_shown);
+        assert!(!full.tick(Duration::from_millis(16)) && !full.dirty);
     }
 
     #[test]
