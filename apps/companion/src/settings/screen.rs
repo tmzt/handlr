@@ -937,7 +937,7 @@ mod tests {
                 r.y + r.h * 0.5,
             ],
         );
-        assert_eq!(s.scrollbar_shown().as_deref(), Some("Hidden"));
+        assert_eq!(s.scrollbar_shown().as_deref(), Some("On Scroll"));
         let mut seen = Vec::new();
         for _ in 0..3 {
             if let Some(SettingsHit::Changed(now)) = tap(&mut s, right[0], right[1]) {

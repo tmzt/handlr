@@ -34,10 +34,11 @@ impl Gear {
         self.rect.contains([x, y])
     }
 
-    /// Draws it at about half its target: the teeth, the wheel, the hole.
+    /// Draws it at about a third of its target: the teeth, the wheel, the
+    /// hole. The target stays 44 pt.
     pub fn draw(&self, list: &mut DrawList) {
         let [cx, cy] = self.rect.center();
-        let r = self.rect.w * 0.25;
+        let r = self.rect.w * 0.16;
         let tooth = r * 0.5;
         for i in 0..TEETH {
             let a = i as f32 * std::f32::consts::TAU / TEETH as f32;

@@ -104,13 +104,13 @@ pub fn scrollbar_name(mode: ScrollbarVisibility) -> &'static str {
 pub fn scrollbar_label(mode: ScrollbarVisibility) -> &'static str {
     match mode {
         ScrollbarVisibility::Disabled => "Disabled",
-        ScrollbarVisibility::Hidden => "Hidden",
+        ScrollbarVisibility::Hidden => "On Scroll",
         ScrollbarVisibility::Always => "Always",
     }
 }
 
 /// The next visibility the right arrow (`forward`) or the left gives,
-/// wrapping at both ends: *Disabled*, *Hidden*, *Always*.
+/// wrapping at both ends: *Disabled*, *On Scroll*, *Always*.
 pub fn step_scrollbar(mode: ScrollbarVisibility, forward: bool) -> ScrollbarVisibility {
     use ScrollbarVisibility::*;
     match (mode, forward) {
