@@ -2081,3 +2081,22 @@ can name one. The S23 has 30 or more voices in `phonon-31m-en/voices/`.
   sets the voice while the app runs. Both are additions.
 - **The copy** is in `SETTINGS_COPY.md`. An ⓘ says the voices are Phonon's
   checkpoints, pushed by `scripts/push-model.sh`.
+
+## 2026-10-24 15:06 EDT — the Voice row: departures
+
+Built in the handlr-audio commit and the companion commit before this entry.
+1. **`Settings` is no longer `Copy`:** it holds the voice as a `String`. Its
+   thread-local is a `RefCell`, and `current()` returns a clone.
+2. **handlr-audio adds `TtsLoaded.names`** beside `voices: usize`, rather than
+   changing `voices`. New `AudioSession::set_voice` and `voice`. The "last
+   `Voice`" in `pump.rs` was the gate's `Input::Voice(bool)`, not a voice.
+3. **The preview for *Default*** says "This is Default.", as the spec's wording
+   gives.
+4. **A preview stops whatever is being said,** a reply read aloud included, and
+   not only an earlier preview.
+5. **A saved voice that is no longer installed** is shown and spoken as
+   *Default*, but stays in `settings.toml` until another one is chosen.
+6. **On the desktop,** `--voice` still applies when no voice is saved. The row
+   then shows *Default*.
+7. **`OptionRow` gains `enabled`:** drawn dim, with its arrows ignored. Its ⓘ
+   still works while dim.
