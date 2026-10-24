@@ -8,10 +8,11 @@
 use libcontrols::Rect;
 
 use super::{
-    AgentCard, BUTTON_H, CARD_BG, CARD_PT, DICTATION_BG, DICTATION_LINES, EDGE, FG, Fill, Flow,
-    PAD, PIN_LINES, Row, SHADOW, TITLE_PT, accent, columns, line_h, wrap_hard,
+    AgentCard, BUTTON_H, CARD_PT, DICTATION_LINES, EDGE, Fill, Flow, PAD, PIN_LINES, Row, TITLE_PT,
+    accent, columns, line_h, wrap_hard,
 };
 use crate::controls::ControlRow;
+use crate::theme::theme;
 use crate::ui::Line;
 
 /// The message being taken, as a block whose bottom is at `bottom`: its
@@ -44,7 +45,7 @@ impl DictationCard {
                 }
             }
             for (i, t) in text.into_iter().enumerate() {
-                rows.push((t, px, FG, if i == 0 { 4.0 * s } else { 0.0 }));
+                rows.push((t, px, theme().fg, if i == 0 { 4.0 * s } else { 0.0 }));
             }
         }
         let head = rows.len();
@@ -80,12 +81,12 @@ impl DictationCard {
         if let Some(card) = replying {
             flow.fills.push(Fill {
                 rect: Rect::new(x + 3.0 * s, top + 4.0 * s, w, h),
-                color: SHADOW,
+                color: theme().shadow,
                 radius: 10.0 * s,
             });
             flow.fills.push(Fill {
                 rect: Rect::new(x, top, w, h),
-                color: CARD_BG,
+                color: theme().card,
                 radius: 10.0 * s,
             });
             flow.fills.push(Fill {
@@ -97,7 +98,7 @@ impl DictationCard {
         } else {
             flow.fills.push(Fill {
                 rect: Rect::new(x, top, w, h),
-                color: DICTATION_BG,
+                color: theme().input,
                 radius: 10.0 * s,
             });
         }

@@ -18,10 +18,9 @@ use libcontrols::{DrawContext, Rect};
 use libhandlr_proto::common::{AgentInfo, Turn};
 use libmsdf::drawlist::{DrawList, SdfInstance, SdfKind};
 
-use crate::agent::{
-    CARD_BG, DIM, FG, Fill, Flow, GREEN, Row, accent, columns, fill, line_h, one_line, wrap_hard,
-};
+use crate::agent::{Fill, Flow, Row, accent, columns, fill, line_h, one_line, wrap_hard};
 use crate::controls::OutlineButton;
+use crate::theme::theme;
 
 /// The chevron after the focused agent's heading.
 pub const CHEVRON: char = '\u{203a}';
@@ -161,20 +160,20 @@ impl AgentCard<'_> {
             return (need.label().to_string(), need.colour());
         }
         match &self.agent.turn {
-            Some(Turn::Stopped { .. }) => ("Stopped".to_string(), GREEN),
-            Some(Turn::Working { .. }) => ("Working".to_string(), DIM),
+            Some(Turn::Stopped { .. }) => ("Stopped".to_string(), theme().green),
+            Some(Turn::Working { .. }) => ("Working".to_string(), theme().dim),
             // Asking is a need, above.
             Some(Turn::Asking { .. }) => ("Asking".to_string(), accent(CardKind::Question)),
-            None => (self.agent.status.clone(), DIM),
+            None => (self.agent.status.clone(), theme().dim),
         }
     }
 
     /// The text under the state line, its colour and its most lines.
     fn body(&self) -> Option<(&str, [f32; 4], usize)> {
         match self.agent.turn.as_ref()? {
-            Turn::Asking { question } => Some((question, FG, Self::QUESTION_LINES)),
-            Turn::Stopped { line } => Some((line, FG, Self::LINE_LINES)),
-            Turn::Working { line } => Some((line, DIM, Self::LINE_LINES)),
+            Turn::Asking { question } => Some((question, theme().fg, Self::QUESTION_LINES)),
+            Turn::Stopped { line } => Some((line, theme().fg, Self::LINE_LINES)),
+            Turn::Working { line } => Some((line, theme().dim, Self::LINE_LINES)),
         }
     }
 
@@ -206,7 +205,7 @@ impl AgentCard<'_> {
         } else {
             one_line(&self.heading(), columns(inner_w, head_px))
         };
-        row(heading, head_px, FG, &mut ty);
+        row(heading, head_px, theme().fg, &mut ty);
         ty += 2.0 * s;
         let (state, state_color) = self.state();
         row(state, text_px, state_color, &mut ty);
@@ -237,13 +236,13 @@ impl AgentCard<'_> {
         let rect = Rect::new(x, y, w, h);
         let mut fills = vec![Fill {
             rect,
-            color: CARD_BG,
+            color: theme().card,
             radius: Self::RADIUS * s,
         }];
         if self.agent.focused {
             fills.push(Fill {
                 rect: Rect::new(x, y, Self::BAR * s, h),
-                color: FG,
+                color: theme().fg,
                 radius: 2.0 * s,
             });
         }
@@ -333,7 +332,7 @@ pub(crate) mod tests {
         assert_eq!(labels, ["Yes", "No"]);
         let question = c.flow.rows.last().unwrap();
         for b in &c.buttons {
-            assert_eq!(b.color, DIM);
+            assert_eq!(b.color, theme().dim);
             assert!(b.rect.y > question.y);
             assert!(b.rect.y + b.rect.h <= c.rect.y + c.rect.h);
             assert!(b.rect.x + b.rect.w <= c.rect.x + c.rect.w);
@@ -396,7 +395,7 @@ pub(crate) mod tests {
             approval: false,
         });
         assert_eq!(&texts(&c)[1..], ["Stopped", "All 12 tests pass."]);
-        assert_eq!(colour_of(&c, "All 12 tests pass."), FG);
+        assert_eq!(colour_of(&c, "All 12 tests pass."), theme().fg);
         assert_eq!(c.outline, None);
         assert!(c.buttons.is_empty());
     }
@@ -416,8 +415,8 @@ pub(crate) mod tests {
             approval: false,
         });
         assert_eq!(&texts(&c)[1..], ["Working", "Bash cargo test"]);
-        assert_eq!(colour_of(&c, "Working"), DIM);
-        assert_eq!(colour_of(&c, "Bash cargo test"), DIM);
+        assert_eq!(colour_of(&c, "Working"), theme().dim);
+        assert_eq!(colour_of(&c, "Bash cargo test"), theme().dim);
         assert_eq!(c.outline, None);
         let none = AgentInfo {
             status: "idle".to_string(),
@@ -428,7 +427,7 @@ pub(crate) mod tests {
             approval: false,
         });
         assert_eq!(&texts(&c)[1..], ["idle"]);
-        assert_eq!(colour_of(&c, "idle"), DIM);
+        assert_eq!(colour_of(&c, "idle"), theme().dim);
         // At least 112 pt high.
         assert_eq!(c.rect.h, AgentCard::MIN_HEIGHT * 2.0);
     }

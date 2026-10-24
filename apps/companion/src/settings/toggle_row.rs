@@ -12,12 +12,9 @@ use libmsdf::drawlist::DrawList;
 
 use super::info::{self, INFO_PART};
 use super::screen::{LABEL_PT, label_y};
-use crate::agent::{BAND, BG, FG, PAD, fill};
+use crate::agent::{PAD, fill};
 use crate::settings::dim_since;
-use crate::ui::TEXT;
-
-/// The switch's track when on.
-const TRACK_ON: [f32; 4] = [0.22, 0.62, 0.36, 1.0];
+use crate::theme::theme;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToggleRow {
@@ -86,13 +83,17 @@ impl DrawControl for ToggleRow {
             &self.label,
             [self.rect.x + PAD * s, label_y(self.rect, px)],
             px,
-            TEXT,
+            theme().text,
         );
         let track = self.switch_rect();
         fill(
             list,
             track,
-            if self.on { TRACK_ON } else { BAND },
+            if self.on {
+                theme().toggle
+            } else {
+                theme().band
+            },
             track.h * 0.5,
         );
         let inset = 3.0 * s;
@@ -105,7 +106,7 @@ impl DrawControl for ToggleRow {
         fill(
             list,
             Rect::new(knob_x, track.y + inset, d, d),
-            if self.on { FG } else { BG },
+            if self.on { theme().fg } else { theme().bg },
             d * 0.5,
         );
         if !self.enabled {

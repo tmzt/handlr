@@ -6,10 +6,11 @@ use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 
 use crate::agent::{
-    AgentHit, CANCEL_GLYPH, CELL_EM, DIM, DOT, FG, FlowButton, PLAY_GLYPH, RECORDING, Row,
-    SEND_GLYPH, SKIP_GLYPH, Terminal, button, draw_row, fill, term_h,
+    AgentHit, CANCEL_GLYPH, CELL_EM, DOT, FlowButton, PLAY_GLYPH, Row, SEND_GLYPH, SKIP_GLYPH,
+    Terminal, button, draw_row, fill, term_h,
 };
 use crate::settings;
+use crate::theme::theme;
 
 /// `glyph` centred in `rect` at `px`, from the terminal face; `fallback`
 /// in the context's font without it.
@@ -114,12 +115,21 @@ impl SquareButton {
                     d,
                     d,
                 );
-                fill(list, dot, if recording { RECORDING } else { FG }, d * 0.5);
+                fill(
+                    list,
+                    dot,
+                    if recording {
+                        theme().recording
+                    } else {
+                        theme().fg
+                    },
+                    d * 0.5,
+                );
             }
             AgentHit::ReadAloud => {
                 fill(list, rect, b.bg, 10.0 * s);
                 // Bright when on, dull when off; skip while a reply is read.
-                let color = if read_aloud { FG } else { DIM };
+                let color = if read_aloud { theme().fg } else { theme().dim };
                 let (glyph, fallback) = if read_aloud && speaking {
                     (SKIP_GLYPH, ">|")
                 } else {
@@ -129,15 +139,24 @@ impl SquareButton {
             }
             // A summary card's replay: the play glyph alone, dim.
             AgentHit::Replay(_) => {
-                draw_glyph(list, ctx, term, PLAY_GLYPH, ">", rect, 18.0 * s, DIM);
+                draw_glyph(
+                    list,
+                    ctx,
+                    term,
+                    PLAY_GLYPH,
+                    ">",
+                    rect,
+                    18.0 * s,
+                    theme().dim,
+                );
             }
             AgentHit::Submit if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);
-                draw_glyph(list, ctx, term, SEND_GLYPH, ">", rect, px, FG);
+                draw_glyph(list, ctx, term, SEND_GLYPH, ">", rect, px, theme().fg);
             }
             AgentHit::Clear if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);
-                draw_glyph(list, ctx, term, CANCEL_GLYPH, "x", rect, px, FG);
+                draw_glyph(list, ctx, term, CANCEL_GLYPH, "x", rect, px, theme().fg);
             }
             // A plan question's words are plain text in their colour (the
             // colour stands in `bg`), not buttons.

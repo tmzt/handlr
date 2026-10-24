@@ -61,8 +61,9 @@ use super::option_row::OptionRow;
 use super::toggle_row::ToggleRow;
 use super::voice;
 use super::{Settings, scrollbar_label, step_scrollbar};
-use crate::agent::{BG, DIM, FG, PAD, Row, Terminal, draw_row, fill, line_h, term_h};
+use crate::agent::{PAD, Row, Terminal, draw_row, fill, line_h, term_h};
 use crate::markdown_view::{self, Faces, MarkdownView};
+use crate::theme::theme;
 use crate::ui::Layout;
 
 /// After *Enable*, how long to watch for the exemption, and how often to
@@ -81,7 +82,6 @@ const SECTION_H: f32 = 36.0;
 const SECTION_GAP: f32 = 12.0;
 /// The header, as the agent view's.
 const HEADER_H: f32 = 64.0;
-const HEADER_BG: [f32; 4] = [0.07, 0.07, 0.09, 1.0];
 const TITLE_PT: f32 = 18.0;
 /// The back target's width, in points.
 const BACK_W: f32 = 56.0;
@@ -432,7 +432,7 @@ impl SettingsScreen {
             0.0,
             (self.layout.w - 2.0 * PAD * s).max(1.0),
             SUBTITLE_PT * s,
-            DIM,
+            theme().dim,
             self.faces.clone(),
         )
     }
@@ -516,7 +516,7 @@ impl SettingsScreen {
             .map(|&section| {
                 let label = Label::new(section.title(), Rect::new(0.0, 0.0, 1.0, 1.0))
                     .with_font_size(SECTION_PT * s)
-                    .with_color(DIM)
+                    .with_color(theme().dim)
                     .with_align(TextAlign::Left);
                 (section, router.add(under, label))
             })
@@ -565,7 +565,7 @@ impl SettingsScreen {
         let vendor = link(&mut router, copy::SAMSUNG_BATTERY.label());
         let clear_cache = router.add(
             under,
-            DangerRow::new(&clear_cache_label(self.cache), s).with_color(FG),
+            DangerRow::new(&clear_cache_label(self.cache), s).with_color(theme().fg),
         );
         let unpair = router.add(under, DangerRow::new(copy::UNPAIR.label(), s));
         let delete = router.add(under, DangerRow::new(copy::DELETE_DATA.label(), s));
@@ -1285,6 +1285,15 @@ impl SettingsScreen {
         .flatten()
     }
 
+    /// The theme changed: the rows, whose controls hold their colours,
+    /// are made again (as for a new layout), and the screen drawn again.
+    pub fn restyle(&mut self) {
+        if self.nodes.is_some() {
+            self.build();
+        }
+        self.dirty = true;
+    }
+
     /// Marks the screen to be drawn again.
     pub fn invalidate(&mut self) {
         self.dirty = true;
@@ -1303,12 +1312,12 @@ impl SettingsScreen {
         list.clear();
         let l = self.layout;
         let s = self.scale();
-        fill(list, Rect::new(0.0, 0.0, l.w, l.h), BG, 0.0);
+        fill(list, Rect::new(0.0, 0.0, l.w, l.h), theme().bg, 0.0);
         // The header first: the modal's dim goes over it.
         fill(
             list,
             Rect::new(0.0, 0.0, l.w, self.header_bottom()),
-            HEADER_BG,
+            theme().header,
             0.0,
         );
         let px = TITLE_PT * s;
@@ -1317,7 +1326,7 @@ impl SettingsScreen {
             x: 0.0,
             y: 0.0,
             px: 1.6 * px,
-            color: FG,
+            color: theme().fg,
             mono: true,
         };
         let back_y = l.top + (HEADER_H * s - term_h(back.px)) * 0.5;
@@ -1327,7 +1336,7 @@ impl SettingsScreen {
             copy::SETTINGS_TITLE.text,
             [BACK_W * s, l.top + (HEADER_H * s - line_h(px)) * 0.5],
             px,
-            FG,
+            theme().fg,
         );
         self.router.render(list, ctx);
         self.dirty = false;
@@ -1435,6 +1444,23 @@ mod tests {
                     ))
                 })
         }
+    }
+
+    #[test]
+    fn switching_to_light_leaves_no_dark_gray_colour_drawn() {
+        use crate::theme::testing::{dark_gray_only, draw_context, use_theme};
+        use_theme("dark_gray");
+        let ctx = draw_context();
+        let mut s = plain();
+        let mut list = DrawList::new();
+        assert!(s.draw(&mut list, &ctx, None));
+        assert!(!dark_gray_only(&list).is_empty(), "drawn in Dark (gray)");
+
+        use_theme("light_black");
+        s.restyle();
+        assert!(s.draw(&mut list, &ctx, None), "drawn again");
+        assert_eq!(dark_gray_only(&list), Vec::<[f32; 4]>::new());
+        use_theme("dark_gray");
     }
 
     /// Taps the row `label`, scrolled to the top.

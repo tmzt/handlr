@@ -93,10 +93,8 @@ use crate::overview::{Overview, OverviewHit, Panel};
 use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
 use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
-use crate::ui::{
-    CODE, Card, CardState, Hit, Layout, Line, MUTED, Screen, View, WARN, chunk, dictation_lines,
-    wrap,
-};
+use crate::theme::{Role, theme};
+use crate::ui::{Card, CardState, Hit, Layout, Line, Screen, View, chunk, dictation_lines, wrap};
 
 /// The frame rate: enough for text, and far less heat than the display's
 /// 120 Hz while STT listens.
@@ -245,8 +243,9 @@ pub struct App {
     card: Option<Card>,
     /// The device code to paste into `handlr pair`, and the server's name.
     code: Option<(String, String)>,
-    /// A pairing note or an error, and its colour.
-    note: Option<(String, [f32; 4])>,
+    /// A pairing note or an error, and its colour's role (looked up as it
+    /// is drawn, so a theme change recolours it).
+    note: Option<(String, Role)>,
     field: String,
     field_focused: bool,
     /// `hello` was answered on the current connection.
@@ -473,9 +472,9 @@ impl App {
         match &self.companion {
             Some(companion) => {
                 companion.send(Input::Pair(text.to_string()));
-                self.note = Some(("pairing\u{2026}".into(), MUTED));
+                self.note = Some(("pairing\u{2026}".into(), Role::Muted));
             }
-            None => self.note = Some(("no key storage: cannot pair".into(), WARN)),
+            None => self.note = Some(("no key storage: cannot pair".into(), Role::Warn)),
         }
     }
 
@@ -545,11 +544,11 @@ impl App {
             Event::Paired { name } => {
                 log::info!("pairing: paired as {name}");
                 self.code = None;
-                self.note = Some((format!("paired as {name}"), MUTED));
+                self.note = Some((format!("paired as {name}"), Role::Muted));
             }
             Event::PairFailed(why) => {
                 log::warn!("pairing: refused");
-                self.note = Some((format!("pairing failed: {why}"), WARN));
+                self.note = Some((format!("pairing failed: {why}"), Role::Warn));
             }
             // The card shows the handle; only `text` is spoken.
             Event::Confirm {
@@ -590,7 +589,7 @@ impl App {
             Event::TurnEnded { outcome, .. } => log::info!("turn: {outcome}"),
             Event::Error(e) => {
                 log::warn!("companion: {e}");
-                self.note = Some((e, WARN));
+                self.note = Some((e, Role::Warn));
             }
             Event::Agents(agents) => {
                 self.agents = agents;
@@ -846,11 +845,11 @@ impl App {
         self.screen.invalidate();
         self.link = "not paired \u{b7} paste a pairing URL below".into();
         self.note = Some(if daemon {
-            ("unpaired".into(), MUTED)
+            ("unpaired".into(), Role::Muted)
         } else {
             (
                 "unpaired on this phone; handlr lists it until it is removed from auth.toml".into(),
-                WARN,
+                Role::Warn,
             )
         });
         if std::mem::take(&mut self.deleting) {
@@ -866,7 +865,7 @@ impl App {
                 Ok(n) => log::info!("settings: deleted {n} entries of the data directory"),
                 Err(e) => {
                     log::error!("settings: deleting the data: {e}");
-                    self.note = Some((format!("deleting the data: {e}"), WARN));
+                    self.note = Some((format!("deleting the data: {e}"), Role::Warn));
                 }
             }
         }
@@ -1208,7 +1207,11 @@ impl App {
         if !self.pairing() {
             let o = &mut self.overview;
             o.set_layout(layout);
-            o.set_status(vec![self.link.clone(), sound], self.note.clone());
+            let note = self
+                .note
+                .as_ref()
+                .map(|(t, r)| (t.clone(), theme().get(*r)));
+            o.set_status(vec![self.link.clone(), sound], note);
             o.set_card(self.card.as_ref().map(|c| Panel {
                 lines: c.lines(),
                 confirm: c.asks().then_some(c.confirm_id),
@@ -1229,18 +1232,23 @@ impl App {
             code.push(line(
                 format!("Paste this code into handlr pair on {server}:"),
                 15.0,
-                MUTED,
+                theme().muted,
                 0.0,
             ));
             // Base58 is mostly capitals and wide letters: wider than the
             // half an em `columns` assumes.
             for part in chunk(device_code, layout.columns(26.0 * 1.3)) {
-                code.push(line(part, 26.0, CODE, 4.0));
+                code.push(line(part, 26.0, theme().code, 4.0));
             }
         }
         if let Some((note, color)) = &self.note {
             for (i, t) in wrap(note, layout.columns(15.0)).into_iter().enumerate() {
-                code.push(line(t, 15.0, *color, if i == 0 { 8.0 } else { 0.0 }));
+                code.push(line(
+                    t,
+                    15.0,
+                    theme().get(*color),
+                    if i == 0 { 8.0 } else { 0.0 },
+                ));
             }
         }
         let view = View {
@@ -1463,6 +1471,10 @@ impl MorphApp for App {
         }
         let settings = data_dir.as_deref().map(Settings::load).unwrap_or_default();
         settings::set_current(settings.clone());
+        // The themes: the shipped ones and the user's themes.toml.
+        theme::set_themes(theme::Themes::load(data_dir.as_deref()));
+        theme::set_theme(theme::themes().first(true));
+        theme::apply_system_bars(theme::SystemBars::of(&theme()));
         log::info!("settings: {settings:?}");
         // The voice models, where they are in the data directory.
         let models = [&audio_config.stt.model_dir, &audio_config.tts.model_dir]
@@ -1563,7 +1575,7 @@ impl MorphApp for App {
             Err(e) => {
                 log::error!("keys: {e}");
                 app.link = "no key storage".into();
-                app.note = Some((e, WARN));
+                app.note = Some((e, Role::Warn));
             }
         }
 
@@ -1738,10 +1750,13 @@ impl MorphApp for App {
 
     fn render(&mut self, ctx: &mut MorphContext, frame: &Frame<'_>) {
         let font = |id| self.fonts.atlas(id).expect("registered in this set");
-        let draw = DrawContext {
+        let mut draw = DrawContext {
             px_range: BUNDLED_ATLAS_PX_RANGE,
             ..DrawContext::new(Some(font(self.roboto).atlas), Some(&self.shaper))
         };
+        // libcontrols' own colours that the app draws: the settings' scroll
+        // indicator, in the theme.
+        draw.theme.scroll.indicator_color = theme().scrollbar;
         let term = Terminal {
             shaper: &self.terminal,
             text: font(self.mono),

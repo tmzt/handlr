@@ -16,16 +16,10 @@ use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Rou
 use libhandlr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
+use crate::theme::theme;
+
 /// Lines of the pairing area (the code and its notes).
 const CODE_LINES: usize = 8;
-
-pub const TEXT: [f32; 4] = [0.92, 0.93, 0.95, 1.0];
-pub const MUTED: [f32; 4] = [0.60, 0.62, 0.68, 1.0];
-pub const SPOKEN: [f32; 4] = [0.55, 0.78, 1.0, 1.0];
-pub const WARN: [f32; 4] = [1.0, 0.62, 0.45, 1.0];
-pub const CODE: [f32; 4] = [1.0, 0.86, 0.45, 1.0];
-
-const PAIR_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
 
 /// One line of text, before layout.
 #[derive(Clone, Debug, PartialEq)]
@@ -130,11 +124,15 @@ impl Card {
             gap,
         };
         let (state, color) = match &self.state {
-            CardState::Waiting => ("Approve?".to_string(), MUTED),
-            CardState::Answering { approve: true } => ("Approving\u{2026}".to_string(), MUTED),
-            CardState::Answering { approve: false } => ("Denying\u{2026}".to_string(), MUTED),
-            CardState::Refused(why) => (format!("Not answered: {why}"), WARN),
-            CardState::Done(outcome) => (outcome_label(outcome), SPOKEN),
+            CardState::Waiting => ("Approve?".to_string(), theme().muted),
+            CardState::Answering { approve: true } => {
+                ("Approving\u{2026}".to_string(), theme().muted)
+            }
+            CardState::Answering { approve: false } => {
+                ("Denying\u{2026}".to_string(), theme().muted)
+            }
+            CardState::Refused(why) => (format!("Not answered: {why}"), theme().warn),
+            CardState::Done(outcome) => (outcome_label(outcome), theme().spoken),
         };
         let words = self
             .handle
@@ -146,10 +144,15 @@ impl Card {
             line(
                 format!("\"{}\" to {}", self.command, self.target()),
                 22.0,
-                TEXT,
+                theme().text,
                 4.0,
             ),
-            line(format!("{words}#{}", self.confirm_id), 14.0, MUTED, 4.0),
+            line(
+                format!("{words}#{}", self.confirm_id),
+                14.0,
+                theme().muted,
+                4.0,
+            ),
         ]
     }
 }
@@ -183,16 +186,18 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
         gap,
     };
     let (state, color) = match (d.phase, d.submit_in) {
-        (DictationPhase::Collecting, Some(n)) => (format!("Submitting in {n} s\u{2026}"), WARN),
-        (DictationPhase::Collecting, None) => ("Taking a message".to_string(), MUTED),
-        (DictationPhase::Submitting, _) => ("Submitting\u{2026}".to_string(), MUTED),
-        (DictationPhase::Confirming, _) => ("Waiting for your approval".to_string(), MUTED),
+        (DictationPhase::Collecting, Some(n)) => {
+            (format!("Submitting in {n} s\u{2026}"), theme().warn)
+        }
+        (DictationPhase::Collecting, None) => ("Taking a message".to_string(), theme().muted),
+        (DictationPhase::Submitting, _) => ("Submitting\u{2026}".to_string(), theme().muted),
+        (DictationPhase::Confirming, _) => ("Waiting for your approval".to_string(), theme().muted),
     };
     let target = match &d.target {
-        Some(t) if t.agent.is_some() => (format!("Message for {}", focus_words(t)), TEXT),
+        Some(t) if t.agent.is_some() => (format!("Message for {}", focus_words(t)), theme().text),
         _ => (
             "No agent focused \u{2014} say \u{2018}focus \u{2026}\u{2019}".to_string(),
-            WARN,
+            theme().warn,
         ),
     };
     let mut lines = vec![
@@ -200,12 +205,22 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
         line(target.0, 18.0, target.1, 4.0),
     ];
     if let Some(moved) = &d.focus_moved {
-        lines.push(line(format!("focus moved to {moved}"), 15.0, WARN, 2.0));
+        lines.push(line(
+            format!("focus moved to {moved}"),
+            15.0,
+            theme().warn,
+            2.0,
+        ));
     }
     if d.text.is_empty() {
-        lines.push(line("(say your message)".to_string(), 20.0, MUTED, 8.0));
+        lines.push(line(
+            "(say your message)".to_string(),
+            20.0,
+            theme().muted,
+            8.0,
+        ));
     } else {
-        lines.push(line(d.text.clone(), 20.0, TEXT, 8.0));
+        lines.push(line(d.text.clone(), 20.0, theme().text, 8.0));
     }
     lines
 }
@@ -292,24 +307,26 @@ impl Screen {
         let button = |text: &str, bg| {
             Button::new(text, Rect::new(0.0, 0.0, 1.0, 1.0))
                 .with_bg(bg)
-                .with_text_color(TEXT)
+                .with_text_color(theme().text)
                 .with_font_size(18.0)
         };
-        let title = router.add(None, label("handlr", 32.0, TEXT, TextAlign::Center));
+        let title = router.add(None, label("handlr", 32.0, theme().text, TextAlign::Center));
         let status = [
-            router.add(None, label("", 15.0, MUTED, TextAlign::Center)),
-            router.add(None, label("", 15.0, MUTED, TextAlign::Center)),
+            router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
+            router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
         ];
         let code = (0..CODE_LINES)
-            .map(|_| router.add(None, label("", 20.0, CODE, TextAlign::Left)))
+            .map(|_| router.add(None, label("", 20.0, theme().code, TextAlign::Left)))
             .collect();
         let field = router.add(
             None,
             Edit::new("", Rect::new(0.0, 0.0, 1.0, 1.0))
+                .with_bg(theme().input)
+                .with_border(theme().band, 1.0)
                 .with_align(TextAlign::Left)
                 .with_font_size(Layout::FIELD_SIZE),
         );
-        let pair = router.add(None, button("Pair", PAIR_BG));
+        let pair = router.add(None, button("Pair", theme().message));
         Self {
             router,
             title,
@@ -363,12 +380,19 @@ impl Screen {
             &mut y,
             self.title,
             None,
-            (32.0, TEXT),
+            (32.0, theme().text),
             0.0,
         );
         for (i, &id) in self.status.iter().enumerate() {
             let text = view.status.get(i).map_or("", String::as_str);
-            place(&mut self.router, &mut y, id, Some(text), (15.0, MUTED), 0.0);
+            place(
+                &mut self.router,
+                &mut y,
+                id,
+                Some(text),
+                (15.0, theme().muted),
+                0.0,
+            );
         }
 
         // The bottom: the field and Pair, hidden once paired.
@@ -382,7 +406,7 @@ impl Screen {
         {
             let edit = self.router.get_mut::<Edit>(self.field).expect("the field");
             let (text, color) = if view.field.is_empty() && !view.field_focused {
-                (PLACEHOLDER.to_string(), MUTED)
+                (PLACEHOLDER.to_string(), theme().muted)
             } else {
                 // The tail, with a caret while focused.
                 let room = layout
@@ -391,7 +415,7 @@ impl Screen {
                 let chars: Vec<char> = view.field.chars().collect();
                 let tail: String = chars[chars.len().saturating_sub(room)..].iter().collect();
                 let caret = if view.field_focused { "|" } else { "" };
-                (format!("{tail}{caret}"), TEXT)
+                (format!("{tail}{caret}"), theme().text)
             };
             edit.set_text(text);
             edit.text_color = Some(color);
@@ -450,6 +474,12 @@ impl Screen {
 
     /// Marks the screen to be drawn again, as after another screen drew
     /// over the list.
+    /// The theme changed: the nodes, which hold their colours, are made
+    /// again, and laid out at the next [`Screen::set`].
+    pub fn restyle(&mut self) {
+        *self = Self::new();
+    }
+
     pub fn invalidate(&mut self) {
         self.dirty = true;
     }
@@ -489,7 +519,7 @@ mod tests {
         Line {
             text: text.into(),
             size: 20.0,
-            color: TEXT,
+            color: theme().text,
             gap: 0.0,
         }
     }

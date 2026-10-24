@@ -7,7 +7,8 @@
 
 use libcontrols::Rect;
 
-use crate::agent::{APPROVE_BG, AgentHit, BACK_BG, BUTTON_H, FlowButton, MESSAGE_BG};
+use crate::agent::{AgentHit, BUTTON_H, FlowButton};
+use crate::theme::theme;
 
 /// The control row between `x0` and `x1`, its bottom at `bottom`: play and
 /// record, or, while `dictating`, play, cancel and send. All square.
@@ -26,12 +27,12 @@ impl ControlRow {
         // Record, and send in its place, always at the bottom right, the
         // easiest place to reach (owner: "the record/send action should
         // always be in the bottom right per Fitz").
-        let mut row = vec![square(AgentHit::ReadAloud, x0, BACK_BG)];
+        let mut row = vec![square(AgentHit::ReadAloud, x0, theme().back)];
         if dictating {
-            row.push(square(AgentHit::Clear, (x0 + x1 - sq) * 0.5, BACK_BG));
-            row.push(square(AgentHit::Submit, x1 - sq, APPROVE_BG));
+            row.push(square(AgentHit::Clear, (x0 + x1 - sq) * 0.5, theme().back));
+            row.push(square(AgentHit::Submit, x1 - sq, theme().approve));
         } else {
-            row.push(square(AgentHit::Message, x1 - sq, MESSAGE_BG));
+            row.push(square(AgentHit::Message, x1 - sq, theme().message));
         }
         row
     }

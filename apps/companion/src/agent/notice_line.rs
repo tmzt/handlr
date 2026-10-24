@@ -9,8 +9,9 @@
 
 use libhandlr_proto::common::Entry;
 
-use super::input_box::AMBER;
-use super::{CELL_EM, DIM, Flow, Row, TOOL_PT, full_text, link_spans, term_h, wrap_hard};
+use super::{CELL_EM, Flow, Row, TOOL_PT, full_text, link_spans, term_h, wrap_hard};
+
+use crate::theme::theme;
 
 /// The dot before a notice, from the terminal face's symbol page.
 pub const DOT: &str = "\u{25CF}";
@@ -73,7 +74,7 @@ impl NoticeLine {
             x,
             y,
             px,
-            color: AMBER,
+            color: theme().accent,
             mono: true,
         });
         let width = cols.saturating_sub(2).max(1);
@@ -86,7 +87,7 @@ impl NoticeLine {
                 x: x + indent,
                 y: ly,
                 px,
-                color: DIM,
+                color: theme().dim,
                 mono: true,
             });
             ly += lh;

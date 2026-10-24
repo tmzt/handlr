@@ -17,9 +17,9 @@ use libmsdf::drawlist::DrawList;
 
 use super::info::{self, INFO_PART};
 use super::screen::{LABEL_PT, label_y};
-use crate::agent::{DIM, PAD};
+use crate::agent::PAD;
 use crate::settings::dim_since;
-use crate::ui::TEXT;
+use crate::theme::theme;
 
 #[derive(Clone, Debug)]
 pub struct OptionRow {
@@ -43,8 +43,8 @@ impl OptionRow {
         let arrows = ArrowLabel::new(value, Rect::new(0.0, 0.0, 1.0, 1.0))
             .with_arrow_width(Self::ARROW_W * scale)
             .with_font_size(LABEL_PT * scale)
-            .with_text_color(TEXT)
-            .with_arrow_color(DIM);
+            .with_text_color(theme().text)
+            .with_arrow_color(theme().dim);
         OptionRow {
             label: label.to_string(),
             rect: Rect::new(0.0, 0.0, 1.0, 1.0),
@@ -98,7 +98,7 @@ impl DrawControl for OptionRow {
             &self.label,
             [self.rect.x + PAD * self.scale, label_y(self.rect, px)],
             px,
-            TEXT,
+            theme().text,
         );
         // A long value (a voice such as "Captain Silas Blackwater") is drawn
         // smaller to fit between the arrows, down to 9 pt; widths are

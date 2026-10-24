@@ -10,7 +10,8 @@ use libcontrols::{
 use libmsdf::drawlist::DrawList;
 
 use super::screen::{LABEL_PT, label_y};
-use crate::agent::{PAD, RED};
+use crate::agent::PAD;
+use crate::theme::theme;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct DangerRow {
@@ -27,7 +28,7 @@ impl DangerRow {
             label: label.to_string(),
             rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             scale,
-            color: RED,
+            color: theme().red,
         }
     }
 

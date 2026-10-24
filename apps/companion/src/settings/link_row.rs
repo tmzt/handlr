@@ -13,11 +13,8 @@ use libmsdf::drawlist::DrawList;
 
 use super::info::{self, INFO_PART};
 use super::screen::{LABEL_PT, SUBTITLE_PT, label_y};
-use crate::agent::{DIM, PAD, fill, line_h};
-use crate::ui::TEXT;
-
-/// The action button's fill: a quiet raised grey, as the settings buttons.
-const BUTTON_BG: [f32; 4] = [0.24, 0.25, 0.31, 1.0];
+use crate::agent::{PAD, fill, line_h};
+use crate::theme::theme;
 
 /// The action button's part: the system's approval, not the page.
 /// (`Custom` parts are a Markdown note's links.)
@@ -165,25 +162,25 @@ impl DrawControl for LinkRow {
         let px = LABEL_PT * s;
         let x = self.rect.x + PAD * s;
         let y = self.label_top();
-        ctx.draw_text(list, &self.label, [x, y], px, TEXT);
+        ctx.draw_text(list, &self.label, [x, y], px, theme().text);
         let sub_px = SUBTITLE_PT * s;
         for (i, line) in self.subtitle_lines().iter().enumerate() {
             let ly = y + line_h(px) + i as f32 * line_h(sub_px);
-            ctx.draw_text(list, line, [x, ly], sub_px, DIM);
+            ctx.draw_text(list, line, [x, ly], sub_px, theme().dim);
         }
         if self.info {
             info::draw(list, ctx, self.info_rect(), s);
         }
         if let (Some(text), Some(r)) = (self.action.as_deref(), self.action_rect(ctx)) {
             let apx = ACTION_TEXT * px;
-            fill(list, r, BUTTON_BG, r.h * 0.5);
+            fill(list, r, theme().button, r.h * 0.5);
             let tw = ctx.text_advance(text, apx);
             ctx.draw_text(
                 list,
                 text,
                 [r.x + (r.w - tw) * 0.5, r.y + (r.h - line_h(apx)) * 0.5],
                 apx,
-                TEXT,
+                theme().text,
             );
             return;
         }
@@ -196,8 +193,8 @@ impl DrawControl for LinkRow {
         let x1 = self.rect.x + self.rect.w - PAD * s;
         let cy = self.rect.y + self.rect.h * 0.5;
         let t = 1.6 * s;
-        list.push_line([x1 - h * 0.6, cy - h], [x1, cy], t, DIM);
-        list.push_line([x1, cy], [x1 - h * 0.6, cy + h], t, DIM);
+        list.push_line([x1 - h * 0.6, cy - h], [x1, cy], t, theme().dim);
+        list.push_line([x1, cy], [x1 - h * 0.6, cy + h], t, theme().dim);
     }
 }
 

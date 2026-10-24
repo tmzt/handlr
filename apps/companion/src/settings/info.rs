@@ -16,9 +16,9 @@ use libcontrols::{Button, ControlPart, DrawContext, ModalDialog, NodeId, PanelFr
 use libmsdf::drawlist::DrawList;
 
 use super::copy;
-use crate::agent::{BACK_BG, BG, CARD_BG, DIM, FG, PAD, fill, line_h};
+use crate::agent::{PAD, fill, line_h};
 use crate::markdown_view::{Faces, MarkdownView};
-use crate::ui::TEXT;
+use crate::theme::theme;
 
 /// The part a row reports for a tap on its ⓘ.
 pub const INFO_PART: ControlPart = ControlPart::Label;
@@ -45,13 +45,19 @@ pub fn draw(list: &mut DrawList, ctx: &DrawContext, target: Rect, s: f32) {
     let d = CIRCLE * s;
     let [cx, cy] = target.center();
     let ring = Rect::new(cx - d * 0.5, cy - d * 0.5, d, d);
-    fill(list, ring, DIM, d * 0.5);
+    fill(list, ring, theme().dim, d * 0.5);
     let t = 1.6 * s;
     let inner = Rect::new(ring.x + t, ring.y + t, d - 2.0 * t, d - 2.0 * t);
-    fill(list, inner, BG, inner.w * 0.5);
+    fill(list, inner, theme().bg, inner.w * 0.5);
     let px = 13.0 * s;
     let w = ctx.text_advance("i", px);
-    ctx.draw_text(list, "i", [cx - w * 0.5, cy - line_h(px) * 0.5], px, DIM);
+    ctx.draw_text(
+        list,
+        "i",
+        [cx - w * 0.5, cy - line_h(px) * 0.5],
+        px,
+        theme().dim,
+    );
 }
 
 /// The title's and the text's sizes, in points.
@@ -80,10 +86,10 @@ impl InfoModal {
             0.0,
             inner_w,
             TITLE_PT * s,
-            FG,
+            theme().fg,
             faces.clone(),
         );
-        let body = MarkdownView::new(text, 0.0, 0.0, inner_w, TEXT_PT * s, TEXT, faces);
+        let body = MarkdownView::new(text, 0.0, 0.0, inner_w, TEXT_PT * s, theme().text, faces);
         let h = pad
             + heading.height()
             + SPACE * s
@@ -93,7 +99,7 @@ impl InfoModal {
             + pad;
         let h = h.min(viewport.h - 2.0 * PAD * s);
         let mut dialog = ModalDialog::centered(viewport, [w, h], pad).with_frame(PanelFrame {
-            bg_color: Some(CARD_BG),
+            bg_color: Some(theme().card),
             border_color: None,
             border_thickness: 0.0,
             corner_radius: Some(14.0 * s),
@@ -112,8 +118,8 @@ impl InfoModal {
         let ok = content.add(
             None,
             Button::new(copy::OK.text, Rect::new(x, by, inner_w, BUTTON_H * s))
-                .with_bg(BACK_BG)
-                .with_text_color(FG)
+                .with_bg(theme().back)
+                .with_text_color(theme().fg)
                 .with_font_size(17.0 * s)
                 .with_corner_radius(10.0 * s),
         );

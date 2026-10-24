@@ -135,6 +135,11 @@ pub fn theme() -> Colors {
     COLORS.with(Cell::get)
 }
 
+/// `c` at opacity `a`.
+pub fn with_alpha(c: [f32; 4], a: f32) -> [f32; 4] {
+    [c[0], c[1], c[2], a]
+}
+
 /// The themes this thread has.
 pub fn themes() -> Themes {
     THEMES.with(|t| t.borrow().clone())
@@ -155,6 +160,106 @@ pub fn current_id() -> String {
 pub fn set_theme(theme: &Theme) {
     CURRENT.with(|c| *c.borrow_mut() = theme.id.clone());
     COLORS.with(|c| c.set(theme.colors));
+}
+
+/// Android's status and navigation bars in a theme (CHANGES.md
+/// 2026-10-24 15:36 EDT, plan 20261024_05 decision 6): the status bar in
+/// the theme's `header`, the navigation bar in its `bg`, each with dark
+/// icons on a light colour and light icons on a dark one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SystemBars {
+    pub status: [f32; 4],
+    pub status_dark_icons: bool,
+    pub navigation: [f32; 4],
+    pub navigation_dark_icons: bool,
+}
+
+/// WCAG 2's relative luminance of `c`'s sRGB colour, from 0 (black) to 1
+/// (white).
+pub fn luminance(c: [f32; 4]) -> f32 {
+    let linear = |v: f32| {
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(c[0]) + 0.7152 * linear(c[1]) + 0.0722 * linear(c[2])
+}
+
+/// Whether dark icons contrast more with `c` than light ones: above
+/// about 0.179, black has the higher contrast ratio against it than white.
+pub fn wants_dark_icons(c: [f32; 4]) -> bool {
+    // (L + 0.05) / 0.05 against black, 1.05 / (L + 0.05) against white.
+    (luminance(c) + 0.05) / 0.05 > 1.05 / (luminance(c) + 0.05)
+}
+
+impl SystemBars {
+    /// The bars for `colors`.
+    pub fn of(colors: &Colors) -> Self {
+        SystemBars {
+            status: colors.header,
+            status_dark_icons: wants_dark_icons(colors.header),
+            navigation: colors.bg,
+            navigation_dark_icons: wants_dark_icons(colors.bg),
+        }
+    }
+}
+
+/// Gives the system bars their colours.
+///
+/// TODO(libmorph): libmorph has no call for the system bars' colours and
+/// icons yet; handlr asked for one with its dark-mode request
+/// (`ctx.dark_mode()` and a change event, plan 20261024_05's 15:33 EDT
+/// amendment, item 5). Until then this does nothing.
+pub fn apply_system_bars(bars: SystemBars) {
+    log::debug!("theme: system bars {bars:?} (no libmorph call yet)");
+}
+
+/// What the screens' theme tests share.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+    use libcontrols::DrawContext;
+    use libmsdf::drawlist::DrawList;
+    use libmsdf::font::{FontAtlas, ROBOTO_REGULAR_ASCII, ROBOTO_REGULAR_ATLAS, TextShaper};
+
+    /// A draw context with Roboto, so text is drawn as glyphs in its
+    /// colours.
+    pub fn draw_context() -> DrawContext<'static> {
+        let atlas: &'static FontAtlas = Box::leak(Box::new(
+            FontAtlas::from_bytes(ROBOTO_REGULAR_ATLAS).unwrap(),
+        ));
+        let shaper: &'static TextShaper = Box::leak(Box::new(
+            TextShaper::new(ROBOTO_REGULAR_ASCII.to_vec()).unwrap(),
+        ));
+        DrawContext::new(Some(atlas), Some(shaper))
+    }
+
+    /// Puts the shipped theme `id` in force.
+    pub fn use_theme(id: &str) {
+        set_theme(Themes::shipped().find(id).expect("shipped"));
+    }
+
+    /// The colours drawn in `list` whose red, green and blue are one of
+    /// *Dark (gray)*'s and none of *Light (black text)*'s, at any opacity.
+    pub fn dark_gray_only(list: &DrawList) -> Vec<[f32; 4]> {
+        let themes = Themes::shipped();
+        let rgb = |c: [f32; 4]| [c[0], c[1], c[2]];
+        let of = |id: &str| -> Vec<[f32; 3]> {
+            let c = themes.find(id).unwrap().colors;
+            Role::ALL.iter().map(|&r| rgb(c.get(r))).collect()
+        };
+        let (gray, light) = (of("dark_gray"), of("light_black"));
+        let mut out: Vec<[f32; 4]> = list
+            .instances
+            .iter()
+            .map(|i| i.color)
+            .filter(|&c| gray.contains(&rgb(c)) && !light.contains(&rgb(c)))
+            .collect();
+        out.dedup();
+        out
+    }
 }
 
 #[cfg(test)]
@@ -262,35 +367,6 @@ mod tests {
     }
 
     #[test]
-    fn the_constants_are_dark_grays_roles() {
-        let c = Themes::shipped().find("dark_gray").unwrap().colors;
-        use crate::agent;
-        assert_eq!(agent::BG, c.bg);
-        assert_eq!(agent::FG, c.fg);
-        assert_eq!(agent::DIM, c.dim);
-        assert_eq!(agent::CARD_BG, c.card);
-        assert_eq!(agent::APPROVE_BG, c.approve);
-        assert_eq!(agent::DENY_BG, c.deny);
-        assert_eq!(agent::MESSAGE_BG, c.message);
-        assert_eq!(agent::BACK_BG, c.back);
-        assert_eq!(agent::RECORDING, c.recording);
-        assert_eq!(
-            agent::accent(handlr_companion::CardKind::Approval),
-            c.accent
-        );
-        assert_eq!(
-            agent::accent(handlr_companion::CardKind::Question),
-            c.question
-        );
-        assert_eq!(crate::ui::TEXT, c.text);
-        assert_eq!(crate::ui::MUTED, c.muted);
-        assert_eq!(crate::ui::SPOKEN, c.spoken);
-        assert_eq!(crate::ui::WARN, c.warn);
-        assert_eq!(crate::ui::CODE, c.code);
-        assert_eq!(agent::link_spans::LINK, c.link);
-    }
-
-    #[test]
     fn the_shipped_themes_are_in_file_order_with_their_sources_named() {
         let themes = Themes::shipped();
         let names: Vec<&str> = themes.list.iter().map(|t| t.name.as_str()).collect();
@@ -354,6 +430,25 @@ mod tests {
         assert_eq!(Themes::load(None), shipped);
         std::fs::write(dir.path().join(FILE), "= nonsense").unwrap();
         assert_eq!(Themes::load(Some(dir.path())), shipped);
+    }
+
+    #[test]
+    fn the_system_bars_take_header_and_bg_with_contrasting_icons() {
+        let themes = Themes::shipped();
+        let light = SystemBars::of(&themes.find("light_black").unwrap().colors);
+        assert_eq!(light.navigation, [1.0, 1.0, 1.0, 1.0], "bg");
+        assert!(light.status_dark_icons && light.navigation_dark_icons);
+        let gray = themes.find("dark_gray").unwrap().colors;
+        let dark = SystemBars::of(&gray);
+        assert_eq!((dark.status, dark.navigation), (gray.header, gray.bg));
+        assert!(!dark.status_dark_icons && !dark.navigation_dark_icons);
+        // Every shipped theme's bars contrast with its kind.
+        for t in &themes.list {
+            let bars = SystemBars::of(&t.colors);
+            assert_eq!(bars.navigation_dark_icons, !t.dark, "{}", t.name);
+            assert_eq!(bars.status_dark_icons, !t.dark, "{}", t.name);
+        }
+        assert!(wants_dark_icons([0.5, 0.5, 0.5, 1.0]) && !wants_dark_icons([0.4, 0.4, 0.4, 1.0]));
     }
 
     #[test]

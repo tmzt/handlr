@@ -40,13 +40,13 @@ use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
 use crate::agent::{
-    ACTION_H, APPROVE_BG, AgentHit, BG, BUTTON_H, CARD_BG, DENY_BG, Fill, Flow, FlowButton, PAD,
-    Row, Terminal, columns, fill, line_h,
+    ACTION_H, AgentHit, BUTTON_H, Fill, Flow, FlowButton, PAD, Row, Terminal, columns, fill, line_h,
 };
 use crate::controls::scroll::Touched;
 use crate::controls::{ControlRow, SquareButton};
 use crate::settings;
-use crate::ui::{Layout, Line, MUTED, TEXT, wrap};
+use crate::theme::theme;
+use crate::ui::{Layout, Line, wrap};
 pub use card_grid::CardGrid;
 pub use gear::Gear;
 pub use turn_log::TurnLog;
@@ -255,6 +255,15 @@ impl Overview {
         self.settle();
     }
 
+    /// The theme changed: the cards, the conversation and the headings
+    /// are laid out again in its colours.
+    pub fn restyle(&mut self) {
+        self.grid.restyle();
+        self.overlay.log_mut().restyle();
+        self.settle();
+        self.dirty = true;
+    }
+
     pub fn gear(&self) -> Gear {
         self.gear
     }
@@ -327,9 +336,9 @@ impl Overview {
             *y += pt * s * 1.35;
         };
         self.gear = Gear::place(l.w, pad, y, TITLE_PT * s * 1.35, s);
-        heading("handlr", TITLE_PT, TEXT, &mut y);
+        heading("handlr", TITLE_PT, theme().text, &mut y);
         for line in &self.status {
-            heading(line, STATUS_PT, MUTED, &mut y);
+            heading(line, STATUS_PT, theme().muted, &mut y);
         }
         if let Some((note, color)) = &self.note {
             heading(note, STATUS_PT, *color, &mut y);
@@ -511,7 +520,7 @@ impl Overview {
         list.clear();
         let l = self.layout;
         let s = self.scale();
-        fill(list, Rect::new(0.0, 0.0, l.w, l.h), BG, 0.0);
+        fill(list, Rect::new(0.0, 0.0, l.w, l.h), theme().bg, 0.0);
         for h in &self.headings {
             let w = ctx.text_advance(&h.text, h.px);
             ctx.draw_text(list, &h.text, [(l.w - w) * 0.5, h.y], h.px, h.color);
@@ -601,7 +610,7 @@ fn panel(lines: &[Line], confirm: Option<u64>, x: f32, w: f32, bottom: f32, s: f
     let mut flow = Flow::default();
     flow.fills.push(Fill {
         rect: Rect::new(x, top, w, h),
-        color: CARD_BG,
+        color: theme().card,
         radius: 10.0 * s,
     });
     let mut y = top + pad;
@@ -622,8 +631,8 @@ fn panel(lines: &[Line], confirm: Option<u64>, x: f32, w: f32, bottom: f32, s: f
         let bw = (inner_w - gap) / 2.0;
         let by = bottom - pad - ACTION_H * s;
         for (i, (hit, label, bg)) in [
-            (AgentHit::Approve(id), "Approve", APPROVE_BG),
-            (AgentHit::Deny(id), "Deny", DENY_BG),
+            (AgentHit::Approve(id), "Approve", theme().approve),
+            (AgentHit::Deny(id), "Deny", theme().deny),
         ]
         .into_iter()
         .enumerate()
@@ -687,6 +696,57 @@ mod tests {
             y - by,
             now + Duration::from_millis(300),
         )
+    }
+
+    #[test]
+    fn switching_to_light_leaves_no_dark_gray_colour_drawn() {
+        use crate::theme::testing::{dark_gray_only, draw_context, use_theme};
+        use crate::ui::{Card, CardState};
+        use_theme("dark_gray");
+        let ctx = draw_context();
+        let mut o = overview(3);
+        let mut agents: Vec<AgentInfo> = (1..=3)
+            .map(|t| agent(&format!("p{t}"), "w1", t, None))
+            .collect();
+        agents[1].turn = asking("Go on?");
+        o.set_agents(agents, &["p3".to_string()]);
+        o.push_turn(Speaker::User, "what is p2 doing".into());
+        o.push_turn(Speaker::Gemini, "It is asking.".into());
+        o.set_partial(Some("and p3".into()));
+        // What the app gives on every update, in the theme in force.
+        let card = Card {
+            confirm_id: 7,
+            command: "continue".into(),
+            agent: "Claude".into(),
+            project: Some("handlr".into()),
+            handle: Some("blue fox".into()),
+            state: CardState::Waiting,
+        };
+        let give = |o: &mut Overview| {
+            o.set_status(
+                vec!["connected to m4".into(), "tap to talk".into()],
+                Some((
+                    "pairing failed".into(),
+                    theme().get(crate::theme::Role::Warn),
+                )),
+            );
+            o.set_card(Some(Panel {
+                lines: card.lines(),
+                confirm: Some(7),
+            }));
+        };
+        give(&mut o);
+        o.open_turns();
+        let mut list = DrawList::new();
+        assert!(o.draw(&mut list, &ctx, None));
+        assert!(!dark_gray_only(&list).is_empty(), "drawn in Dark (gray)");
+
+        use_theme("light_black");
+        o.restyle();
+        give(&mut o);
+        assert!(o.draw(&mut list, &ctx, None), "drawn again");
+        assert_eq!(dark_gray_only(&list), Vec::<[f32; 4]>::new());
+        use_theme("dark_gray");
     }
 
     #[test]
@@ -793,7 +853,7 @@ mod tests {
         o.set_dictation(Some(vec![Line {
             text: "Taking a message".into(),
             size: 15.0,
-            color: MUTED,
+            color: theme().muted,
             gap: 28.0,
         }]));
         let card = &o.panels[0].fills[0].rect;
@@ -929,7 +989,7 @@ mod tests {
         o.set_dictation(Some(vec![Line {
             text: "Taking a message".into(),
             size: 15.0,
-            color: MUTED,
+            color: theme().muted,
             gap: 28.0,
         }]));
         let card = o.panels[0].fills[0].rect;
@@ -969,7 +1029,7 @@ mod tests {
         o.set_dictation(Some(vec![Line {
             text: "Taking a message".into(),
             size: 15.0,
-            color: MUTED,
+            color: theme().muted,
             gap: 28.0,
         }]));
         let send = o.rect_of(AgentHit::Submit).unwrap();
@@ -987,7 +1047,7 @@ mod tests {
         let line = |text: &str| Line {
             text: text.into(),
             size: 22.0,
-            color: TEXT,
+            color: theme().text,
             gap: 4.0,
         };
         o.set_dictation(Some(vec![line("Please run the tests.")]));
@@ -1102,7 +1162,7 @@ mod tests {
         o.set_dictation(Some(vec![Line {
             text: "Taking a message".into(),
             size: 15.0,
-            color: MUTED,
+            color: theme().muted,
             gap: 28.0,
         }]));
         let mut list = DrawList::new();

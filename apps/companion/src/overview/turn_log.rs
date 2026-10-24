@@ -16,7 +16,8 @@ use libmsdf::drawlist::DrawList;
 
 use crate::agent::{PAD, Row, line_h};
 use crate::controls::scroll::{Scroll, Touched};
-use crate::ui::{MUTED, SPOKEN, TEXT, wrap};
+use crate::theme::theme;
+use crate::ui::wrap;
 
 /// The lines kept, the oldest dropped beyond it.
 pub const KEPT: usize = 200;
@@ -92,19 +93,27 @@ impl TurnLog {
         self.relayout();
     }
 
+    /// The theme changed: the lines are laid out again in its colours.
+    pub fn restyle(&mut self) {
+        self.relayout();
+    }
+
     fn relayout(&mut self) {
         let s = self.scale;
         let pad = PAD * s;
         let w = self.viewport.w - 2.0 * pad;
         let mut rows = Vec::new();
         let mut y = 4.0 * s;
-        let partial = self
-            .partial
-            .as_ref()
-            .map(|p| (format!("> {}\u{2026}", p.trim()), Self::USER_PT, MUTED));
+        let partial = self.partial.as_ref().map(|p| {
+            (
+                format!("> {}\u{2026}", p.trim()),
+                Self::USER_PT,
+                theme().muted,
+            )
+        });
         let lines = self.lines.iter().map(|(speaker, text)| match speaker {
-            Speaker::User => (format!("> {text}"), Self::USER_PT, TEXT),
-            Speaker::Gemini => (format!("< {text}"), Self::GEMINI_PT, SPOKEN),
+            Speaker::User => (format!("> {text}"), Self::USER_PT, theme().text),
+            Speaker::Gemini => (format!("< {text}"), Self::GEMINI_PT, theme().spoken),
         });
         for (text, pt, color) in lines.chain(partial) {
             let px = pt * s;
@@ -206,18 +215,18 @@ mod tests {
         let texts: Vec<&str> = l.rows().iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts[0], "> what is claude doing 1");
         assert!(texts[1].starts_with("< Claude is running"));
-        assert_eq!(l.rows()[0].color, TEXT);
-        assert_eq!(l.rows().last().unwrap().color, SPOKEN);
+        assert_eq!(l.rows()[0].color, theme().text);
+        assert_eq!(l.rows().last().unwrap().color, theme().spoken);
         // What STT hears comes last, dim, until it is an utterance.
         assert!(l.set_partial(Some("and co".into())));
         assert!(!l.set_partial(Some("and co".into())));
         let last = l.rows().last().unwrap();
         assert_eq!(
             (last.text.as_str(), last.color),
-            ("> and co\u{2026}", MUTED)
+            ("> and co\u{2026}", theme().muted)
         );
         l.set_partial(None);
-        assert_eq!(l.rows().last().unwrap().color, SPOKEN);
+        assert_eq!(l.rows().last().unwrap().color, theme().spoken);
         // Nothing runs past the window.
         for r in l.rows() {
             assert!(r.text.chars().count() as f32 * r.px * 0.5 <= HALF.w - 2.0 * PAD * 2.0 + r.px);

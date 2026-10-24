@@ -5,8 +5,8 @@
 use libcontrols::Rect;
 use libmsdf::drawlist::DrawList;
 
-use crate::agent::{BG, fill};
-use crate::ui::MUTED;
+use crate::agent::fill;
+use crate::theme::theme;
 
 /// The gear's teeth.
 const TEETH: usize = 8;
@@ -46,7 +46,7 @@ impl Gear {
             fill(
                 list,
                 Rect::new(tx - tooth * 0.5, ty - tooth * 0.5, tooth, tooth),
-                MUTED,
+                theme().muted,
                 tooth * 0.3,
             );
         }
@@ -54,14 +54,14 @@ impl Gear {
         fill(
             list,
             Rect::new(cx - wheel, cy - wheel, 2.0 * wheel, 2.0 * wheel),
-            MUTED,
+            theme().muted,
             wheel,
         );
         let hole = r * 0.42;
         fill(
             list,
             Rect::new(cx - hole, cy - hole, 2.0 * hole, 2.0 * hole),
-            BG,
+            theme().bg,
             hole,
         );
     }

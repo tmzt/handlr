@@ -5,10 +5,10 @@
 
 use libcontrols::Rect;
 
-use super::{BAND, CARD_BG, Fill, Flow, PAD, Row, TEXT_PT, term_columns, term_h, wrap_hard};
+use super::{Fill, Flow, PAD, Row, TEXT_PT, term_columns, term_h, wrap_hard};
 
-/// Amber, as the approval card's edge.
-pub const AMBER: [f32; 4] = [1.0, 0.74, 0.25, 1.0];
+use crate::theme::theme;
+
 /// The most lines of the typed text shown.
 const LINES: usize = 3;
 
@@ -33,12 +33,12 @@ impl InputBox {
         let mut flow = Flow::default();
         flow.fills.push(Fill {
             rect: Rect::new(x, top, w, h),
-            color: BAND,
+            color: theme().band,
             radius: 8.0 * s,
         });
         flow.fills.push(Fill {
             rect: Rect::new(x + border, top + border, w - 2.0 * border, h - 2.0 * border),
-            color: CARD_BG,
+            color: theme().card,
             radius: 8.0 * s - border,
         });
         let mut y = top + pad * 0.75;
@@ -49,7 +49,7 @@ impl InputBox {
                 x: x + pad,
                 y,
                 px,
-                color: AMBER,
+                color: theme().accent,
                 mono: true,
             });
             y += term_h(px);

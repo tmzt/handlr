@@ -16,8 +16,7 @@ use libmsdf::drawlist::DrawList;
 
 use super::{CELL_EM, Flow, Row, Terminal, draw_row, fill, line_h, term_h};
 
-/// The link colour: a light blue, apart from the Question accent.
-pub const LINK: [f32; 4] = [0.45, 0.78, 1.0, 1.0];
+use crate::theme::theme;
 
 /// A link's text in one row: `start..end` in characters, and the link's
 /// index in the screen's links.
@@ -198,7 +197,7 @@ pub fn draw(
     for s in sorted {
         let start = s.start.max(from);
         piece(list, from, start, row.color);
-        piece(list, start, s.end, LINK);
+        piece(list, start, s.end, theme().link);
         let h = if row.mono {
             term_h(row.px)
         } else {
@@ -209,7 +208,7 @@ pub fn draw(
         fill(
             list,
             Rect::new(x0, pos[1] + h * 0.92 - thick, (x1 - x0).max(0.0), thick),
-            LINK,
+            theme().link,
             0.0,
         );
         from = from.max(s.end);

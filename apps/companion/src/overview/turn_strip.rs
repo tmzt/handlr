@@ -8,7 +8,8 @@ use handlr_companion::Speaker;
 use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 
-use crate::agent::{BAND, DIM, PAD, columns, fill, line_h, one_line};
+use crate::agent::{PAD, columns, fill, line_h, one_line};
+use crate::theme::theme;
 
 /// The strip: what it shows and where.
 pub struct TurnStrip {
@@ -105,12 +106,12 @@ impl TurnStrip {
         fill(
             list,
             Rect::new(r.x + pad, r.y, r.w - 2.0 * pad, 1.0),
-            BAND,
+            theme().band,
             0.0,
         );
         let text = one_line(&line, columns(r.w - 2.0 * pad, px));
         let y = r.y + (r.h - line_h(px)) * 0.5;
-        ctx.draw_text(list, &text, [r.x + pad, y], px, DIM);
+        ctx.draw_text(list, &text, [r.x + pad, y], px, theme().dim);
     }
 }
 

@@ -47,6 +47,7 @@ use libmsdf::font::TerminalSource;
 use libmsdf::font::{GlyphStyle, TerminalShaper};
 
 use crate::controls::{ControlRow, SquareButton};
+use crate::theme::{theme, with_alpha};
 use crate::ui::{Layout, Line};
 
 mod dictation_card;
@@ -58,32 +59,15 @@ use input_box::InputBox;
 use link_spans::LinkSpan;
 use notice_line::NoticeLine;
 
-pub const BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
-pub const FG: [f32; 4] = [0.94, 0.95, 0.96, 1.0];
-pub const DIM: [f32; 4] = [0.50, 0.53, 0.58, 1.0];
-pub const GREEN: [f32; 4] = [0.36, 0.93, 0.45, 1.0];
-pub const RED: [f32; 4] = [1.0, 0.40, 0.40, 1.0];
-pub const YELLOW: [f32; 4] = [1.0, 0.82, 0.30, 1.0];
-pub const BAND: [f32; 4] = [0.18, 0.19, 0.21, 1.0];
-pub(crate) const CARD_BG: [f32; 4] = [0.11, 0.12, 0.17, 1.0];
-const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
-const HEADER_BG: [f32; 4] = [0.07, 0.07, 0.09, 1.0];
-pub(crate) const APPROVE_BG: [f32; 4] = [0.16, 0.45, 0.25, 1.0];
-pub(crate) const DENY_BG: [f32; 4] = [0.55, 0.18, 0.18, 1.0];
-pub(crate) const MESSAGE_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
-pub(crate) const BACK_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
-/// A plan question's implement button: approve and build.
-const DICTATION_BG: [f32; 4] = [0.09, 0.10, 0.13, 1.0];
-
-/// A card kind's accent colour.
+/// A card kind's accent colour, in the theme in force.
 pub fn accent(kind: CardKind) -> [f32; 4] {
     match kind {
-        CardKind::Approval => [1.0, 0.74, 0.25, 1.0],
-        CardKind::Question => [0.42, 0.72, 1.0, 1.0],
-        CardKind::Broke => RED,
-        CardKind::Finished => GREEN,
+        CardKind::Approval => theme().accent,
+        CardKind::Question => theme().question,
+        CardKind::Broke => theme().red,
+        CardKind::Finished => theme().green,
         // A kind from a newer daemon.
-        _ => DIM,
+        _ => theme().dim,
     }
 }
 
@@ -117,7 +101,6 @@ const BACK_W: f32 = 44.0;
 /// a microphone glyph, which no bundled atlas has yet (a microphone icon
 /// is for later).
 pub(crate) const DOT: f32 = 18.0;
-pub(crate) const RECORDING: [f32; 4] = [1.0, 0.35, 0.35, 1.0];
 /// Send and cancel, from the terminal face's symbol page.
 pub(crate) const SEND_GLYPH: &str = "\u{27A4}";
 pub(crate) const CANCEL_GLYPH: &str = "\u{2715}";
@@ -409,7 +392,7 @@ fn entry_lines(
     match (e.role, e.kind) {
         (Role::User, EntryKind::Text) => {
             for l in wrap_hard(full.trim(), cols(TEXT_PT)) {
-                lines.push((l, TEXT_PT, FG));
+                lines.push((l, TEXT_PT, theme().fg));
             }
             return (lines, true, false);
         }
@@ -420,11 +403,11 @@ fn entry_lines(
             for raw in full.trim().split('\n') {
                 let fence = raw.trim_start().starts_with("```");
                 let color = if fence {
-                    DIM
+                    theme().dim
                 } else if fenced {
-                    diff_colour(raw).unwrap_or(FG)
+                    diff_colour(raw).unwrap_or(theme().fg)
                 } else {
-                    FG
+                    theme().fg
                 };
                 if fence {
                     fenced = !fenced;
@@ -441,13 +424,13 @@ fn entry_lines(
                 for (i, raw) in text.lines().enumerate() {
                     let lead = if i == 0 { "> " } else { "  " };
                     for l in wrap_indented(lead, raw, cols(TOOL_PT)) {
-                        lines.push((l, TOOL_PT, DIM));
+                        lines.push((l, TOOL_PT, theme().dim));
                     }
                 }
             } else {
                 let line = format!("> {first}");
                 more = line.chars().count() > cols(TOOL_PT) || text.lines().nth(1).is_some();
-                lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, DIM));
+                lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, theme().dim));
             }
         }
         (_, EntryKind::ToolResult) => {
@@ -456,13 +439,13 @@ fn entry_lines(
                 more = !expanded && wrapped.len() > ERROR_LINES;
                 let shown = if expanded { usize::MAX } else { ERROR_LINES };
                 for l in wrapped.into_iter().take(shown) {
-                    lines.push((l, TOOL_PT, RED));
+                    lines.push((l, TOOL_PT, theme().red));
                 }
             } else if is_diff(full) {
                 let raws: Vec<&str> = full.trim_end().lines().collect();
                 if expanded {
                     for raw in raws {
-                        let color = diff_colour(raw).unwrap_or(DIM);
+                        let color = diff_colour(raw).unwrap_or(theme().dim);
                         for l in wrap_indented("  ", raw, cols(TOOL_PT)) {
                             lines.push((l, TOOL_PT, color));
                         }
@@ -470,7 +453,7 @@ fn entry_lines(
                 } else {
                     more = raws.len() > DIFF_LINES;
                     for raw in raws.iter().take(DIFF_LINES) {
-                        let color = diff_colour(raw).unwrap_or(DIM);
+                        let color = diff_colour(raw).unwrap_or(theme().dim);
                         let line = format!("  {raw}");
                         more |= line.chars().count() > cols(TOOL_PT);
                         lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, color));
@@ -479,7 +462,7 @@ fn entry_lines(
             } else if expanded {
                 for raw in full.trim_end().lines() {
                     for l in wrap_indented("  ", raw, cols(TOOL_PT)) {
-                        lines.push((l, TOOL_PT, DIM));
+                        lines.push((l, TOOL_PT, theme().dim));
                     }
                 }
             } else {
@@ -487,7 +470,7 @@ fn entry_lines(
                 let first = shown.next().unwrap_or("");
                 let line = format!("  {first}");
                 more = line.chars().count() > cols(TOOL_PT) || shown.next().is_some();
-                lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, DIM));
+                lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, theme().dim));
             }
         }
     }
@@ -502,9 +485,9 @@ pub fn diff_colour(line: &str) -> Option<[f32; 4]> {
     if line.starts_with("+++") || line.starts_with("---") {
         None
     } else if line.starts_with('+') {
-        Some(GREEN)
+        Some(theme().green)
     } else if line.starts_with('-') {
-        Some(RED)
+        Some(theme().red)
     } else {
         None
     }
@@ -533,8 +516,8 @@ pub(crate) fn one_line(text: &str, cols: usize) -> String {
 fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
     match (card.kind, card.confirm_id) {
         (CardKind::Approval, Some(id)) => vec![
-            (AgentHit::Approve(id), "Approve", APPROVE_BG),
-            (AgentHit::Deny(id), "Deny", DENY_BG),
+            (AgentHit::Approve(id), "Approve", theme().approve),
+            (AgentHit::Deny(id), "Deny", theme().deny),
         ],
         // A question about a plan (plan 20261022_03, the 21:57 EDT
         // amendment): just the three words, as plain coloured text, not
@@ -542,23 +525,27 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
         // (approve, impl) can be plain text"). The colour stands in the
         // background slot; `SquareButton::draw` draws these as text.
         (CardKind::Question, _) if card.about_plan => vec![
-            (AgentHit::Suggest(Suggestion::Approve), "approve", GREEN),
+            (
+                AgentHit::Suggest(Suggestion::Approve),
+                "approve",
+                theme().green,
+            ),
             (
                 AgentHit::Suggest(Suggestion::Discuss),
                 "discuss",
-                link_spans::LINK,
+                theme().link,
             ),
             (
                 AgentHit::Suggest(Suggestion::Implement),
                 "implement",
-                YELLOW,
+                theme().yellow,
             ),
-            (AgentHit::Reply, "", MESSAGE_BG),
+            (AgentHit::Reply, "", theme().message),
         ],
         (CardKind::Question, _) => vec![
-            (AgentHit::Suggest(Suggestion::Yes), "Yes", APPROVE_BG),
-            (AgentHit::Suggest(Suggestion::No), "No", DENY_BG),
-            (AgentHit::Reply, "", MESSAGE_BG),
+            (AgentHit::Suggest(Suggestion::Yes), "Yes", theme().approve),
+            (AgentHit::Suggest(Suggestion::No), "No", theme().deny),
+            (AgentHit::Reply, "", theme().message),
         ],
         _ => vec![],
     }
@@ -703,7 +690,7 @@ fn replay_button(key: u64, x: f32, y: f32, s: f32) -> FlowButton {
         hit: AgentHit::Replay(key),
         rect: Rect::new(x, y - (h - line_h(TOOL_PT * s)) * 0.5, REPLAY_W * s, h),
         label: "",
-        bg: DIM,
+        bg: theme().dim,
     }
 }
 
@@ -759,12 +746,12 @@ fn card_block(
     let panel = Rect::new(x, y, w, h);
     flow.fills.push(Fill {
         rect: Rect::new(x + 3.0 * s, y + 4.0 * s, w, h),
-        color: SHADOW,
+        color: theme().shadow,
         radius: 10.0 * s,
     });
     flow.fills.push(Fill {
         rect: panel,
-        color: CARD_BG,
+        color: theme().card,
         radius: 10.0 * s,
     });
     flow.fills.push(Fill {
@@ -785,14 +772,14 @@ fn card_block(
     let first_text = flow.rows.len();
     for p in parts {
         let (text, px, color) = match p {
-            Part::Body(t) | Part::Point(t) | Part::Spoken(t) => (t, text_px, FG),
+            Part::Body(t) | Part::Point(t) | Part::Spoken(t) => (t, text_px, theme().fg),
             Part::Label => {
                 flow.rows.push(Row {
                     text: SPOKEN.to_string(),
                     x: inner_x,
                     y: ty + 4.0 * s,
                     px: label_px,
-                    color: DIM,
+                    color: theme().dim,
                     mono: false,
                 });
                 if let CardForm::Expanded {
@@ -824,7 +811,7 @@ fn card_block(
             x: inner_x + inner_w - w_more,
             y: ty,
             px: label_px,
-            color: DIM,
+            color: theme().dim,
             mono: false,
         });
         ty += line_h(label_px);
@@ -887,7 +874,7 @@ fn marker_row(text: &str, s: f32) -> Row {
         x: PAD * s,
         y: TOP_PAD * s,
         px: TOOL_PT * s,
-        color: DIM,
+        color: theme().dim,
         mono: false,
     }
 }
@@ -955,7 +942,7 @@ fn lay_out_card(
                 x: pen.pad,
                 y: ly,
                 px,
-                color: DIM,
+                color: theme().dim,
                 mono: true,
             });
             ly += term_h(px);
@@ -1000,21 +987,25 @@ fn lay_out_resolved_summary(
     };
     let expanded = matches!(form, CardForm::Expanded { .. });
     if expanded {
-        push(flow, format!("-- {}", card.title), DIM, &mut ly);
+        push(flow, format!("-- {}", card.title), theme().dim, &mut ly);
     }
     for (i, p) in parts.into_iter().enumerate() {
         match p {
-            Part::Body(t) if !expanded && i == 0 => push(flow, format!("{lead}{t}"), DIM, &mut ly),
-            Part::Body(t) if !expanded => push(flow, format!("{indent}{t}"), DIM, &mut ly),
-            Part::Body(t) | Part::Point(t) => push(flow, format!("{indent}{t}"), FG, &mut ly),
-            Part::Spoken(t) => push(flow, format!("{indent}{t}"), FG, &mut ly),
+            Part::Body(t) if !expanded && i == 0 => {
+                push(flow, format!("{lead}{t}"), theme().dim, &mut ly)
+            }
+            Part::Body(t) if !expanded => push(flow, format!("{indent}{t}"), theme().dim, &mut ly),
+            Part::Body(t) | Part::Point(t) => {
+                push(flow, format!("{indent}{t}"), theme().fg, &mut ly)
+            }
+            Part::Spoken(t) => push(flow, format!("{indent}{t}"), theme().fg, &mut ly),
             Part::Label => {
                 let label = format!("{indent}{SPOKEN}");
                 if state.sound {
                     let lx = pen.pad + (label.chars().count() as f32 + 1.0) * px * CELL_EM;
                     flow.buttons.push(replay_button(state.key, lx, ly, s));
                 }
-                push(flow, label, DIM, &mut ly);
+                push(flow, label, theme().dim, &mut ly);
             }
         }
     }
@@ -1026,7 +1017,7 @@ fn lay_out_resolved_summary(
             x: pen.pad + pen.text_w - w_more,
             y: ly,
             px,
-            color: DIM,
+            color: theme().dim,
             mono: true,
         });
         ly += lh;
@@ -1075,7 +1066,7 @@ fn lay_out_entry(
     if band {
         flow.fills.push(Fill {
             rect: Rect::new(0.0, y - 4.0 * s, pen.width, h + 8.0 * s),
-            color: BAND,
+            color: theme().band,
             radius: 0.0,
         });
     }
@@ -1261,11 +1252,6 @@ pub fn lay_out_block_as(
     flow
 }
 
-/// A placeholder's bars: the text's colour, almost clear (L3, the
-/// amendment on placeholders, item 2).
-const PLACEHOLDER: [f32; 4] = [FG[0], FG[1], FG[2], 0.06];
-/// The shimmer's band at its centre, over the bars (item 3).
-const SHIMMER: [f32; 4] = [FG[0], FG[1], FG[2], 0.04 / 3.0];
 /// One sweep of the shimmer, in seconds.
 const SHIMMER_PERIOD: f32 = 1.6;
 
@@ -1307,14 +1293,14 @@ fn lay_out_pending(kind: SectionKind, lines: u32, chars: u32, pen: Pen, flow: &m
         let bh = (line * 0.55).max(2.0 * s);
         flow.fills.push(Fill {
             rect: Rect::new(pen.pad, y + (line - bh) / 2.0, w, bh),
-            color: PLACEHOLDER,
+            color: theme().placeholder,
             radius: bh / 2.0,
         });
     };
     match kind {
         SectionKind::Card => flow.fills.push(Fill {
             rect: Rect::new(pen.pad, 2.0 * s, pen.text_w, (h - 4.0 * s).max(1.0)),
-            color: PLACEHOLDER,
+            color: theme().placeholder,
             radius: 6.0 * s,
         }),
         SectionKind::Tool | SectionKind::Context => {
@@ -1692,11 +1678,11 @@ pub struct Suggested {
 /// A suggestion's colour: yes green, no red, the commands yellow.
 pub fn suggestion_colour(s: Suggestion) -> [f32; 4] {
     match s {
-        Suggestion::Yes => GREEN,
-        Suggestion::No => RED,
-        Suggestion::Continue | Suggestion::Compact => YELLOW,
-        Suggestion::Approve | Suggestion::Implement => GREEN,
-        Suggestion::Discuss => link_spans::LINK,
+        Suggestion::Yes => theme().green,
+        Suggestion::No => theme().red,
+        Suggestion::Continue | Suggestion::Compact => theme().yellow,
+        Suggestion::Approve | Suggestion::Implement => theme().green,
+        Suggestion::Discuss => theme().link,
     }
 }
 
@@ -1956,6 +1942,20 @@ impl AgentScreen {
         self.hold(keep);
         self.flow_stale = true;
         self.settle();
+    }
+
+    /// The theme changed: every block is laid out again in its colours,
+    /// holding the view where it is, and the screen is drawn again.
+    pub fn restyle(&mut self) {
+        for b in self.blocks.values_mut() {
+            b.stale = true;
+        }
+        let keep = self.keep_anchors();
+        self.refresh_blocks();
+        self.hold(keep);
+        self.flow_stale = true;
+        self.settle();
+        self.dirty = true;
     }
 
     /// Expands the section `key`, or folds it again (the 11:54 EDT
@@ -2739,7 +2739,7 @@ impl AgentScreen {
                 let mut flow = Flow::default();
                 flow.fills.push(Fill {
                     rect: bar,
-                    color: CARD_BG,
+                    color: theme().card,
                     radius: 8.0 * s,
                 });
                 flow.fills.push(Fill {
@@ -2754,7 +2754,7 @@ impl AgentScreen {
                     x: bar.x + EDGE * s + pad,
                     y: bar.y + (bar.h - line_h(px)) * 0.5,
                     px,
-                    color: FG,
+                    color: theme().fg,
                     mono: false,
                 });
                 pin = Some(Pinned {
@@ -2828,7 +2828,7 @@ impl AgentScreen {
     fn jump_line(&self, cols: usize) -> (String, [f32; 4]) {
         match self.end_state(true) {
             Some((what, line, color)) => (state_line(what, &line, cols), color),
-            None => (JUMP_TO_END.to_string(), DIM),
+            None => (JUMP_TO_END.to_string(), theme().dim),
         }
     }
 
@@ -2865,12 +2865,12 @@ impl AgentScreen {
         } else if let Some(a) = live(CardKind::Approval) {
             Some(("approval", a, accent(CardKind::Approval)))
         } else if let Some(b) = live(CardKind::Broke) {
-            Some(("broke", b, RED))
+            Some(("broke", b, theme().red))
         } else if let Some(d) = live(CardKind::Finished).filter(|_| !is_working) {
-            Some(("done", d, GREEN))
+            Some(("done", d, theme().green))
         } else if is_working && working {
             let newest = shows.iter().rev().find_map(|sh| first_line(sh));
-            Some(("working", newest.unwrap_or_default(), DIM))
+            Some(("working", newest.unwrap_or_default(), theme().dim))
         } else {
             None
         }
@@ -2893,7 +2893,7 @@ impl AgentScreen {
     /// giving the refresh's result.
     pub fn pull_line(&self) -> Option<(String, [f32; 4])> {
         match &self.pull_state {
-            PullState::Refreshing => Some((REFRESHING.to_string(), DIM)),
+            PullState::Refreshing => Some((REFRESHING.to_string(), theme().dim)),
             PullState::Result { text, color, .. } => Some((text.clone(), *color)),
             PullState::Idle if self.pull > 0.0 => {
                 let text = if self.pull >= PULL_ARM * self.scale() {
@@ -2901,7 +2901,7 @@ impl AgentScreen {
                 } else {
                     PULL_TO_REFRESH
                 };
-                Some((text.to_string(), DIM))
+                Some((text.to_string(), theme().dim))
             }
             PullState::Idle => None,
         }
@@ -2919,9 +2919,9 @@ impl AgentScreen {
         let s = self.scale();
         let cols = columns(self.layout.w - 2.0 * PAD * s, TOOL_PT * s);
         let (text, color) = match (new, self.end_state(false)) {
-            (0, _) => (UP_TO_DATE.to_string(), DIM),
+            (0, _) => (UP_TO_DATE.to_string(), theme().dim),
             (_, Some((what, line, color))) => (state_line(what, &line, cols), color),
-            (n, None) => (format!("-- {n} new --"), DIM),
+            (n, None) => (format!("-- {n} new --"), theme().dim),
         };
         log::info!("agent view: refreshed, {new} new");
         self.pull_state = PullState::Result {
@@ -3767,7 +3767,7 @@ impl AgentScreen {
         let l = self.layout;
         let s = self.scale();
         let recording = self.dictation.is_some();
-        fill(list, Rect::new(0.0, 0.0, l.w, l.h), BG, 0.0);
+        fill(list, Rect::new(0.0, 0.0, l.w, l.h), theme().bg, 0.0);
 
         // The flow, in its window, pulled up by a pull to refresh.
         let v = self.frame.viewport;
@@ -3779,10 +3779,10 @@ impl AgentScreen {
             if visible(f.rect.y, f.rect.h) {
                 let r = Rect::new(f.rect.x, f.rect.y + dy, f.rect.w, f.rect.h);
                 fill(list, r, f.color, f.radius);
-                if f.color == PLACEHOLDER {
+                if f.color == theme().placeholder {
                     placeholders = true;
                     for band in shimmer_over(r, self.shimmer, l.w) {
-                        fill(list, band, SHIMMER, f.radius.min(band.w / 2.0));
+                        fill(list, band, theme().shimmer, f.radius.min(band.w / 2.0));
                     }
                 }
             }
@@ -3822,7 +3822,7 @@ impl AgentScreen {
                 },
                 [PAD * s, v.y + 16.0 * s],
                 px,
-                DIM,
+                theme().dim,
             );
         }
         // The pull's line, dim, centred in the space below the last
@@ -3837,7 +3837,7 @@ impl AgentScreen {
         }
         // The scrollbar's thumb, while it shows.
         if let Some(r) = self.thumb_rect() {
-            let color = [FG[0], FG[1], FG[2], self.bar_alpha()];
+            let color = with_alpha(theme().fg, self.bar_alpha());
             fill(list, r, color, r.w / 2.0);
         }
         // The section labels over the scrollback, in the thumb's grays.
@@ -3851,7 +3851,7 @@ impl AgentScreen {
                     (LABEL_BG, LABEL_TEXT)
                 };
                 let r = label.rect;
-                fill(list, r, [FG[0], FG[1], FG[2], bg * alpha], r.h / 2.0);
+                fill(list, r, with_alpha(theme().fg, bg * alpha), r.h / 2.0);
                 let w = label.text.chars().count() as f32 * px * 0.5;
                 let pos = [r.x + (r.w - w) * 0.5, r.y + (r.h - line_h(px)) * 0.5];
                 ctx.draw_text(
@@ -3859,14 +3859,14 @@ impl AgentScreen {
                     &label.text,
                     pos,
                     px,
-                    [FG[0], FG[1], FG[2], fg * alpha],
+                    with_alpha(theme().fg, fg * alpha),
                 );
             }
         }
         list.push_clip_end();
 
         // The header: the agent and its status.
-        fill(list, self.frame.header, HEADER_BG, 0.0);
+        fill(list, self.frame.header, theme().header, 0.0);
         let name_px = NAME_PT * s;
         let top = l.top + 8.0 * s;
         let back = Row {
@@ -3874,19 +3874,19 @@ impl AgentScreen {
             x: 0.0,
             y: 0.0,
             px: 1.6 * name_px,
-            color: FG,
+            color: theme().fg,
             mono: true,
         };
         let back_y = l.top + (HEADER_H * s - term_h(back.px)) * 0.5;
         draw_row(list, ctx, term, &back, [PAD * s, back_y]);
         let name_x = BACK_W * s;
-        ctx.draw_text(list, &self.name, [name_x, top], name_px, FG);
+        ctx.draw_text(list, &self.name, [name_x, top], name_px, theme().fg);
         ctx.draw_text(
             list,
             &self.status,
             [name_x, top + line_h(name_px)],
             TOOL_PT * s,
-            DIM,
+            theme().dim,
         );
         if let Some(on) = &self.terminal_on {
             // The view does not follow herdr's focus: say where it is.
@@ -3895,7 +3895,7 @@ impl AgentScreen {
                 &format!("terminal on: {on}"),
                 [name_x, l.top + HEADER_H * s],
                 TOOL_PT * s,
-                DIM,
+                theme().dim,
             );
         }
 
@@ -4025,7 +4025,7 @@ pub(crate) fn button(
     let fits = (rect.w - 24.0 * s) / (0.55 * chars);
     let mut b = Button::new(label, rect)
         .with_bg(bg)
-        .with_text_color(FG)
+        .with_text_color(theme().fg)
         .with_font_size((17.0 * s).min(fits).max(9.0 * s));
     b.corner_radius = Some(10.0 * s);
     b.draw(list, ctx);
@@ -4326,7 +4326,11 @@ mod tests {
         let flow = lay_out_flow(&entries, &[], None, 1080.0, 2.0);
         assert_eq!(flow.entry_y.len(), entries.len());
         // Only the user's own words are on the band.
-        let bands = flow.fills.iter().filter(|f| f.color == BAND).count();
+        let bands = flow
+            .fills
+            .iter()
+            .filter(|f| f.color == theme().band)
+            .count();
         assert_eq!(bands, 1);
         let row = |prefix: &str| -> Vec<&Row> {
             flow.rows
@@ -4341,7 +4345,7 @@ mod tests {
         ] {
             let rows = row(text);
             assert_eq!(rows.len(), 1, "{text}: {:?}", flow.rows);
-            assert_eq!(rows[0].color, DIM);
+            assert_eq!(rows[0].color, theme().dim);
             assert_eq!(rows[0].px, TOOL_PT * 2.0);
             // The dot before it, amber, on the same line.
             let dot = flow
@@ -4349,7 +4353,7 @@ mod tests {
                 .iter()
                 .find(|r| r.text == notice_line::DOT && r.y == rows[0].y)
                 .expect("a dot");
-            assert_eq!(dot.color, input_box::AMBER);
+            assert_eq!(dot.color, theme().accent);
             assert!(dot.x < rows[0].x);
         }
         // Whole, never cut (plan 20261022_03, the L3 amendment of
@@ -4396,10 +4400,14 @@ mod tests {
                 .color
         };
         // The user's turn on the grey band, full width.
-        let band = flow.fills.iter().find(|f| f.color == BAND).expect("a band");
+        let band = flow
+            .fills
+            .iter()
+            .find(|f| f.color == theme().band)
+            .expect("a band");
         assert_eq!((band.rect.x, band.rect.w), (0.0, 1080.0));
         assert!(band.rect.y <= flow.entry_y[0] && band.rect.y + band.rect.h > flow.entry_y[0]);
-        assert_eq!(colour("please fix it"), FG);
+        assert_eq!(colour("please fix it"), theme().fg);
         // A tool call is one dim line.
         let call: Vec<&Row> = flow
             .rows
@@ -4407,18 +4415,18 @@ mod tests {
             .filter(|r| r.text.starts_with("> Edit"))
             .collect();
         assert_eq!(call.len(), 1);
-        assert_eq!(call[0].color, DIM);
+        assert_eq!(call[0].color, theme().dim);
         assert!(!flow.rows.iter().any(|r| r.text.trim() == "more"));
         // A diff result: green and red.
-        assert_eq!(colour("-old"), RED);
-        assert_eq!(colour("+new"), GREEN);
+        assert_eq!(colour("-old"), theme().red);
+        assert_eq!(colour("+new"), theme().green);
         // An error, red.
-        assert_eq!(colour("! exit status 1"), RED);
+        assert_eq!(colour("! exit status 1"), theme().red);
         // In a reply, diff lines only inside a fence; a bullet stays plain.
-        assert_eq!(colour("-a"), RED);
-        assert_eq!(colour("+b"), GREEN);
-        assert_eq!(colour("- a bullet"), FG);
-        assert_eq!(colour("```diff"), DIM);
+        assert_eq!(colour("-a"), theme().red);
+        assert_eq!(colour("+b"), theme().green);
+        assert_eq!(colour("- a bullet"), theme().fg);
+        assert_eq!(colour("```diff"), theme().dim);
         // Nothing runs past the phone's width.
         for r in &flow.rows {
             assert!(r.mono, "{r:?}");
@@ -4442,10 +4450,10 @@ mod tests {
             .iter()
             .find(|r| r.text.starts_with("-- "))
             .unwrap();
-        assert_eq!(faded.color, DIM);
+        assert_eq!(faded.color, theme().dim);
         // The live one: a shadow, a panel and its accent edge, larger text.
-        assert!(flow.fills.iter().any(|f| f.color == CARD_BG));
-        assert!(flow.fills.iter().any(|f| f.color == SHADOW));
+        assert!(flow.fills.iter().any(|f| f.color == theme().card));
+        assert!(flow.fills.iter().any(|f| f.color == theme().shadow));
         assert!(
             flow.fills
                 .iter()
@@ -4821,13 +4829,13 @@ mod tests {
             Line {
                 text: "Message for Claude".into(),
                 size: 18.0,
-                color: FG,
+                color: theme().fg,
                 gap: 4.0,
             },
             Line {
                 text: "please go on".into(),
                 size: 20.0,
-                color: FG,
+                color: theme().fg,
                 gap: 8.0,
             },
         ];
@@ -4879,7 +4887,7 @@ mod tests {
             x: 0.0,
             y: 0.0,
             px: 30.0,
-            color: FG,
+            color: theme().fg,
             mono: true,
         };
         let mut list = DrawList::new();
@@ -4891,6 +4899,28 @@ mod tests {
             [0.0, 0.0],
         );
         assert!(!list.lower_with(&set).draws.is_empty());
+    }
+
+    #[test]
+    fn switching_to_light_leaves_no_dark_gray_colour_drawn() {
+        use crate::theme::testing::{dark_gray_only, draw_context, use_theme};
+        use_theme("dark_gray");
+        let ctx = draw_context();
+        let cards = vec![
+            card(CardKind::Question, 2, false),
+            card(CardKind::Approval, 4, true),
+        ];
+        let mut a = screen(conversation(4), cards, Some(1));
+        a.set_scrollbar(ScrollbarVisibility::Always);
+        let mut list = DrawList::new();
+        assert!(a.draw(&mut list, &ctx, None));
+        assert!(!dark_gray_only(&list).is_empty(), "drawn in Dark (gray)");
+
+        use_theme("light_black");
+        a.restyle();
+        assert!(a.draw(&mut list, &ctx, None), "drawn again");
+        assert_eq!(dark_gray_only(&list), Vec::<[f32; 4]>::new());
+        use_theme("dark_gray");
     }
 
     #[test]
@@ -4943,7 +4973,7 @@ mod tests {
         let row = a.frame().suggestions.clone();
         assert_eq!(row.len(), 1);
         assert_eq!(row[0].hit, AgentHit::Suggest(Suggestion::Continue));
-        assert_eq!((row[0].label, row[0].color), ("cont", YELLOW));
+        assert_eq!((row[0].label, row[0].color), ("cont", theme().yellow));
         assert!(row[0].rect.y + row[0].rect.h <= a.frame().buttons[0].rect.y);
         // The play button redraws when it changes, and keeps its place.
         a.draw(&mut DrawList::new(), &DrawContext::default(), None);
@@ -4971,8 +5001,8 @@ mod tests {
         assert_eq!(a.suggestions(), [Suggestion::Continue]);
         a.status = "working".into();
         assert!(a.suggestions().is_empty());
-        assert_eq!(suggestion_colour(Suggestion::Yes), GREEN);
-        assert_eq!(suggestion_colour(Suggestion::No), RED);
+        assert_eq!(suggestion_colour(Suggestion::Yes), theme().green);
+        assert_eq!(suggestion_colour(Suggestion::No), theme().red);
     }
 
     #[test]
@@ -5045,7 +5075,7 @@ mod tests {
         vec![Line {
             text: text.into(),
             size: 20.0,
-            color: FG,
+            color: theme().fg,
             gap: 0.0,
         }]
     }
@@ -5132,7 +5162,7 @@ mod tests {
         let typed = f.typed.expect("the input box");
         let row = &typed.rows[0];
         assert_eq!(row.text, "\u{203A} Yes, install it on the S23");
-        assert_eq!(row.color, input_box::AMBER);
+        assert_eq!(row.color, theme().accent);
         assert!(row.mono, "on the terminal grid");
         // Above the controls; the flow ends above it.
         assert!(typed.fills[0].rect.y + typed.height <= f.buttons[0].rect.y);
@@ -5193,7 +5223,7 @@ mod tests {
             &ctx,
             "Implement",
             Rect::new(0.0, 0.0, 80.0, 40.0),
-            FG,
+            theme().fg,
             1.0,
         );
         button(
@@ -5201,7 +5231,7 @@ mod tests {
             &ctx,
             "Yes",
             Rect::new(0.0, 0.0, 200.0, 40.0),
-            FG,
+            theme().fg,
             1.0,
         );
         // The size rule itself: 17 pt when it fits, smaller when not.
@@ -5542,10 +5572,10 @@ mod tests {
         let mut a = screen(all[..80].to_vec(), vec![], None);
         assert!(a.frame().jump.is_none(), "hidden while following");
         scrolled_back(&mut a);
-        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), DIM));
+        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), theme().dim));
         // New sections with no state to tell: still jump to end.
         flat(&mut a, "idle", 0, all[..84].to_vec(), vec![], None);
-        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), DIM));
+        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), theme().dim));
         // Tappable.
         let r = a.rect_of(AgentHit::JumpToEnd).expect("tappable");
         assert_eq!(
@@ -5600,7 +5630,7 @@ mod tests {
             ),
             (
                 "-- broke: error[E0308]: mismatched types --".to_string(),
-                RED
+                theme().red
             )
         );
         assert_eq!(
@@ -5608,17 +5638,17 @@ mod tests {
                 "idle",
                 vec![live_card(CardKind::Finished, 79, "All tests pass.")]
             ),
-            ("-- done: All tests pass. --".to_string(), GREEN)
+            ("-- done: All tests pass. --".to_string(), theme().green)
         );
         // Working: the newest section's first line.
         assert_eq!(
             with("working", vec![]),
-            ("-- working: Answer 19. --".to_string(), DIM)
+            ("-- working: Answer 19. --".to_string(), theme().dim)
         );
         // A resolved card is no state.
         assert_eq!(
             with("idle", vec![card(CardKind::Question, 79, false)]),
-            (JUMP_TO_END.to_string(), DIM)
+            (JUMP_TO_END.to_string(), theme().dim)
         );
     }
 
@@ -5679,7 +5709,7 @@ mod tests {
         let mut a = outline_screen(300, 290..300);
         scrolled_back(&mut a);
         a.set_new_content(true);
-        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), DIM));
+        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), theme().dim));
         a.set_held_end(vec![ViewSection {
             index: 300,
             serial: Serial::new(FILE, 301, 0),
@@ -5980,7 +6010,11 @@ mod tests {
     fn a_slot_without_contents_is_faint_bars_not_text() {
         let a = outline_screen(40, 30..40);
         let flow = a.flow();
-        let bars = flow.fills.iter().filter(|f| f.color == PLACEHOLDER).count();
+        let bars = flow
+            .fills
+            .iter()
+            .filter(|f| f.color == theme().placeholder)
+            .count();
         assert!(bars > 0, "placeholders draw bars");
         assert!(
             !flow.rows.iter().any(|r| r.text == "\u{2026}"),
@@ -6712,7 +6746,7 @@ mod tests {
         assert_eq!(open.last().unwrap(), "   c");
         // Its colours stay a diff's.
         let rows = &a.blocks[&key].flow.rows;
-        assert_eq!(rows[2].color, GREEN);
+        assert_eq!(rows[2].color, theme().green);
     }
 
     #[test]

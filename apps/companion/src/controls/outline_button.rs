@@ -6,7 +6,8 @@
 use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::{DrawList, SdfInstance, SdfKind};
 
-use crate::agent::{DIM, line_h};
+use crate::agent::line_h;
+use crate::theme::theme;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct OutlineButton {
@@ -25,7 +26,7 @@ impl OutlineButton {
         OutlineButton {
             label,
             rect,
-            color: DIM,
+            color: theme().dim,
         }
     }
 
@@ -66,6 +67,6 @@ mod tests {
         ));
         assert_eq!(outline.position, [10.0, 120.0]);
         assert_eq!(outline.size, [144.0, 64.0]);
-        assert_eq!(outline.color, DIM);
+        assert_eq!(outline.color, theme().dim);
     }
 }

@@ -22,8 +22,8 @@ use libcontrols::{
 use libmsdf::drawlist::{AtlasId, AtlasRef, DrawList};
 use libmsdf::font::{FontAtlas, GlyphStyle, TerminalShaper, TextShaper};
 
-use crate::agent::link_spans::LINK;
-use crate::agent::{CELL_EM, DIM, fill, line_h};
+use crate::agent::{CELL_EM, fill, line_h};
+use crate::theme::theme;
 
 /// One prose face: its atlas in the renderer's set (metrics only, see
 /// [`Faces::metrics`]), and its shaper.
@@ -243,9 +243,9 @@ impl DrawControl for MarkdownView {
     fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
         for p in &self.placed {
             let color = if p.link.is_some() {
-                LINK
+                theme().link
             } else if p.dim {
-                DIM
+                theme().dim
             } else {
                 self.color
             };
@@ -256,7 +256,7 @@ impl DrawControl for MarkdownView {
                 fill(
                     list,
                     Rect::new(p.x, p.y + h * 0.92 - thick, p.w, thick),
-                    LINK,
+                    theme().link,
                     0.0,
                 );
             }
@@ -301,8 +301,6 @@ impl HostedControl for MarkdownView {
 mod tests {
     use super::*;
 
-    const FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-
     fn click(view: &MarkdownView, pos: [f32; 2]) -> Option<ControlAction> {
         view.handle_mouse(
             &MouseEvent::Click {
@@ -316,7 +314,7 @@ mod tests {
     #[test]
     fn a_paragraph_with_bold_italic_code_and_a_link_draws_and_its_link_taps() {
         let md = "Some **bold**, *italic*, `code` and [a link](https://example.com).";
-        let view = MarkdownView::new(md, 10.0, 20.0, 2000.0, 20.0, FG, None);
+        let view = MarkdownView::new(md, 10.0, 20.0, 2000.0, 20.0, theme().fg, None);
         assert_eq!(view.text(), "Some bold, italic, code and a link.");
         assert_eq!(view.links(), ["https://example.com"]);
         assert_eq!(view.height(), line_h(20.0));
@@ -327,7 +325,7 @@ mod tests {
         assert!(
             list.instances
                 .iter()
-                .any(|i| i.color == LINK && (i.position[0] - r.x).abs() < 1e-3)
+                .any(|i| i.color == theme().link && (i.position[0] - r.x).abs() < 1e-3)
         );
         let at = [r.x + r.w * 0.5, r.y + r.h * 0.5];
         assert_eq!(
@@ -347,7 +345,7 @@ mod tests {
             0.0,
             100.0,
             20.0,
-            FG,
+            theme().fg,
             None,
         );
         assert!(view.text().lines().count() > 1);

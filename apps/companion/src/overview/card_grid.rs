@@ -16,8 +16,9 @@ use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
 use super::agent_card::{AgentCard, CardLayout};
-use crate::agent::{DIM, PAD};
+use crate::agent::PAD;
 use crate::controls::scroll::{Scroll, Touched};
+use crate::theme::theme;
 
 /// A workspace id as it sorts: its number, where it ends in one ("w2"
 /// before "w10"), then as written.
@@ -127,6 +128,11 @@ impl CardGrid {
         self.relayout();
     }
 
+    /// The theme changed: the cards are laid out again in its colours.
+    pub fn restyle(&mut self) {
+        self.relayout();
+    }
+
     fn relayout(&mut self) {
         let s = self.scale;
         let gap = Self::GAP * s;
@@ -230,7 +236,13 @@ impl CardGrid {
         let s = self.scale;
         list.push_clip(v.pos(), v.size());
         if let Some(line) = self.empty_line() {
-            ctx.draw_text(list, line, [v.x + PAD * s, v.y + 8.0 * s], 15.0 * s, DIM);
+            ctx.draw_text(
+                list,
+                line,
+                [v.x + PAD * s, v.y + 8.0 * s],
+                15.0 * s,
+                theme().dim,
+            );
         }
         let dy = self.dy();
         for (_, c) in &self.cards {

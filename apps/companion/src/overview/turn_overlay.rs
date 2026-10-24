@@ -17,12 +17,9 @@ use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
 use super::turn_log::TurnLog;
-use crate::agent::{BAND, fill};
+use crate::agent::fill;
 use crate::controls::scroll::Touched;
-
-/// The sheet's colour, and the shade over what is above it when open.
-const SHEET_BG: [f32; 4] = [0.07, 0.07, 0.09, 1.0];
-const SHADE: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
+use crate::theme::theme;
 
 /// A finger on the sheet, watched for a swipe down.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -199,10 +196,10 @@ impl TurnOverlay {
         }
         let s = self.scale;
         let r = self.rect();
-        let mut shade = SHADE;
+        let mut shade = theme().overlay;
         shade[3] *= self.shown;
         fill(list, Rect::new(0.0, 0.0, width, r.y), shade, 0.0);
-        fill(list, r, SHEET_BG, 16.0 * s);
+        fill(list, r, theme().header, 16.0 * s);
         let (hw, hh) = (40.0 * s, 4.0 * s);
         let handle = Rect::new(
             r.x + (r.w - hw) * 0.5,
@@ -210,7 +207,7 @@ impl TurnOverlay {
             hw,
             hh,
         );
-        fill(list, handle, BAND, hh * 0.5);
+        fill(list, handle, theme().band, hh * 0.5);
         self.log.draw_moved(list, ctx, self.drop());
     }
 }

@@ -9,9 +9,9 @@ use std::sync::Arc;
 use libcontrols::{Button, ModalDialog, ModalOptions, NodeId, PanelFrame, Rect};
 
 use super::copy;
-use crate::agent::{BACK_BG, CARD_BG, DENY_BG, FG, PAD};
+use crate::agent::PAD;
 use crate::markdown_view::{Faces, MarkdownView};
-use crate::ui::TEXT;
+use crate::theme::theme;
 
 /// The question's size, in points.
 const TEXT_PT: f32 = 17.0;
@@ -42,13 +42,13 @@ impl Confirm {
         let w = (viewport.w - 2.0 * PAD * s).min(560.0 * s);
         let inner_w = w - 2.0 * pad;
         let px = TEXT_PT * s;
-        let mut body = MarkdownView::new(question, 0.0, 0.0, inner_w, px, TEXT, faces);
+        let mut body = MarkdownView::new(question, 0.0, 0.0, inner_w, px, theme().text, faces);
         let text_h = body.height();
         let h = pad + text_h + GAP * 2.0 * s + BUTTON_H * s + pad;
         let options = ModalOptions::default();
         let mut dialog = ModalDialog::centered(viewport, [w, h], pad)
             .with_frame(PanelFrame {
-                bg_color: Some(CARD_BG),
+                bg_color: Some(theme().card),
                 border_color: None,
                 border_thickness: 0.0,
                 corner_radius: Some(14.0 * s),
@@ -65,12 +65,12 @@ impl Confirm {
         let button = |label: &str, bx: f32, bg| {
             Button::new(label, Rect::new(bx, by, bw, BUTTON_H * s))
                 .with_bg(bg)
-                .with_text_color(FG)
+                .with_text_color(theme().fg)
                 .with_font_size(px)
                 .with_corner_radius(10.0 * s)
         };
-        let cancel = content.add(None, button(copy::CANCEL.text, x, BACK_BG));
-        let action = content.add(None, button(action, x + bw + GAP * s, DENY_BG));
+        let cancel = content.add(None, button(copy::CANCEL.text, x, theme().back));
+        let action = content.add(None, button(action, x + bw + GAP * s, theme().deny));
         let dialog = dialog.with_close_control(cancel).with_close_control(action);
         Confirm {
             dialog,
