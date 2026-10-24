@@ -1838,3 +1838,11 @@ vendor's source libmorph's "device identity". The owner named it
 (`docs/design/20261024_02_DEVICE_INFO_PLAN.md`, in libmorph, awaiting
 approval) is to use: `ctx.brand_info()`, with `vendor`, `make` and `model`.
 handlr uses its `vendor`.
+
+## 2026-10-24 13:08 EDT — the vendor's source is `build_info`, not `brand_info`
+
+This corrects the previous entry's name. The owner settled the name in
+libmorph's session: `ctx.build_info() -> Option<&BuildInfo { vendor, make,
+model }>`, the same name as libmobile's `build_info()`, recorded in libmorph
+`0a725b4`. It ships in libmorph 0.4.0, after libmobile 0.2.4. It returns
+`None` on desktop, the web and scripted runs. handlr uses its `vendor`.
