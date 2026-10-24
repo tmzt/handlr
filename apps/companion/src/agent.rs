@@ -2609,13 +2609,14 @@ impl AgentScreen {
         self.follow
     }
 
-    /// Whether the pinned card is the bar: while a finger scrolls, or the
-    /// view is scrolled back. An expanded card stays expanded while the
+    /// Whether the pinned card is the bar: while the view is scrolled back
+    /// or the scrollbar is held. An expanded card stays expanded while the
     /// view scrolls (owner, 2026-10-24: "scrolling with finish card
     /// expanded shouldn't collapse it").
     pub fn compact(&self) -> bool {
-        !self.pin_expanded
-            && (!self.follow || self.thumb.is_some() || self.drag.as_ref().is_some_and(|d| d.moved))
+        // A finger moving at the bottom (a pull to refresh) leaves it whole
+        // (owner, 2026-10-24): it folds once the view leaves the bottom.
+        !self.pin_expanded && (!self.follow || self.thumb.is_some())
     }
 
     /// Clamps the offset, follows the bottom when following, and places
@@ -6960,6 +6961,25 @@ mod tests {
     fn pull_up(a: &mut AgentScreen, y: f32, dy: f32, t: Duration) -> Duration {
         let steps = (dy / 10.0) as u32;
         drag(a, y, y - dy, steps, t)
+    }
+
+    #[test]
+    fn a_pull_to_refresh_leaves_the_pinned_card_whole() {
+        let mut live = finished(&["One."], Some("Landed it."));
+        live.live = true;
+        let mut a = screen(conversation(40), vec![live], Some(0));
+        assert!(a.following() && !a.compact());
+        let t = pull_up(&mut a, 1500.0, 200.0, Duration::ZERO);
+        assert!(a.pull() > 0.0);
+        assert!(!a.compact(), "not folded to the bar while pulling");
+        a.touch(
+            1,
+            TouchPhase::Ended,
+            540.0,
+            1300.0,
+            t + Duration::from_millis(16),
+        );
+        assert!(!a.compact());
     }
 
     #[test]
