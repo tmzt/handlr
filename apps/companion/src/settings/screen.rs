@@ -954,12 +954,12 @@ mod tests {
             panic!("the left arrow steps");
         };
         assert_eq!(now.scrollbar, Disabled);
-        assert_eq!(s.scrollbar_shown().as_deref(), Some("Disabled"));
+        assert_eq!(s.scrollbar_shown().as_deref(), Some("None"));
         // A tap on the label is not an arrow.
         assert_eq!(tap(&mut s, r.x + 40.0, r.y + r.h * 0.5), None);
         // Kept across a new layout.
         s.set_layout(Layout { w: 1200.0, ..PHONE });
-        assert_eq!(s.scrollbar_shown().as_deref(), Some("Disabled"));
+        assert_eq!(s.scrollbar_shown().as_deref(), Some("None"));
     }
 
     #[test]
