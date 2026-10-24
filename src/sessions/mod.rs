@@ -37,6 +37,10 @@ pub const TAIL_CHUNK: u64 = 256 * 1024;
 pub const TAIL_MAX: u64 = 2 * 1024 * 1024;
 /// The most of a file `tail` reads, bookkeeping and all.
 pub const TAIL_READ_MAX: u64 = 32 * 1024 * 1024;
+/// The most one line counts toward `TAIL_MAX`. A tool result holding an
+/// image is most of a megabyte, of which the reader keeps a few thousand
+/// characters; counted whole, five of them filled the budget.
+pub const LINE_BUDGET_MAX: u64 = 32 * 1024;
 /// A tool call's or result's text is kept to this many characters as it is
 /// read; summaries are cut further after redaction.
 pub(crate) const TOOL_TEXT_MAX: usize = 4000;
@@ -240,7 +244,9 @@ fn parse_lines<R: SessionReader + ?Sized>(reader: &R, bytes: &[u8]) -> (Vec<Item
         .map(<[u8]>::trim_ascii)
         .filter(|l| !l.is_empty() && !reader.is_bookkeeping(l))
         .flat_map(|l| {
-            conversation += l.len() as u64 + 1;
+            // A huge line (an image in a tool result) counts as no more
+            // than `LINE_BUDGET_MAX`: the reader keeps little of it.
+            conversation += (l.len() as u64 + 1).min(LINE_BUDGET_MAX);
             reader.parse_line(&String::from_utf8_lossy(l))
         })
         .collect();
@@ -608,5 +614,30 @@ mod tests {
             .map(|i| i.text)
             .collect();
         assert_eq!(texts, ["reply 0", "reply 1"]);
+    }
+
+    #[test]
+    fn huge_lines_do_not_use_up_the_read_budget() {
+        // Ten conversation lines, each followed by a line as big as an
+        // image result: all ten come back, as without the padding.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        let mut text = String::new();
+        let huge = "x".repeat(800 * 1024);
+        for i in 0..10 {
+            text.push_str(&format!(
+                "{{\"type\":\"assistant\",\"timestamp\":\"t{i}\",\"message\":{{\"content\":[{{\"type\":\"text\",\"text\":\"reply {i}\"}}]}}}}\n"
+            ));
+            text.push_str(&format!(
+                "{{\"type\":\"user\",\"timestamp\":\"u{i}\",\"message\":{{\"content\":[{{\"type\":\"tool_result\",\"tool_use_id\":\"c{i}\",\"content\":\"{huge}\"}}]}}}}\n"
+            ));
+        }
+        std::fs::write(&path, text).unwrap();
+        let reader = claude::ClaudeCode::new(dir.path().to_path_buf());
+        let items = read_tail(&reader, &path, |items| items.len() >= 100)
+            .unwrap()
+            .items;
+        let replies = items.iter().filter(|i| i.kind == EntryKind::Text).count();
+        assert_eq!(replies, 10);
     }
 }
