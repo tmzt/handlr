@@ -1741,3 +1741,33 @@ Tests:
 
 The previous entry names the entry it replaces as "2026-10-24 12:5x EDT".
 That entry is dated 2026-10-24 12:35 EDT.
+
+## 2026-10-24 12:46 EDT — plan 20261022_03 L3 (full text and summary cards) and plan 20261023_05: the protocol and daemon half, departures
+
+Built in libhandlr_proto 0.3.9 (`Entry.text`, `CardBody.points` and `spoken`,
+`Slot.bookend`, `CARD_POINTS_MAX`), the handlr-companion literals, the daemon
+commit, and the companion literals commit after it.
+1. **`Entry.text` is sent only when `summary` was cut,** so the same text
+   isn't sent twice. The client shows `text` when present, else `summary`.
+2. **Links and sizes come from the full text.** `Entry.links` are found in
+   the full text. A text slot's `lines` and `chars` count the full text.
+   Tool slots still count the summary, since they fold.
+3. **The points request is in ADDITIONAL_PROMPTS.md.** The `spoken_summary`
+   prompt gains `- [#] max_points: 6` and a `points` block, appended after
+   the user message. The answer is split at a `POINTS:` line, list marks
+   are stripped, and each point is at most 160 characters. A prompts file
+   without `points` means no card summaries.
+4. **Which Finished cards are new:**
+   - on a tailer's first look, only the newest; after that, each card not
+     yet sent;
+   - answers are kept by serial and card-text hash (up to 1,024), and are
+     not retried after an error.
+5. **Before a subscription names the pane,** the prompt uses the agent's own
+   name ("claude").
+6. **Integration tests set `[summary] cards = false`** unless a test gives a
+   mock, so tests never call real Gemini.
+7. **Not yet done:**
+   - read aloud reusing `CardBody.spoken`, and `speech.summarize` checking
+     the card store (both go to the client half);
+   - the summary prompt's temperature, still not applied, as before.
+8. **The bookend mark** is `Slot.bookend: bool`, so `Slot` stays `Copy`.
