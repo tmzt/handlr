@@ -13,7 +13,8 @@
 //!   of its runs, after its turn has ended).
 //!
 //! The question is redacted, then cut to `PENDING_QUESTION_MAX`
-//! characters.
+//! characters. It is marked `about_plan`, with its plan's spoken name,
+//! by [`super::links::plan_question`] (the 21:57 EDT amendment).
 
 use libherdr::protocol::AgentStatus;
 
@@ -50,9 +51,14 @@ pub fn pending_question(
     if !asks(paragraph) {
         return None;
     }
+    let redacted = redact(paragraph);
+    let (about_plan, plan) = super::links::plan_question(&redacted);
     Some(PendingQuestion {
-        text: cut(&redact(paragraph), PENDING_QUESTION_MAX),
+        text: cut(&redacted, PENDING_QUESTION_MAX),
         ts: items[last].ts.clone(),
+        about_plan,
+        plan,
+        links: Vec::new(),
     })
 }
 
@@ -226,5 +232,22 @@ mod tests {
             tool(Role::Assistant, EntryKind::ToolUse),
         ];
         assert!(pending_question(&went_on, &AgentStatus::Working, true).is_none());
+    }
+
+    #[test]
+    fn a_question_about_a_plan_says_so_and_names_it() {
+        let asked = [text(
+            Role::Assistant,
+            "2",
+            "Wrote the amendment.\n\nShall I build `docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md` now?",
+        )];
+        let q = pending_question(&asked, &AgentStatus::Idle, false).unwrap();
+        assert!(q.about_plan);
+        assert_eq!(q.plan.as_deref(), Some("the overview screen plan"));
+        assert!(q.links.is_empty(), "links are the server's to add");
+        let plain = [text(Role::Assistant, "2", "Install it on the S23?")];
+        let q = pending_question(&plain, &AgentStatus::Idle, false).unwrap();
+        assert!(!q.about_plan);
+        assert_eq!(q.plan, None);
     }
 }

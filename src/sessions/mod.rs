@@ -14,6 +14,7 @@
 pub mod claude;
 pub mod codex;
 pub mod context;
+pub mod links;
 pub mod pending;
 pub mod redact;
 pub mod turn;
@@ -63,6 +64,7 @@ impl Item {
             kind: self.kind,
             tool: self.tool.clone(),
             summary: cut(&redact::redact(&self.text), ENTRY_SUMMARY_MAX),
+            links: Vec::new(),
         }
     }
 
@@ -315,6 +317,23 @@ pub struct Peeked {
     pub entries: Vec<Entry>,
     pub pending_question: Option<PendingQuestion>,
     pub turn: turn::Turn,
+}
+
+impl Peeked {
+    /// Give the entries and the pending question their repowiki links
+    /// (the 21:57 EDT amendment), when `[repowiki] url` is set and the
+    /// agent's directory has a site.
+    pub fn link(&mut self, repowiki: Option<&str>, cwd: Option<&str>) {
+        let Some(linker) = links::Linker::new(repowiki, cwd) else {
+            return;
+        };
+        for entry in &mut self.entries {
+            linker.link_entry(entry);
+        }
+        if let Some(q) = &mut self.pending_question {
+            linker.link_question(q);
+        }
+    }
 }
 
 impl Sessions {

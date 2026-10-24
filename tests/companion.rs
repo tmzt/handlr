@@ -1271,6 +1271,85 @@ async fn session_peek_gives_the_agent_view_its_entries_and_question() {
     assert!(r.get("error").is_none(), "{r}");
 }
 
+/// Give the mock's pane the plan question fixture's session, in
+/// `/work/plans`.
+async fn give_plan_session(daemon: &Daemon) {
+    match daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let pane = &mut state.snapshot.workspaces[0].tabs[0].panes[0];
+            pane.cwd = Some("/work/plans".to_string());
+            pane.agent_session = Some(AgentSession {
+                source: "herdr:claude".to_string(),
+                agent: "claude".to_string(),
+                kind: "id".to_string(),
+                value: "00000000-0000-4000-8000-0000000000e5".to_string(),
+            });
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+}
+
+#[tokio::test]
+async fn a_plan_question_is_marked_and_docs_paths_link_to_repowiki() {
+    // Plan 20261022_03, the 21:57 EDT amendment.
+    let mut cfg = confirming();
+    cfg.repowiki.url = Some("http://wiki:8088/".to_string());
+    let env = start(cfg).await;
+    give_plan_session(&env.daemon).await;
+    set_status(&env.daemon, AgentStatus::Idle).await;
+    let (mut c, _) = Client::companion(&env).await;
+
+    let r = c.call("session.peek", json!({"pane_id": "p1"})).await;
+    let session = &r["result"]["session"];
+    let q = &session["pending_question"];
+    assert_eq!(q["about_plan"], true, "{r}");
+    assert_eq!(q["plan"], "the overview screen plan");
+    let plan = "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md";
+    let plan_url = "http://wiki:8088/#/work--plans/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN";
+    assert_eq!(q["links"], json!([{"text": plan, "url": plan_url}]), "{r}");
+    let reply = session["entries"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        reply["links"],
+        json!([
+            {"text": "docs/FONT_X.md", "url": "http://wiki:8088/#/work--plans/docs/FONT_X"},
+            {"text": plan, "url": plan_url},
+        ]),
+        "{reply}"
+    );
+    // The user's entry names no path: no links on the wire.
+    assert!(session["entries"][0].get("links").is_none(), "{r}");
+
+    // agents.list's question carries them too.
+    let r = c.call("agents.list", json!({})).await;
+    let q = &r["result"]["agents"][0]["session"]["pending_question"];
+    assert_eq!(q["links"][0]["url"], plan_url, "{r}");
+
+    // Without `[repowiki] url`, the question is still about the plan, but
+    // nothing links.
+    let env = start(confirming()).await;
+    give_plan_session(&env.daemon).await;
+    set_status(&env.daemon, AgentStatus::Idle).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("session.peek", json!({"pane_id": "p1"})).await;
+    let session = &r["result"]["session"];
+    assert_eq!(session["pending_question"]["about_plan"], true, "{r}");
+    assert!(session["pending_question"].get("links").is_none(), "{r}");
+    assert!(
+        session["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e.get("links").is_none()),
+        "{r}"
+    );
+}
+
 #[tokio::test]
 async fn a_pane_without_a_session_peeks_as_null() {
     let env = start(confirming()).await;

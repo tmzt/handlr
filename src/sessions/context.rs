@@ -235,6 +235,9 @@ mod tests {
         let q = PendingQuestion {
             text: "Shall I go on?".to_string(),
             ts: "t5".to_string(),
+            about_plan: false,
+            plan: None,
+            links: vec![],
         };
         let block = AgentContext::new("Claude", "p1", "blocked", &items, Some(q));
         let text = block.render();
@@ -254,6 +257,9 @@ mod tests {
                 let q = PendingQuestion {
                     text: format!("Question {a}?"),
                     ts: "t".to_string(),
+                    about_plan: false,
+                    plan: None,
+                    links: vec![],
                 };
                 AgentContext::new(
                     &format!("Agent {a}"),

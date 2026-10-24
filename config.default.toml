@@ -84,3 +84,11 @@ allow_arbitrary_commands = false
 # key = "~/.config/handlr/link_key"      # the server's private key, mode 0600
 # auth = "~/.config/handlr/auth.toml"    # the paired clients
 # revoke_check_secs = 60                 # how often open connections are checked
+
+# Links from `docs/…` paths in the companion's agent view to their pages on
+# repowiki (`~/src/repowiki`). Each agent's site is its directory's parent
+# and own name joined with `--` (`~/src/handlr` is `src--handlr`); a path
+# links to `<url>/#/<site>/<path without .md>`. Without a url nothing is
+# linked.
+# [repowiki]
+# url = "http://localhost:8088"

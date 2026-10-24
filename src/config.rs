@@ -27,6 +27,18 @@ pub struct AppConfig {
     pub naming: NamingConfig,
     #[serde(default)]
     pub link: LinkConfig,
+    #[serde(default)]
+    pub repowiki: RepowikiConfig,
+}
+
+/// `[repowiki]`: links from `docs/…` paths in the agent view to their
+/// pages on repowiki (plan 20261022_03, the 21:57 EDT amendment).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct RepowikiConfig {
+    /// The repowiki's address (`http://host:8088`). Without it nothing is
+    /// linked.
+    pub url: Option<String>,
 }
 
 fn default_agents() -> Vec<AgentConfig> {
@@ -68,6 +80,7 @@ impl Default for AppConfig {
             server: ServerConfig::default(),
             naming: NamingConfig::default(),
             link: LinkConfig::default(),
+            repowiki: RepowikiConfig::default(),
         }
     }
 }
@@ -613,6 +626,14 @@ revoke_check_secs = 5
         assert_eq!(cfg.link.key.as_deref(), Some("/tmp/k"));
         assert_eq!(cfg.link.auth.as_deref(), Some("/tmp/a.toml"));
         assert_eq!(cfg.link.revoke_check_secs, Some(5));
+    }
+
+    #[test]
+    fn repowiki_is_off_unless_set() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.repowiki.url, None);
+        let cfg: AppConfig = toml::from_str("[repowiki]\nurl = \"http://w:8088\"\n").unwrap();
+        assert_eq!(cfg.repowiki.url.as_deref(), Some("http://w:8088"));
     }
 
     #[test]

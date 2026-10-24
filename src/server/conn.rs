@@ -515,7 +515,8 @@ fn agent_session(
     if !sessions_here(daemon) || daemon.sessions.reader_for(&pane.agent).is_none() {
         return None;
     }
-    let peeked = daemon.sessions.peek(pane, 1)?;
+    let mut peeked = daemon.sessions.peek(pane, 1)?;
+    peeked.link(daemon.repowiki.as_deref(), pane.cwd.as_deref());
     let session = common::AgentSessionInfo {
         session_id: peeked.located.session_id,
         matched: peeked.located.matched.into(),
@@ -699,6 +700,10 @@ async fn call(
             let session = sessions_here(daemon)
                 .then(|| daemon.sessions.peek(pane, p.entries))
                 .flatten()
+                .map(|mut peeked| {
+                    peeked.link(daemon.repowiki.as_deref(), pane.cwd.as_deref());
+                    peeked
+                })
                 .map(|peeked| common::SessionPeek {
                     session_id: peeked.located.session_id,
                     matched: peeked.located.matched.into(),
