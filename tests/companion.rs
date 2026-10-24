@@ -1291,7 +1291,7 @@ async fn give_plan_session(daemon: &Daemon) {
 }
 
 #[tokio::test]
-async fn a_plan_question_is_marked_and_docs_paths_link_to_repowiki() {
+async fn a_plan_question_is_marked_and_its_paths_and_urls_link() {
     // Plan 20261022_03, the 21:57 EDT amendment.
     let mut cfg = confirming();
     cfg.repowiki.url = Some("http://wiki:8088/".to_string());
@@ -1307,7 +1307,12 @@ async fn a_plan_question_is_marked_and_docs_paths_link_to_repowiki() {
     assert_eq!(q["plan"], "the overview screen plan");
     let plan = "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md";
     let plan_url = "http://wiki:8088/#/work--plans/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN";
-    assert_eq!(q["links"], json!([{"text": plan, "url": plan_url}]), "{r}");
+    let web = json!({"text": "https://example.com/spec", "url": "https://example.com/spec"});
+    assert_eq!(
+        q["links"],
+        json!([{"text": plan, "url": plan_url}, web.clone()]),
+        "{r}"
+    );
     let reply = session["entries"]
         .as_array()
         .unwrap()
@@ -1319,6 +1324,7 @@ async fn a_plan_question_is_marked_and_docs_paths_link_to_repowiki() {
         json!([
             {"text": "docs/FONT_X.md", "url": "http://wiki:8088/#/work--plans/docs/FONT_X"},
             {"text": plan, "url": plan_url},
+            web.clone(),
         ]),
         "{reply}"
     );
@@ -1330,8 +1336,8 @@ async fn a_plan_question_is_marked_and_docs_paths_link_to_repowiki() {
     let q = &r["result"]["agents"][0]["session"]["pending_question"];
     assert_eq!(q["links"][0]["url"], plan_url, "{r}");
 
-    // Without `[repowiki] url`, the question is still about the plan, but
-    // nothing links.
+    // Without `[repowiki] url`, the question is still about the plan, and
+    // only its web link links.
     let env = start(confirming()).await;
     give_plan_session(&env.daemon).await;
     set_status(&env.daemon, AgentStatus::Idle).await;
@@ -1339,15 +1345,10 @@ async fn a_plan_question_is_marked_and_docs_paths_link_to_repowiki() {
     let r = c.call("session.peek", json!({"pane_id": "p1"})).await;
     let session = &r["result"]["session"];
     assert_eq!(session["pending_question"]["about_plan"], true, "{r}");
-    assert!(session["pending_question"].get("links").is_none(), "{r}");
-    assert!(
-        session["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|e| e.get("links").is_none()),
-        "{r}"
-    );
+    assert_eq!(session["pending_question"]["links"], json!([web]), "{r}");
+    let entries = session["entries"].as_array().unwrap();
+    assert!(entries[0].get("links").is_none(), "{r}");
+    assert_eq!(entries.last().unwrap()["links"], json!([web]), "{r}");
 }
 
 #[tokio::test]
