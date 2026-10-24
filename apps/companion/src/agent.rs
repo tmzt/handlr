@@ -793,6 +793,11 @@ struct Drag {
     last_t: Duration,
     /// Past the slop: a scroll, not a tap.
     moved: bool,
+    /// The fling running when the finger came down, if any: a quick flick
+    /// the same way adds to it.
+    carried: f32,
+    /// When the finger came down.
+    down: Duration,
     /// The latest samples, oldest first, for the release speed. It is
     /// measured over a span, not between two moves, because moves can
     /// arrive together, microseconds apart, and divide into absurd speeds
@@ -817,26 +822,41 @@ impl Drag {
 /// measure, and at most `MAX_FLING`.
 fn release_speed(d: &Drag, s: f32) -> f32 {
     let samples = &d.samples[..d.sampled];
-    let Some(&(last_t, last_y)) = samples.last() else {
+    let Some(&(last_t, _)) = samples.last() else {
         return 0.0;
     };
-    // The oldest sample within the window; past it, the newest before it,
-    // so the span is not cut short when moves come in bursts.
-    let i = samples
+    // The samples within the window, and at least one before it when the
+    // window holds a span too short (moves can come in bursts).
+    let mut i = samples
         .iter()
         .position(|&(t, _)| last_t.saturating_sub(t) <= SPEED_WINDOW)
         .unwrap_or(0);
-    let i = if last_t.saturating_sub(samples[i].0) < SPEED_SPAN_MIN {
-        i.saturating_sub(1)
-    } else {
-        i
-    };
-    let (first_t, first_y) = samples[i];
-    let span = last_t.saturating_sub(first_t);
+    if last_t.saturating_sub(samples[i].0) < SPEED_SPAN_MIN {
+        i = i.saturating_sub(1);
+    }
+    let window = &samples[i..];
+    let span = last_t.saturating_sub(window[0].0);
     if span < SPEED_SPAN_MIN {
         return 0.0;
     }
-    let v = (last_y - first_y) / span.as_secs_f32();
+    // A least-squares line through them, weighted toward the newest, so
+    // the speed is the finger's at release, not the flick's average.
+    let (mut sw, mut st, mut sy, mut stt, mut sty) = (0.0f32, 0.0, 0.0, 0.0, 0.0);
+    for &(t, y) in window {
+        let age = last_t.saturating_sub(t).as_secs_f32();
+        let x = -age;
+        let w = 1.0 - 0.5 * (age / SPEED_WINDOW.as_secs_f32()).min(1.0);
+        sw += w;
+        st += w * x;
+        sy += w * y;
+        stt += w * x * x;
+        sty += w * x * y;
+    }
+    let den = sw * stt - st * st;
+    if den.abs() < f32::EPSILON {
+        return 0.0;
+    }
+    let v = (sw * sty - st * sy) / den;
     v.clamp(-MAX_FLING * s, MAX_FLING * s)
 }
 
@@ -846,13 +866,16 @@ pub(crate) const SLOP: f32 = 10.0;
 pub(crate) const FLING_DT_MAX: f32 = 1.0 / 30.0;
 /// The momentum's decay per second: the speed falls to `e^-DECAY` of
 /// itself each second.
-pub(crate) const DECAY: f32 = 3.2;
+pub(crate) const DECAY: f32 = 2.0;
 /// Slower than this (points per second), a fling stops.
 pub(crate) const MIN_FLING: f32 = 30.0;
 /// The fastest fling (points per second), as libcontrols' scroll pane.
 pub(crate) const MAX_FLING: f32 = 8000.0;
 /// The span the release speed is measured over, back from the last move.
-const SPEED_WINDOW: Duration = Duration::from_millis(80);
+const SPEED_WINDOW: Duration = Duration::from_millis(100);
+/// A flick within this long of touching a running fling, the same way,
+/// adds to it (as Android and iOS do).
+const FLING_BOOST_TOUCH: Duration = Duration::from_millis(400);
 /// Samples kept for it.
 const SAMPLES: usize = 16;
 /// A shorter span gives no speed: too little to measure.
@@ -2015,8 +2038,10 @@ impl AgentScreen {
         let s = self.scale();
         match phase {
             TouchPhase::Started => {
-                self.fling = 0.0;
+                let carried = std::mem::take(&mut self.fling);
                 self.drag = Some(Drag {
+                    carried,
+                    down: now,
                     id,
                     start: [x, y],
                     last_y: y,
@@ -2049,7 +2074,12 @@ impl AgentScreen {
                 if d.moved {
                     // A finger that stopped before lifting does not fling.
                     let still = now.saturating_sub(d.last_t) > Duration::from_millis(100);
-                    let velocity = release_speed(&d, s);
+                    let mut velocity = release_speed(&d, s);
+                    let quick = now.saturating_sub(d.down) <= FLING_BOOST_TOUCH;
+                    if quick && velocity * d.carried > 0.0 {
+                        velocity += d.carried;
+                    }
+                    let velocity = velocity.clamp(-MAX_FLING * s, MAX_FLING * s);
                     if !still && velocity.abs() > MIN_FLING * s {
                         self.fling = velocity;
                     }
@@ -2861,6 +2891,57 @@ mod tests {
         b.touch(1, TouchPhase::Moved, 540.0, 900.0, us);
         b.touch(1, TouchPhase::Ended, 540.0, 900.0, 2 * us);
         assert_eq!(b.fling, 0.0);
+    }
+
+    #[test]
+    fn the_release_speed_is_the_fingers_at_release() {
+        // A flick that speeds up: its speed at release is above its
+        // average over the window.
+        let mut a = screen(conversation(40), vec![], None);
+        a.touch(1, TouchPhase::Started, 540.0, 800.0, Duration::ZERO);
+        let mut y = 800.0;
+        let mut t = Duration::ZERO;
+        for i in 1..=6 {
+            t += Duration::from_millis(16);
+            y += 10.0 * i as f32;
+            a.touch(1, TouchPhase::Moved, 540.0, y, t);
+        }
+        a.touch(1, TouchPhase::Ended, 540.0, y, t + Duration::from_millis(1));
+        let average = (y - 800.0) / t.as_secs_f32();
+        assert!(a.fling > average, "{} <= {average}", a.fling);
+    }
+
+    #[test]
+    fn a_quick_flick_the_same_way_adds_to_a_running_fling() {
+        let flick = |a: &mut AgentScreen, from: f32, to: f32, t: Duration| {
+            let end = drag(a, from, to, 4, t);
+            a.touch(
+                1,
+                TouchPhase::Ended,
+                540.0,
+                to,
+                end + Duration::from_millis(1),
+            );
+            end
+        };
+        let mut a = screen(conversation(80), vec![], None);
+        let t = flick(&mut a, 800.0, 1000.0, Duration::ZERO);
+        let first = a.fling;
+        a.tick(MS);
+        let running = a.fling;
+        flick(&mut a, 800.0, 1000.0, t + Duration::from_millis(50));
+        assert!(a.fling > first, "{} <= {first}", a.fling);
+        assert!(a.fling > running);
+        // The other way: no boost, just the new flick.
+        let mut b = screen(conversation(80), vec![], None);
+        let t = flick(&mut b, 800.0, 1000.0, Duration::ZERO);
+        b.tick(MS);
+        flick(&mut b, 1000.0, 800.0, t + Duration::from_millis(50));
+        assert!(
+            b.fling < 0.0 && b.fling.abs() <= first * 1.01,
+            "{}",
+            b.fling
+        );
     }
 
     #[test]
