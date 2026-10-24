@@ -266,3 +266,41 @@ Each step is one crate or subproject, one commit (Rule 3.1).
    contents can be read back from it in place of the daemon.
 2. **`LIVE_INLINE`:** contents ride along for the newest 8 indexes. Should
    that be more, or only while the client says it is following?
+
+## Amendment — 2026-10-24 00:03 EDT: one inclusive range, `from` and `to`, each open when `None`
+
+The owner (2026-10-24): "gt/lt are just from/to with None"; then "yes"
+to this amendment. This replaces `gt` and `lt` everywhere in the plan:
+decision 3's `SessionSubscribeParams.gt`, decision 4's
+`SessionContentParams` fields and the paragraph after it, and the
+ranges named in steps 3 and 6.
+
+1. **`session.content` takes one range:**
+
+   ```rust
+   pub struct SessionContentParams {
+       pub subscription_id: u64,
+       /// Inclusive bounds; None is open on that side.
+       pub from: Option<u64>,
+       pub to: Option<u64>,
+       /// 1 to SECTIONS_MAX (200); default 50.
+       pub limit: usize,
+       pub slots_only: bool,
+   }
+   ```
+
+   - `from` only: the next `limit` sections from `from` on;
+   - `to` only: the `limit` sections ending at `to`, oldest first;
+   - both: the range, cut at `limit` from `from`, with `more` set when
+     cut;
+   - neither: the newest `limit` sections.
+
+   `SessionContentResult` is unchanged.
+2. **`session.subscribe` takes `from: Option<u64>`** in place of `gt`:
+   the outline starts at that index (the client's newest held index plus
+   one, to resume), and at 0 when it is `None` or the file is not the
+   one the client holds.
+3. **Steps.** Step 3's tests answer the four range shapes above, in place
+   of "`gt`, `lt`, both, and `from`/`to`", and `from` resumes in place of
+   `gt`. Step 6's log fetches a content range by `from` only, `to` only
+   and both.
