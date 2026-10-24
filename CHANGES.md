@@ -1930,3 +1930,38 @@ Android resolutions". The icon and its generator are in `apps/companion/icon/`.
   `android:roundIcon`. aapt shows `mipmap/ic_launcher`.
 - **Temporary:** this hook goes away once libmobile and libmorph's icon plans
   (Drafts, awaiting the owner) give `Project::icon(..)`.
+
+## 2026-10-24 14:10 EDT — libmorph 0.4.1 wired into the companion (plan 20261024_02's Background, Notifications, battery and copy; plan 20261022_03 L3's memory grades): departures
+
+Built in the handlr-companion, handlr-audio and companion commits before this
+entry, merged with the launcher icon (`build.rs` keeps both the icon's
+`extra_script` and the service and battery declarations).
+1. **handlr-audio's libmorph pin moved too,** with the root lock (libdevice 0.1.1
+   to 0.1.2), since the graph holds one libmorph.
+2. **The notification follows the client from threads.** libmorph's Android
+   runner draws no frames while suspended, so the notification's content and
+   the alerts are driven from the `net` thread (`Companion::spawn_tapped`) and
+   a `notify` thread.
+3. **A title change uses `update`,** because `update_text` can't change the
+   title.
+4. **"Done"** means a turn went from working to stopped since handlr was last
+   on screen. Returning to the screen clears it. The approval line uses the
+   asked confirmation's command, because `Event::Confirm` names no pane.
+5. **"n MB this session"** counts each message's plaintext from the client's
+   start, across reconnections. The handshake's `hello` isn't counted.
+6. **A `notifications_asked` marker** in the data directory tells "never asked"
+   from "won't ask again". Delete data removes it.
+7. **Background reports ready on every host,** so "needs an app update" no
+   longer shows on the desktop. Starting the service there gives
+   `Unsupported`, which is logged.
+8. **On the desktop, only `settings.toml` moves** to the `APP_ID` data directory:
+   once, never over an existing file, and never in a scripted run.
+9. **The vendor battery row** shows on Samsung, because libmorph can't tell
+   whether a vendor page exists. It falls back to the app's page.
+10. **`NotificationHidden` is only logged:** there is no inline note for it yet.
+
+Not possible yet in libmorph 0.4.1:
+- **A separate alert notification:** alerts are detected and logged, not
+  posted.
+- **Knowing what was tapped:** a tap on the notification opens the app but
+  doesn't say what was tapped, so it can't open that agent.
