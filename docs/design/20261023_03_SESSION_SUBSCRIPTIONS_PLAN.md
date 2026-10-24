@@ -1,7 +1,7 @@
 ---
 title: Session subscriptions, pushed session entries
 date: 2026-10-23
-status: Draft
+status: In implementation
 covers:
   - "A subscription to an agent's session: the daemon tails the session
     file and pushes new, redacted entries to every subscriber as they are
@@ -906,3 +906,10 @@ and brings the plan in line with what was built since it was drafted.
 
 Item 3 of the previous amendment cites "the 22:53 EDT CHANGES.md entry";
 that entry, "the agent view keeps what it showed", is at 22:51 EDT.
+
+## Amendment — 2026-10-23 23:02 EDT: implementation has started; the document is now immutable
+
+The owner approved building the plan on 2026-10-23: "Approve the plan".
+Implementation starts with step 1 (libherdr 0.3.0, the focus and pane
+subscriptions). From this commit the document is frozen; departures are
+recorded in CHANGES.md (Rule 1.7).

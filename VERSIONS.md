@@ -122,3 +122,22 @@ Additive, by the owner's ruling ("appending to a struct is additive"):
   out of the wire when absent): an entry that is context rather than the
   user's or the agent's own words, and where it is from: `"task"`,
   `"peer:<name>"`, `"agent:<id>"`, `"recap"` or `"compact"`.
+
+## libherdr 0.3.0 — 2026-10-23 (the commit tagged `libherdr-v0.3.0`)
+
+Not strictly additive (plan 20261023_03, step 1: herdr's focus and pane
+lifecycle, pushed):
+
+- **Breaking:** `events::Subscription` gains `PaneFocused`, `TabFocused`,
+  `PaneUpdated` and `PaneClosed` (`pane.focused`, `tab.focused`,
+  `pane.updated`, `pane.closed`, with no fields). `Subscription` is an
+  exhaustive enum.
+- **Breaking:** `Subscription::pane_id` returns `Option<&str>`: `None`
+  for the four new subscriptions, which herdr does not scope to a pane.
+- **Breaking:** `events::HerdrEvent` gains `PaneFocused { pane_id,
+  workspace_id }`, `TabFocused { tab_id, workspace_id }`,
+  `PaneUpdated(Box<PaneInfo>)` and `PaneClosed { pane_id, workspace_id }`,
+  decoded from `pane_focused`, `tab_focused`, `pane_updated` and
+  `pane_closed` (or the dotted spellings). `HerdrEvent` is an exhaustive
+  enum; these events were `Other` before.
+- **Added:** `Subscription::focus_and_panes()`, the four as an array.

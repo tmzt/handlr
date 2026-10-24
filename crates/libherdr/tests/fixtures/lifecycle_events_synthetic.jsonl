@@ -1,0 +1,5 @@
+{"event":"pane_focused","data":{"type":"pane_focused","pane_id":"w2:pZ","workspace_id":"w2"}}
+{"event":"tab_focused","data":{"type":"tab_focused","tab_id":"w2:t3","workspace_id":"w2"}}
+{"event":"pane_updated","data":{"type":"pane_updated","pane":{"pane_id":"w2:pZ","terminal_id":"term-7","workspace_id":"w2","tab_id":"w2:t3","focused":true,"agent_status":"working","revision":42,"agent":"claude","cwd":"/src/handlr","agent_session":{"source":"herdr:claude","agent":"claude","kind":"id","value":"00000000-0000-4000-8000-0000000000a1"}}}}
+{"event":"pane_closed","data":{"type":"pane_closed","pane_id":"w2:pV","workspace_id":"w2"}}
+{"event":"pane.focused","data":{"type":"pane_focused","pane_id":"w1:p1","workspace_id":"w1"}}

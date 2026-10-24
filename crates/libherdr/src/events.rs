@@ -26,7 +26,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::protocol::AgentStatus;
+use crate::protocol::{AgentStatus, PaneInfo};
 
 /// A subscription requested from herdr.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +43,20 @@ pub enum Subscription {
     /// Fires when `pane_id` produces output matching a pattern.
     #[serde(rename = "pane.scroll_changed")]
     PaneScrollChanged { pane_id: String },
+    /// Fires when any pane takes the focus (`pane_focused`). Not scoped to
+    /// a pane.
+    #[serde(rename = "pane.focused")]
+    PaneFocused,
+    /// Fires when any tab takes the focus (`tab_focused`). Not scoped.
+    #[serde(rename = "tab.focused")]
+    TabFocused,
+    /// Fires when any pane changes (`pane_updated`), such as its agent's
+    /// session. Not scoped.
+    #[serde(rename = "pane.updated")]
+    PaneUpdated,
+    /// Fires when any pane closes (`pane_closed`). Not scoped.
+    #[serde(rename = "pane.closed")]
+    PaneClosed,
 }
 
 impl Subscription {
@@ -54,12 +68,25 @@ impl Subscription {
         }
     }
 
-    /// The pane this subscription is scoped to.
-    pub fn pane_id(&self) -> &str {
+    /// The pane this subscription is scoped to; `None` for the focus and
+    /// pane lifecycle subscriptions, which herdr does not scope.
+    pub fn pane_id(&self) -> Option<&str> {
         match self {
-            Self::PaneAgentStatusChanged { pane_id, .. } => pane_id,
-            Self::PaneScrollChanged { pane_id } => pane_id,
+            Self::PaneAgentStatusChanged { pane_id, .. } => Some(pane_id),
+            Self::PaneScrollChanged { pane_id } => Some(pane_id),
+            Self::PaneFocused | Self::TabFocused | Self::PaneUpdated | Self::PaneClosed => None,
         }
+    }
+
+    /// The four unscoped subscriptions for herdr's focus and its panes'
+    /// lifecycle (plan 20261023_03, decision 12).
+    pub fn focus_and_panes() -> [Subscription; 4] {
+        [
+            Self::PaneFocused,
+            Self::TabFocused,
+            Self::PaneUpdated,
+            Self::PaneClosed,
+        ]
     }
 }
 
@@ -102,6 +129,24 @@ pub enum HerdrEvent {
     SubscriptionStarted,
     /// An agent changed status in a watched pane.
     AgentStatusChanged(PaneAgentStatusChanged),
+    /// A pane took the focus (`pane_focused`).
+    PaneFocused {
+        pane_id: String,
+        workspace_id: String,
+    },
+    /// A tab took the focus (`tab_focused`); its focused pane is read from
+    /// a snapshot.
+    TabFocused {
+        tab_id: String,
+        workspace_id: String,
+    },
+    /// A pane changed (`pane_updated`), with the pane as herdr now has it.
+    PaneUpdated(Box<PaneInfo>),
+    /// A pane closed (`pane_closed`).
+    PaneClosed {
+        pane_id: String,
+        workspace_id: String,
+    },
     /// A subscribed event this crate does not model yet.
     Other { event: String, data: Value },
     /// The server rejected the subscription request.
@@ -155,7 +200,39 @@ impl HerdrEvent {
                 }
             }
         }
+        if let Some(decoded) = Self::lifecycle(&event, &data) {
+            return Some(decoded);
+        }
         Some(Self::Other { event, data })
+    }
+
+    /// The focus and pane lifecycle events, in either spelling; `None`
+    /// for other events and for a payload that does not decode.
+    fn lifecycle(event: &str, data: &Value) -> Option<Self> {
+        let text = |key: &str| data.get(key).and_then(Value::as_str).map(str::to_string);
+        let decoded = match event.replace('.', "_").as_str() {
+            "pane_focused" => Self::PaneFocused {
+                pane_id: text("pane_id")?,
+                workspace_id: text("workspace_id").unwrap_or_default(),
+            },
+            "tab_focused" => Self::TabFocused {
+                tab_id: text("tab_id")?,
+                workspace_id: text("workspace_id").unwrap_or_default(),
+            },
+            "pane_closed" => Self::PaneClosed {
+                pane_id: text("pane_id")?,
+                workspace_id: text("workspace_id").unwrap_or_default(),
+            },
+            "pane_updated" => match serde_json::from_value::<PaneInfo>(data.get("pane")?.clone()) {
+                Ok(pane) => Self::PaneUpdated(Box::new(pane)),
+                Err(e) => {
+                    log::warn!("libherdr: pane_updated did not deserialize: {e}");
+                    return None;
+                }
+            },
+            _ => return None,
+        };
+        Some(decoded)
     }
 }
 
@@ -171,6 +248,82 @@ mod tests {
         assert_eq!(json["pane_id"], "w1:p6");
         // The optional filter is omitted rather than sent as null.
         assert!(json.get("agent_status").is_none());
+    }
+
+    #[test]
+    fn test_focus_and_pane_subscriptions_carry_no_pane() {
+        let subs = Subscription::focus_and_panes();
+        let json = serde_json::to_value(&subs).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {"type": "pane.focused"},
+                {"type": "tab.focused"},
+                {"type": "pane.updated"},
+                {"type": "pane.closed"}
+            ])
+        );
+        for sub in &subs {
+            assert_eq!(sub.pane_id(), None);
+            let back: Subscription =
+                serde_json::from_value(serde_json::to_value(sub).unwrap()).unwrap();
+            assert_eq!(&back, sub);
+        }
+        assert_eq!(Subscription::agent_status("w1:p6").pane_id(), Some("w1:p6"));
+    }
+
+    /// Synthetic events, written from herdr's API schema (`herdr api schema
+    /// --json`: protocol 19, schema_version 1, read on 2026-10-23). No live
+    /// event was recorded (CHANGES.md, plan 20261023_03, step 1).
+    const LIFECYCLE_FIXTURE: &str =
+        include_str!("../tests/fixtures/lifecycle_events_synthetic.jsonl");
+
+    #[test]
+    fn test_parse_focus_and_pane_events_from_the_fixture() {
+        let events: Vec<HerdrEvent> = LIFECYCLE_FIXTURE
+            .lines()
+            .filter_map(HerdrEvent::from_line)
+            .collect();
+        assert_eq!(events.len(), 5, "{events:?}");
+        assert_eq!(
+            events[0],
+            HerdrEvent::PaneFocused {
+                pane_id: "w2:pZ".to_string(),
+                workspace_id: "w2".to_string()
+            }
+        );
+        assert_eq!(
+            events[1],
+            HerdrEvent::TabFocused {
+                tab_id: "w2:t3".to_string(),
+                workspace_id: "w2".to_string()
+            }
+        );
+        match &events[2] {
+            HerdrEvent::PaneUpdated(pane) => {
+                assert_eq!(pane.pane_id, "w2:pZ");
+                assert_eq!(pane.cwd.as_deref(), Some("/src/handlr"));
+                assert!(pane.focused);
+                let session = pane.agent_session.as_ref().expect("a session");
+                assert_eq!(session.id(), Some("00000000-0000-4000-8000-0000000000a1"));
+            }
+            other => panic!("expected pane_updated, got {other:?}"),
+        }
+        assert_eq!(
+            events[3],
+            HerdrEvent::PaneClosed {
+                pane_id: "w2:pV".to_string(),
+                workspace_id: "w2".to_string()
+            }
+        );
+        // The dotted spelling decodes the same.
+        assert_eq!(
+            events[4],
+            HerdrEvent::PaneFocused {
+                pane_id: "w1:p1".to_string(),
+                workspace_id: "w1".to_string()
+            }
+        );
     }
 
     #[test]
@@ -214,10 +367,15 @@ mod tests {
 
     #[test]
     fn test_parse_unmodelled_event_is_preserved() {
-        let line =
-            r#"{"event":"pane_updated","data":{"type":"pane_updated","pane":{"pane_id":"w1:p6"}}}"#;
+        let line = r#"{"event":"layout_updated","data":{"type":"layout_updated"}}"#;
         match HerdrEvent::from_line(line).expect("should decode") {
-            HerdrEvent::Other { event, .. } => assert_eq!(event, "pane_updated"),
+            HerdrEvent::Other { event, .. } => assert_eq!(event, "layout_updated"),
+            other => panic!("expected passthrough, got {other:?}"),
+        }
+        // A lifecycle event whose payload lacks its pane stays `Other`.
+        let line = r#"{"event":"pane_focused","data":{"type":"pane_focused"}}"#;
+        match HerdrEvent::from_line(line).expect("should decode") {
+            HerdrEvent::Other { event, .. } => assert_eq!(event, "pane_focused"),
             other => panic!("expected passthrough, got {other:?}"),
         }
     }
