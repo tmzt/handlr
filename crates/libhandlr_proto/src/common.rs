@@ -378,6 +378,13 @@ pub struct Entry {
     /// speaking. Left out of the wire when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// The entry's full redacted text, up to the reader's limits (32 KiB
+    /// for text, 4,000 characters for a tool call or result), where
+    /// `summary` is cut (plan 20261022_03, the L3 amendment of 2026-10-24
+    /// 11:54 EDT). Left out of the wire when absent, as from an older
+    /// daemon: a client then shows `summary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
 }
 
 /// A link in an entry's or question's text: `text` is what is written
@@ -839,7 +846,20 @@ pub struct CardBody {
     /// The links in `text`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// A point-by-point summary of the reply, at most `CARD_POINTS_MAX`
+    /// short lines, filled by the daemon's `[summary] cards` (plan
+    /// 20261022_03, the L3 amendment of 2026-10-24 12:06 EDT). Empty, and
+    /// left out of the wire, until then or without Gemini.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<String>,
+    /// The text to read aloud for the card, filled with `points`. Left out
+    /// of the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spoken: Option<String>,
 }
+
+/// The most `CardBody::points`.
+pub const CARD_POINTS_MAX: usize = 6;
 
 /// One unit of the agent view (A1, A3): sections are flat and ordered by
 /// serial. A section that changes (a text block that grows, a tool that
@@ -880,6 +900,12 @@ pub struct Slot {
     /// Bumped each time the section is replaced, from 0.
     #[serde(default)]
     pub rev: u32,
+    /// A Finished card's slot: a bookend, which closes a section of the
+    /// session, for the scrollbar's section labels (plan 20261022_03, the
+    /// L3 amendment of 2026-10-24 12:27 EDT). False, and left out of the
+    /// wire, otherwise.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bookend: bool,
 }
 
 /// The most slots one outline delivery carries.
@@ -1288,6 +1314,7 @@ mod tests {
                 summary: "Done.".into(),
                 links: vec![],
                 origin: None,
+                text: None,
             }],
             card: None,
             index: 0,
@@ -1327,6 +1354,8 @@ mod tests {
                     text: "docs/design/X_PLAN.md".into(),
                     url: "u".into(),
                 }],
+                points: vec![],
+                spoken: None,
             }),
             index: 0,
         };
@@ -1429,6 +1458,7 @@ mod tests {
             lines: 12,
             chars: 480,
             rev: 2,
+            bookend: false,
         };
         round_trip(slot);
         assert_eq!(
@@ -1575,6 +1605,7 @@ mod tests {
             summary: "hi".into(),
             links: vec![],
             origin: None,
+            text: None,
         };
         let text = serde_json::to_string(&entry).unwrap();
         assert!(!text.contains("origin"), "{text}");
@@ -1601,6 +1632,7 @@ mod tests {
             summary: "Bash {\"command\":\"ls\"}".into(),
             links: vec![],
             origin: None,
+            text: None,
         });
         round_trip(Entry {
             ts: "t".into(),
@@ -1610,6 +1642,7 @@ mod tests {
             summary: "Build finished".into(),
             links: vec![],
             origin: Some("task".into()),
+            text: None,
         });
         round_trip(Entry {
             ts: "t".into(),
@@ -1622,6 +1655,7 @@ mod tests {
                 url: "http://wiki/#/src--handlr/docs/design/X_PLAN".into(),
             }],
             origin: None,
+            text: None,
         });
         round_trip(PendingQuestion {
             text: "Shall I go on?".into(),
@@ -1739,6 +1773,7 @@ mod tests {
                     summary: "hi".to_string(),
                     links: vec![],
                     origin: None,
+                    text: None,
                 }],
                 pending_question: None,
             }),
@@ -2092,5 +2127,56 @@ mod tests {
             .unwrap(),
             json!({"name": "s23", "paired": true})
         );
+    }
+
+    #[test]
+    fn full_text_points_spoken_and_bookends_are_appended_and_defaulted() {
+        // Old JSON reads with the new fields empty, and empty ones stay off
+        // the wire.
+        let old: Entry = serde_json::from_value(
+            json!({"ts": "t", "role": "assistant", "kind": "text", "summary": "hi"}),
+        )
+        .unwrap();
+        assert_eq!(old.text, None);
+        assert!(serde_json::to_value(&old).unwrap().get("text").is_none());
+        let full = Entry {
+            text: Some("hi, and the rest".into()),
+            ..old
+        };
+        round_trip(full.clone());
+        assert_eq!(
+            serde_json::to_value(&full).unwrap()["text"],
+            "hi, and the rest"
+        );
+
+        let card: CardBody = serde_json::from_value(json!({
+            "card": "finished", "live": false, "title": "Finished", "text": "Done."
+        }))
+        .unwrap();
+        assert!(card.points.is_empty() && card.spoken.is_none());
+        let value = serde_json::to_value(&card).unwrap();
+        assert!(value.get("points").is_none() && value.get("spoken").is_none());
+        let summarised = CardBody {
+            points: vec!["Wrote it".into(), "Pushed it".into()],
+            spoken: Some("Written and pushed.".into()),
+            ..card
+        };
+        round_trip(summarised.clone());
+        let value = serde_json::to_value(&summarised).unwrap();
+        assert_eq!(value["points"], json!(["Wrote it", "Pushed it"]));
+        assert_eq!(value["spoken"], "Written and pushed.");
+
+        let slot: Slot = serde_json::from_value(json!({
+            "index": 3, "serial": "3fa9c21e:412.0", "kind": "card",
+            "lines": 2, "chars": 40
+        }))
+        .unwrap();
+        assert!(!slot.bookend);
+        let bookend = Slot {
+            bookend: true,
+            ..slot
+        };
+        round_trip(bookend);
+        assert_eq!(serde_json::to_value(bookend).unwrap()["bookend"], true);
     }
 }

@@ -227,3 +227,19 @@ an appended, serde-defaulted field (plan 20261024_02, step 2):
     while false, the daemon starts no Gemini turn for the client.
 - **Changed:** `ClientOptionsParams::default()` has `general_agent: true`;
   the other options still default to off.
+
+## libhandlr_proto 0.3.9 — 2026-10-24 (the commit tagged `libhandlr_proto-v0.3.9`)
+
+Additive, by the owner's rulings ("appending to a struct is additive", and
+the CHANGES.md entries of 2026-10-24 12:06 EDT: "a patch release"): four
+appended, serde-defaulted fields and a constant (plan 20261022_03, the L3
+amendments of 2026-10-24 11:54, 12:06 and 12:27 EDT):
+
+- **Added:**
+  - `common::Entry::text`, the entry's full redacted text, up to the
+    reader's limits; `summary` stays the 500-character form;
+  - `common::CardBody::points`, a point-by-point summary of a Finished
+    card's reply, at most `common::CARD_POINTS_MAX` (6) lines;
+  - `common::CardBody::spoken`, the text to read aloud for the card;
+  - `common::Slot::bookend`, true on a Finished card's outline slot, for
+    the scrollbar's section labels.
