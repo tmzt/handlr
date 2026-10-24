@@ -498,6 +498,7 @@ impl App {
                 start,
                 terminal_on,
                 new_content,
+                held_end,
             } => {
                 if let Some(agent) = &mut self.agent {
                     agent.set_loading(loading);
@@ -506,6 +507,7 @@ impl App {
                     agent.set_content(name, status, sections, pinned, &changed);
                     agent.set_history(loading_earlier, start);
                     agent.set_new_content(new_content);
+                    agent.set_held_end(held_end);
                 }
             }
             // herdr's focus shows on the cards, from the list it refreshes.
@@ -574,8 +576,10 @@ impl App {
                 }
             }
             AgentHit::JumpToEnd => {
-                // A new outline waiting: the client swaps it in, and the
-                // view, at the bottom, follows it.
+                // A 2 s scroll to the end. A new outline waiting: the
+                // client adds its newer sections below the end, the scroll
+                // carries on into them, and the rest is merged once the
+                // view lands at the bottom, following.
                 if self.agent.as_mut().is_some_and(|a| a.jump_to_end()) {
                     self.send(Input::ApplyOutline);
                 }

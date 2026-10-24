@@ -989,20 +989,46 @@ pub struct Frame {
 
 /// The one-line "jump to end" message below the scrollback, while
 /// scrolled back (plan 20261022_03, the 00:05 EDT amendment): its tap area,
-/// the screen's width, and its text, drawn dim and centred.
+/// the screen's width, and its text, drawn centred in its colour: the
+/// state at the session's end (the 01:07 EDT amendment).
 #[derive(Clone, Debug, PartialEq)]
 pub struct JumpLine {
     pub rect: Rect,
     pub text: String,
+    pub color: [f32; 4],
 }
 
 /// The jump line's height, in points, kept whether or not it shows.
 const JUMP_H: f32 = 28.0;
-/// The jump line with nothing new.
+/// The jump line with no state to tell.
 pub const JUMP_TO_END: &str = "-- jump to end --";
-/// The jump line while a new outline is held aside (CHANGES.md,
-/// 2026-10-24 00:36 EDT, item 3).
-pub const NEW_CONTENT: &str = "-- new content --";
+/// How long the jump line's scroll to the end takes, whatever the
+/// distance (plan 20261022_03, the 01:06 EDT amendment, item 1).
+pub const JUMP_SCROLL: Duration = Duration::from_secs(2);
+
+/// The cubic ease-in-out of the jump scroll: from 0 at `u = 0` to 1 at
+/// `u = 1`, with zero speed at both ends and the highest midway.
+pub fn ease_in_out(u: f32) -> f32 {
+    let u = u.clamp(0.0, 1.0);
+    if u < 0.5 {
+        4.0 * u * u * u
+    } else {
+        1.0 - (-2.0 * u + 2.0).powi(3) / 2.0
+    }
+}
+
+/// The jump line's scroll to the end, running: where it started, in
+/// pixels from the top of the flow, and how long it has run.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct JumpScroll {
+    start: f32,
+    elapsed: Duration,
+}
+
+/// The first non-empty line of `text`, trimmed.
+fn text_line(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|l| !l.is_empty())
+}
 /// How far from the window contents are kept, in screens; beyond, the
 /// client forgets them (plan 20261024_01, decision 6).
 pub const FORGET_SCREENS: f32 = 20.0;
@@ -1202,13 +1228,16 @@ pub struct AgentScreen {
     /// Taken by the last approach to the top; armed again once the top is
     /// left, or a page lands.
     earlier_asked: bool,
-    /// The newest section held when the view left the bottom: those after
-    /// it are new, for the jump line.
-    left_at: Option<u64>,
+    /// The jump line's scroll to the end, while it runs.
+    jump: Option<JumpScroll>,
+    /// The end of a new outline the client holds aside (the event's
+    /// `held_end`): its live cards and newest section, for the jump line's
+    /// state.
+    held_end: Vec<ViewSection>,
     /// Packed serial to its slot's place in `slots`.
     slot_index: HashMap<u64, usize>,
-    /// A new outline is held aside by the client: the jump line reads
-    /// `-- new content --`.
+    /// A new outline is held aside by the client: the jump line's tap
+    /// asks for its newer sections below the end.
     new_content: bool,
     /// The window on the ribbon, by index, as last worked out, and as last
     /// taken for the client.
@@ -1337,6 +1366,10 @@ impl AgentScreen {
             .find_map(|&(serial, delta)| self.slot_of(serial).map(|i| (i, delta)))
         {
             let to = self.tops[i] + delta;
+            // A jump scroll running keeps its curve on the same content.
+            if let Some(j) = self.jump.as_mut() {
+                j.start += to - self.offset;
+            }
             if (to - self.offset).abs() > 2.0 {
                 log::info!(
                     "agent view: held on {}, {:.0} -> {:.0}",
@@ -1960,10 +1993,11 @@ impl AgentScreen {
         let (view_bottom, full_bottom) = (view_bottom - jump_h, full_bottom - jump_h);
         let jump = (!self.follow).then(|| {
             let px = TOOL_PT * s;
-            let text = self.jump_text(columns(l.w - 2.0 * pad, px));
+            let (text, color) = self.jump_line(columns(l.w - 2.0 * pad, px));
             JumpLine {
                 rect: Rect::new(0.0, view_bottom, l.w, jump_h),
                 text,
+                color,
             }
         });
         Frame {
@@ -1980,39 +2014,102 @@ impl AgentScreen {
         }
     }
 
-    /// The jump line's text (the 00:05 EDT amendment, item 2), at most
-    /// `cols` characters: the newest section's first line, after how many
-    /// sections arrived since the view left the bottom; "jump to end" when
-    /// none did.
-    fn jump_text(&self, cols: usize) -> String {
-        if self.new_content {
-            return NEW_CONTENT.to_string();
-        }
-        // Newer than the newest when the view left the bottom, wherever
-        // the slot is (a late card's index can be out of serial order).
-        let new = self.left_at.map_or(0, |at| {
-            self.slots.iter().filter(|s| s.serial.to_u64() > at).count()
-        });
-        let message = self
+    /// The jump line's text and colour, at most `cols` characters: the
+    /// state at the session's end (plan 20261022_03, the 01:07 EDT
+    /// amendment), the first that holds of a question waiting, an approval
+    /// needed, something broken, a finished turn and the agent working;
+    /// else `-- jump to end --`. The states come from the live cards, of
+    /// the ribbon and of an outline held aside, and herdr's status.
+    fn jump_line(&self, cols: usize) -> (String, [f32; 4]) {
+        // The ribbon's sections, then those held aside (newer), oldest
+        // first.
+        let shows: Vec<&Shows> = self
             .slots
-            .last()
-            .and_then(|s| self.blocks.get(&s.serial.to_u64()))
-            .and_then(|b| first_line(&b.shows));
-        let Some(message) = message.filter(|_| new > 0) else {
-            return JUMP_TO_END.to_string();
+            .iter()
+            .filter_map(|s| self.blocks.get(&s.serial.to_u64()).map(|b| &b.shows))
+            .chain(self.held_end.iter().map(|v| &v.shows))
+            .collect();
+        let live = |kind: CardKind| {
+            shows.iter().rev().find_map(|sh| match sh {
+                Shows::Card(c) if c.live && c.kind == kind => {
+                    Some(text_line(&c.text).unwrap_or(c.title.trim()).to_string())
+                }
+                _ => None,
+            })
         };
-        let lead = format!("-- {new} new: ");
+        let working = self.status == "working";
+        let state = if let Some(q) = live(CardKind::Question) {
+            Some(("question", q, accent(CardKind::Question)))
+        } else if let Some(a) = live(CardKind::Approval) {
+            Some(("approval", a, accent(CardKind::Approval)))
+        } else if let Some(b) = live(CardKind::Broke) {
+            Some(("broke", b, RED))
+        } else if let Some(d) = live(CardKind::Finished).filter(|_| !working) {
+            Some(("done", d, GREEN))
+        } else if working {
+            let newest = shows.iter().rev().find_map(|sh| first_line(sh));
+            Some(("working", newest.unwrap_or_default(), DIM))
+        } else {
+            None
+        };
+        let Some((what, line, color)) = state else {
+            return (JUMP_TO_END.to_string(), DIM);
+        };
+        if line.is_empty() {
+            return (format!("-- {what} --"), color);
+        }
+        let lead = format!("-- {what}: ");
         let room = cols.saturating_sub(lead.chars().count() + 3).max(1);
-        format!("{lead}{} --", one_line(&message, room))
+        (format!("{lead}{} --", one_line(&line, room)), color)
     }
 
-    /// Jumps to the bottom and follows again: the jump line's tap. Returns
-    /// whether a new outline was waiting, for the client to apply it.
+    /// The jump line's tap: scrolls to the end in `JUMP_SCROLL` on an
+    /// ease-in-out curve, then follows again (plan 20261022_03, the 01:06
+    /// EDT amendment). Returns whether a new outline was waiting, for the
+    /// client to add its newer sections below the end.
     pub fn jump_to_end(&mut self) -> bool {
         self.fling = 0.0;
-        let bottom = self.max_offset();
-        self.scroll_to(bottom);
+        let end = self.max_offset();
+        log::info!(
+            "agent view: jump scroll from {:.0} to {:.0}",
+            self.offset,
+            end
+        );
+        self.jump = Some(JumpScroll {
+            start: self.offset,
+            elapsed: Duration::ZERO,
+        });
+        self.dirty = true;
         std::mem::take(&mut self.new_content)
+    }
+
+    /// Whether the jump line's scroll to the end is running.
+    pub fn jumping(&self) -> bool {
+        self.jump.is_some()
+    }
+
+    /// Carries the jump scroll on by `dt`: the end is read again each
+    /// frame, so an end that grows is still reached at `JUMP_SCROLL`.
+    fn step_jump(&mut self, dt: Duration) -> bool {
+        let Some(mut j) = self.jump else {
+            return false;
+        };
+        j.elapsed += dt;
+        let before = self.offset;
+        let u = j.elapsed.as_secs_f32() / JUMP_SCROLL.as_secs_f32();
+        if u >= 1.0 {
+            self.jump = None;
+            let end = self.max_offset();
+            self.scroll_to(end);
+            log::info!("agent view: jump scroll landed at {:.0}", self.offset);
+            return self.offset != before;
+        }
+        self.jump = Some(j);
+        let end = self.max_offset();
+        // Not following until it lands, even within a pixel of the end.
+        self.offset = (j.start + (end - j.start) * ease_in_out(u)).clamp(0.0, end);
+        self.placed();
+        self.offset != before
     }
 
     /// Whether the client holds a new outline aside (the event's
@@ -2024,10 +2121,21 @@ impl AgentScreen {
         }
     }
 
+    /// The end of the outline the client holds aside (the event's
+    /// `held_end`), for the jump line's state.
+    pub fn set_held_end(&mut self, held_end: Vec<ViewSection>) {
+        if held_end != self.held_end {
+            self.held_end = held_end;
+            self.settle();
+        }
+    }
+
     /// The window on the ribbon, by index, when it changed since last
     /// taken: for [`handlr_companion::Input::Window`].
     pub fn take_window(&mut self) -> Option<ViewWindow> {
-        if self.window == self.window_taken {
+        // Not while the jump scroll runs: nothing is fetched on the way,
+        // and landing reports the bottom, following.
+        if self.jump.is_some() || self.window == self.window_taken {
             return None;
         }
         self.window_taken = self.window;
@@ -2162,12 +2270,12 @@ impl AgentScreen {
     fn scroll_to(&mut self, offset: f32) {
         let max = self.max_offset();
         self.offset = offset.clamp(0.0, max);
-        let follow = self.offset >= max - 1.0;
-        if self.follow && !follow {
-            // Leaving the bottom: what arrives from now on is new.
-            self.left_at = self.slots.iter().map(|s| s.serial.to_u64()).max();
-        }
-        self.follow = follow;
+        self.follow = self.offset >= max - 1.0;
+        self.placed();
+    }
+
+    /// Places everything for the offset as it is.
+    fn placed(&mut self) {
         if self.rows_short() {
             self.assemble();
         }
@@ -2186,6 +2294,7 @@ impl AgentScreen {
         }
         // The pinned card is shown only at the bottom: go back there.
         self.fling = 0.0;
+        self.jump = None;
         let bottom = self.max_offset();
         self.scroll_to(bottom);
     }
@@ -2203,6 +2312,10 @@ impl AgentScreen {
         let s = self.scale();
         match phase {
             TouchPhase::Started => {
+                // A touch stops the jump scroll, as it catches a fling.
+                if self.jump.take().is_some() {
+                    log::info!("agent view: jump scroll stopped at {:.0}", self.offset);
+                }
                 let carried = std::mem::take(&mut self.fling);
                 self.drag = Some(Drag {
                     carried,
@@ -2268,13 +2381,17 @@ impl AgentScreen {
         }
     }
 
-    /// Carries a fling on by `dt`. Returns whether the view moved.
+    /// Carries a fling, or the jump scroll, on by `dt`. Returns whether
+    /// the view moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
         let was = self.quiet_for >= QUIET_FOR_CONTINUE;
         self.quiet_for += dt.as_secs_f32();
         if !was && self.quiet_for >= QUIET_FOR_CONTINUE {
             // The suggestion row may appear.
             self.settle();
+        }
+        if self.jump.is_some() {
+            return self.step_jump(dt);
         }
         if self.fling == 0.0 || self.drag.is_some() {
             return false;
@@ -2455,7 +2572,7 @@ impl AgentScreen {
             let w = j.text.chars().count() as f32 * px * 0.5;
             let x = j.rect.x + ((j.rect.w - w) * 0.5).max(PAD * s);
             let y = j.rect.y + (j.rect.h - line_h(px)) * 0.5;
-            ctx.draw_text(list, &j.text, [x, y], px, DIM);
+            ctx.draw_text(list, &j.text, [x, y], px, j.color);
         }
         let sg_px = SUGGEST_PT * s;
         for g in &self.frame.suggestions {
@@ -4003,49 +4120,177 @@ mod tests {
         assert_eq!(a.block_layouts, a.slots().len());
     }
 
-    // Plan 20261022_03, the 00:05 EDT amendment: the jump line.
+    // Plan 20261022_03, the 00:05 EDT amendment: the jump line, and the
+    // 01:07 EDT amendment: it says what is at the end.
+
+    fn jump(a: &AgentScreen) -> (String, [f32; 4]) {
+        let j = a.frame().jump.clone().expect("shown");
+        (j.text, j.color)
+    }
+
+    fn live_card(kind: CardKind, at: usize, text: &str) -> AgentCard {
+        AgentCard {
+            text: text.to_string(),
+            ..card(kind, at, true)
+        }
+    }
 
     #[test]
-    fn the_jump_line_shows_scrolled_back_and_says_what_is_new() {
+    fn the_jump_line_shows_scrolled_back_and_says_jump_to_end_when_nothing_is_new() {
         let all = conversation(30);
         let mut a = screen(all[..80].to_vec(), vec![], None);
         assert!(a.frame().jump.is_none(), "hidden while following");
         scrolled_back(&mut a);
-        let jump = |a: &AgentScreen| a.frame().jump.clone().expect("shown").text;
-        assert_eq!(jump(&a), JUMP_TO_END);
-        // One new section, then several.
-        flat(&mut a, "idle", 0, all[..81].to_vec(), vec![], None);
-        assert_eq!(jump(&a), "-- 1 new: question 20 --");
+        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), DIM));
+        // New sections with no state to tell: still jump to end.
         flat(&mut a, "idle", 0, all[..84].to_vec(), vec![], None);
-        assert_eq!(jump(&a), "-- 4 new: Answer 20. --");
-        // A long message is cut to fit.
-        let mut long = all[..84].to_vec();
-        long.push(entry(
-            Role::Assistant,
-            EntryKind::Text,
-            &"A very long reply. ".repeat(20),
-        ));
-        flat(&mut a, "idle", 0, long, vec![], None);
-        let text = jump(&a);
-        assert!(text.starts_with("-- 5 new: A very long reply."), "{text}");
-        assert!(text.ends_with("\u{2026} --"), "{text}");
-        assert!(
-            text.chars().count()
-                <= columns(PHONE.w - 2.0 * PAD * PHONE.scale, TOOL_PT * PHONE.scale)
-        );
-        // A tap goes back to the bottom, following; the line goes.
+        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), DIM));
+        // Tappable.
         let r = a.rect_of(AgentHit::JumpToEnd).expect("tappable");
         assert_eq!(
             a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5),
             Some(AgentHit::JumpToEnd)
         );
         a.jump_to_end();
+        run_jump(&mut a);
         assert!(a.following());
         assert_eq!(a.offset(), a.max_offset());
         assert!(a.frame().jump.is_none());
-        // Left again: nothing new since.
+    }
+
+    #[test]
+    fn the_jump_line_says_each_state_in_its_colour() {
+        let all = conversation(30);
+        let entries = all[..80].to_vec();
+        let mut a = screen(entries.clone(), vec![], None);
         scrolled_back(&mut a);
-        assert_eq!(jump(&a), JUMP_TO_END);
+        let mut with = |status: &str, cards: Vec<AgentCard>| {
+            flat(&mut a, status, 0, entries.clone(), cards, None);
+            jump(&a)
+        };
+        assert_eq!(
+            with(
+                "idle",
+                vec![live_card(CardKind::Question, 79, "Which one?\nA or B.")]
+            ),
+            (
+                "-- question: Which one? --".to_string(),
+                accent(CardKind::Question)
+            )
+        );
+        assert_eq!(
+            with(
+                "idle",
+                vec![live_card(CardKind::Approval, 79, "cargo test")]
+            ),
+            (
+                "-- approval: cargo test --".to_string(),
+                accent(CardKind::Approval)
+            )
+        );
+        assert_eq!(
+            with(
+                "idle",
+                vec![live_card(
+                    CardKind::Broke,
+                    79,
+                    "error[E0308]: mismatched types\nmore"
+                )]
+            ),
+            (
+                "-- broke: error[E0308]: mismatched types --".to_string(),
+                RED
+            )
+        );
+        assert_eq!(
+            with(
+                "idle",
+                vec![live_card(CardKind::Finished, 79, "All tests pass.")]
+            ),
+            ("-- done: All tests pass. --".to_string(), GREEN)
+        );
+        // Working: the newest section's first line.
+        assert_eq!(
+            with("working", vec![]),
+            ("-- working: Answer 19. --".to_string(), DIM)
+        );
+        // A resolved card is no state.
+        assert_eq!(
+            with("idle", vec![card(CardKind::Question, 79, false)]),
+            (JUMP_TO_END.to_string(), DIM)
+        );
+    }
+
+    #[test]
+    fn the_first_state_that_holds_wins_and_a_long_line_is_cut() {
+        let all = conversation(30);
+        let entries = all[..80].to_vec();
+        let mut a = screen(entries.clone(), vec![], None);
+        scrolled_back(&mut a);
+        let mut with = |status: &str, kinds: &[CardKind]| {
+            let cards = kinds
+                .iter()
+                .map(|&k| live_card(k, 79, &format!("{k:?} text")))
+                .collect();
+            flat(&mut a, status, 0, entries.clone(), cards, None);
+            jump(&a).0
+        };
+        use CardKind::*;
+        assert_eq!(
+            with("working", &[Finished, Broke, Approval, Question]),
+            "-- question: Question text --"
+        );
+        assert_eq!(
+            with("working", &[Finished, Broke, Approval]),
+            "-- approval: Approval text --"
+        );
+        assert_eq!(
+            with("working", &[Finished, Broke]),
+            "-- broke: Broke text --"
+        );
+        assert_eq!(with("idle", &[Finished]), "-- done: Finished text --");
+        // The turn is not finished while the agent works again.
+        assert_eq!(with("working", &[Finished]), "-- working: Answer 19. --");
+        // A long line is cut to fit with an ellipsis.
+        let long = "A very long question. ".repeat(20);
+        flat(
+            &mut a,
+            "idle",
+            0,
+            entries.clone(),
+            vec![live_card(Question, 79, &long)],
+            None,
+        );
+        let (text, _) = jump(&a);
+        assert!(
+            text.starts_with("-- question: A very long question."),
+            "{text}"
+        );
+        assert!(text.ends_with("\u{2026} --"), "{text}");
+        assert!(
+            text.chars().count()
+                <= columns(PHONE.w - 2.0 * PAD * PHONE.scale, TOOL_PT * PHONE.scale)
+        );
+    }
+
+    #[test]
+    fn the_end_of_an_outline_held_aside_gives_the_state() {
+        let mut a = outline_screen(300, 290..300);
+        scrolled_back(&mut a);
+        a.set_new_content(true);
+        assert_eq!(jump(&a), (JUMP_TO_END.to_string(), DIM));
+        a.set_held_end(vec![ViewSection {
+            index: 300,
+            serial: Serial::new(FILE, 301, 0),
+            shows: Shows::Card(live_card(CardKind::Question, 0, "Go on?")),
+        }]);
+        assert_eq!(
+            jump(&a),
+            (
+                "-- question: Go on? --".to_string(),
+                accent(CardKind::Question)
+            )
+        );
     }
 
     #[test]
@@ -4064,8 +4309,168 @@ mod tests {
         let buttons = a.frame().buttons[0].rect;
         assert!(line.rect.y + line.rect.h <= buttons.y);
         a.jump_to_end();
+        run_jump(&mut a);
         assert_eq!(a.frame().viewport, view);
         assert!(a.offset() > offset);
+    }
+
+    // Plan 20261022_03, the 01:06 EDT amendment: the jump line scrolls to
+    // the end in 2 s on an ease-in-out curve.
+
+    const FRAME: Duration = Duration::from_millis(20);
+
+    /// Ticks 20 ms frames until the jump scroll lands; returns the offset
+    /// after each frame.
+    fn run_jump(a: &mut AgentScreen) -> Vec<f32> {
+        let mut offsets = Vec::new();
+        while a.jumping() {
+            a.tick(FRAME);
+            offsets.push(a.offset());
+            assert!(offsets.len() <= 200, "runs away");
+        }
+        offsets
+    }
+
+    /// An outline screen scrolled back `screens` screens from the end.
+    fn back_by(screens: f32) -> AgentScreen {
+        let mut a = outline_screen(8000, 7990..8000);
+        let screen = a.frame().viewport.h;
+        scrolled_back(&mut a);
+        a.scroll_to(a.max_offset() - screens * screen);
+        assert!(!a.following());
+        assert!(
+            a.max_offset() - a.offset() >= screens * screen - 1.0,
+            "the ribbon is long enough"
+        );
+        a
+    }
+
+    #[test]
+    fn the_ease_is_cubic_in_out() {
+        assert_eq!(ease_in_out(0.0), 0.0);
+        assert_eq!(ease_in_out(0.5), 0.5);
+        assert_eq!(ease_in_out(1.0), 1.0);
+        assert!((ease_in_out(0.25) - 4.0 * 0.25f32.powi(3)).abs() < 1e-6);
+        assert!((ease_in_out(0.75) - (1.0 - 0.5f32.powi(3) / 2.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_jump_scroll_takes_2_s_from_one_screen_back_and_from_300() {
+        for screens in [1.0, 300.0] {
+            let mut a = back_by(screens);
+            a.jump_to_end();
+            assert!(a.jumping());
+            let offsets = run_jump(&mut a);
+            // 100 frames of 20 ms: 2 s, whatever the distance.
+            assert_eq!(offsets.len(), 100, "{screens} screen(s)");
+            assert!(a.following());
+            assert_eq!(a.offset(), a.max_offset());
+            // Still on its way a frame before, not following; at 1.8 s
+            // visibly short of the end.
+            let mut b = back_by(screens);
+            b.jump_to_end();
+            for _ in 0..99 {
+                b.tick(FRAME);
+            }
+            assert!(b.jumping() && !b.following());
+            let mut c = back_by(screens);
+            c.jump_to_end();
+            for _ in 0..90 {
+                c.tick(FRAME);
+            }
+            assert!(c.max_offset() - c.offset() > 1.0);
+        }
+    }
+
+    #[test]
+    fn the_jump_scroll_is_still_at_both_ends_and_fastest_midway() {
+        let mut a = back_by(300.0);
+        let start = a.offset();
+        a.jump_to_end();
+        let mut offsets = vec![start];
+        offsets.extend(run_jump(&mut a));
+        let speeds: Vec<f32> = offsets.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(speeds.iter().all(|&v| v >= 0.0), "always toward the end");
+        let top = speeds.iter().cloned().fold(0.0, f32::max);
+        assert!(speeds[0] < top * 0.01, "{} of {top}", speeds[0]);
+        assert!(speeds[99] < top * 0.01, "{} of {top}", speeds[99]);
+        let fastest = speeds.iter().position(|&v| v == top).unwrap();
+        assert!((48..=51).contains(&fastest), "{fastest}");
+        // Speeding up through the first second, slowing through the second.
+        assert!(speeds[..49].windows(2).all(|w| w[1] >= w[0]));
+        assert!(speeds[51..].windows(2).all(|w| w[1] <= w[0]));
+    }
+
+    #[test]
+    fn an_end_that_grows_during_the_jump_scroll_is_reached_at_2_s() {
+        let mut a = outline_screen(300, 290..300);
+        scrolled_back(&mut a);
+        a.jump_to_end();
+        for _ in 0..50 {
+            a.tick(FRAME);
+        }
+        let end_before = a.max_offset();
+        // Twenty more sections arrive at the end.
+        give(&mut a, "idle", outline_sections(320, 290..320), None);
+        assert!(a.max_offset() > end_before + 100.0);
+        for _ in 0..49 {
+            a.tick(FRAME);
+        }
+        assert!(a.jumping() && a.offset() < a.max_offset());
+        a.tick(FRAME);
+        assert!(!a.jumping());
+        assert!(a.following());
+        assert_eq!(a.offset(), a.max_offset());
+        assert_eq!(a.slots().len(), 320);
+    }
+
+    #[test]
+    fn a_touch_stops_the_jump_scroll() {
+        let mut a = back_by(10.0);
+        a.jump_to_end();
+        for _ in 0..30 {
+            a.tick(FRAME);
+        }
+        a.touch(
+            1,
+            TouchPhase::Started,
+            540.0,
+            1000.0,
+            Duration::from_secs(10),
+        );
+        assert!(!a.jumping());
+        let at = a.offset();
+        a.touch(
+            1,
+            TouchPhase::Ended,
+            540.0,
+            1000.0,
+            Duration::from_millis(10_050),
+        );
+        for _ in 0..100 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.offset(), at, "it stays where the finger caught it");
+        assert!(!a.following());
+    }
+
+    #[test]
+    fn the_jump_scroll_lands_following_and_reports_no_window_on_the_way() {
+        let mut a = back_by(10.0);
+        a.take_window();
+        a.jump_to_end();
+        for _ in 0..99 {
+            a.tick(FRAME);
+            assert_eq!(a.take_window(), None, "no contents asked for on the way");
+        }
+        a.tick(FRAME);
+        let w = a.take_window().expect("landing reports the bottom");
+        assert!(!w.scrolled_back);
+        assert!(a.following());
+        // Following: new sections keep it at the bottom.
+        give(&mut a, "idle", outline_sections(8010, 7990..8010), None);
+        assert!(a.following());
+        assert_eq!(a.offset(), a.max_offset());
     }
 
     // Plan 20261024_01, step 5, and CHANGES.md 2026-10-24 00:36 EDT.
@@ -4225,29 +4630,49 @@ mod tests {
     }
 
     #[test]
-    fn the_jump_line_says_new_content_and_its_tap_swaps_and_jumps_to_the_end() {
+    fn with_a_new_outline_held_aside_the_jump_scroll_carries_on_into_its_newer_sections() {
         let mut a = outline_screen(300, 290..300);
-        // While following, a new outline is swapped in at once: no line.
-        a.set_new_content(false);
-        assert!(a.frame().jump.is_none());
         scrolled_back(&mut a);
         let (serial, _) = a.place().unwrap();
         let at = on_screen(&a, serial);
         // A new outline held aside: the old ribbon stays as it was.
         a.set_new_content(true);
-        let jump = |a: &AgentScreen| a.frame().jump.clone().expect("shown").text;
-        assert_eq!(jump(&a), NEW_CONTENT);
         assert!((on_screen(&a, serial) - at).abs() < 0.01);
-        // The tap: to the end, following, and the client is to apply it.
+        // The tap: the client is to add the newer sections below.
         assert!(a.jump_to_end());
-        assert!(a.following());
-        assert!(!a.jump_to_end(), "only once");
-        // The new ribbon comes: still at its bottom.
-        give(&mut a, "idle", outline_sections(320, 310..320), None);
-        a.set_new_content(false);
+        assert!(!a.following());
+        for _ in 0..10 {
+            a.tick(FRAME);
+        }
+        // They come below the old end, at indexes after its last.
+        let mut sections = outline_sections(300, 290..300);
+        sections.extend((300..320).map(|i| outline_section(i, i >= 310)));
+        let diff = changed(&a, &sections);
+        a.set_content("Claude".into(), "idle".into(), sections, None, &diff);
+        assert_eq!(a.slots().len(), 320);
+        let newest = a.slots()[319].serial;
+        run_jump(&mut a);
+        // The scroll reached them: at the very end, following.
         assert!(a.following());
         assert_eq!(a.offset(), a.max_offset());
-        assert_eq!(a.slots().len(), 320);
+        let bottom = on_screen(&a, newest);
+        let v = a.frame().viewport;
+        assert!(bottom >= v.y && bottom < v.y + v.h, "the newest in view");
+        // Back at the bottom, the client merges the full new outline: here
+        // two old sections gone and the indexes renumbered. The view stays.
+        a.set_new_content(false);
+        let mut merged = outline_sections(320, 290..320);
+        merged.remove(20);
+        merged.remove(20);
+        for (i, v) in merged.iter_mut().enumerate() {
+            v.index = i as u64;
+        }
+        let diff = changed(&a, &merged);
+        a.set_content("Claude".into(), "idle".into(), merged, None, &diff);
+        assert!(a.following());
+        assert_eq!(a.offset(), a.max_offset());
+        assert!((on_screen(&a, newest) - bottom).abs() < 0.01);
+        assert_eq!(a.slots().len(), 318);
     }
 
     #[test]
