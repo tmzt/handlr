@@ -438,6 +438,10 @@ pub const PING_IDLE: Duration = Duration::from_secs(30);
 /// rare enough to let the radio sleep.
 pub const PING_IDLE_BACKGROUND: Duration = Duration::from_secs(270);
 pub const PING_WAIT: Duration = Duration::from_secs(10);
+/// How long the ping sent on coming back to the front may go unanswered:
+/// short, because a socket that slept (or was frozen by the system) is
+/// often dead, and the view would sit stale until it was found out.
+pub const PING_WAIT_RESUME: Duration = Duration::from_secs(3);
 
 /// Whether an utterance answers a confirmation with approval: the whole
 /// utterance is "approve" or "approved", in any case, ignoring punctuation
@@ -804,6 +808,8 @@ pub struct State {
     /// unanswered so far.
     last_heard: Duration,
     ping_sent: Option<Duration>,
+    /// How long the ping in `ping_sent` may go unanswered.
+    ping_wait: Duration,
     /// Replies to read aloud, oldest first, each waiting for its summary
     /// or ready.
     reading: VecDeque<Reading>,
@@ -1143,6 +1149,7 @@ impl State {
             background: false,
             last_heard: Duration::ZERO,
             ping_sent: None,
+            ping_wait: PING_WAIT,
             reading: VecDeque::new(),
             next_reading: 1,
             read_replies: VecDeque::new(),
@@ -2650,8 +2657,12 @@ impl State {
         if self.online() {
             self.send_options(out);
             if !on {
+                // Timed, so a dead socket is closed and made again within
+                // PING_WAIT_RESUME, not left to the network to notice.
                 let params = common::PingParams { active: Some(true) };
                 out.push(self.request(methods::PING, params, Sent::Ping));
+                self.ping_sent = Some(self.now);
+                self.ping_wait = PING_WAIT_RESUME;
             }
         }
         // The daemon holds the view's deliveries while the link sleeps and
@@ -2673,10 +2684,10 @@ impl State {
             return;
         }
         match self.ping_sent {
-            Some(at) if self.now.saturating_sub(at) >= PING_WAIT => {
+            Some(at) if self.now.saturating_sub(at) >= self.ping_wait => {
                 log::info!(
                     "link: no answer to a ping in {} s; reconnecting",
-                    PING_WAIT.as_secs()
+                    self.ping_wait.as_secs()
                 );
                 self.ping_sent = None;
                 out.push(Output::Close("no answer to a ping".to_string()));
@@ -2691,6 +2702,7 @@ impl State {
                     } =>
             {
                 self.ping_sent = Some(self.now);
+                self.ping_wait = PING_WAIT;
                 let params = common::PingParams {
                     active: Some(!self.background),
                 };
@@ -6017,6 +6029,30 @@ mod tests {
         // Unanswered for 10 s: closed, to reconnect.
         let out = s.input(Input::Tick(secs(50.0)));
         assert!(out.iter().any(|o| matches!(o, Output::Close(_))), "{out:?}");
+    }
+
+    #[test]
+    fn coming_back_to_the_front_finds_a_dead_link_within_3_s() {
+        // On the S23 the system froze the app in the background; back in
+        // front, the old socket was dead and the view sat stale for 13 s.
+        let mut s = online();
+        s.input(Input::Tick(secs(10.0)));
+        s.input(Input::Background(true));
+        s.input(Input::Tick(secs(4000.0)));
+        let out = s.input(Input::Background(false));
+        assert_eq!(requests(&out, "ping").len(), 1);
+        let out = s.input(Input::Tick(secs(4002.0)));
+        assert!(!out.iter().any(|o| matches!(o, Output::Close(_))));
+        let out = s.input(Input::Tick(secs(4003.0)));
+        assert!(out.iter().any(|o| matches!(o, Output::Close(_))), "{out:?}");
+        // Answered in time: kept.
+        let mut t = online();
+        t.input(Input::Background(true));
+        t.input(Input::Tick(secs(100.0)));
+        t.input(Input::Background(false));
+        t.incoming(note("focus.changed", json!({"focus": null})));
+        let out = t.input(Input::Tick(secs(104.0)));
+        assert!(!out.iter().any(|o| matches!(o, Output::Close(_))));
     }
 
     #[test]
