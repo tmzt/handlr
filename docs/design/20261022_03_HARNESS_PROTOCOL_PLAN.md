@@ -1168,3 +1168,17 @@ Tests:
 - the thumb is centred under the finger;
 - with *Disabled*, a touch in the band scrolls as content does;
 - with *Always*, the thumb is drawn at rest.
+
+## Amendment — 2026-10-24 11:40 EDT: the general agent's centre button in the agent view's controls (living section L3)
+
+The owner (2026-10-24): the general agent button is "on all screens, only
+replaced with X when it means cancel voice input" (plan 20261024_03, the
+amendment of the same time). In the agent view's controls row:
+- the centre is the general agent's button (plan 20261024_03 for its
+  behaviour). Record (left) and the message or send button (right) keep
+  their roles for this agent;
+- while a message is dictated, the centre is an X that discards it. This
+  replaces the dictation's own cancel button, and the dictation controls
+  become send, X, record;
+- with the general agent off (the settings plan), the centre is empty,
+  except for the X while dictating.
