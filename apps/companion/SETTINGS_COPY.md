@@ -60,6 +60,10 @@ key's text on that vendor's phones.
 
 - text: Default
 
+# [Copy] voice_preview_default
+
+- text: This is the default voice.
+
 # [Copy] voice_preview
 
 - [abc] voice: the voice's name, as the row shows it

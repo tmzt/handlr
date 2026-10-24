@@ -53,9 +53,14 @@ pub fn label(voice: Option<&str>) -> &str {
     voice.unwrap_or(copy::VOICE_DEFAULT.text)
 }
 
-/// The preview's text for `voice`: "This is <voice>."
+/// The preview's text for `voice`: "This is <voice>.", or "This is the
+/// default voice." for *Default*.
 pub fn preview_text(voice: Option<&str>) -> String {
-    copy::VOICE_PREVIEW.fill(None, &[("voice", label(voice))])
+    match voice {
+        // Not "This is Default." (owner, 2026-10-24).
+        None => copy::VOICE_PREVIEW_DEFAULT.text.to_string(),
+        Some(_) => copy::VOICE_PREVIEW.fill(None, &[("voice", label(voice))]),
+    }
 }
 
 /// What the audio is asked for a step's preview of `voice`, already set
@@ -125,7 +130,7 @@ mod tests {
     #[test]
     fn the_preview_names_the_voice_and_a_further_step_cuts_it_off() {
         assert_eq!(preview_text(Some("alba")), "This is alba.");
-        assert_eq!(preview_text(None), "This is Default.");
+        assert_eq!(preview_text(None), "This is the default voice.");
         assert_eq!(
             preview(Some("alba"), false),
             [Action::Speak("This is alba.".into())]
