@@ -1879,3 +1879,35 @@ Open:
   panics. This needs a check on the S23.
 - The "refusal that won't be asked again" test waits for the real
   permission (libmorph 0.4.0, released, to be wired in).
+
+## 2026-10-24 13:29 EDT — plan 20261022_03 L3 (full text, folding, summary cards, cache, memory, refresh, labels) and plan 20261024_02's Clear cache: the client and app half, departures
+
+Built in the handlr-companion commit, the apps lock commit and the companion
+commit before this entry. When merging with plan 20261024_04's settings
+work, the *Clear cache (n MB)* label moved into `SETTINGS_COPY.md`
+(`clear_cache`, with a `size` slot).
+1. **No spoken part without `CardBody.spoken`.** The expanded card shows only
+   the full context, with no spoken section and no replay. The app doesn't
+   have the speech rules, and what read aloud would say depends on the time
+   it is said.
+2. **Memory grades always keep live cards,** because the pin and the jump
+   line need them. Under pressure, the newest-8 exception doesn't apply.
+3. **Resolved summary cards** read `-- Finished: <short form>` in dim text.
+   Expanded in the scrollback, they repeat the reply just above.
+4. **Folded sizes:** a folded diff shows 4 lines (12 before), and a folded
+   error 4. Notices join their whole text onto one line, then wrap.
+5. **Labels and the jump line:** a bookend label's summary is the first line
+   of `spoken`, and its time comes from the reply on the card's line. The
+   jump line's "done" also prefers `spoken`'s first line.
+6. **Reopened views** open at the bottom, following, so the jump line doesn't
+   show on reopening.
+7. **Refresh** fetches from the window's top to the outline's end, and gives
+   up after 5 s (`REFRESH_WAIT`).
+8. **A settings modal test** taps the modal's centre (kept from the settings
+   work), not a row under it.
+
+Open:
+- paging closed views to redb (plan 20261023_09, a TODO in the client);
+- wiring libmorph's memory events (0.4.0 has `on_low_memory`; the trim
+  levels come in 0.4.1);
+- the daemon's `speech.summarize` checking the card store.
