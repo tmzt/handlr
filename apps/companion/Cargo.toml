@@ -29,7 +29,9 @@ libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a7369882523
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
 # Code's interface glyphs.
 libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "4de319ce57aea99297de0a805b899276dd90b411", features = ["font-apache-roboto-regular", "fonts-ofl-terminal"] }
-libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "5cad90ff2a0409c5cae50ec78084814e0dd16e68" }
+# 0.8.0: the scroll pane and `ArrowLabel` for the settings screen (plan
+# 20261024_02, step 1), on the same libmsdf.
+libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "a7d0fd9c7a42576f474488889d70eb491efa1107" }
 log = "0.4"
 # The key store's Noise key (src/keys.rs): cleared on drop, X25519 with the
 # curve25519-dalek snow already uses, and a random key from the OS.

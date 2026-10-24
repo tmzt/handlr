@@ -1,7 +1,7 @@
 ---
 title: A settings screen, from a gear on the overview
 date: 2026-10-24
-status: Draft
+status: In implementation
 covers:
   - "A gear at the right of the overview's header opening a settings
     screen, in sections, on libcontrols 0.8.0's scroll pane"
@@ -241,6 +241,12 @@ released. The status becomes `In implementation` with step 1's commit.
 The previous amendment names "the 11:3x EDT amendment" for open question
 3. It means the amendment of 2026-10-24 11:37 EDT, "the general agent
 toggle stops user-directed Gemini turns only".
+
+## Amendment — 2026-10-24 11:49 EDT: implementation has started; the document is now immutable
+
+Implementation has started with step 1 (the app's move to libcontrols
+0.8.0, `a7d0fd9`). The status is `In implementation`, and from here the
+document changes only on the owner's explicit instruction (Rule 1.5).
 
 ## Amendment — 2026-10-24 12:12 EDT: Clear cache, in the Device section
 
