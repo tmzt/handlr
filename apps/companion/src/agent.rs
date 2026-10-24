@@ -1148,7 +1148,18 @@ impl AgentScreen {
             .iter()
             .find_map(|&(serial, delta)| self.slot_of(serial).map(|i| (i, delta)))
         {
-            self.offset = self.tops[i] + delta;
+            let to = self.tops[i] + delta;
+            if (to - self.offset).abs() > 2.0 {
+                log::info!(
+                    "agent view: held on {}, {:.0} -> {:.0}",
+                    self.slots[i].serial,
+                    self.offset,
+                    to
+                );
+            }
+            self.offset = to;
+        } else if !keep.is_empty() {
+            log::info!("agent view: no anchor held of {}", keep.len());
         }
     }
 
@@ -1596,7 +1607,11 @@ impl AgentScreen {
         if self.follow {
             self.offset = max;
         }
-        self.offset = self.offset.clamp(0.0, max);
+        let clamped = self.offset.clamp(0.0, max);
+        if !self.follow && (clamped - self.offset).abs() > 2.0 {
+            log::info!("agent view: clamped {:.0} -> {:.0}", self.offset, clamped);
+        }
+        self.offset = clamped;
         if self.rows_short() {
             self.assemble();
         }
@@ -1993,6 +2008,11 @@ impl AgentScreen {
                     if !still && d.velocity.abs() > MIN_FLING * s {
                         self.fling = d.velocity;
                     }
+                    log::info!(
+                        "agent view: drag ended at {:.0}, fling {:.0}",
+                        self.offset,
+                        self.fling
+                    );
                     self.scroll_to(self.offset);
                     return None;
                 }
@@ -2031,6 +2051,7 @@ impl AgentScreen {
             || self.follow;
         if stopped {
             self.fling = 0.0;
+            log::info!("agent view: fling stopped at {:.0}", self.offset);
         }
         self.offset != before
     }
