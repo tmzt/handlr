@@ -1419,3 +1419,16 @@ Tests:
 - release before springs back with nothing sent;
 - a fling to the end sends nothing;
 - the result line, then the spring back.
+
+## Amendment — 2026-10-24 12:23 EDT: the refresh's result line is the end's short summary (living section L3)
+
+The owner (2026-10-24): "it shows the short summary as in the other plan,
+not N new except as fallback". This replaces item 3's result line in the
+previous amendment (`-- up to date --` or `-- N new --`). When sections
+arrived, the line shows the end's state as the jump line does (the
+amendment "the jump line says what is at the end"):
+- the question, approval, broke or done line, with a summary card's short
+  form (the daemon's summary when it has one);
+- `-- N new --` only as the fallback, when none of those holds.
+
+With nothing new, it reads `-- up to date --`.
