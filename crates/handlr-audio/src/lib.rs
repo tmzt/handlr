@@ -10,6 +10,8 @@
 //!   the gate, `Vocabulary` writes `vocab.txt`, read when the STT model
 //!   next loads, and `Ding` plays a short built-in chime over whatever the
 //!   speaker plays (plan 20261024_02, as approved at 11:46 EDT).
+//! - [`AudioSession::set_voice`] changes the Phonon voice while the session
+//!   runs; [`AudioEvent::TtsLoaded`] names the voices there are.
 //! - [`AudioSession::poll`] gives [`AudioEvent`]s. Those in
 //!   [`AudioEvent::Input`] (`Utterance`, `Listening`, `Speaking`) go to
 //!   [`Companion::send`](handlr_companion::Companion::send); the others are
@@ -256,6 +258,24 @@ impl AudioSession {
         out
     }
 
+    /// The Phonon voice every later `Speak` is said in; `None` is the
+    /// checkpoint's own. Set while the session runs, as by the companion's
+    /// *Voice* setting (plan 20261024_02, CHANGES.md 2026-10-24 14:58 EDT):
+    /// what is already being said keeps its voice. A name Phonon does not
+    /// have makes each `Speak` fail with [`AudioEvent::SpeakFailed`].
+    pub fn set_voice(&mut self, voice: Option<String>) {
+        if voice != self.voice {
+            log::info!("audio: voice {}", voice.as_deref().unwrap_or("(default)"));
+            self.voice = voice;
+        }
+    }
+
+    /// The voice `Speak` is said in, as [`set_voice`](Self::set_voice) or
+    /// [`AudioConfig::voice`] last set it.
+    pub fn voice(&self) -> Option<&str> {
+        self.voice.as_deref()
+    }
+
     /// Where `Vocabulary` is written, if anywhere.
     pub fn vocab_file(&self) -> Option<&Path> {
         self.vocab_file.as_deref()
@@ -272,5 +292,47 @@ impl AudioSession {
             },
             Err(e) => AudioEvent::VocabularyFailed(format!("{}: {e}", path.display())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libvoicexn::tts::TtsRequest;
+
+    /// A session on models that are not there: the workers report the
+    /// failure and stop, and the session still takes requests.
+    fn session() -> (tempfile::TempDir, AudioSession) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = AudioConfig::new(dir.path());
+        config.vocab_file = None;
+        config.voice = Some("alba".into());
+        let format = Format {
+            rate: 24_000,
+            channels: 1,
+        };
+        let (session, _mic, _playback) = AudioSession::spawn(config, format, format);
+        (dir, session)
+    }
+
+    #[test]
+    fn the_voice_is_set_while_the_session_runs() {
+        let (_dir, mut s) = session();
+        assert_eq!(s.voice(), Some("alba"), "from the config");
+        s.set_voice(Some("cosette".into()));
+        assert_eq!(s.voice(), Some("cosette"));
+        // Each later `Speak` names it.
+        let speak = pump::tts_request(&Action::Speak("This is cosette.".into()), s.voice());
+        assert!(matches!(
+            speak,
+            Some(TtsRequest::Speak { voice: Some(ref v), .. }) if v == "cosette"
+        ));
+        s.act(Action::Speak("This is cosette.".into()));
+        s.set_voice(None);
+        assert_eq!(s.voice(), None, "back to Phonon's own");
+        assert!(matches!(
+            pump::tts_request(&Action::Speak("Hi.".into()), s.voice()),
+            Some(TtsRequest::Speak { voice: None, .. })
+        ));
     }
 }

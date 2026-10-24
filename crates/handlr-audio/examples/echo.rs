@@ -211,7 +211,9 @@ fn run(args: Args) -> Result<(), String> {
                         let _ = start.send(());
                     }
                 }
-                AudioEvent::TtsLoaded { load_ms, voices } => {
+                AudioEvent::TtsLoaded {
+                    load_ms, voices, ..
+                } => {
                     tts_loaded = true;
                     log::info!("tts: loaded in {load_ms} ms, {voices} voices");
                 }

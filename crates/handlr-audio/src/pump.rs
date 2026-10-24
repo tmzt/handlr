@@ -71,8 +71,14 @@ pub enum AudioEvent {
     SttLoaded { load_ms: u32 },
     /// The STT model did not load. Nothing will be heard.
     SttLoadFailed(String),
-    /// Phonon is loaded, with this many voices.
-    TtsLoaded { load_ms: u32, voices: usize },
+    /// Phonon is loaded, with this many voices, named in `names` (the
+    /// checkpoint's `voices/`, in Phonon's order). Any of them can be given
+    /// to [`AudioSession::set_voice`](crate::AudioSession::set_voice).
+    TtsLoaded {
+        load_ms: u32,
+        voices: usize,
+        names: Vec<String>,
+    },
     /// Phonon did not load. Nothing will be said.
     TtsLoadFailed(String),
     /// The utterance so far.
@@ -180,6 +186,7 @@ impl Pump {
             TtsEvent::Loaded { voices, load_ms } => Some(AudioEvent::TtsLoaded {
                 load_ms,
                 voices: voices.len(),
+                names: voices,
             }),
             TtsEvent::LoadFailed(e) => {
                 self.queued = 0;
@@ -468,7 +475,8 @@ mod tests {
             }),
             Some(AudioEvent::TtsLoaded {
                 load_ms: 300,
-                voices: 2
+                voices: 2,
+                names: vec!["a".into(), "b".into()],
             })
         );
         assert_eq!(
