@@ -1213,3 +1213,16 @@ disconnect, or the app coming back to the front, the next peek now
 replaces the entries instead of merging onto them, so the newest are
 certain; and each peek's result is logged (the count and the newest
 entry's time, no text) to find the cause if it recurs.
+
+## 2026-10-23 23:19 EDT — plan 20261022_03: a huge line counts at most 32 KiB toward the read budget
+
+After the previous entry the phone's log showed the view getting 27
+entries, not 200. The newest part of the owner's session holds screenshot
+results, `user` lines of 750 to 825 KiB each (base64 images), and the
+22:31 EDT reader change counted every conversation line's bytes whole
+toward the 2 MiB budget, so five of them filled it. Each line now counts at
+most 32 KiB (`LINE_BUDGET_MAX`): the reader keeps only a few thousand
+characters of a tool result anyway. The 32 MiB cap on what one read may
+cover stays. This is also the likely cause of the view going backwards:
+as screenshots arrived, a peek's window no longer overlapped what the
+phone held.
