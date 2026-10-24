@@ -901,3 +901,8 @@ and brings the plan in line with what was built since it was drafted.
    libhandlr_proto; a variant added to a closed enum is a minor release.
    libherdr's `Subscription` is closed, so step 1 is libherdr 0.3.0, as
    planned.
+
+## Amendment — 2026-10-23 22:55 EDT: a correction to the previous amendment's reference
+
+Item 3 of the previous amendment cites "the 22:53 EDT CHANGES.md entry";
+that entry, "the agent view keeps what it showed", is at 22:51 EDT.
