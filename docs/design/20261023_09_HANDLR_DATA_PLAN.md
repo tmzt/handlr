@@ -164,3 +164,18 @@ Each step is one crate, one commit (Rule 3.1). 1 needs plan
    app restarts. Once this plan is approved, that line is replaced by
    decision 6 here; should that be recorded as an amendment there too, or
    is this plan's note enough?
+
+## Amendment — 2026-10-23 23:26 EDT: approved; built once plan 20261023_03 lands
+
+The owner approved the plan on 2026-10-23: "approve the existing and start
+it". Its open questions take the plan's values until the owner says
+otherwise: the phone's cap is 20 sessions and 50 MB; the daemon's cache is
+in `~/.local/state/handlr/`; and plan 20261023_03's "nothing persists
+across app restarts" is replaced by decision 6 here, noted in that plan by
+its next amendment.
+
+Building starts as soon as plan 20261023_03's work, being built in a
+worktree at the time of writing, is on `main`: step 1 moves the section
+types that work creates, and steps 4 and 5 build on its hub and client.
+Starting before it lands would mean moving types out from under it. The
+status becomes `In implementation` with step 1's first commit.
