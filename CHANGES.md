@@ -2041,3 +2041,15 @@ the first. The *Battery optimization* row's status ("Optimized: Android may
 hold back handlr's network when idle") wraps beside *Enable*, no longer
 running under it. This is done in the app's own row control, not in
 libcontrols. Toggle rows' labels don't wrap yet.
+
+## 2026-10-24 14:38 EDT — plan 20261024_02: the battery row sees the exemption after *Enable*
+
+The owner (2026-10-24): "can the app detect optimized status? it should check
+after pressing enable upon returning to app (but I got a system dialog
+requesting exemption)". On the S23, the Allow worked (`dumpsys deviceidle
+whitelist` lists `dev.tmzt.handlr`), but the row didn't change. Android's
+Allow dialog sits over the app without taking its surface, so libmorph's
+`on_resume`, where the state was read again, never fires. After *Enable*, the
+settings screen now reads the state once a second for up to 60 s, and stops
+once handlr is exempt (`BATTERY_WATCH`, `BATTERY_LOOK`). `on_resume` still reads it
+after the battery pages, which do take the surface.
