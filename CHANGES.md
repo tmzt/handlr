@@ -1189,3 +1189,15 @@ not counted: the budget is 2 MiB of conversation lines, with at most
 - Gemini's session context labels a context line by its origin (`- task
   [ts]: …`, `- peer:<name> [ts]: …`) instead of `user`, and its heading
   says these are not the user speaking.
+
+## 2026-10-23 22:51 EDT — plan 20261022_03, L3: the agent view keeps what it showed
+
+The owner, on entries vanishing while scrolled back: "it might be the
+scroll back, it shows and then disappears when it lands". Each peek
+replaced the view's entries with the newest 200, so as new entries arrived
+the oldest left the window, under a reader scrolled back to them. The
+client now lays each peek over what it had: entries older than the
+peek's first stay, the peek replaces the rest (so a changed entry is
+updated), up to 1000 kept (`VIEW_KEEP`); a different session file, or a
+peek that does not overlap, starts fresh. History paging (plan
+20261023_03) replaces this when it is built.
