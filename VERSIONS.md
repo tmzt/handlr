@@ -196,3 +196,18 @@ a method (plan 20261024_01, step 1, as amended at 00:03 EDT):
 - `envelope::codes::SESSION_CHANGED` (-32014), already there since
   0.3.5, is also what `session.content` answers for a file the
   subscription has moved off; its value is unchanged.
+
+## libhandlr_proto 0.3.7 — 2026-10-24 (the commit tagged `libhandlr_proto-v0.3.7`)
+
+Additive, by the owner's ruling ("appending to a struct is additive"):
+two appended, serde-defaulted fields (plan 20261024_01, the CHANGES.md
+departure of 2026-10-24 on the daemon epoch):
+
+- **Added:**
+  - `common::SessionSubscribeParams::epoch`, the epoch of the outline a
+    resuming client holds;
+  - `common::SessionDelivery::epoch`, the epoch an outline delivery's
+    indexes are of.
+- **Changed meaning, in outline mode only:** `SessionDelivery::reset`
+  drops only the outline; contents stay valid by serial. Outline mode
+  came in 0.3.6 and has no client yet.

@@ -955,6 +955,12 @@ pub struct SessionSubscribeParams {
     /// starts at 0 with a reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<u64>,
+    /// In outline mode, the epoch of the outline the client holds (as
+    /// its last delivery gave it). `from` is honoured only when it is
+    /// the daemon's current one; otherwise the outline starts again at
+    /// 0 with a reset, which drops only the outline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1038,6 +1044,12 @@ pub struct SessionDelivery {
     pub first: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last: Option<u64>,
+    /// Outline mode: the epoch the indexes are of. It changes when the
+    /// daemon restarts or the session file is rewritten, and the outline
+    /// is then sent again from 0 with `reset`. In outline mode, `reset`
+    /// drops only the outline: contents stay valid by serial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub epoch: Option<u64>,
 }
 
 /// An `Option<Option<T>>` field: absent is `None`, null is `Some(None)`.
@@ -1257,6 +1269,7 @@ mod tests {
             after: Some(s),
             outline: false,
             from: None,
+            epoch: None,
         });
         let p: SessionSubscribeParams =
             serde_json::from_value(json!({"pane_id": "w2:pZ"})).unwrap();
@@ -1307,6 +1320,7 @@ mod tests {
             removed_index: vec![],
             first: 0,
             last: None,
+            epoch: None,
         };
         round_trip(full.clone());
         round_trip(SessionSubscribeResult {
@@ -1402,12 +1416,13 @@ mod tests {
             after: Some(s),
             outline: true,
             from: Some(8),
+            epoch: Some(0x5eed),
         };
         round_trip(p.clone());
         assert_eq!(serde_json::to_value(&p).unwrap()["from"], 8);
         let old: SessionSubscribeParams =
             serde_json::from_value(json!({"pane_id": "w2:pZ", "after": "3fa9c21e:412.0"})).unwrap();
-        assert!(!old.outline && old.from.is_none());
+        assert!(!old.outline && old.from.is_none() && old.epoch.is_none());
         // An outline delivery.
         let d = SessionDelivery {
             subscription_id: 3,
@@ -1424,6 +1439,7 @@ mod tests {
             removed_index: vec![4, 5],
             first: 0,
             last: Some(7),
+            epoch: Some(0x5eed),
         };
         round_trip(d.clone());
         let v = serde_json::to_value(&d).unwrap();
