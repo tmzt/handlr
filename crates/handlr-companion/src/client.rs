@@ -22,7 +22,7 @@ use libhandlr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::view::{AgentCard, Sections};
+use crate::view::{Sections, ViewSection};
 use crate::wire;
 
 /// What the app tells the client.
@@ -355,16 +355,21 @@ pub enum Event {
     },
     /// The dictation card changed.
     Dictation(Dictation),
-    /// The open agent view changed (plan 20261022_03, step 4): the agent's
-    /// shown name and status, its entries (oldest first), the priority
-    /// cards in flow order, and the index of the pinned one. `loading`
-    /// until the session's first answer.
+    /// The open agent view changed (plan 20261022_03, step 4, and the
+    /// 23:54 EDT amendment's ribbon): the agent's shown name and status,
+    /// its sections in serial order (each its entries or its card, a card
+    /// the user has just answered left out), the pinned card's serial, and
+    /// the serials changed since the view was last given. `loading` until
+    /// the session's first answer.
     AgentView {
         name: String,
         status: String,
-        entries: Vec<common::Entry>,
-        cards: Vec<AgentCard>,
-        pinned: Option<usize>,
+        sections: Vec<ViewSection>,
+        pinned: Option<common::Serial>,
+        /// The serials whose sections came, were replaced with different
+        /// content, or went since the view was last given (every serial
+        /// the first time), in serial order. The rest are as last given.
+        changed: Vec<common::Serial>,
         loading: bool,
         /// A response sent from the view that the session has not shown
         /// yet, shown as typed input.
@@ -856,6 +861,84 @@ impl AgentView {
     }
 }
 
+/// The serials of `now` whose sections differ from `before`'s, and those of
+/// `before` that `now` no longer has, in serial order. Both lists are in
+/// serial order.
+fn changed_serials(before: &[ViewSection], now: &[ViewSection]) -> Vec<common::Serial> {
+    let mut changed = Vec::new();
+    let (mut a, mut b) = (before.iter().peekable(), now.iter().peekable());
+    loop {
+        match (a.peek(), b.peek()) {
+            (None, None) => break,
+            (Some(x), Some(y)) if x.serial == y.serial => {
+                // A new index alone (sections paged in before it) is not
+                // a change: the block is as it was.
+                if x.shows != y.shows {
+                    changed.push(y.serial);
+                }
+                a.next();
+                b.next();
+            }
+            (Some(x), Some(y)) if x.serial.to_u64() < y.serial.to_u64() => {
+                changed.push(x.serial);
+                a.next();
+            }
+            (Some(x), None) => {
+                changed.push(x.serial);
+                a.next();
+            }
+            (_, Some(y)) => {
+                changed.push(y.serial);
+                b.next();
+            }
+        }
+    }
+    changed
+}
+
+/// Whether two agent views show the same, whatever their `changed`.
+fn same_view(a: &Event, b: &Event) -> bool {
+    match (a, b) {
+        (
+            Event::AgentView {
+                name,
+                status,
+                sections,
+                pinned,
+                changed: _,
+                loading,
+                typed,
+                loading_earlier,
+                start,
+                terminal_on,
+            },
+            Event::AgentView {
+                name: name_b,
+                status: status_b,
+                sections: sections_b,
+                pinned: pinned_b,
+                changed: _,
+                loading: loading_b,
+                typed: typed_b,
+                loading_earlier: loading_earlier_b,
+                start: start_b,
+                terminal_on: terminal_on_b,
+            },
+        ) => {
+            name == name_b
+                && status == status_b
+                && pinned == pinned_b
+                && loading == loading_b
+                && typed == typed_b
+                && loading_earlier == loading_earlier_b
+                && start == start_b
+                && terminal_on == terminal_on_b
+                && sections == sections_b
+        }
+        _ => a == b,
+    }
+}
+
 impl State {
     /// A client that calls itself `client` in `hello`.
     pub fn new(client: impl Into<String>) -> Self {
@@ -1101,9 +1184,15 @@ impl State {
             .replied_to
             .as_ref()
             .is_some_and(|ts| v.pending_question.as_ref().is_some_and(|q| &q.ts == ts));
-        let (entries, cards, pinned) = v
+        let (sections, pinned) = v
             .sections
-            .flatten(|c| answered && c.live && c.kind == crate::view::CardKind::Question);
+            .view(|c| answered && c.live && c.kind == crate::view::CardKind::Question);
+        let changed = match &v.shown {
+            Some(Event::AgentView {
+                sections: before, ..
+            }) => changed_serials(before, &sections),
+            _ => sections.iter().map(|v| v.serial).collect(),
+        };
         let terminal_on = self
             .focus
             .as_ref()
@@ -1113,9 +1202,9 @@ impl State {
         Some(Event::AgentView {
             name: self.agent_name(&v.pane_id),
             status: v.status.clone(),
-            entries,
-            cards,
+            sections,
             pinned,
+            changed,
             loading: !v.answered,
             typed: v.typed.clone(),
             loading_earlier: v.history,
@@ -1261,7 +1350,11 @@ impl State {
             return;
         };
         let v = self.view.as_mut().expect("a view");
-        if v.shown.as_ref() != Some(&event) {
+        if !v
+            .shown
+            .as_ref()
+            .is_some_and(|shown| same_view(shown, &event))
+        {
             v.shown = Some(event.clone());
             out.push(Output::Event(event));
         }
@@ -3758,14 +3851,27 @@ mod tests {
             .collect()
     }
 
-    fn view_of(out: &[Output]) -> Option<(Vec<common::Entry>, Vec<AgentCard>, Option<usize>)> {
+    fn view_of(
+        out: &[Output],
+    ) -> Option<(
+        Vec<common::Entry>,
+        Vec<crate::view::AgentCard>,
+        Option<usize>,
+    )> {
         out.iter().rev().find_map(|o| match o {
             Output::Event(Event::AgentView {
-                entries,
-                cards,
-                pinned,
-                ..
-            }) => Some((entries.clone(), cards.clone(), *pinned)),
+                sections, pinned, ..
+            }) => Some(crate::view::flatten_view(sections, *pinned)),
+            _ => None,
+        })
+    }
+
+    /// The `changed` of the last view given in `out`, as (line, slot).
+    fn changed_of(out: &[Output]) -> Option<Vec<(u32, u8)>> {
+        out.iter().rev().find_map(|o| match o {
+            Output::Event(Event::AgentView { changed, .. }) => {
+                Some(changed.iter().map(|s| (s.line, s.slot)).collect())
+            }
             _ => None,
         })
     }
@@ -3856,9 +3962,13 @@ mod tests {
 
     fn summaries(s: &State) -> Vec<String> {
         match s.agent_view() {
-            Some(Event::AgentView { entries, .. }) => {
-                entries.into_iter().map(|e| e.summary).collect()
-            }
+            Some(Event::AgentView {
+                sections, pinned, ..
+            }) => crate::view::flatten_view(&sections, pinned)
+                .0
+                .into_iter()
+                .map(|e| e.summary)
+                .collect(),
             other => panic!("{other:?}"),
         }
     }
@@ -4201,6 +4311,46 @@ mod tests {
             }) => (loading_earlier, start),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn the_view_marks_the_serials_changed_since_it_was_last_given() {
+        let mut s = online();
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        assert_eq!(changed_of(&out), Some(vec![]), "nothing held yet");
+        // The first answer: every section came.
+        let out = session_answer(&mut s, &out, "idle", asking());
+        assert_eq!(changed_of(&out), Some(vec![(1, 0), (2, 0), (2, 128)]));
+        // A new section: only it.
+        let out = deliver(&mut s, vec![text_at(5, 0, "five")], vec![]);
+        assert_eq!(changed_of(&out), Some(vec![(5, 0)]));
+        // Resent as it was: nothing to give.
+        let out = deliver(&mut s, vec![text_at(5, 0, "five")], vec![]);
+        assert_eq!(changed_of(&out), None);
+        // Replaced with different content, and another removed.
+        let out = deliver(
+            &mut s,
+            vec![text_at(5, 0, "five, grown")],
+            vec![serial(1, 0)],
+        );
+        assert_eq!(changed_of(&out), Some(vec![(1, 0), (5, 0)]));
+        // A page landing before them: only its sections, though every
+        // index after them moves on.
+        let out = s.input(Input::LoadEarlier);
+        let page = requests(&out, "session.history")[0].clone();
+        let out = s.incoming(response(
+            page.id,
+            json!({"sections": [text_at(0, 1, "older"), text_at(0, 2, "old")], "start": true}),
+        ));
+        assert_eq!(changed_of(&out), Some(vec![(0, 1), (0, 2)]));
+        let Some(Event::AgentView { sections, .. }) = s.agent_view() else {
+            panic!("a view");
+        };
+        let placed: Vec<(u64, u32)> = sections.iter().map(|v| (v.index, v.serial.line)).collect();
+        assert_eq!(placed, [(0, 0), (1, 0), (2, 2), (3, 2), (4, 5)]);
+        // The question answered from the view: its card goes, and is marked.
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        assert_eq!(changed_of(&out), Some(vec![(2, 128)]));
     }
 
     #[test]
@@ -4830,9 +4980,13 @@ mod tests {
             "idle",
             asking_about_a_plan(Some("the overview screen plan")),
         );
-        let Some(Event::AgentView { cards, entries, .. }) = s.agent_view() else {
+        let Some(Event::AgentView {
+            sections, pinned, ..
+        }) = s.agent_view()
+        else {
             panic!("a view");
         };
+        let (entries, cards, _) = crate::view::flatten_view(&sections, pinned);
         let card = cards
             .iter()
             .find(|c| c.kind == crate::view::CardKind::Question)
@@ -4842,9 +4996,13 @@ mod tests {
         assert_eq!(entries[1].links.len(), 1, "entries keep their links");
         // A plain question is not about a plan.
         let s = viewing("idle", asking());
-        let Some(Event::AgentView { cards, .. }) = s.agent_view() else {
+        let Some(Event::AgentView {
+            sections, pinned, ..
+        }) = s.agent_view()
+        else {
             panic!("a view");
         };
+        let (_, cards, _) = crate::view::flatten_view(&sections, pinned);
         assert!(cards.iter().all(|c| !c.about_plan && c.links.is_empty()));
     }
 

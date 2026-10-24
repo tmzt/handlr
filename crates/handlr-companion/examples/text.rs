@@ -176,9 +176,9 @@ fn print_event(event: Event) {
         Event::AgentView {
             name,
             status,
-            entries,
-            cards,
+            sections,
             pinned,
+            changed: _,
             loading,
             typed,
             loading_earlier,
@@ -197,6 +197,7 @@ fn print_event(event: Event) {
             if start {
                 println!("* start of session");
             }
+            let (entries, cards, pinned) = handlr_companion::view::flatten_view(&sections, pinned);
             let loading = if loading { ", loading" } else { "" };
             println!(
                 "* view of {name} ({status}{loading}): {} entries",

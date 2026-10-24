@@ -32,7 +32,7 @@ use std::time::Duration;
 pub use client::{DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Speaker, Suggestion};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
-pub use view::{AgentCard, CardKind};
+pub use view::{AgentCard, CardKind, Shows, ViewSection};
 
 /// How the client runs.
 #[derive(Debug, Clone, PartialEq, Eq)]

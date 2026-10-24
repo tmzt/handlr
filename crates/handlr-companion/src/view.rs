@@ -12,14 +12,19 @@
 //! view shows them in serial order, and a serial already held is replaced
 //! in place, never added twice.
 //!
-//! For the app, the map is flattened into the entries of its non-card
-//! sections and the cards placed among them ([`Sections::flatten`]); the
-//! pinned card is the highest live one, the newest of its kind.
+//! For the app, the view is the sections in serial order, each its entries
+//! or its card ([`Sections::view`]), with the pinned card's serial: the
+//! highest live card, the newest of its kind (plan 20261022_03, the
+//! 23:54 EDT amendment: the scrollback is a ribbon of sections). The map can
+//! also be flattened into the entries of its non-card sections and the
+//! cards placed among them ([`Sections::flatten`]).
 
 use std::collections::BTreeMap;
 
 pub use libhandlr_proto::common::CardKind;
-use libhandlr_proto::common::{Entry, EntryKind, Link, Role, Section, SectionKind, Serial};
+use libhandlr_proto::common::{
+    CardBody, Entry, EntryKind, Link, Role, Section, SectionKind, Serial,
+};
 
 /// A card as the view shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +53,60 @@ pub struct AgentCard {
 /// never the user speaking.
 pub fn is_user_said(e: &Entry) -> bool {
     e.role == Role::User && e.kind == EntryKind::Text && e.origin.is_none()
+}
+
+/// What one section of the view shows: its entries, or its card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Shows {
+    Entries(Vec<Entry>),
+    /// Its `at` is 0: [`flatten_view`] places it.
+    Card(AgentCard),
+}
+
+/// One section of the view, as the app lays it out: one block of the
+/// ribbon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewSection {
+    /// Its place in the ribbon: increasing with the serial, from
+    /// [`section_index`].
+    pub index: u64,
+    pub serial: Serial,
+    pub shows: Shows,
+}
+
+/// The ribbon index of `section`, held `position`th among the view's
+/// sections (0 the oldest held). For now it is that position; a later plan
+/// has the daemon send a contiguous index with each section, which takes
+/// its place here.
+pub fn section_index(position: usize, section: &Section) -> u64 {
+    let _ = section;
+    position as u64
+}
+
+/// The view's sections flattened as [`Sections::flatten`] gives them: the
+/// entries, the cards placed among them, and the pinned card's index.
+pub fn flatten_view(
+    sections: &[ViewSection],
+    pinned: Option<Serial>,
+) -> (Vec<Entry>, Vec<AgentCard>, Option<usize>) {
+    let mut entries = Vec::new();
+    let mut cards = Vec::new();
+    let mut pin = None;
+    for section in sections {
+        match &section.shows {
+            Shows::Entries(e) => entries.extend(e.iter().cloned()),
+            Shows::Card(card) => {
+                if pinned == Some(section.serial) {
+                    pin = Some(cards.len());
+                }
+                cards.push(AgentCard {
+                    at: entries.len(),
+                    ..card.clone()
+                });
+            }
+        }
+    }
+    (entries, cards, pin)
 }
 
 /// The sections of one agent view, by packed serial.
@@ -114,6 +173,41 @@ impl Sections {
         self.map.values()
     }
 
+    /// The view's sections in serial order, each its entries or its card,
+    /// and the pinned
+    /// card's serial: the highest live card, the newest of its kind.
+    /// `hide` drops a card the user has just answered, and its section.
+    pub fn view(&self, hide: impl Fn(&AgentCard) -> bool) -> (Vec<ViewSection>, Option<Serial>) {
+        let mut out = Vec::with_capacity(self.map.len());
+        // The pinned card's rank, newest first among equals.
+        let mut pinned: Option<(CardKind, Serial)> = None;
+        for (position, section) in self.map.values().enumerate() {
+            let shows = match (&section.kind, &section.card) {
+                (SectionKind::Card, Some(body)) => {
+                    // `at` is a flattened view's: here it is 0, so a card
+                    // stays as it was when sections come before it.
+                    let card = card_of(body, 0);
+                    if hide(&card) {
+                        continue;
+                    }
+                    if card.live && pinned.is_none_or(|(kind, _)| card.kind <= kind) {
+                        pinned = Some((card.kind, section.serial));
+                    }
+                    Shows::Card(card)
+                }
+                // A card without a body, or a kind from a newer daemon:
+                // its entries, if any, are shown as they are.
+                _ => Shows::Entries(section.entries.clone()),
+            };
+            out.push(ViewSection {
+                index: section_index(position, section),
+                serial: section.serial,
+                shows,
+            });
+        }
+        (out, pinned.map(|(_, serial)| serial))
+    }
+
     /// The entries of the non-card sections, in serial order, and the
     /// cards placed among them (each `at` the number of entries before
     /// it), with the index of the pinned one: the highest live card, the
@@ -127,16 +221,7 @@ impl Sections {
         for section in self.map.values() {
             match (&section.kind, &section.card) {
                 (SectionKind::Card, Some(body)) => {
-                    let card = AgentCard {
-                        kind: body.card,
-                        live: body.live,
-                        at: entries.len(),
-                        title: body.title.clone(),
-                        text: body.text.clone(),
-                        confirm_id: body.confirm_id,
-                        about_plan: body.about_plan,
-                        links: body.links.clone(),
-                    };
+                    let card = card_of(body, entries.len());
                     if !hide(&card) {
                         cards.push(card);
                     }
@@ -156,10 +241,23 @@ impl Sections {
     }
 }
 
+/// The card a card section's body shows, `at` its place among the entries.
+fn card_of(body: &CardBody, at: usize) -> AgentCard {
+    AgentCard {
+        kind: body.card,
+        live: body.live,
+        at,
+        title: body.title.clone(),
+        text: body.text.clone(),
+        confirm_id: body.confirm_id,
+        about_plan: body.about_plan,
+        links: body.links.clone(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use libhandlr_proto::common::CardBody;
 
     pub fn entry(ts: &str, role: Role, kind: EntryKind, summary: &str) -> Entry {
         Entry {
@@ -272,5 +370,34 @@ pub(crate) mod tests {
         // A hidden card is not placed.
         let (_, cards, _) = s.flatten(|c| c.kind == CardKind::Approval);
         assert!(cards.iter().all(|c| c.kind != CardKind::Approval));
+    }
+
+    #[test]
+    fn the_view_is_the_sections_in_order_with_the_pinned_cards_serial() {
+        let mut s = Sections::default();
+        s.put(text(1, 0, "a"));
+        s.put(card(1, 130, CardKind::Broke, true));
+        s.put(text(2, 0, "b"));
+        s.put(card(2, 128, CardKind::Question, true));
+        s.put(card(3, 64, CardKind::Approval, false));
+        let (sections, pinned) = s.view(|_| false);
+        let serials: Vec<(u32, u8)> = sections
+            .iter()
+            .map(|v| (v.serial.line, v.serial.slot))
+            .collect();
+        assert_eq!(serials, [(1, 0), (1, 130), (2, 0), (2, 128), (3, 64)]);
+        assert_eq!(pinned, Some(Serial::new(FILE, 2, 128)), "the question");
+        let indices: Vec<u64> = sections.iter().map(|v| v.index).collect();
+        assert_eq!(indices, [0, 1, 2, 3, 4], "the place among those held");
+        // Flattened, the same as the map flattened.
+        assert_eq!(flatten_view(&sections, pinned), s.flatten(|_| false));
+        // A hidden card's section is not in the view; the pin moves on.
+        let (sections, pinned) = s.view(|c| c.kind == CardKind::Question);
+        assert_eq!(sections.len(), 4);
+        assert_eq!(pinned, Some(Serial::new(FILE, 1, 130)));
+        let indices: Vec<u64> = sections.iter().map(|v| v.index).collect();
+        assert_eq!(indices, [0, 1, 2, 4], "a hidden card keeps its index");
+        assert!(matches!(&sections[1].shows, Shows::Card(c) if c.kind == CardKind::Broke));
+        assert!(matches!(&sections[0].shows, Shows::Entries(e) if e[0].summary == "a"));
     }
 }
