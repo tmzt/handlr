@@ -839,3 +839,44 @@ the rest with "…". When it is cut, a tap on the card (not on its buttons)
 shows all of its text, growing the card upward as far as leaves the flow
 120 pt; a second tap folds it. A different pinned card starts folded. A
 card whose text fits has nothing to expand, and a tap on it does nothing.
+
+## Amendment — 2026-10-23 21:57 EDT: plan questions get approve, improve and implement; repowiki links (living section L3)
+
+Agreed with the owner on 2026-10-23 (by voice): "we detect when it's
+asking about a plan and add in a[pprove], improve, implement option. Also,
+can we add something like Repo Wiki prefix as a configuration option and
+then create URLs from that?", then "Yes, write both as one L3 amendment and
+build them".
+
+**1. Plan questions.** The daemon marks a pending question
+`about_plan` when it names a plan: a path or link to
+`docs/design/…_PLAN.md`, or one of the words "plan", "amendment",
+"draft" or "approve". It also gives the plan's spoken name, as the reading
+rules read its path ("the overview screen plan"), as `plan` when one path
+names it. `PendingQuestion` gains `about_plan: bool` and
+`plan: Option<String>` (additive; libhandlr_proto's next patch).
+
+A Question card that is `about_plan` offers **approve**, **improve** and
+**implement** in place of Yes and No:
+- **approve** sends "Approve the <plan>" ("Approve the plan" with no name);
+- **improve** opens the message card with "Improve the <plan>: " already
+  in it, to dictate the rest;
+- **implement** sends "Approve the <plan> and start building it".
+
+A tap is its own approval and dismisses the card, as Yes does. The
+buttons read just the three words.
+
+**2. Repowiki links.** A new `[repowiki] url` setting (for example
+`"http://timothys-mac-mini-1.tailcd7df.ts.net:8088"`) turns on links;
+without it nothing changes. The daemon maps an agent's directory to its
+repowiki site id by repowiki's own rule (the directory's parent and own
+name joined with `--`: `src--handlr`), and gives each entry and
+question a `links` list: for every `docs/…` path in its text,
+`{text, url}` with `url` = `<url>/#/<site>/<path without .md>`. In the
+agent view such a path is drawn underlined in the link colour, and a tap
+opens the URL in the phone's browser. Opening a link needs an outbound
+"open this link" call that libmobile and libmorph do not have yet (they
+only receive links); until a release has it, a tap does nothing and the
+link is still shown. `Entry` and `PendingQuestion` gain `links`
+(additive). The `.md` is left off, as repowiki's default route
+(`/README`) is; the S23 check confirms it.
