@@ -1846,3 +1846,36 @@ libmorph's session: `ctx.build_info() -> Option<&BuildInfo { vendor, make,
 model }>`, the same name as libmobile's `build_info()`, recorded in libmorph
 `0a725b4`. It ships in libmorph 0.4.0, after libmobile 0.2.4. It returns
 `None` on desktop, the web and scripted runs. handlr uses its `vendor`.
+
+## 2026-10-24 13:20 EDT — plan 20261024_04, steps 1–2, with plan 20261024_02's copy and sections: departures
+
+Built in the handlr-markdown commit and the companion commit after it.
+1. **`fill` is a method:** each key is a `CopyText` const with `label()`,
+   `body(vendor)` and `fill(vendor, &[(name, value)])`. There is no free
+   `fill(key, …)`.
+2. **Finding a missing key:** `build.rs` scans `src/**/*.rs` for `copy::<KEY>`.
+   A missing one would also fail to compile.
+3. **Slots** are declared as the object's members (`- [abc] daemon: …`).
+   Every object has a `text`. A row with an ⓘ uses `title` as its label and
+   `text` as the explanation.
+4. **`build.rs` has no `rerun-if-changed`,** so libmorph's Gradle step still
+   reruns on any package change, as before.
+5. **The Background section also shows on the desktop.** Battery stays
+   Android-only.
+6. **"Needs an app update"** shows whenever a toggle that needs the service
+   is on and the service isn't there, not only on a tap.
+7. **All notes are drawn as Markdown,** the battery notes and confirm texts
+   included. `auth.toml` and **Restricted** are formatted, and the unused
+   "Vendor battery" label is gone.
+8. **Link taps** are logged and kept as `tapped_link()` until `open_link` is
+   wired in. `SettingsHit` is unchanged.
+9. **The Markdown faces keep copies of the atlas metrics,** without pixel
+   data, because libcontrols' `DrawContext` carries one face.
+10. **`apps/Cargo.lock`** also moves libhandlr_proto to 0.3.9, catching it
+    up.
+
+Open:
+- The two extra atlases must fit the app's atlas set on Android, or start-up
+  panics. This needs a check on the S23.
+- The "refusal that won't be asked again" test waits for the real
+  permission (libmorph 0.4.0, released, to be wired in).
