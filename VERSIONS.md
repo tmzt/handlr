@@ -92,3 +92,10 @@ public struct as not strictly additive):
 - **Added:** `common::ClientOptionsParams::background` (`bool`, defaulted
   on the wire): the companion's link sleeps, and the daemon sends it only
   what needs the user.
+
+## libhandlr_proto 0.3.2 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.3.2`)
+
+Additive:
+
+- **Added:** `common::PingParams` (`active: Option<bool>`), `ping`'s params:
+  the companion says whether the app is in front.

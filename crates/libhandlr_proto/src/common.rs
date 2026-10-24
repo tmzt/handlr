@@ -506,6 +506,17 @@ pub struct CancelResult {
     pub cancelled: bool,
 }
 
+/// `ping`'s params: whether the app is in front. A companion pings with
+/// `active: false` while its link sleeps in the background, and with
+/// `active: true` the moment the user resumes the app; absent, the ping
+/// says nothing about it (owner, 2026-10-23: "ping should have active flag
+/// ... and send it when user resumes app").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PingParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<bool>,
+}
+
 /// The empty object, for methods with no parameters or no result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Empty {}
@@ -742,6 +753,13 @@ mod tests {
             summary: None,
             complex: false,
         });
+        round_trip(PingParams {
+            active: Some(false),
+        });
+        assert_eq!(
+            serde_json::to_value(PingParams::default()).unwrap(),
+            serde_json::json!({})
+        );
         round_trip(ClientOptionsParams {
             spoken_output: true,
             background: true,
