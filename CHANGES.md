@@ -2002,3 +2002,13 @@ option".
   that the plan 20261024_04 departures entry relied on (item 4). Edits to
   `SETTINGS_COPY.md` were not picked up. `build.rs` now names the copy file,
   `src`, `build`, `build.rs`, `Cargo.toml` and `icon`.
+
+## 2026-10-24 14:21 EDT — plan 20261024_04 and the settings copy: each ⓘ's link is "Android documentation", drawn last
+
+The owner (2026-10-24): "the links should say Android documentation and be the
+last thing in the info text". A copy object may carry `link` (a Markdown link
+as a literal block). `CopyText::body` draws it last, after the text and any
+vendor addition. The ⓘ texts' links to developer.android.com moved out of their
+texts into `link`, labelled "Android documentation". The Samsung page's link to
+dontkillmyapp.com/samsung, which isn't Android's documentation, keeps its own
+label and is drawn last too.
