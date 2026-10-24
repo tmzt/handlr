@@ -3048,6 +3048,7 @@ mod tests {
             summary: summary.to_string(),
             links: Vec::new(),
             origin: None,
+            text: None,
         }
     }
 
@@ -5293,6 +5294,7 @@ mod tests {
                 lines: 2,
                 chars: 40,
                 rev: 0,
+                bookend: false,
             })
             .collect();
         a.set_held_newer(newer);
