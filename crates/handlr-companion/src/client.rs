@@ -1280,6 +1280,7 @@ impl State {
             after: v.sections.newest(),
             outline: false,
             from: None,
+            epoch: None,
         };
         out.push(self.request(methods::SESSION_SUBSCRIBE, params, Sent::Subscribe(pane_id)));
     }
