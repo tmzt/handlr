@@ -893,3 +893,15 @@ ends at whitespace, without the punctuation that ends or wraps a sentence
 (`.,;:!?)]}>"'`), keeping a `)` that balances a `(` inside it; a
 Markdown link `[text](url)` is shown as its text. They are drawn and
 tapped like the repowiki links.
+
+## Amendment — 2026-10-23 22:58 EDT: labels fit their buttons; a plan question's words are text (living section L3)
+
+The owner (2026-10-23): "button labels shouldn't be bigger than the
+buttons, Yes/No are buttons but suggestions (approve, impl) can be plain
+text". This replaces, in the 21:57 EDT amendment's item 1, the three words
+as buttons:
+- a plan question's **approve**, **improve** and **implement** are plain
+  text, lower case, in green, the link blue and yellow, like the
+  suggestion row; Yes and No stay buttons;
+- a labelled button's text is 17 pt, or smaller to fit (down to 9 pt), so
+  it never outgrows the button.
