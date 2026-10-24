@@ -1556,3 +1556,16 @@ card in its colour; it hides after 10 s; a question replaces it.
 The previous amendment cites "the amendment of 2026-10-24 15", a time cut
 short by a mistake in my command. It means the amendment of 2026-10-24 15:56 EDT, "a colour for
 every session, and other sessions' questions as cards at the bottom".
+
+## Amendment — 2026-10-24 16:01 EDT: only long-running turns give a finished card (living section L3)
+
+The owner (2026-10-24): "one-line finished summaries from other sessions but
+only for long running tasks". This narrows the amendment of 2026-10-24 16:00 EDT ("other
+sessions' finished turns as one-line cards too"). A finished card appears
+only for a turn that ran at least 3 minutes, from the user's prompt to the
+Finished card, in the agent's own times. Shorter turns give no card, and
+still show on the overview. Questions and approvals are unchanged, and
+always give a card.
+
+Tests: a turn of 3 minutes or more gives a finished card; a shorter one
+gives none.
