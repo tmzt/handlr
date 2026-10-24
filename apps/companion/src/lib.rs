@@ -489,9 +489,9 @@ impl App {
             Event::AgentView {
                 name,
                 status,
-                entries,
-                cards,
+                sections,
                 pinned,
+                changed,
                 loading,
                 typed,
                 loading_earlier,
@@ -502,7 +502,7 @@ impl App {
                     agent.set_loading(loading);
                     agent.set_typed(typed);
                     agent.set_terminal_on(terminal_on);
-                    agent.set_content(name, status, entries, cards, pinned);
+                    agent.set_content(name, status, sections, pinned, &changed);
                     agent.set_history(loading_earlier, start);
                 }
             }
@@ -569,6 +569,11 @@ impl App {
             AgentHit::Pin => {
                 if let Some(agent) = &mut self.agent {
                     agent.jump_to_pin();
+                }
+            }
+            AgentHit::JumpToEnd => {
+                if let Some(agent) = &mut self.agent {
+                    agent.jump_to_end();
                 }
             }
             AgentHit::Suggest(Suggestion::Discuss) => {

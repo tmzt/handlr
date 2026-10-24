@@ -14,8 +14,14 @@
 //! **Scrolling** is the app's own: libcontrols has no scroll view. A finger
 //! drags the flow, and a fling carries on with momentum that decays. The
 //! view follows the newest entry while it is at the bottom; scrolled back,
-//! it stays where it is as entries arrive (kept on the entry at its top),
-//! and follows again once scrolled back to the bottom.
+//! it stays where it is as sections arrive, and follows again once
+//! scrolled back to the bottom.
+//!
+//! **The ribbon** (the 23:54 EDT amendment): the scrollback is the view's
+//! sections end to end, in serial order, one block each, below a marker row
+//! of fixed height. A block is laid out once, when its section arrives or
+//! changes, and cached by serial; scrolled back, the place is the serial of
+//! the block at the window's top and the distance into it.
 //!
 //! **The pinned card** (the highest live one) sits above the buttons. At
 //! the bottom it shows in full; while the finger scrolls back, or the view
@@ -28,9 +34,11 @@
 
 use std::time::Duration;
 
-use handlr_companion::{AgentCard, CardKind, Suggestion};
+use std::collections::{HashMap, HashSet};
+
+use handlr_companion::{AgentCard, CardKind, Shows, Suggestion, ViewSection};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
-use libhandlr_proto::common::{Entry, EntryKind, Link, Role};
+use libhandlr_proto::common::{Entry, EntryKind, Link, Role, Serial};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 #[cfg(test)]
@@ -253,6 +261,8 @@ pub enum AgentHit {
     /// A link's text: its index in the screen's links
     /// ([`AgentScreen::link`]).
     Link(usize),
+    /// The jump line: back to the bottom, following.
+    JumpToEnd,
 }
 
 /// A button, in the flow or on the screen.
@@ -520,10 +530,160 @@ pub fn lay_out_flow(
 pub const LOADING_EARLIER: &str = "loading earlier\u{2026}";
 pub const START_OF_SESSION: &str = "start of session";
 
+/// The flow's top padding, in points, above the marker row.
+const TOP_PAD: f32 = 8.0;
+
+/// The marker row's fixed height at scale `s`, with the padding around it
+/// (the 23:54 EDT amendment, item 4): the ribbon's first section starts
+/// this far down, whatever the marker says.
+fn ribbon_top(s: f32) -> f32 {
+    TOP_PAD * s + line_h(TOOL_PT * s) + 8.0 * s
+}
+
+/// The marker row, at the flow's top.
+fn marker_row(text: &str, s: f32) -> Row {
+    Row {
+        text: text.to_string(),
+        x: PAD * s,
+        y: TOP_PAD * s,
+        px: TOOL_PT * s,
+        color: DIM,
+        mono: false,
+    }
+}
+
+/// What the scrollback is laid out with: the width, the scale, and the
+/// text's margin and width.
+#[derive(Clone, Copy)]
+struct Pen {
+    width: f32,
+    s: f32,
+    pad: f32,
+    text_w: f32,
+}
+
+impl Pen {
+    fn new(width: f32, s: f32) -> Self {
+        let pad = PAD * s;
+        Pen {
+            width,
+            s,
+            pad,
+            text_w: width - 2.0 * pad,
+        }
+    }
+
+    /// Terminal cells of `pt`-point type across the text.
+    fn cols(&self, pt: f32) -> usize {
+        term_columns(self.text_w - 8.0 * self.s, pt * self.s)
+    }
+}
+
+/// Lays out `card` at `y` into `flow`; the y after it. A live card that
+/// is `pinned` shows at the bottom instead, and keeps only its place.
+fn lay_out_card(
+    card: &AgentCard,
+    pinned: bool,
+    y: f32,
+    pen: Pen,
+    targets: &[Link],
+    flow: &mut Flow,
+) -> f32 {
+    let s = pen.s;
+    flow.card_y.push(y);
+    if card.live && pinned {
+        // Shown at the bottom instead.
+        y
+    } else if card.live {
+        let y = y + 8.0 * s;
+        *flow.card_y.last_mut().expect("pushed") = y;
+        y + card_block(card, pen.pad, y, pen.text_w, s, usize::MAX, targets, flow) + 12.0 * s
+    } else {
+        // Resolved: ordinary scrollback, one dim line.
+        let text = format!("-- {}: {}", card.title, card.text.replace('\n', " "));
+        flow.rows.push(Row {
+            text: one_line(&text, pen.cols(TOOL_PT)),
+            x: pen.pad,
+            y,
+            px: TOOL_PT * s,
+            color: DIM,
+            mono: true,
+        });
+        y + term_h(TOOL_PT * s) + 4.0 * s
+    }
+}
+
+/// Lays out entry `e` at `y` into `flow`, after an entry that
+/// `previous_compacts`; the y after it.
+fn lay_out_entry(
+    e: &Entry,
+    previous_compacts: bool,
+    y: f32,
+    pen: Pen,
+    targets: &[Link],
+    flow: &mut Flow,
+) -> f32 {
+    let s = pen.s;
+    let mut y = y;
+    if let Some(origin) = e.origin.as_deref() {
+        // Context: one dim line or two, after an amber dot.
+        if NoticeLine::repeats(e, previous_compacts) {
+            flow.entry_y.push(y);
+            return y;
+        }
+        y += 4.0 * s;
+        flow.entry_y.push(y);
+        return y + NoticeLine::lay_out(e, origin, pen.pad, y, pen.cols(TOOL_PT), s, targets, flow);
+    }
+    let (lines, band) = entry_lines(e, |pt| pen.cols(pt));
+    let gap = match (e.role, e.kind) {
+        (_, EntryKind::Text) => 10.0 * s,
+        _ => 2.0 * s,
+    };
+    y += gap;
+    flow.entry_y.push(y);
+    let h: f32 = lines
+        .iter()
+        .map(|(text, pt, _)| {
+            let lh = term_h(pt * s);
+            if text.is_empty() { lh * 0.5 } else { lh }
+        })
+        .sum();
+    if band {
+        flow.fills.push(Fill {
+            rect: Rect::new(0.0, y - 4.0 * s, pen.width, h + 8.0 * s),
+            color: BAND,
+            radius: 0.0,
+        });
+    }
+    let mut ly = y;
+    let first_row = flow.rows.len();
+    for (text, pt, color) in lines {
+        let px = pt * s;
+        let lh = term_h(px);
+        if text.is_empty() {
+            ly += lh * 0.5;
+            continue;
+        }
+        flow.rows.push(Row {
+            text,
+            x: pen.pad,
+            y: ly,
+            px,
+            color,
+            mono: true,
+        });
+        ly += lh;
+    }
+    link_spans::mark(flow, first_row, &e.links, targets);
+    ly + if band { 8.0 * s } else { 0.0 }
+}
+
 /// As [`lay_out_flow`], with `marker` (a dim row) at the top, and only the
 /// rows, fills, buttons and links of the entries and cards that meet
 /// `keep` (a span of the flow's y): the rest keep their place and height
-/// but no laid-out rows (the 22:55 EDT amendment's memory guard).
+/// but no laid-out rows (the 22:55 EDT amendment's memory guard). With a
+/// marker, the entries start where the ribbon's do.
 pub fn lay_out_flow_in(
     entries: &[Entry],
     cards: &[AgentCard],
@@ -543,20 +703,11 @@ pub fn lay_out_flow_in(
             .map(|e| &e.links[..])
             .chain(cards.iter().map(|c| &c.links[..])),
     );
-    let pad = PAD * s;
-    let text_w = width - 2.0 * pad;
-    let cols = |pt: f32| term_columns(text_w - 8.0 * s, pt * s);
-    let mut y = 8.0 * s;
+    let pen = Pen::new(width, s);
+    let mut y = TOP_PAD * s;
     if let Some(text) = marker {
-        flow.rows.push(Row {
-            text: text.to_string(),
-            x: pad,
-            y,
-            px: TOOL_PT * s,
-            color: DIM,
-            mono: false,
-        });
-        y += line_h(TOOL_PT * s) + 8.0 * s;
+        flow.rows.push(marker_row(text, s));
+        y = ribbon_top(s);
     }
     // What has been pushed when an item starts; dropped again when the
     // item is outside `keep`.
@@ -583,91 +734,53 @@ pub fn lay_out_flow_in(
         while let Some(card) = cards.get(next_card).filter(|c| c.at <= i) {
             let at = mark(&flow);
             let top = y;
-            flow.card_y.push(y);
-            if card.live && pinned == Some(next_card) {
-                // Shown at the bottom instead.
-            } else if card.live {
-                y += 8.0 * s;
-                *flow.card_y.last_mut().expect("pushed") = y;
-                y +=
-                    card_block(card, pad, y, text_w, s, usize::MAX, &targets, &mut flow) + 12.0 * s;
-            } else {
-                // Resolved: ordinary scrollback, one dim line.
-                let text = format!("-- {}: {}", card.title, card.text.replace('\n', " "));
-                flow.rows.push(Row {
-                    text: one_line(&text, cols(TOOL_PT)),
-                    x: pad,
-                    y,
-                    px: TOOL_PT * s,
-                    color: DIM,
-                    mono: true,
-                });
-                y += term_h(TOOL_PT * s) + 4.0 * s;
-            }
+            y = lay_out_card(card, pinned == Some(next_card), y, pen, &targets, &mut flow);
             prune(&mut flow, at, top, y);
             next_card += 1;
         }
         let Some(e) = entries.get(i) else { break };
         let at = mark(&flow);
         let top = y;
-        if let Some(origin) = e.origin.as_deref() {
-            // Context: one dim line or two, after an amber dot.
-            if NoticeLine::repeats(e, i.checked_sub(1).and_then(|p| entries.get(p))) {
-                flow.entry_y.push(y);
-                continue;
-            }
-            y += 4.0 * s;
-            flow.entry_y.push(y);
-            y += NoticeLine::lay_out(e, origin, pad, y, cols(TOOL_PT), s, &targets, &mut flow);
-            prune(&mut flow, at, top, y);
-            continue;
-        }
-        let (lines, band) = entry_lines(e, cols);
-        let gap = match (e.role, e.kind) {
-            (_, EntryKind::Text) => 10.0 * s,
-            _ => 2.0 * s,
-        };
-        y += gap;
-        flow.entry_y.push(y);
-        let h: f32 = lines
-            .iter()
-            .map(|(text, pt, _)| {
-                let lh = term_h(pt * s);
-                if text.is_empty() { lh * 0.5 } else { lh }
-            })
-            .sum();
-        if band {
-            flow.fills.push(Fill {
-                rect: Rect::new(0.0, y - 4.0 * s, width, h + 8.0 * s),
-                color: BAND,
-                radius: 0.0,
-            });
-        }
-        let mut ly = y;
-        let first_row = flow.rows.len();
-        for (text, pt, color) in lines {
-            let px = pt * s;
-            let lh = term_h(px);
-            if text.is_empty() {
-                ly += lh * 0.5;
-                continue;
-            }
-            flow.rows.push(Row {
-                text,
-                x: pad,
-                y: ly,
-                px,
-                color,
-                mono: true,
-            });
-            ly += lh;
-        }
-        link_spans::mark(&mut flow, first_row, &e.links, &targets);
-        y = ly + if band { 8.0 * s } else { 0.0 };
+        let previous_compacts = i
+            .checked_sub(1)
+            .and_then(|p| entries.get(p))
+            .is_some_and(NoticeLine::compacts);
+        y = lay_out_entry(e, previous_compacts, y, pen, &targets, &mut flow);
         prune(&mut flow, at, top, y);
     }
     flow.height = y + 16.0 * s;
     flow.targets = targets;
+    flow
+}
+
+/// One section's block of the ribbon (the 23:54 EDT amendment, items 1
+/// and 2), laid out at y = 0, `width` pixels wide at scale `s`: its rows,
+/// fills, buttons and link spans, its entries' and card's tops, and its
+/// height. Its links are its own (`targets`), which the screen's flow maps
+/// to its own. A live card that is `pinned` keeps no height; the first
+/// entry comes after one that `after_compact`.
+pub fn lay_out_block(shows: &Shows, pinned: bool, after_compact: bool, width: f32, s: f32) -> Flow {
+    let mut flow = Flow::default();
+    let pen = Pen::new(width, s);
+    let mut y = 0.0;
+    match shows {
+        Shows::Entries(entries) => {
+            flow.targets = link_spans::targets(entries.iter().map(|e| &e.links[..]));
+            let targets = std::mem::take(&mut flow.targets);
+            let mut previous_compacts = after_compact;
+            for e in entries {
+                y = lay_out_entry(e, previous_compacts, y, pen, &targets, &mut flow);
+                previous_compacts = NoticeLine::compacts(e);
+            }
+            flow.targets = targets;
+        }
+        Shows::Card(card) => {
+            let targets = link_spans::targets([&card.links[..]]);
+            y = lay_out_card(card, pinned, y, pen, &targets, &mut flow);
+            flow.targets = targets;
+        }
+    }
+    flow.height = y;
     flow
 }
 
@@ -686,6 +799,8 @@ struct Drag {
 
 /// A movement under this many points is a tap.
 pub(crate) const SLOP: f32 = 10.0;
+/// The longest frame a fling advances by, in seconds.
+pub(crate) const FLING_DT_MAX: f32 = 1.0 / 30.0;
 /// The momentum's decay per second: the speed falls to `e^-DECAY` of
 /// itself each second.
 pub(crate) const DECAY: f32 = 3.2;
@@ -714,6 +829,34 @@ pub struct Frame {
     pub suggestions: Vec<Suggested>,
     /// The response just sent, as typed input in its box.
     pub typed: Option<Flow>,
+    /// The jump line, while scrolled back.
+    pub jump: Option<JumpLine>,
+}
+
+/// The one-line "jump to end" message below the scrollback, while
+/// scrolled back (plan 20261022_03, the 00:05 EDT amendment): its tap area,
+/// the screen's width, and its text, drawn dim and centred.
+#[derive(Clone, Debug, PartialEq)]
+pub struct JumpLine {
+    pub rect: Rect,
+    pub text: String,
+}
+
+/// The jump line's height, in points, kept whether or not it shows.
+const JUMP_H: f32 = 28.0;
+/// The jump line with nothing new.
+pub const JUMP_TO_END: &str = "-- jump to end --";
+
+/// The first line of what a section shows: its first entry's text (a
+/// turn's prompt, a reply, a tool call's summary), or its card's title.
+fn first_line(shows: &Shows) -> Option<String> {
+    let line = match shows {
+        Shows::Entries(entries) => entries
+            .iter()
+            .find_map(|e| e.summary.lines().map(str::trim).find(|l| !l.is_empty()))?,
+        Shows::Card(card) => card.title.trim(),
+    };
+    (!line.is_empty()).then(|| line.to_string())
 }
 
 /// A suggested response as placed: its tap area and its text.
@@ -774,11 +917,66 @@ pub(crate) fn draw_row(
     }
 }
 
-/// Whether `a` and `b` are the same entry of the session: its time, role and
-/// kind. Its summary may change between peeks, as a tool call's result is
-/// linked to it.
-fn same_entry(a: &Entry, b: &Entry) -> bool {
-    a.ts == b.ts && a.role == b.role && a.kind == b.kind
+/// One section's place in the ribbon (the 23:54 EDT amendment, item 1):
+/// its index (increasing with the serial, as the client gives it), its
+/// serial, and its block's height in pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slot {
+    pub index: u64,
+    pub serial: Serial,
+    pub height: f32,
+}
+
+/// A section's block, cached by serial (item 2).
+#[derive(Debug)]
+struct Block {
+    shows: Shows,
+    /// A live card shown at the bottom instead: no height here.
+    pinned: bool,
+    /// The first entry comes after a compaction's line.
+    after_compact: bool,
+    /// Laid out at y = 0: its height, its entries' and card's tops and its
+    /// links always; its rows, fills, buttons and link spans while `rows`.
+    flow: Flow,
+    rows: bool,
+    /// To be laid out again: new or different content, the width or scale
+    /// changed, or its pin or neighbour did.
+    stale: bool,
+}
+
+impl Block {
+    fn new(shows: Shows) -> Self {
+        Block {
+            shows,
+            pinned: false,
+            after_compact: false,
+            flow: Flow::default(),
+            rows: false,
+            stale: true,
+        }
+    }
+
+    fn lay_out(&mut self, width: f32, s: f32) {
+        self.flow = lay_out_block(&self.shows, self.pinned, self.after_compact, width, s);
+        self.rows = true;
+        self.stale = false;
+    }
+
+    /// The memory guard: only its height, tops and links stay.
+    fn drop_rows(&mut self) {
+        self.flow.rows = Vec::new();
+        self.flow.fills = Vec::new();
+        self.flow.buttons = Vec::new();
+        self.flow.links = Vec::new();
+        self.rows = false;
+    }
+
+    fn card(&self) -> Option<&AgentCard> {
+        match &self.shows {
+            Shows::Card(card) => Some(card),
+            _ => None,
+        }
+    }
 }
 
 /// The agent view's screen: content, scroll state and layout.
@@ -786,11 +984,23 @@ fn same_entry(a: &Entry, b: &Entry) -> bool {
 pub struct AgentScreen {
     pub name: String,
     pub status: String,
-    entries: Vec<Entry>,
-    cards: Vec<AgentCard>,
-    pinned: Option<usize>,
+    /// The ribbon: the view's sections in index order (the 23:54 EDT
+    /// amendment, item 1).
+    slots: Vec<Slot>,
+    /// The top of each slot's block in the flow, in pixels: the marker row,
+    /// then the heights before it.
+    tops: Vec<f32>,
+    /// The blocks, by packed serial.
+    blocks: HashMap<u64, Block>,
+    pinned: Option<Serial>,
+    /// The width and scale the blocks were laid out at.
+    laid_at: (f32, f32),
     layout: Layout,
+    /// The kept blocks' rows put together in flow coordinates, for drawing
+    /// and hit testing.
     flow: Flow,
+    /// The flow is to be put together again.
+    flow_stale: bool,
     frame: Frame,
     /// From the top of the flow, in pixels.
     offset: f32,
@@ -831,7 +1041,13 @@ pub struct AgentScreen {
     /// Taken by the last approach to the top; armed again once the top is
     /// left, or a page lands.
     earlier_asked: bool,
+    /// The newest section held when the view left the bottom: those after
+    /// it are new, for the jump line.
+    left_at: Option<u64>,
     dirty: bool,
+    /// Blocks laid out, counted for the tests.
+    #[cfg(test)]
+    block_layouts: usize,
 }
 
 impl AgentScreen {
@@ -840,52 +1056,82 @@ impl AgentScreen {
             follow: true,
             dirty: true,
             loading: true,
+            flow_stale: true,
             ..Default::default()
         }
     }
 
-    /// New content. Scrolled back, the view stays on the entry at its top.
+    /// New content: the view's sections in serial order, the pinned card's
+    /// serial, and the serials `changed` since the last (the 23:54 EDT
+    /// amendment, item 5). Only the changed sections' blocks, and those not
+    /// held yet, are laid out again. Scrolled back, the view stays on the
+    /// section at its top (item 3).
     pub fn set_content(
         &mut self,
         name: String,
         status: String,
-        entries: Vec<Entry>,
-        cards: Vec<AgentCard>,
-        pinned: Option<usize>,
+        sections: Vec<ViewSection>,
+        pinned: Option<Serial>,
+        changed: &[Serial],
     ) {
+        let same_slots = sections.len() == self.slots.len()
+            && sections
+                .iter()
+                .zip(&self.slots)
+                .all(|(v, s)| v.serial == s.serial && v.index == s.index);
         if self.name == name
             && self.status == status
-            && self.entries == entries
-            && self.cards == cards
+            && changed.is_empty()
             && self.pinned == pinned
+            && same_slots
         {
             return;
         }
-        // Scrolled back, the view holds still: it stays on the entry at its
-        // top, or, when that one has left the window, on the next one that
-        // is still there, at the same place on screen.
-        if self.status != status || self.entries != entries {
+        let changed: HashSet<u64> = changed.iter().map(|s| s.to_u64()).collect();
+        let is_entries = |b: Option<&Block>| matches!(b.map(|b| &b.shows), Some(Shows::Entries(_)));
+        let mut entries_changed = changed.iter().any(|k| is_entries(self.blocks.get(k)));
+        if self.status != status {
             self.quiet_for = 0.0;
         }
         let keep = self.keep_anchors();
+        let pin_was = self.pinned_card().map(|c| (c.kind, c.text.clone()));
+        let mut slots = Vec::with_capacity(sections.len());
+        for v in sections {
+            let key = v.serial.to_u64();
+            if changed.contains(&key) || !self.blocks.contains_key(&key) {
+                entries_changed |= matches!(v.shows, Shows::Entries(_));
+                self.blocks.insert(key, Block::new(v.shows));
+            }
+            slots.push(Slot {
+                index: v.index,
+                serial: v.serial,
+                height: self.blocks[&key].flow.height,
+            });
+        }
+        self.slots = slots;
+        if self.blocks.len() != self.slots.len() {
+            // Sections gone: their blocks go too.
+            let held: HashSet<u64> = self.slots.iter().map(|s| s.serial.to_u64()).collect();
+            self.blocks.retain(|k, _| held.contains(k));
+        }
+        if entries_changed {
+            self.quiet_for = 0.0;
+        }
         self.name = name;
         self.status = status;
-        self.entries = entries;
+        self.pinned = pinned;
         // A different pinned card starts folded.
-        let pinned_card =
-            |cards: &[AgentCard], i: Option<usize>| i.and_then(|i| cards.get(i)).cloned();
-        if pinned_card(&self.cards, self.pinned).map(|c| (c.kind, c.text))
-            != pinned_card(&cards, pinned).map(|c| (c.kind, c.text))
-        {
+        if self.pinned_card().map(|c| (c.kind, c.text.clone())) != pin_was {
             self.pin_expanded = false;
         }
-        self.cards = cards;
-        self.pinned = pinned;
-        self.relayout_keeping(keep);
+        self.refresh_blocks();
+        self.hold(keep);
+        self.flow_stale = true;
+        self.settle();
     }
 
     /// The anchors to hold the view still by, when scrolled back.
-    fn keep_anchors(&self) -> Vec<(Entry, f32)> {
+    fn keep_anchors(&self) -> Vec<(u64, f32)> {
         if self.follow {
             Vec::new()
         } else {
@@ -893,24 +1139,185 @@ impl AgentScreen {
         }
     }
 
-    /// Lays the flow out again and, scrolled back, puts the entry that was
-    /// at the window's top back at the same place on screen: entries
-    /// paged in above it, or old ones leaving, do not move it (L3-1).
-    fn relayout_keeping(&mut self, keep: Vec<(Entry, f32)>) {
-        self.relayout();
-        if let Some((i, delta)) = keep.iter().find_map(|(entry, delta)| {
-            self.entries
-                .iter()
-                .rposition(|e| same_entry(e, entry))
-                .map(|i| (i, *delta))
-        }) {
-            self.offset = self.flow.entry_y[i] + delta;
+    /// Scrolled back, puts the section that was at the window's top back
+    /// at the same place on screen, or, if it went, the next one still
+    /// held at its own place (item 3): sections paged in above it, or
+    /// replaced below it, never move it.
+    fn hold(&mut self, keep: Vec<(u64, f32)>) {
+        if let Some((i, delta)) = keep
+            .iter()
+            .find_map(|&(serial, delta)| self.slot_of(serial).map(|i| (i, delta)))
+        {
+            self.offset = self.tops[i] + delta;
         }
-        self.settle();
+    }
+
+    /// The slot of the section `serial` (packed), if held.
+    fn slot_of(&self, serial: u64) -> Option<usize> {
+        self.slots
+            .binary_search_by_key(&serial, |s| s.serial.to_u64())
+            .ok()
+    }
+
+    /// The slot whose block is at `y` of the flow: the last that starts at
+    /// or above it.
+    fn slot_at(&self, y: f32) -> Option<usize> {
+        self.tops.partition_point(|&t| t <= y).checked_sub(1)
+    }
+
+    /// Lays out the blocks that are stale (all of them when the width or
+    /// scale changed), then the slots' heights and the running tops.
+    fn refresh_blocks(&mut self) {
+        let (w, s) = (self.layout.w, self.scale());
+        let redo = self.laid_at != (w, s);
+        self.laid_at = (w, s);
+        let pinned = self.pinned.map(Serial::to_u64);
+        let mut after_compact = false;
+        let mut top = ribbon_top(s);
+        self.tops.clear();
+        #[cfg(test)]
+        let mut laid = 0;
+        for slot in &mut self.slots {
+            let key = slot.serial.to_u64();
+            let b = self.blocks.get_mut(&key).expect("a block for each slot");
+            // Only what changes the block counts: the pin for a live card,
+            // the neighbour for a first entry that is a compaction's.
+            let is_pinned = pinned == Some(key) && b.card().is_some_and(|c| c.live);
+            let after = after_compact
+                && matches!(&b.shows, Shows::Entries(e) if e.first().is_some_and(NoticeLine::compacts));
+            if redo || b.pinned != is_pinned || b.after_compact != after {
+                b.stale = true;
+            }
+            b.pinned = is_pinned;
+            b.after_compact = after;
+            if b.stale {
+                b.lay_out(w, s);
+                #[cfg(test)]
+                {
+                    laid += 1;
+                }
+            }
+            if let Shows::Entries(e) = &b.shows
+                && let Some(last) = e.last()
+            {
+                after_compact = NoticeLine::compacts(last);
+            }
+            slot.height = b.flow.height;
+            self.tops.push(top);
+            top += slot.height;
+        }
+        #[cfg(test)]
+        {
+            self.block_layouts += laid;
+        }
+    }
+
+    /// The flow's height: the marker row, the blocks, and the bottom
+    /// padding.
+    fn ribbon_height(&self) -> f32 {
+        let s = self.scale();
+        let end = match (self.tops.last(), self.slots.last()) {
+            (Some(top), Some(slot)) => top + slot.height,
+            _ => ribbon_top(s),
+        };
+        end + 16.0 * s
+    }
+
+    /// The marker row's text: "loading earlier…", "start of session", or
+    /// nothing.
+    fn marker(&self) -> &'static str {
+        if self.loading_earlier {
+            LOADING_EARLIER
+        } else if self.history_start {
+            START_OF_SESSION
+        } else {
+            ""
+        }
+    }
+
+    /// Puts the flow together from the blocks: the marker row, then each
+    /// block's tops, and the rows, fills, buttons and links of those within
+    /// the kept span, moved to the block's top. A block that comes into the
+    /// span is laid out again; one that leaves it keeps only its height
+    /// (the memory guard, per block).
+    fn assemble(&mut self) {
+        let s = self.scale();
+        let (w, _) = self.laid_at;
+        let keep = self.keep_span();
+        let (lo, hi) = keep;
+        let mut flow = Flow {
+            kept: Some(keep),
+            ..Flow::default()
+        };
+        flow.rows.push(marker_row(self.marker(), s));
+        let pinned = self.pinned.map(Serial::to_u64);
+        #[cfg(test)]
+        let mut laid = 0;
+        for (slot, &top) in self.slots.iter().zip(&self.tops) {
+            let key = slot.serial.to_u64();
+            let b = self.blocks.get_mut(&key).expect("a block for each slot");
+            let inside = top + slot.height >= lo && top <= hi;
+            if inside && !b.rows {
+                b.lay_out(w, s);
+                #[cfg(test)]
+                {
+                    laid += 1;
+                }
+            } else if !inside && b.rows {
+                b.drop_rows();
+            }
+            let f = &b.flow;
+            flow.entry_y.extend(f.entry_y.iter().map(|y| y + top));
+            flow.card_y.extend(f.card_y.iter().map(|y| y + top));
+            if !b.rows && pinned != Some(key) {
+                continue;
+            }
+            // The block's links, as the flow's.
+            let map: Vec<usize> = f
+                .targets
+                .iter()
+                .map(|l| match flow.targets.iter().position(|t| t == l) {
+                    Some(i) => i,
+                    None => {
+                        flow.targets.push(l.clone());
+                        flow.targets.len() - 1
+                    }
+                })
+                .collect();
+            if !b.rows {
+                continue;
+            }
+            let first_row = flow.rows.len();
+            flow.rows.extend(f.rows.iter().map(|r| Row {
+                y: r.y + top,
+                ..r.clone()
+            }));
+            flow.fills.extend(f.fills.iter().map(|x| Fill {
+                rect: Rect::new(x.rect.x, x.rect.y + top, x.rect.w, x.rect.h),
+                ..*x
+            }));
+            flow.buttons.extend(f.buttons.iter().map(|x| FlowButton {
+                rect: Rect::new(x.rect.x, x.rect.y + top, x.rect.w, x.rect.h),
+                ..x.clone()
+            }));
+            flow.links.extend(f.links.iter().map(|x| LinkSpan {
+                row: x.row + first_row,
+                link: map[x.link],
+                ..*x
+            }));
+        }
+        #[cfg(test)]
+        {
+            self.block_layouts += laid;
+        }
+        flow.height = self.ribbon_height();
+        self.flow = flow;
+        self.flow_stale = false;
     }
 
     /// The history markers (A7): a page on its way, or the session's
-    /// start reached. Each is a dim row at the flow's top.
+    /// start reached. The marker row is always there, at a fixed height:
+    /// its text changing never moves the view (item 4).
     pub fn set_history(&mut self, loading_earlier: bool, start: bool) {
         if (loading_earlier, start) == (self.loading_earlier, self.history_start) {
             return;
@@ -921,8 +1328,11 @@ impl AgentScreen {
         }
         self.loading_earlier = loading_earlier;
         self.history_start = start;
-        let keep = self.keep_anchors();
-        self.relayout_keeping(keep);
+        let marker = self.marker();
+        if let Some(row) = self.flow.rows.first_mut() {
+            row.text = marker.to_string();
+        }
+        self.settle();
     }
 
     /// herdr's focus, when it is on another pane than the view's: a dim
@@ -952,10 +1362,7 @@ impl AgentScreen {
             self.earlier_asked = false;
             return;
         }
-        if self.earlier_asked
-            || self.loading_earlier
-            || self.history_start
-            || self.entries.is_empty()
+        if self.earlier_asked || self.loading_earlier || self.history_start || self.slots.is_empty()
         {
             return;
         }
@@ -973,36 +1380,57 @@ impl AgentScreen {
         )
     }
 
-    /// Lays the rows out again when the window comes within a screen of
-    /// the edge of those laid out (the memory guard).
-    fn ensure_rows(&mut self) {
+    /// Whether the flow is to be put together again: it is stale, or the
+    /// window came within a screen of the edge of the rows laid out (the
+    /// memory guard).
+    fn rows_short(&self) -> bool {
+        if self.flow_stale {
+            return true;
+        }
         let Some((lo, hi)) = self.flow.kept else {
-            return;
+            return true;
         };
         let screen = self.frame.viewport.h.max(self.layout.h).max(1.0);
         let short_above = lo > 0.0 && self.offset - screen < lo;
-        let short_below = hi < self.flow.height && self.offset + 2.0 * screen > hi;
-        if short_above || short_below {
-            self.relayout();
-            self.place_hits();
-        }
+        let short_below = hi < self.ribbon_height() && self.offset + 2.0 * screen > hi;
+        short_above || short_below
     }
 
-    /// The entries from the one at the top of the window on, each with how
-    /// far the window's top is from it.
-    fn anchors(&self) -> Vec<(Entry, f32)> {
-        // Above the first entry (the flow's top padding), the first.
-        let top = self
-            .flow
-            .entry_y
+    /// The sections from the one at the top of the window on, each with
+    /// how far the window's top is from its block's top.
+    fn anchors(&self) -> Vec<(u64, f32)> {
+        // Above the first block (the marker row), the first.
+        let top = self.slot_at(self.offset).unwrap_or(0);
+        self.slots
             .iter()
-            .rposition(|&y| y <= self.offset)
-            .unwrap_or(0);
-        self.entries
-            .iter()
-            .zip(&self.flow.entry_y)
+            .zip(&self.tops)
             .skip(top)
-            .map(|(e, &y)| (e.clone(), self.offset - y))
+            .map(|(slot, &y)| (slot.serial.to_u64(), self.offset - y))
+            .collect()
+    }
+
+    /// The ribbon's slots, in index order.
+    pub fn slots(&self) -> &[Slot] {
+        &self.slots
+    }
+
+    /// The section at the top of the window, and how far into its block
+    /// the window starts.
+    pub fn place(&self) -> Option<(Serial, f32)> {
+        let i = self.slot_at(self.offset)?;
+        Some((self.slots[i].serial, self.offset - self.tops[i]))
+    }
+
+    /// The entries held, in order, as the flow's `entry_y` places them.
+    #[cfg(test)]
+    fn entries(&self) -> Vec<Entry> {
+        self.slots
+            .iter()
+            .filter_map(|s| match &self.blocks[&s.serial.to_u64()].shows {
+                Shows::Entries(e) => Some(e.clone()),
+                Shows::Card(_) => None,
+            })
+            .flatten()
             .collect()
     }
 
@@ -1012,7 +1440,7 @@ impl AgentScreen {
     fn top_entry(&self) -> Option<(Entry, f32)> {
         let i = self.flow.entry_y.iter().rposition(|&y| y <= self.offset)?;
         Some((
-            self.entries.get(i)?.clone(),
+            self.entries().get(i)?.clone(),
             self.offset - self.flow.entry_y[i],
         ))
     }
@@ -1037,7 +1465,13 @@ impl AgentScreen {
         self.reply = self
             .pinned_card()
             .filter(asking)
-            .or_else(|| self.cards.iter().rev().find(asking))
+            .or_else(|| {
+                self.slots
+                    .iter()
+                    .rev()
+                    .filter_map(|s| self.blocks.get(&s.serial.to_u64()).and_then(Block::card))
+                    .find(asking)
+            })
             .cloned();
         self.settle();
     }
@@ -1113,27 +1547,10 @@ impl AgentScreen {
             return;
         }
         self.layout = layout;
-        self.relayout();
+        // Every block again only when the width or scale changed.
+        self.refresh_blocks();
+        self.flow_stale = true;
         self.settle();
-    }
-
-    fn relayout(&mut self) {
-        let marker = if self.loading_earlier {
-            Some(LOADING_EARLIER)
-        } else if self.history_start {
-            Some(START_OF_SESSION)
-        } else {
-            None
-        };
-        self.flow = lay_out_flow_in(
-            &self.entries,
-            &self.cards,
-            self.pinned,
-            self.layout.w,
-            self.scale(),
-            marker,
-            Some(self.keep_span()),
-        );
     }
 
     fn scale(&self) -> f32 {
@@ -1146,12 +1563,14 @@ impl AgentScreen {
 
     /// The pinned card, if any.
     pub fn pinned_card(&self) -> Option<&AgentCard> {
-        self.pinned.and_then(|i| self.cards.get(i))
+        self.pinned
+            .and_then(|p| self.blocks.get(&p.to_u64()))
+            .and_then(Block::card)
     }
 
     /// The largest offset: the flow's bottom above the full pinned card.
     pub fn max_offset(&self) -> f32 {
-        (self.flow.height - self.frame.full_viewport_h).max(0.0)
+        (self.ribbon_height() - self.frame.full_viewport_h).max(0.0)
     }
 
     pub fn offset(&self) -> f32 {
@@ -1173,14 +1592,16 @@ impl AgentScreen {
     fn settle(&mut self) {
         self.frame = self.arrange(false);
         let full_h = self.frame.full_viewport_h;
-        let max = (self.flow.height - full_h).max(0.0);
+        let max = (self.ribbon_height() - full_h).max(0.0);
         if self.follow {
             self.offset = max;
         }
         self.offset = self.offset.clamp(0.0, max);
+        if self.rows_short() {
+            self.assemble();
+        }
         self.frame = self.arrange(self.compact());
         self.place_hits();
-        self.ensure_rows();
         self.check_earlier();
         self.dirty = true;
     }
@@ -1328,6 +1749,19 @@ impl AgentScreen {
         } else {
             above
         };
+        // The jump line's height is kept below the scrollback whether or
+        // not it shows, so it never moves the scrollback (the 00:05 EDT
+        // amendment, item 4).
+        let jump_h = JUMP_H * s;
+        let (view_bottom, full_bottom) = (view_bottom - jump_h, full_bottom - jump_h);
+        let jump = (!self.follow).then(|| {
+            let px = TOOL_PT * s;
+            let text = self.jump_text(columns(l.w - 2.0 * pad, px));
+            JumpLine {
+                rect: Rect::new(0.0, view_bottom, l.w, jump_h),
+                text,
+            }
+        });
         Frame {
             header,
             viewport: Rect::new(0.0, view_top, l.w, (view_bottom - view_top).max(0.0)),
@@ -1338,7 +1772,40 @@ impl AgentScreen {
             back,
             suggestions,
             typed,
+            jump,
         }
+    }
+
+    /// The jump line's text (the 00:05 EDT amendment, item 2), at most
+    /// `cols` characters: the newest section's first line, after how many
+    /// sections arrived since the view left the bottom; "jump to end" when
+    /// none did.
+    fn jump_text(&self, cols: usize) -> String {
+        let new = self.left_at.map_or(0, |at| {
+            self.slots
+                .iter()
+                .rev()
+                .take_while(|s| s.serial.to_u64() > at)
+                .count()
+        });
+        let message = self
+            .slots
+            .last()
+            .and_then(|s| self.blocks.get(&s.serial.to_u64()))
+            .and_then(|b| first_line(&b.shows));
+        let Some(message) = message.filter(|_| new > 0) else {
+            return JUMP_TO_END.to_string();
+        };
+        let lead = format!("-- {new} new: ");
+        let room = cols.saturating_sub(lead.chars().count() + 3).max(1);
+        format!("{lead}{} --", one_line(&message, room))
+    }
+
+    /// Jumps to the bottom and follows again: the jump line's tap.
+    pub fn jump_to_end(&mut self) {
+        self.fling = 0.0;
+        let bottom = self.max_offset();
+        self.scroll_to(bottom);
     }
 
     /// The suggested responses for the row, by the pinned card and the
@@ -1376,6 +1843,9 @@ impl AgentScreen {
         }
         for g in &self.frame.suggestions {
             self.hits.push((g.hit, g.rect));
+        }
+        if let Some(j) = &self.frame.jump {
+            self.hits.push((AgentHit::JumpToEnd, j.rect));
         }
         if let Some(p) = &self.frame.pin {
             if p.compact {
@@ -1439,10 +1909,17 @@ impl AgentScreen {
     fn scroll_to(&mut self, offset: f32) {
         let max = self.max_offset();
         self.offset = offset.clamp(0.0, max);
-        self.follow = self.offset >= max - 1.0;
+        let follow = self.offset >= max - 1.0;
+        if self.follow && !follow {
+            // Leaving the bottom: what arrives from now on is new.
+            self.left_at = self.slots.last().map(|s| s.serial.to_u64());
+        }
+        self.follow = follow;
+        if self.rows_short() {
+            self.assemble();
+        }
         self.frame = self.arrange(self.compact());
         self.place_hits();
-        self.ensure_rows();
         self.check_earlier();
         self.dirty = true;
     }
@@ -1542,7 +2019,9 @@ impl AgentScreen {
         if self.fling == 0.0 || self.drag.is_some() {
             return false;
         }
-        let dt = dt.as_secs_f32().min(0.1);
+        // A slow frame cannot throw the view (the 23:54 EDT amendment,
+        // item 6).
+        let dt = dt.as_secs_f32().min(FLING_DT_MAX);
         let before = self.offset;
         self.scroll_to(self.offset - self.fling * dt);
         self.fling *= (-DECAY * dt).exp();
@@ -1607,7 +2086,7 @@ impl AgentScreen {
                 );
             }
         }
-        if self.entries.is_empty() && self.cards.is_empty() {
+        if self.slots.is_empty() {
             let px = TEXT_PT * s;
             ctx.draw_text(
                 list,
@@ -1708,6 +2187,14 @@ impl AgentScreen {
                     recording,
                 );
             }
+        }
+        if let Some(j) = &self.frame.jump {
+            let px = TOOL_PT * s;
+            // Centred, at Roboto's half an em a character.
+            let w = j.text.chars().count() as f32 * px * 0.5;
+            let x = j.rect.x + ((j.rect.w - w) * 0.5).max(PAD * s);
+            let y = j.rect.y + (j.rect.h - line_h(px)) * 0.5;
+            ctx.draw_text(list, &j.text, [x, y], px, DIM);
         }
         let sg_px = SUGGEST_PT * s;
         for g in &self.frame.suggestions {
@@ -1829,8 +2316,84 @@ mod tests {
     fn screen(entries: Vec<Entry>, cards: Vec<AgentCard>, pinned: Option<usize>) -> AgentScreen {
         let mut a = AgentScreen::new();
         a.set_layout(PHONE);
-        a.set_content("Claude".into(), "idle".into(), entries, cards, pinned);
+        flat(&mut a, "idle", 0, entries, cards, pinned);
         a
+    }
+
+    const FILE: u32 = 0x3fa9_c21e;
+
+    /// The serial of the entry `i` of a test's whole session: on its own
+    /// line, the even ones; a card before entry `i` is on the odd line
+    /// before it.
+    fn entry_serial(i: usize) -> Serial {
+        Serial::new(FILE, 2 * i as u32 + 2, 0)
+    }
+
+    /// The serials of `sections` that differ from what `a` holds, and those
+    /// it holds that `sections` does not have: what the client marks.
+    fn changed(a: &AgentScreen, sections: &[ViewSection]) -> Vec<Serial> {
+        let mut out: Vec<Serial> = sections
+            .iter()
+            .filter(|v| a.blocks.get(&v.serial.to_u64()).map(|b| &b.shows) != Some(&v.shows))
+            .map(|v| v.serial)
+            .collect();
+        for slot in &a.slots {
+            if !sections.iter().any(|v| v.serial == slot.serial) {
+                out.push(slot.serial);
+            }
+        }
+        out.sort_by_key(|s| s.to_u64());
+        out
+    }
+
+    /// Gives `a` these sections, indexed in order, with what changed.
+    fn give(
+        a: &mut AgentScreen,
+        status: &str,
+        mut sections: Vec<ViewSection>,
+        pinned: Option<Serial>,
+    ) {
+        sections.sort_by_key(|v| v.serial.to_u64());
+        for (i, v) in sections.iter_mut().enumerate() {
+            v.index = i as u64;
+        }
+        let changed = changed(a, &sections);
+        a.set_content("Claude".into(), status.into(), sections, pinned, &changed);
+    }
+
+    /// Gives `a` the entries and cards of a flattened view, as the
+    /// client's sections: each entry a section of its own, `base` its
+    /// place in the whole session, and each card a section before the
+    /// entry it is `at`.
+    fn flat(
+        a: &mut AgentScreen,
+        status: &str,
+        base: usize,
+        entries: Vec<Entry>,
+        cards: Vec<AgentCard>,
+        pinned: Option<usize>,
+    ) {
+        let mut sections = Vec::new();
+        let mut pin = None;
+        for (n, card) in cards.into_iter().enumerate() {
+            let serial = Serial::new(FILE, 2 * (base + card.at) as u32 + 1, n as u8);
+            if pinned == Some(n) {
+                pin = Some(serial);
+            }
+            sections.push(ViewSection {
+                index: 0,
+                serial,
+                shows: Shows::Card(AgentCard { at: 0, ..card }),
+            });
+        }
+        for (i, e) in entries.into_iter().enumerate() {
+            sections.push(ViewSection {
+                index: 0,
+                serial: entry_serial(base + i),
+                shows: Shows::Entries(vec![e]),
+            });
+        }
+        give(a, status, sections, pin);
     }
 
     const PLAN: &str = "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md";
@@ -2153,13 +2716,7 @@ mod tests {
         assert!(a.max_offset() > 0.0);
         assert_eq!(a.offset(), a.max_offset());
         // New entries: still at the bottom.
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            conversation(21),
-            vec![],
-            None,
-        );
+        flat(&mut a, "idle", 0, conversation(21), vec![], None);
         assert_eq!(a.offset(), a.max_offset());
 
         // Scroll back: the finger moves down.
@@ -2175,13 +2732,7 @@ mod tests {
         let back = a.offset();
         assert!((a.max_offset() - back - 400.0).abs() < 1.0, "{back}");
         // New entries do not move it.
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            conversation(22),
-            vec![],
-            None,
-        );
+        flat(&mut a, "idle", 0, conversation(22), vec![], None);
         assert_eq!(a.offset(), back);
         // Back down to the bottom: it follows again.
         let t = drag(&mut a, 1400.0, 200.0, 10, t + Duration::from_secs(1));
@@ -2210,13 +2761,7 @@ mod tests {
         );
         let (top, delta) = a.top_entry().unwrap();
         // The window moves on by four entries: the same entry stays on top.
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            all[4..104].to_vec(),
-            vec![],
-            None,
-        );
+        flat(&mut a, "idle", 4, all[4..104].to_vec(), vec![], None);
         let (now_top, now_delta) = a.top_entry().unwrap();
         assert_eq!(now_top, top);
         assert!((now_delta - delta).abs() < 0.5);
@@ -2360,18 +2905,12 @@ mod tests {
         let back = a.offset();
         // A card arrives and is pinned: the scrolled-back view stays.
         let cards = vec![card(CardKind::Question, n, true)];
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            entries.clone(),
-            cards,
-            Some(0),
-        );
+        flat(&mut a, "idle", 0, entries.clone(), cards, Some(0));
         assert_eq!(a.offset(), back);
         assert!(a.frame().pin.as_ref().unwrap().compact);
         // It resolves and leaves the pin: still there.
         let resolved = vec![card(CardKind::Question, n, false)];
-        a.set_content("Claude".into(), "idle".into(), entries, resolved, None);
+        flat(&mut a, "idle", 0, entries, resolved, None);
         assert_eq!(a.offset(), back);
         assert!(a.frame().pin.is_none());
     }
@@ -2484,21 +3023,9 @@ mod tests {
         let ctx = DrawContext::default();
         assert!(a.draw(&mut list, &ctx, None));
         assert!(!a.draw(&mut list, &ctx, None));
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            conversation(3),
-            vec![],
-            None,
-        );
+        flat(&mut a, "idle", 0, conversation(3), vec![], None);
         assert!(!a.draw(&mut list, &ctx, None), "the same content");
-        a.set_content(
-            "Claude".into(),
-            "working".into(),
-            conversation(3),
-            vec![],
-            None,
-        );
+        flat(&mut a, "working", 0, conversation(3), vec![], None);
         assert!(a.draw(&mut list, &ctx, None));
     }
 
@@ -2615,18 +3142,12 @@ mod tests {
         );
         a.scroll_to(0.0);
         assert!(!a.following());
-        let second = a.entries[1].clone();
+        let second = a.entries()[1].clone();
         // The window moves on: the top entry leaves, and the next one is at
         // the top, not the old offset into the new content.
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            all[1..101].to_vec(),
-            vec![],
-            None,
-        );
+        flat(&mut a, "idle", 1, all[1..101].to_vec(), vec![], None);
         assert!(!a.following());
-        assert_eq!((a.entries[0].clone(), a.offset()), (second, 0.0));
+        assert_eq!((a.entries()[0].clone(), a.offset()), (second, 0.0));
         // In the middle, entries leaving above keep the view on the same
         // entry, at the same place, even when its summary changes (a
         // result linked to its call).
@@ -2636,9 +3157,9 @@ mod tests {
         for e in changed.iter_mut() {
             e.summary.push_str(" (linked)");
         }
-        a.set_content("Claude".into(), "idle".into(), changed, vec![], None);
+        flat(&mut a, "idle", 5, changed, vec![], None);
         let (now_top, now_delta) = a.top_entry().unwrap();
-        assert!(same_entry(&now_top, &top));
+        assert_eq!(now_top.ts, top.ts);
         assert!((now_delta - delta).abs() < 0.5);
         assert!(!a.following());
     }
@@ -2834,11 +3355,13 @@ mod tests {
     #[test]
     fn a_page_prepended_keeps_the_entry_under_the_thumb_in_place() {
         let all = conversation(40);
-        let mut a = screen(all[80..].to_vec(), vec![], None);
+        let mut a = AgentScreen::new();
+        a.set_layout(PHONE);
+        flat(&mut a, "idle", 80, all[80..].to_vec(), vec![], None);
         scrolled_back(&mut a);
         let (top, delta) = a.top_entry().unwrap();
         let place = |a: &AgentScreen, e: &Entry| {
-            let i = a.entries.iter().position(|x| x == e).unwrap();
+            let i = a.entries().iter().position(|x| x == e).unwrap();
             a.flow().entry_y[i] - a.offset()
         };
         let before = place(&a, &top);
@@ -2846,7 +3369,7 @@ mod tests {
         // row comes and goes.
         a.set_history(true, false);
         assert!((place(&a, &top) - before).abs() < 0.5);
-        a.set_content("Claude".into(), "idle".into(), all.clone(), vec![], None);
+        flat(&mut a, "idle", 0, all.clone(), vec![], None);
         a.set_history(false, false);
         let (now_top, now_delta) = a.top_entry().unwrap();
         assert_eq!(now_top, top);
@@ -2871,24 +3394,12 @@ mod tests {
         a.set_history(false, false);
         assert_ne!(a.flow().rows[0].text, LOADING_EARLIER);
         // Landed and still near the top: the next approach asks again.
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            conversation(2),
-            vec![],
-            None,
-        );
+        flat(&mut a, "idle", 0, conversation(2), vec![], None);
         assert!(a.take_load_earlier());
         // At the start, no more.
         a.set_history(false, true);
         assert_eq!(a.flow().rows[0].text, START_OF_SESSION);
-        a.set_content(
-            "Claude".into(),
-            "idle".into(),
-            conversation(3),
-            vec![],
-            None,
-        );
+        flat(&mut a, "idle", 0, conversation(3), vec![], None);
         assert!(!a.take_load_earlier());
 
         // Long content at the bottom: nothing until scrolled near the top.
@@ -2905,7 +3416,8 @@ mod tests {
     #[test]
     fn far_entries_keep_their_place_but_not_their_rows() {
         let all = conversation(150);
-        let full = lay_out_flow(&all, &[], None, PHONE.w, PHONE.scale);
+        // Laid out whole, below the ribbon's marker row.
+        let full = lay_out_flow_in(&all, &[], None, PHONE.w, PHONE.scale, Some(""), None);
         let a = screen(all.clone(), vec![], None);
         // At the bottom: the same places and height as laid out whole.
         assert_eq!(a.flow().entry_y, full.entry_y);
@@ -2919,8 +3431,10 @@ mod tests {
             a.flow().rows.len(),
             full.rows.len()
         );
-        assert!(a.flow().rows.iter().all(|r| r.y >= lo - 200.0));
-        let first = a.flow().rows.iter().map(|r| r.y).fold(f32::MAX, f32::min);
+        // Past the marker row, always at the top.
+        let rows = &a.flow().rows[1..];
+        assert!(rows.iter().all(|r| r.y >= lo - 200.0));
+        let first = rows.iter().map(|r| r.y).fold(f32::MAX, f32::min);
         assert!(first > full.height / 2.0);
         // Scrolled to the top, the top is laid out again.
         let mut a = a;
@@ -2949,5 +3463,249 @@ mod tests {
         assert!(a.frame().viewport.y >= a.frame().header.h);
         a.set_terminal_on(None);
         assert_eq!(a.frame().header.h, plain);
+    }
+
+    // Plan 20261022_03, the 23:54 EDT amendment: the ribbon.
+
+    /// A screen on the entries of `all` from `from` on, as sections.
+    fn screen_from(all: &[Entry], from: usize) -> AgentScreen {
+        let mut a = AgentScreen::new();
+        a.set_layout(PHONE);
+        flat(&mut a, "idle", from, all[from..].to_vec(), vec![], None);
+        a
+    }
+
+    /// Where the section `serial`'s block is on screen.
+    fn on_screen(a: &AgentScreen, serial: Serial) -> f32 {
+        let i = a.slot_of(serial.to_u64()).expect("held");
+        a.tops[i] - a.offset()
+    }
+
+    #[test]
+    fn a_page_of_sections_landing_above_does_not_move_the_view() {
+        let all = conversation(60);
+        let mut a = screen_from(&all, 120);
+        scrolled_back(&mut a);
+        let (serial, delta) = a.place().unwrap();
+        let at = on_screen(&a, serial);
+        a.set_history(true, false);
+        flat(&mut a, "idle", 0, all.clone(), vec![], None);
+        a.set_history(false, false);
+        assert_eq!(a.slots().len(), all.len());
+        let (now, now_delta) = a.place().unwrap();
+        assert_eq!(now, serial);
+        assert!((now_delta - delta).abs() < 0.01);
+        assert!((on_screen(&a, serial) - at).abs() < 0.01);
+        assert!(!a.following());
+    }
+
+    #[test]
+    fn sections_whose_entries_share_a_time_do_not_confuse_the_place() {
+        // Parallel tool calls: the same time, role and kind, even the same
+        // text.
+        let same = |line: u32| ViewSection {
+            index: 0,
+            serial: Serial::new(FILE, line, 0),
+            shows: Shows::Entries(vec![Entry {
+                ts: "12:00:00".into(),
+                ..entry(
+                    Role::Assistant,
+                    EntryKind::ToolUse,
+                    "Bash {\"command\":\"ls\"}",
+                )
+            }]),
+        };
+        let mut a = AgentScreen::new();
+        a.set_layout(PHONE);
+        give(&mut a, "idle", (100..300).map(same).collect(), None);
+        let target = a.tops[150] + 5.0;
+        a.scroll_to(target);
+        assert!(!a.following());
+        let (serial, delta) = a.place().unwrap();
+        assert_eq!(serial, Serial::new(FILE, 250, 0));
+        let at = on_screen(&a, serial);
+        // A page of more of the same lands above.
+        give(&mut a, "idle", (20..300).map(same).collect(), None);
+        assert_eq!(a.place(), Some((serial, delta)));
+        assert!((on_screen(&a, serial) - at).abs() < 0.01);
+    }
+
+    #[test]
+    fn replacing_a_section_below_the_window_or_removing_the_top_one_holds_the_view() {
+        let all = conversation(60);
+        let mut a = screen_from(&all, 0);
+        scrolled_back(&mut a);
+        let offset = a.offset();
+        let (serial, delta) = a.place().unwrap();
+        // The newest section grows, below the window.
+        let mut grown = all.clone();
+        grown
+            .last_mut()
+            .unwrap()
+            .summary
+            .push_str("\nAnd a third paragraph.\nAnd a fourth.");
+        flat(&mut a, "idle", 0, grown.clone(), vec![], None);
+        assert_eq!(a.offset(), offset);
+        assert_eq!(a.place(), Some((serial, delta)));
+        // The top section goes: the next one stays where it was on screen.
+        let i = a.slot_of(serial.to_u64()).unwrap();
+        let next = a.slots()[i + 1].serial;
+        let at = on_screen(&a, next);
+        let mut sections: Vec<ViewSection> = a
+            .slots()
+            .iter()
+            .map(|s| ViewSection {
+                index: 0,
+                serial: s.serial,
+                shows: a.blocks[&s.serial.to_u64()].shows.clone(),
+            })
+            .collect();
+        sections.retain(|v| v.serial != serial);
+        give(&mut a, "idle", sections, None);
+        assert!(a.slot_of(serial.to_u64()).is_none());
+        assert!((on_screen(&a, next) - at).abs() < 0.01);
+        assert!(!a.following());
+    }
+
+    #[test]
+    fn the_marker_row_changing_does_not_move_the_view() {
+        let mut a = screen_from(&conversation(40), 0);
+        scrolled_back(&mut a);
+        let (offset, height, tops) = (a.offset(), a.flow().height, a.flow().entry_y.clone());
+        for (loading, start, text) in [
+            (true, false, LOADING_EARLIER),
+            (false, true, START_OF_SESSION),
+            (false, false, ""),
+        ] {
+            a.set_history(loading, start);
+            assert_eq!(a.flow().rows[0].text, text);
+            assert_eq!(a.offset(), offset);
+            assert_eq!(a.flow().height, height);
+            assert_eq!(a.flow().entry_y, tops);
+        }
+        // At the bottom too.
+        let mut a = screen_from(&conversation(40), 0);
+        let bottom = a.offset();
+        a.set_history(true, false);
+        assert_eq!(a.offset(), bottom);
+        assert!(a.following());
+    }
+
+    #[test]
+    fn a_fling_covers_the_same_distance_whether_or_not_a_page_lands() {
+        let all = conversation(80);
+        let flung = || {
+            let mut a = screen_from(&all, 160);
+            let t = drag(&mut a, 800.0, 1100.0, 5, Duration::ZERO);
+            a.touch(1, TouchPhase::Ended, 540.0, 1100.0, t + MS);
+            assert!(a.fling != 0.0);
+            a
+        };
+        let (mut a, mut b) = (flung(), flung());
+        let (serial, _) = a.place().unwrap();
+        for _ in 0..10 {
+            a.tick(MS);
+            b.tick(MS);
+        }
+        // A page lands under b's fling.
+        flat(&mut b, "idle", 0, all.clone(), vec![], None);
+        for _ in 0..30 {
+            a.tick(MS);
+            b.tick(MS);
+        }
+        assert!((on_screen(&a, serial) - on_screen(&b, serial)).abs() < 0.5);
+        assert!(on_screen(&a, serial) > 300.0, "it carried on");
+        // A slow frame moves it by a thirtieth of a second at most.
+        let mut c = flung();
+        let (before, speed) = (c.offset(), c.fling.abs());
+        c.tick(Duration::from_millis(500));
+        assert!((before - c.offset()).abs() <= speed * FLING_DT_MAX + 0.5);
+    }
+
+    #[test]
+    fn a_delivery_of_one_section_lays_out_one_block() {
+        let all = conversation(4);
+        let mut a = screen(all[..12].to_vec(), vec![], None);
+        a.block_layouts = 0;
+        flat(&mut a, "idle", 0, all[..13].to_vec(), vec![], None);
+        assert_eq!(a.block_layouts, 1, "the new one");
+        // Scrolled back, a section replaced: only it.
+        let mut a = screen_from(&conversation(40), 0);
+        scrolled_back(&mut a);
+        a.block_layouts = 0;
+        let mut grown = conversation(40);
+        grown[150].summary.push_str(" (linked)");
+        flat(&mut a, "idle", 0, grown, vec![], None);
+        assert_eq!(a.block_layouts, 1);
+        // A new width: every block again.
+        let mut a = screen(all.clone(), vec![], None);
+        a.block_layouts = 0;
+        a.set_layout(Layout { w: 720.0, ..PHONE });
+        assert_eq!(a.block_layouts, a.slots().len());
+    }
+
+    // Plan 20261022_03, the 00:05 EDT amendment: the jump line.
+
+    #[test]
+    fn the_jump_line_shows_scrolled_back_and_says_what_is_new() {
+        let all = conversation(30);
+        let mut a = screen(all[..80].to_vec(), vec![], None);
+        assert!(a.frame().jump.is_none(), "hidden while following");
+        scrolled_back(&mut a);
+        let jump = |a: &AgentScreen| a.frame().jump.clone().expect("shown").text;
+        assert_eq!(jump(&a), JUMP_TO_END);
+        // One new section, then several.
+        flat(&mut a, "idle", 0, all[..81].to_vec(), vec![], None);
+        assert_eq!(jump(&a), "-- 1 new: question 20 --");
+        flat(&mut a, "idle", 0, all[..84].to_vec(), vec![], None);
+        assert_eq!(jump(&a), "-- 4 new: Answer 20. --");
+        // A long message is cut to fit.
+        let mut long = all[..84].to_vec();
+        long.push(entry(
+            Role::Assistant,
+            EntryKind::Text,
+            &"A very long reply. ".repeat(20),
+        ));
+        flat(&mut a, "idle", 0, long, vec![], None);
+        let text = jump(&a);
+        assert!(text.starts_with("-- 5 new: A very long reply."), "{text}");
+        assert!(text.ends_with("\u{2026} --"), "{text}");
+        assert!(
+            text.chars().count()
+                <= columns(PHONE.w - 2.0 * PAD * PHONE.scale, TOOL_PT * PHONE.scale)
+        );
+        // A tap goes back to the bottom, following; the line goes.
+        let r = a.rect_of(AgentHit::JumpToEnd).expect("tappable");
+        assert_eq!(
+            a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5),
+            Some(AgentHit::JumpToEnd)
+        );
+        a.jump_to_end();
+        assert!(a.following());
+        assert_eq!(a.offset(), a.max_offset());
+        assert!(a.frame().jump.is_none());
+        // Left again: nothing new since.
+        scrolled_back(&mut a);
+        assert_eq!(jump(&a), JUMP_TO_END);
+    }
+
+    #[test]
+    fn the_jump_line_showing_or_going_does_not_move_the_scrollback() {
+        let mut a = screen(conversation(30), vec![], None);
+        let (view, full) = (a.frame().viewport, a.frame().full_viewport_h);
+        scrolled_back(&mut a);
+        let line = a.frame().jump.clone().expect("shown");
+        assert_eq!(a.frame().viewport, view);
+        assert_eq!(a.frame().full_viewport_h, full);
+        assert!(
+            (line.rect.y - (view.y + view.h)).abs() < 0.01,
+            "just below it"
+        );
+        let offset = a.offset();
+        let buttons = a.frame().buttons[0].rect;
+        assert!(line.rect.y + line.rect.h <= buttons.y);
+        a.jump_to_end();
+        assert_eq!(a.frame().viewport, view);
+        assert!(a.offset() > offset);
     }
 }

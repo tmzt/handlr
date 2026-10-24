@@ -44,12 +44,16 @@ impl NoticeLine {
         }
     }
 
-    /// Whether the entry after `previous` says nothing new: a compaction
-    /// is marked by two lines in a row (the boundary and its notice), and
-    /// shown once.
-    pub fn repeats(e: &Entry, previous: Option<&Entry>) -> bool {
+    /// Whether `e` is a compaction's line.
+    pub fn compacts(e: &Entry) -> bool {
         e.origin.as_deref() == Some("compact")
-            && previous.is_some_and(|p| p.origin.as_deref() == Some("compact"))
+    }
+
+    /// Whether `e`, after an entry that `previous_compacts`, says nothing
+    /// new: a compaction is marked by two lines in a row (the boundary and
+    /// its notice), and shown once.
+    pub fn repeats(e: &Entry, previous_compacts: bool) -> bool {
+        Self::compacts(e) && previous_compacts
     }
 
     /// The notice for `e` (which has an origin) at `y`, from `x`, `cols`
