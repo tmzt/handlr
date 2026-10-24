@@ -179,3 +179,28 @@ worktree at the time of writing, is on `main`: step 1 moves the section
 types that work creates, and steps 4 and 5 build on its hub and client.
 Starting before it lands would mean moving types out from under it. The
 status becomes `In implementation` with step 1's first commit.
+
+## Amendment — 2026-10-24 12:15 EDT: the phone's store holds the outline and closed views, and the build order
+
+The owner (2026-10-24): closed views "should be paged out to disk (data)
+with a small number of recents in memory, as redb"; then "yes". This plan
+predates the outline (plan 20261024_01). It changes decision 6 and step 5:
+1. **What the phone stores per session:** the outline (slots by index,
+   with its epoch), the place, and the contents by serial, through the
+   same `SectionStore` with a small `OutlineStore` beside it (`put_outline`,
+   `outline`, `put_place`, `place`), in the same redb file and
+   transaction.
+2. **Paging:** the client pages a view out when it leaves the 3 kept in
+   memory, or on low memory, and reads it back on reopen (plan 20261022_03
+   L3, the amendment of the same time). Decision 6's "opening an agent view
+   shows the stored sections at once" stands, now with the outline.
+3. **Clear cache** (the settings plan) empties the store and compacts the
+   file.
+4. **Build order:** after the settings screen (plan 20261024_02) and the
+   full-text build (plan 20261022_03 L3, with its libhandlr_proto
+   release), in steps 1, 3 and 5. Step 1 moves the shared types, so it
+   follows that protocol release rather than running beside it. The
+   daemon's cache (step 4) may follow later.
+
+Step 5's tests also cover the outline and place stored and read back, a
+view paged out and reopened, and Clear cache.
