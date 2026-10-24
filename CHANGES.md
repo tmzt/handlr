@@ -1829,3 +1829,12 @@ vendor, I was describing the libmorph feature".
   `Build.BRAND` and `Build.MODEL` on Android, `None` elsewhere. It has no
   serial, Android ID, IMEI or other private identifier. Only the vendor is
   used here. Until libmorph has it, only base text shows.
+
+## 2026-10-24 13:04 EDT — the vendor's source is named `brand_info`
+
+The previous entry, "vendor additions to the settings copy", calls the
+vendor's source libmorph's "device identity". The owner named it
+(2026-10-24): "brand_info", which libmorph's own plan
+(`docs/design/20261024_02_DEVICE_INFO_PLAN.md`, in libmorph, awaiting
+approval) is to use: `ctx.brand_info()`, with `vendor`, `make` and `model`.
+handlr uses its `vendor`.
