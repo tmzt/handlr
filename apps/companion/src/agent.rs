@@ -2610,9 +2610,12 @@ impl AgentScreen {
     }
 
     /// Whether the pinned card is the bar: while a finger scrolls, or the
-    /// view is scrolled back.
+    /// view is scrolled back. An expanded card stays expanded while the
+    /// view scrolls (owner, 2026-10-24: "scrolling with finish card
+    /// expanded shouldn't collapse it").
     pub fn compact(&self) -> bool {
-        !self.follow || self.thumb.is_some() || self.drag.as_ref().is_some_and(|d| d.moved)
+        !self.pin_expanded
+            && (!self.follow || self.thumb.is_some() || self.drag.as_ref().is_some_and(|d| d.moved))
     }
 
     /// Clamps the offset, follows the bottom when following, and places
@@ -6820,7 +6823,7 @@ mod tests {
     fn the_pinned_summary_card_expands_to_its_points_and_spoken_text() {
         let mut live = finished(&["One.", "Two."], Some("Landed the settings screen."));
         live.live = true;
-        let mut a = screen(conversation(3), vec![live], Some(0));
+        let mut a = screen(conversation(40), vec![live], Some(0));
         let pin_texts = |a: &AgentScreen| texts(&a.frame().pin.as_ref().unwrap().flow);
         assert_eq!(pin_texts(&a), ["Finished", "Landed the settings screen."]);
         let pin = a.frame().pin.as_ref().unwrap().rect;
@@ -6831,6 +6834,19 @@ mod tests {
         assert!(open.contains(&SPOKEN.to_string()), "{open:?}");
         let buttons = &a.frame().pin.as_ref().unwrap().flow.buttons;
         assert!(buttons.iter().any(|b| matches!(b.hit, AgentHit::Replay(_))));
+        // Scrolling back keeps it expanded: not folded to the bar.
+        let t = drag(&mut a, 600.0, 1400.0, 10, Duration::ZERO);
+        assert!(!a.compact());
+        assert_eq!(pin_texts(&a), open, "still expanded while dragging");
+        a.touch(
+            1,
+            TouchPhase::Ended,
+            540.0,
+            1400.0,
+            t + Duration::from_millis(300),
+        );
+        assert!(!a.following());
+        assert_eq!(pin_texts(&a), open, "and once scrolled back");
     }
 
     #[test]
