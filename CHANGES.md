@@ -1097,3 +1097,12 @@ confirmations, notices and focus over the same socket. The ping (plan
 instead of 30 s. Back on screen (`on_resume`), one catch-up (a peek of the
 open view and a list), then the usual timers. Keeping the process and its
 socket alive while asleep is the foreground service's job (libmobile).
+
+## 2026-10-23 21:34 EDT — plan 20261022_05: the listed project follows the naming too
+
+The owner: "we haven't fixed the agent names on the overview screen". The
+16:58 EDT change named projects by directory in each agent's `name`, but
+`agents.list`'s separate `project` field still carried herdr's raw
+workspace label ("cc-highbay"), and the overview's cards show that field.
+It now carries the project as named (`[naming] project_from`, the
+directory by default), falling back to herdr's label only with no name.
