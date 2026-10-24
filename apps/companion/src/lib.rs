@@ -42,8 +42,9 @@
 //!
 //! The settings (plan 20261024_02, `settings.rs`): the gear on the
 //! overview opens them; Back, or the system Back, returns. They are kept in
-//! `settings.toml` in the data directory (on the desktop, the companion's
-//! own, `~/.config/handlr-companion`), given to the client as
+//! `settings.toml` in libmorph's data directory on every host (on macOS,
+//! `~/Library/Application Support/dev.tmzt.handlr`; a file at the old
+//! desktop place, `~/.config/handlr-companion`, is moved once), given to the client as
 //! [`Input::Settings`], and read by every control they turn off. *Unpair
 //! this device* sends [`Input::Unpair`]; once [`Event::Unpaired`] comes,
 //! the app is back on the pairing screen, and *Delete data* then removes
@@ -102,6 +103,10 @@ const FIELD_MAX: usize = 16 * 1024;
 
 /// The name the client gives in `hello`.
 const CLIENT: &str = "companion";
+
+/// The app's id: the Android package (build.rs) and the desktop's data
+/// directory's name.
+pub const APP_ID: &str = "dev.tmzt.handlr";
 
 /// The most lines of a dictated message's text the card shows: its tail.
 const MESSAGE_LINES: usize = 8;
@@ -276,9 +281,11 @@ pub struct App {
 }
 
 /// The models: `<data dir>/<name>` on Android, `--models <dir>` (default
-/// `models/`) on the desktop.
+/// `models/`) on the desktop. libmorph 0.4.0 gives a data directory on the
+/// desktop too; the models and the vocabulary stay where they were there.
 fn audio_config(ctx: &MorphContext, args: &Args) -> AudioConfig {
-    let models = match ctx.data_dir() {
+    let android_dir = ctx.data_dir().filter(|_| cfg!(target_os = "android"));
+    let models = match android_dir {
         Some(dir) => dir.to_path_buf(),
         None => args
             .models
@@ -286,7 +293,7 @@ fn audio_config(ctx: &MorphContext, args: &Args) -> AudioConfig {
             .unwrap_or_else(|| PathBuf::from("models")),
     };
     let mut config = AudioConfig::new(&models);
-    if let Some(dir) = ctx.data_dir() {
+    if let Some(dir) = android_dir {
         // Next to the keys, which on Android are not files.
         config.vocab_file = Some(dir.join("vocab.txt"));
     }
@@ -996,6 +1003,11 @@ impl MorphApp for App {
     /// `libmorph.handlr-companion`, on Android and in the macOS Keychain.
     const SECURE_STORE_ID: &'static str = "handlr-companion";
 
+    /// The desktop's data and cache directories' name (libmorph 0.4.0):
+    /// `~/Library/Application Support/dev.tmzt.handlr` on macOS. Android
+    /// uses the package's own, whose id is the same.
+    const APP_ID: &'static str = APP_ID;
+
     /// libmsdf's fragment stage binds five storage buffers; the downlevel
     /// defaults allow four.
     fn limits(base: &wgpu::Limits) -> LimitsRequest {
@@ -1092,11 +1104,21 @@ impl MorphApp for App {
 
         let args = Args::parse(ctx.args());
         let audio_config = audio_config(ctx, &args);
-        // The app's data directory; on the desktop, the companion's own.
+        // libmorph's data directory, on every host with a filesystem; the
+        // companion's old one where there is none (the web).
         let data_dir = ctx
             .data_dir()
             .map(std::path::Path::to_path_buf)
             .or_else(|| Some(FileKeyStore::default_dir()));
+        // The desktop's settings.toml was in ~/.config/handlr-companion
+        // until libmorph 0.4.0: moved once into the data directory. Only
+        // into the app's own directory, never a scripted run's `storage/`.
+        #[cfg(not(target_os = "android"))]
+        if let Some(dir) = data_dir.as_deref()
+            && dir.file_name() == Some(std::ffi::OsStr::new(APP_ID))
+        {
+            settings::move_old(&FileKeyStore::default_dir(), dir);
+        }
         let settings = data_dir.as_deref().map(Settings::load).unwrap_or_default();
         settings::set_current(settings);
         log::info!("settings: {settings:?}");

@@ -4,7 +4,9 @@
 //! - [`Settings`] is the screen's toggles and the scrollbar's visibility
 //!   (the 11:32 EDT amendment), kept in `settings.toml` in the app's data
 //!   directory (decision 5): written on every change, read at start, the
-//!   defaults when missing or unreadable.
+//!   defaults when missing or unreadable. On the desktop that is libmorph's
+//!   data directory since 0.4.0; [`move_old`] brings the file over once
+//!   from `~/.config/handlr-companion`.
 //! - A toggle that is off disables its UI throughout the app (decision 4).
 //!   Each control asks [`allows`] whether it is live, so no screen keeps
 //!   its own switch: a disabled control is drawn at [`DISABLED_ALPHA`]
@@ -252,6 +254,50 @@ pub fn dim_since(list: &mut DrawList, start: usize) {
     }
 }
 
+/// Moves `settings.toml` from `old` (the desktop's directory before
+/// libmorph 0.4.0) into `dir`, once: only when `old` has one and `dir`
+/// does not, so a file already in `dir` is never replaced. Logged either
+/// way. Returns whether it moved.
+pub fn move_old(old: &Path, dir: &Path) -> bool {
+    let from = old.join(FILE);
+    if !from.is_file() || old == dir {
+        return false;
+    }
+    let to = dir.join(FILE);
+    if to.exists() {
+        log::info!(
+            "settings: {} is also at the old place, {}; keeping {}",
+            FILE,
+            from.display(),
+            to.display()
+        );
+        return false;
+    }
+    // A rename, or across file systems a copy and a delete.
+    let moved = std::fs::create_dir_all(dir)
+        .and_then(|()| {
+            std::fs::rename(&from, &to).or_else(|_| {
+                std::fs::copy(&from, &to)?;
+                std::fs::remove_file(&from)
+            })
+        })
+        .map_err(|e| e.to_string());
+    match moved {
+        Ok(()) => {
+            log::info!("settings: moved {} to {}", from.display(), to.display());
+            true
+        }
+        Err(e) => {
+            log::warn!(
+                "settings: moving {} to {}: {e}",
+                from.display(),
+                to.display()
+            );
+            false
+        }
+    }
+}
+
 /// *Delete data* on disk (decision 3): removes everything in `dir` but the
 /// paths in `keep`, the voice models. Returns how many entries went.
 pub fn delete_data(dir: &Path, keep: &[PathBuf]) -> Result<usize, String> {
@@ -323,6 +369,29 @@ mod tests {
                 ..Settings::default()
             }
         );
+    }
+
+    #[test]
+    fn the_old_desktop_file_moves_once_and_never_over_a_new_one() {
+        let root = tempfile::tempdir().unwrap();
+        let (old, dir) = (root.path().join("old"), root.path().join("new"));
+        assert!(!move_old(&old, &dir), "nothing to move");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(FILE), "sound = false\n").unwrap();
+        // The new directory need not exist yet.
+        assert!(move_old(&old, &dir));
+        assert!(!old.join(FILE).exists(), "moved, not copied");
+        assert!(!Settings::load(&dir).sound);
+        assert!(!move_old(&old, &dir), "once");
+        // A file in both places: the new one is kept, the old one left.
+        std::fs::write(old.join(FILE), "ding = false\n").unwrap();
+        assert!(!move_old(&old, &dir));
+        assert!(old.join(FILE).exists());
+        let kept = Settings::load(&dir);
+        assert!(!kept.sound && kept.ding);
+        // The same directory is not a move.
+        assert!(!move_old(&dir, &dir));
+        assert!(dir.join(FILE).exists());
     }
 
     #[test]

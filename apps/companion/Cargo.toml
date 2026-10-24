@@ -21,9 +21,10 @@ handlr-companion = { path = "../../crates/handlr-companion" }
 handlr-audio = { path = "../../crates/handlr-audio" }
 # `StaticKey`, which the key store's Noise key implements.
 libhandlr_proto = { path = "../../crates/libhandlr_proto", features = ["link"] }
-# libmorph 0.3.2: the key store and the secure store (`secure-store`), and
-# URL schemes (`on_open_url`).
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862", default-features = false, features = ["secure-store"] }
+# libmorph 0.4.1: the key store and the secure store (`secure-store`), URL
+# schemes (`on_open_url`), `open_link`, `data_dir` on every host,
+# `build_info`, and the memory hooks (`on_low_memory`, `on_trim_memory`).
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36", default-features = false, features = ["secure-store"] }
 # The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
 # 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
@@ -52,22 +53,25 @@ base64 = "0.22"
 handlr-audio = { path = "../../crates/handlr-audio", features = ["cpal"] }
 env_logger = "0.11"
 
-# Android: libmorph's audio and libmobile, and libmorph's Sink and Source.
+# Android: libmorph's audio and libmobile, and libmorph's Sink and Source;
+# the foreground service and its events (`on_service`), system events, and
+# the battery pages (libmorph 0.4.0, plan 20261024_02's Background and
+# Battery sections).
 [target.'cfg(target_os = "android")'.dependencies]
 handlr-audio = { path = "../../crates/handlr-audio", features = ["morph"] }
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862", default-features = false, features = ["audio", "mobile", "secure-store"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery"] }
 android_logger = "0.14"
 
 # Generates the Gradle project when building for Android; a no-op on the host.
 [build-dependencies]
-libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862" }
+libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36" }
 # SETTINGS_COPY.md, read into settings_copy.rs (plan 20261024_04, decision
 # 6), at the revision the root crate pins for ADDITIONAL_PROMPTS.md.
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
 
 # The key tests use libdevice's memory vault, through libmorph's `script`.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862", default-features = false, features = ["secure-store", "script"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36", default-features = false, features = ["secure-store", "script"] }
 
 # The settings tests write settings.toml and delete data in a scratch directory.
 [dev-dependencies]

@@ -1588,10 +1588,13 @@ dependencies = [
 
 [[package]]
 name = "libdevice"
-version = "0.1.1"
-source = "git+https://github.com/tmzt/libdevice#b46963b724cf0451e94d099e26b1e8e7473d3add"
+version = "0.1.2"
+source = "git+https://github.com/tmzt/libdevice#9cbddc9c10420ac8233d25416b847b514d98c62d"
 dependencies = [
  "log",
+ "objc2 0.5.3",
+ "objc2-app-kit",
+ "objc2-foundation 0.2.2",
  "security-framework",
  "toml 1.1.8+spec-1.1.0",
  "zeroize",
@@ -1627,8 +1630,8 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmobile"
-version = "0.2.2"
-source = "git+https://github.com/tmzt/libmobile#eccea7cdf960fbcf9f71763b46abf6462133074e"
+version = "0.2.4"
+source = "git+https://github.com/tmzt/libmobile#f4d5c04ea5b07d90ab4360d1009b4faa6dbca4e5"
 dependencies = [
  "android-activity",
  "cpal",
@@ -1642,8 +1645,8 @@ dependencies = [
 
 [[package]]
 name = "libmorph"
-version = "0.3.2"
-source = "git+https://github.com/tmzt/libmorph?rev=cda1be7a73698825239d7c611e1a2aedc2e6d862#cda1be7a73698825239d7c611e1a2aedc2e6d862"
+version = "0.4.1"
+source = "git+https://github.com/tmzt/libmorph?rev=2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36#2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36"
 dependencies = [
  "block2 0.5.1",
  "cpal",
@@ -1664,8 +1667,8 @@ dependencies = [
 
 [[package]]
 name = "libmorph-build"
-version = "0.2.2"
-source = "git+https://github.com/tmzt/libmorph?rev=cda1be7a73698825239d7c611e1a2aedc2e6d862#cda1be7a73698825239d7c611e1a2aedc2e6d862"
+version = "0.2.4"
+source = "git+https://github.com/tmzt/libmorph?rev=2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36#2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36"
 dependencies = [
  "libmobile",
 ]
