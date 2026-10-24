@@ -1,7 +1,7 @@
 ---
 title: The session outline by index, with section contents delivered separately on the same link
 date: 2026-10-24
-status: Draft
+status: In implementation
 covers:
   - "A contiguous, stable `index` for every section of a session file,
     assigned by the daemon alongside the serial"
@@ -320,3 +320,10 @@ at once. Steps 4 and 5 build on the L3 ribbon, which is being built at the
 time of writing, so they start once it lands. Plan 20261023_09's step 1
 moves the shared types out of `libhandlr_proto`, so it follows this plan's
 step 1, so that the new types move with the rest.
+
+## Amendment — 2026-10-24 00:14 EDT: implementation has started; the document is now immutable
+
+Implementation has started with step 1 (`libhandlr_proto` 0.3.6), and
+steps 1–3 come first. The status is `In implementation`, and from here
+the document changes only on the owner's explicit instruction (Rule
+1.5).

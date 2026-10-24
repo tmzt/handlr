@@ -62,6 +62,9 @@ pub mod methods {
     pub const SESSION_UNSUBSCRIBE: &str = "session.unsubscribe";
     /// A page of a subscription's sections from before a serial.
     pub const SESSION_HISTORY: &str = "session.history";
+    /// Section contents, or outline slots, by index range (plan
+    /// 20261024_01, decision 4, as amended at 00:03 EDT).
+    pub const SESSION_CONTENT: &str = "session.content";
     /// Notification: a subscription's new or changed sections.
     pub const SESSION_DELIVERY: &str = "session.delivery";
 }
@@ -827,6 +830,88 @@ pub struct Section {
     /// For kind `card`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub card: Option<CardBody>,
+    /// The section's place among its file's sections, from 0 with no
+    /// gaps (plan 20261024_01, decision 1). Set in outline mode and in
+    /// `session.content`'s answers; 0, and left out of the wire, otherwise.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub index: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// One section in a session's outline (plan 20261024_01, decision 2):
+/// its place, identity and size, without its contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Slot {
+    pub index: u64,
+    pub serial: Serial,
+    pub kind: SectionKind,
+    /// The content's size: its lines (after the readers' line cuts) and
+    /// characters, for the client's height estimate.
+    pub lines: u32,
+    pub chars: u32,
+    /// Bumped each time the section is replaced, from 0.
+    #[serde(default)]
+    pub rev: u32,
+}
+
+/// The most slots one outline delivery carries.
+pub const SLOTS_MAX: usize = 2000;
+/// The newest indexes whose contents ride along with outline deliveries.
+pub const LIVE_INLINE: u64 = 8;
+/// Sections `session.content` returns by default.
+pub const CONTENT_LIMIT_DEFAULT: usize = 50;
+
+fn content_limit_default() -> usize {
+    CONTENT_LIMIT_DEFAULT
+}
+
+/// `session.content` (plan 20261024_01, decision 4, as amended at 00:03
+/// EDT): one inclusive index range of the subscription's current file.
+///
+/// * `from` only: the next `limit` sections from `from` on;
+/// * `to` only: the `limit` sections ending at `to`, oldest first;
+/// * both: the range, cut at `limit` from `from`;
+/// * neither: the newest `limit` sections.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContentParams {
+    pub subscription_id: u64,
+    /// Inclusive bounds; `None` is open on that side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<u64>,
+    /// 1 to `SECTIONS_MAX`.
+    #[serde(default = "content_limit_default")]
+    pub limit: usize,
+    /// Slots only, no contents (to fill a gap in the outline).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub slots_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionContentResult {
+    /// In index order, each carrying its index; empty when `slots_only`.
+    #[serde(default)]
+    pub sections: Vec<Section>,
+    /// When `slots_only`, in index order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<Slot>,
+    /// Indexes in the range walked that were removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_index: Vec<u64>,
+    /// The session's lowest and highest index; `last` is null for no
+    /// sections.
+    #[serde(default)]
+    pub first: u64,
+    #[serde(default)]
+    pub last: Option<u64>,
+    /// The range held more than `limit`: ask again past the last one
+    /// (before the first one, for `to` only or neither bound).
+    #[serde(default)]
+    pub more: bool,
 }
 
 /// Sections a subscription's backfill holds by default, and the most a
@@ -859,6 +944,17 @@ pub struct SessionSubscribeParams {
     /// otherwise the first delivery is a reset.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after: Option<Serial>,
+    /// Outline mode (plan 20261024_01, decision 3): deliveries carry
+    /// slots for the whole session, and contents only for the newest
+    /// `LIVE_INLINE` indexes; the rest come by `session.content`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub outline: bool,
+    /// In outline mode, the index the outline starts at: the client's
+    /// newest held index plus one, to resume. It is honoured only when
+    /// `after` is of the pane's current file; otherwise the outline
+    /// starts at 0 with a reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -928,6 +1024,20 @@ pub struct SessionDelivery {
     /// the wire when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<Serial>,
+    /// Outline mode: new and replaced slots, in index order, at most
+    /// `SLOTS_MAX`; a reset's outline continues over the next deliveries
+    /// until it reaches `last` (plan 20261024_01, decision 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<Slot>,
+    /// Outline mode: the indexes of sections that no longer stand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed_index: Vec<u64>,
+    /// Outline mode: the session's lowest and highest index; `last` is
+    /// absent for no sections, and both are left out otherwise.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub first: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<u64>,
 }
 
 /// An `Option<Option<T>>` field: absent is `None`, null is `Some(None)`.
@@ -1134,6 +1244,7 @@ mod tests {
                 origin: None,
             }],
             card: None,
+            index: 0,
         }
     }
 
@@ -1144,6 +1255,8 @@ mod tests {
             pane_id: "w2:pZ".into(),
             sections: 200,
             after: Some(s),
+            outline: false,
+            from: None,
         });
         let p: SessionSubscribeParams =
             serde_json::from_value(json!({"pane_id": "w2:pZ"})).unwrap();
@@ -1168,6 +1281,7 @@ mod tests {
                     url: "u".into(),
                 }],
             }),
+            index: 0,
         };
         let full = SessionDelivery {
             subscription_id: 3,
@@ -1189,6 +1303,10 @@ mod tests {
                 links: vec![],
             })),
             removed: vec![Serial::new(0x3fa9_c21e, 400, 195)],
+            slots: vec![],
+            removed_index: vec![],
+            first: 0,
+            last: None,
         };
         round_trip(full.clone());
         round_trip(SessionSubscribeResult {
@@ -1254,6 +1372,111 @@ mod tests {
     }
 
     #[test]
+    fn the_outline_types_round_trip_and_old_messages_read_as_before() {
+        let s = Serial::new(0x3fa9_c21e, 412, 0);
+        let slot = Slot {
+            index: 7,
+            serial: s,
+            kind: SectionKind::Tool,
+            lines: 12,
+            chars: 480,
+            rev: 2,
+        };
+        round_trip(slot);
+        assert_eq!(
+            serde_json::to_value(slot).unwrap(),
+            json!({"index": 7, "serial": "3fa9c21e:412.0", "kind": "tool",
+                   "lines": 12, "chars": 480, "rev": 2})
+        );
+        // A section with its index carries it; one without reads as 0.
+        let mut indexed = section(s, SectionKind::Text);
+        indexed.index = 7;
+        round_trip(indexed.clone());
+        assert_eq!(serde_json::to_value(&indexed).unwrap()["index"], 7);
+        let plain = section(s, SectionKind::Text);
+        assert!(serde_json::to_value(&plain).unwrap().get("index").is_none());
+        // Outline subscribe params.
+        let p = SessionSubscribeParams {
+            pane_id: "w2:pZ".into(),
+            sections: 50,
+            after: Some(s),
+            outline: true,
+            from: Some(8),
+        };
+        round_trip(p.clone());
+        assert_eq!(serde_json::to_value(&p).unwrap()["from"], 8);
+        let old: SessionSubscribeParams =
+            serde_json::from_value(json!({"pane_id": "w2:pZ", "after": "3fa9c21e:412.0"})).unwrap();
+        assert!(!old.outline && old.from.is_none());
+        // An outline delivery.
+        let d = SessionDelivery {
+            subscription_id: 3,
+            pane_id: "w2:pZ".into(),
+            agent: "claude".into(),
+            reset: true,
+            session: None,
+            reason: None,
+            sections: vec![indexed.clone()],
+            status: None,
+            pending_question: None,
+            removed: vec![],
+            slots: vec![slot],
+            removed_index: vec![4, 5],
+            first: 0,
+            last: Some(7),
+        };
+        round_trip(d.clone());
+        let v = serde_json::to_value(&d).unwrap();
+        assert_eq!(v["removed_index"], json!([4, 5]));
+        assert_eq!(v["last"], 7);
+        // An old delivery has none of it.
+        let old: SessionDelivery = serde_json::from_value(json!({
+            "subscription_id": 3, "pane_id": "w2:pZ", "agent": "claude",
+            "session": null, "reason": null
+        }))
+        .unwrap();
+        assert!(old.slots.is_empty() && old.removed_index.is_empty());
+        assert_eq!((old.first, old.last), (0, None));
+        // session.content.
+        let c = SessionContentParams {
+            subscription_id: 3,
+            from: Some(10),
+            to: None,
+            limit: 200,
+            slots_only: true,
+        };
+        round_trip(c.clone());
+        let bare: SessionContentParams =
+            serde_json::from_value(json!({"subscription_id": 3})).unwrap();
+        assert_eq!(
+            bare,
+            SessionContentParams {
+                subscription_id: 3,
+                from: None,
+                to: None,
+                limit: CONTENT_LIMIT_DEFAULT,
+                slots_only: false,
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            json!({"subscription_id": 3, "limit": 50})
+        );
+        round_trip(SessionContentResult {
+            sections: vec![indexed],
+            slots: vec![slot],
+            removed_index: vec![6],
+            first: 0,
+            last: Some(9),
+            more: true,
+        });
+        let r: SessionContentResult = serde_json::from_value(json!({})).unwrap();
+        assert!(r.sections.is_empty() && !r.more && r.last.is_none());
+        assert_eq!(methods::SESSION_CONTENT, "session.content");
+        assert!(LIVE_INLINE as usize <= SECTIONS_MAX && SECTIONS_MAX <= SLOTS_MAX);
+    }
+
+    #[test]
     fn section_and_card_kinds_are_open() {
         for (kind, wire) in [
             (SectionKind::Turn, "turn"),
@@ -1284,6 +1507,7 @@ mod tests {
             kind: SectionKind::Text,
             entries: vec![],
             card: None,
+            index: 0,
         };
         assert_eq!(
             serde_json::to_value(&empty).unwrap(),

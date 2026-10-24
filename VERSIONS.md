@@ -173,3 +173,26 @@ and 22:55 EDT):
   - `envelope::codes::TOO_MANY_SUBSCRIPTIONS` (-32012),
     `SUBSCRIPTION_NOT_FOUND` (-32013) and `SESSION_CHANGED` (-32014).
     `codes::ALL` is unchanged, so its type stays `[i64; 15]`.
+
+## libhandlr_proto 0.3.6 — 2026-10-24 (the commit tagged `libhandlr_proto-v0.3.6`)
+
+Additive, by the owner's rulings ("appending to a struct is additive";
+new items are additive): appended struct fields, all serde-defaulted so
+that messages without them read as before, and new types, constants and
+a method (plan 20261024_01, step 1, as amended at 00:03 EDT):
+
+- **Added:**
+  - `common::Section::index` (default 0, left out of the wire when 0);
+  - `common::Slot` (`index`, `serial`, `kind`, `lines`, `chars`, `rev`);
+  - `common::SLOTS_MAX` (2000), `LIVE_INLINE` (8) and
+    `CONTENT_LIMIT_DEFAULT` (50);
+  - `common::SessionSubscribeParams::outline` and `from`;
+  - `common::SessionDelivery::slots`, `removed_index`, `first` and
+    `last`;
+  - `common::methods::SESSION_CONTENT` (`session.content`), with
+    `common::SessionContentParams` (`subscription_id`, `from`, `to`,
+    `limit`, `slots_only`) and `common::SessionContentResult`
+    (`sections`, `slots`, `removed_index`, `first`, `last`, `more`).
+- `envelope::codes::SESSION_CHANGED` (-32014), already there since
+  0.3.5, is also what `session.content` answers for a file the
+  subscription has moved off; its value is unchanged.

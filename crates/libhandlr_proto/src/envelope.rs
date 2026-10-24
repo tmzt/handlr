@@ -165,7 +165,9 @@ pub mod codes {
     /// No such session subscription on this connection (4.3).
     pub const SUBSCRIPTION_NOT_FOUND: i64 = -32013;
     /// `session.history`'s `before` is not of the subscription's current
-    /// session file; a reset delivery follows (A5).
+    /// session file, or `session.content`'s range is of a file the
+    /// subscription has moved off (plan 20261024_01, decision 4); a reset
+    /// delivery follows (A5).
     pub const SESSION_CHANGED: i64 = -32014;
     /// A service the request needs is not there: Gemini has no key, a
     /// prompt did not load, or the call failed or timed out (plan
