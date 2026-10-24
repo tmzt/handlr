@@ -880,3 +880,16 @@ only receive links); until a release has it, a tap does nothing and the
 link is still shown. `Entry` and `PendingQuestion` gain `links`
 (additive). The `.md` is left off, as repowiki's default route
 (`/README`) is; the S23 check confirms it.
+
+## Amendment — 2026-10-23 22:05 EDT: plain http and https links are links too (living section L3)
+
+The owner (2026-10-23): "we should also detect other http/https links and
+make them clickable". This adds to the previous amendment (2026-10-23 21:57 EDT), item
+2: besides `docs/…` paths (which need `[repowiki] url`), every
+`http://` or `https://` URL in an entry or the pending question is a
+link, whether or not `[repowiki] url` is set. Only those two schemes
+(never `file:`, `content:`, `intent:`, `javascript:` or others). A URL
+ends at whitespace, without the punctuation that ends or wraps a sentence
+(`.,;:!?)]}>"'`), keeping a `)` that balances a `(` inside it; a
+Markdown link `[text](url)` is shown as its text. They are drawn and
+tapped like the repowiki links.
