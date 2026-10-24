@@ -1588,3 +1588,8 @@ card" (2026-10-24 11:59 EDT). The points no longer come back from
 - **Without Gemini in the daemon** (no key, unreachable, or an error), both
   fields stay empty. This is not the general agent toggle, which only
   stops the user's own Gemini turns.
+
+## 2026-10-24 12:06 EDT — correction: the entry the previous one replaces
+
+The previous entry says it replaces "points for the expanded card
+(2026-10-24 11:59 EDT)". That entry is dated 2026-10-24 12:03 EDT.
