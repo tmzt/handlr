@@ -268,12 +268,11 @@ impl SettingsScreen {
             router: Router::new(),
             nodes: None,
             scroll: ScrollState::new(),
-            // Closing is at once, with no fade (owner, 2026-10-24: "closing
-            // a confirm modal shouldn't have a delay, no fade out").
-            modals: Arc::new(ModalState::new().with_transition(ModalTransition::Timed {
-                open_secs: 0.18,
-                close_secs: 0.0,
-            })),
+            // Open and closed at once, never faded: a fading panel showed
+            // the rows through it, and a frame left mid-fade stayed see-through
+            // (owner, 2026-10-24: "no transparency on settings dialogs"; and
+            // "closing a confirm modal shouldn't have a delay, no fade out").
+            modals: Arc::new(ModalState::new().with_transition(ModalTransition::Instant)),
             settings,
             battery,
             battery_state,
