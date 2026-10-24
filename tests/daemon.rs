@@ -10,7 +10,9 @@ use futures_util::StreamExt;
 use handlr::config::AppConfig;
 use handlr::core::confirm::{ConfirmEvent, nonce};
 use handlr::core::principal::Principal;
+use handlr::server::companion::TurnOptions;
 use handlr::server::{self, Daemon, ServeOptions};
+use handlr::sessions::Sessions;
 use handlr::transport::{HerdrClient, HerdrTransport};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
@@ -93,10 +95,25 @@ impl Client {
     }
 }
 
+/// Sessions read, and approvals journalled, under a temporary home, never
+/// this machine's own.
+fn own_home(dir: &Path) -> TurnOptions {
+    TurnOptions {
+        session_dir: Some(dir.join("history")),
+        agent_sessions: Some(Arc::new(Sessions::with_home(&dir.join("home")))),
+        ..TurnOptions::default()
+    }
+}
+
 async fn start() -> (tempfile::TempDir, std::path::PathBuf, Arc<Daemon>) {
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("h.sock");
-    let daemon = Daemon::new(HerdrClient::mock(), &AppConfig::default());
+    let daemon = Daemon::with_turns(
+        HerdrClient::mock(),
+        &AppConfig::default(),
+        None,
+        own_home(dir.path()),
+    );
     let listener = server::bind(&socket).await.unwrap();
     let options = ServeOptions {
         show_tokens: false,
@@ -448,9 +465,11 @@ async fn start_tabbed() -> (
     let dir = tempfile::tempdir().unwrap();
     let herdr = FakeHerdr::start(&dir.path().join("herdr.sock"), tabbed_snapshot()).await;
     let socket = dir.path().join("h.sock");
-    let daemon = Daemon::new(
+    let daemon = Daemon::with_turns(
         HerdrClient::local(dir.path().join("herdr.sock")),
         &AppConfig::default(),
+        None,
+        own_home(dir.path()),
     );
     let listener = server::bind(&socket).await.unwrap();
     let options = ServeOptions {

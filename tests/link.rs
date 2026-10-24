@@ -9,9 +9,11 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use handlr::config::AppConfig;
+use handlr::server::companion::TurnOptions;
 use handlr::server::link::auth::{AuthFile, format_key};
 use handlr::server::link::{Link, LinkSettings};
 use handlr::server::{self, Daemon, ServeOptions};
+use handlr::sessions::Sessions;
 use handlr::transport::HerdrClient;
 use libhandlr_proto::link::{
     DeviceCode, LinkStream, PairingPayload, StaticKeypair, generate_keypair, reconnect,
@@ -56,10 +58,17 @@ async fn start() -> Env {
     let link = Link::open(settings).unwrap();
     let listeners = link.bind().await.unwrap();
     let address = listeners[0].local_addr().unwrap().to_string();
-    let daemon = Daemon::with_link(
+    // Sessions read, and approvals journalled, under a temporary home,
+    // never this machine's own.
+    let daemon = Daemon::with_turns(
         HerdrClient::mock(),
         &AppConfig::default(),
         Some(Arc::clone(&link)),
+        TurnOptions {
+            session_dir: Some(dir.path().join("history")),
+            agent_sessions: Some(Arc::new(Sessions::with_home(&dir.path().join("home")))),
+            ..TurnOptions::default()
+        },
     );
     let unix = server::bind(&socket).await.unwrap();
     server::link::spawn(Arc::clone(&daemon), listeners);

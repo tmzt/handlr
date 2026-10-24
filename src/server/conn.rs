@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::companion::{self as turns, Session};
 use super::link::auth::AuthEntry;
+use super::subscriptions::{self, Subscription};
 use super::{CoreEvent, Daemon};
 use crate::core::agents::{self, extract_agent_name_for_pane};
 use crate::core::confirm::{
@@ -92,24 +93,86 @@ pub(super) struct Conn {
     pub(super) background: std::sync::atomic::AtomicBool,
     /// When the client last asked anything but a ping.
     last_request: Mutex<std::time::Instant>,
+    /// Session subscriptions, by id (plan 20261023_03).
+    subscriptions: Mutex<HashMap<u64, Arc<Subscription>>>,
+    next_subscription: std::sync::atomic::AtomicU64,
+    /// Answers after whose writing something starts: a subscription's
+    /// task waits for its `session.subscribe` answer (4.4).
+    after_answer: Mutex<HashMap<Id, tokio::sync::oneshot::Sender<()>>>,
+    /// Lines queued to the connection, and lines its writer has written:
+    /// a subscription's delivery has left once `written` reaches its place.
+    queued: std::sync::atomic::AtomicU64,
+    written: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Conn {
     pub(super) fn send(&self, value: &impl serde::Serialize) {
+        self.send_counted(value);
+    }
+
+    /// Send, and give the line's place in the queue (see [`Conn::written`]).
+    pub(super) fn send_counted(&self, value: &impl serde::Serialize) -> u64 {
+        let place = self
+            .queued
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         if let Ok(line) = serde_json::to_string(value) {
             let _ = self.out.send(line);
         }
+        place
+    }
+
+    /// How many lines the connection's writer has written.
+    pub(super) fn written(&self) -> u64 {
+        self.written.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(super) fn is_local(&self) -> bool {
+        matches!(self.origin, Origin::Local)
+    }
+
+    pub(super) fn subscription_count(&self) -> usize {
+        self.subscriptions.lock().unwrap().len()
+    }
+
+    pub(super) fn next_subscription_id(&self) -> u64 {
+        self.next_subscription
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1
+    }
+
+    /// Hold `sub`; `ready` fires once the answer to `request_id` is written.
+    pub(super) fn add_subscription(
+        &self,
+        sub: Arc<Subscription>,
+        request_id: Id,
+        ready: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.after_answer.lock().unwrap().insert(request_id, ready);
+        self.subscriptions.lock().unwrap().insert(sub.id, sub);
+    }
+
+    pub(super) fn subscription(&self, id: u64) -> Option<Arc<Subscription>> {
+        self.subscriptions.lock().unwrap().get(&id).cloned()
+    }
+
+    pub(super) fn remove_subscription(&self, id: u64) -> Option<Arc<Subscription>> {
+        self.subscriptions.lock().unwrap().remove(&id)
     }
 
     /// Whether the companion's link sleeps: it said so (`background`), or
-    /// it has asked nothing but pings for [`ASLEEP_AFTER`]. An awake phone
-    /// always asks within about 30 s (a peek, a list or a ping), so a
-    /// minute of silence means it is not awake, though it may not have had
-    /// the chance to say so (owner, 2026-10-23: "do we consider a daemon not
-    /// getting a ping for 60s enough to background the link?").
+    /// it has asked nothing but pings for [`ASLEEP_AFTER`] and holds no
+    /// session subscription. An awake phone without one always asks within
+    /// about 30 s (a list or a ping), so a minute of silence means it is not
+    /// awake, though it may not have had the chance to say so (owner,
+    /// 2026-10-23: "do we consider a daemon not getting a ping for 60s
+    /// enough to background the link?"). One with a subscription is pushed
+    /// to and need not ask (CHANGES.md, plan 20261023_03, step 4).
     pub(super) fn asleep(&self) -> bool {
         self.background.load(std::sync::atomic::Ordering::Relaxed)
-            || (self.is_companion() && self.last_request.lock().unwrap().elapsed() >= ASLEEP_AFTER)
+            || (self.is_companion()
+                && self.last_request.lock().unwrap().elapsed() >= ASLEEP_AFTER
+                && self.subscriptions.lock().unwrap().is_empty())
     }
 
     pub(super) fn spoken_output(&self) -> bool {
@@ -158,17 +221,28 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
 
     let (read, mut write) = stream.into_split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = Arc::clone(&written);
     let writer = tokio::spawn(async move {
         while let Some(mut line) = out_rx.recv().await {
             line.push('\n');
             if write.write_all(line.as_bytes()).await.is_err() {
                 break;
             }
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
     let lines = FramedRead::new(read, LinesCodec::new_with_max_length(MAX_LINE))
         .map(|line| line.map_err(|e| format!("unreadable line: {e}")));
-    serve(daemon, Origin::Local, lines, out, CancellationToken::new()).await;
+    serve(
+        daemon,
+        Origin::Local,
+        lines,
+        out,
+        written,
+        CancellationToken::new(),
+    )
+    .await;
     let _ = writer.await;
 }
 
@@ -187,11 +261,14 @@ pub(crate) async fn handle_link(
 ) {
     let (reader, mut writer) = stream.into_split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counted = Arc::clone(&written);
     let write_task = tokio::spawn(async move {
         while let Some(message) = out_rx.recv().await {
             if writer.send_message(message.as_bytes()).await.is_err() {
                 return;
             }
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let _ = writer.shutdown().await;
     });
@@ -209,6 +286,7 @@ pub(crate) async fn handle_link(
         Origin::Link { entry, key },
         Box::pin(first.chain(rest)),
         out,
+        written,
         close,
     )
     .await;
@@ -225,6 +303,7 @@ async fn serve<S>(
     origin: Origin,
     mut lines: S,
     out: mpsc::UnboundedSender<String>,
+    written: Arc<std::sync::atomic::AtomicU64>,
     close: CancellationToken,
 ) where
     S: Stream<Item = Result<String, String>> + Unpin,
@@ -247,6 +326,11 @@ async fn serve<S>(
         spoken_output: std::sync::atomic::AtomicBool::new(false),
         background: std::sync::atomic::AtomicBool::new(false),
         last_request: Mutex::new(std::time::Instant::now()),
+        subscriptions: Mutex::new(HashMap::new()),
+        next_subscription: std::sync::atomic::AtomicU64::new(0),
+        after_answer: Mutex::new(HashMap::new()),
+        queued: std::sync::atomic::AtomicU64::new(0),
+        written,
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -320,6 +404,10 @@ async fn serve<S>(
                 };
             task_conn.inflight.lock().unwrap().remove(&request.id);
             task_conn.send(&response);
+            let after = task_conn.after_answer.lock().unwrap().remove(&request.id);
+            if let Some(after) = after {
+                let _ = after.send(());
+            }
         });
         conn.inflight
             .lock()
@@ -331,6 +419,9 @@ async fn serve<S>(
     // connection was waiting on.
     for (_, task) in conn.inflight.lock().unwrap().drain() {
         task.abort();
+    }
+    for (_, sub) in conn.subscriptions.lock().unwrap().drain() {
+        sub.cancel();
     }
     if let Some(principal) = conn.principal.get() {
         let opened: Vec<u64> = conn.opened.lock().unwrap().drain().collect();
@@ -490,7 +581,15 @@ fn wire_outcome(outcome: Outcome) -> common::Outcome {
     }
 }
 
-fn wire_status(status: &libherdr::protocol::AgentStatus) -> String {
+/// An outcome's word on the wire (`approved`, `sent`, `denied` …).
+pub(super) fn outcome_word(outcome: Outcome) -> String {
+    serde_json::to_value(wire_outcome(outcome))
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub(super) fn wire_status(status: &libherdr::protocol::AgentStatus) -> String {
     serde_json::to_value(status)
         .ok()
         .and_then(|v| v.as_str().map(str::to_string))
@@ -714,6 +813,18 @@ async fn call(
                 session,
                 status: wire_status(&pane.status),
             })
+        }
+        methods::SESSION_SUBSCRIBE => {
+            let p: common::SessionSubscribeParams = params(raw)?;
+            subscriptions::subscribe(conn, request_id, p).await
+        }
+        methods::SESSION_UNSUBSCRIBE => {
+            let p: common::SessionUnsubscribeParams = params(raw)?;
+            subscriptions::unsubscribe(conn, p)
+        }
+        methods::SESSION_HISTORY => {
+            let p: common::SessionHistoryParams = params(raw)?;
+            subscriptions::history(conn, p).await
         }
         methods::SPEECH_SUMMARIZE => {
             // Plan 20261023_05, decision 4: companions only, with
@@ -1118,6 +1229,12 @@ async fn forward_events(conn: Arc<Conn>) {
                 Err(broadcast::error::RecvError::Closed) => return,
             },
             event = core.recv() => match event {
+                // herdr's focus moved: a companion hears at once (plan
+                // 20261023_03, decision 12).
+                Ok(CoreEvent::Focus { .. }) if companion => {
+                    tokio::spawn(turns::check_vocabulary(Arc::clone(&conn)));
+                }
+                Ok(CoreEvent::Focus { .. }) | Ok(CoreEvent::Pane { .. }) => {}
                 Ok(CoreEvent::AgentStatus { pane_id, agent, status }) if companion => {
                     if conn.daemon.watches.is_watched(&pane_id) {
                         turns::agent_status(&conn, &pane_id, &agent, &status).await;

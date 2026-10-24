@@ -1,8 +1,12 @@
-//! The herdr event subscription for watched panes, feeding the daemon's
-//! event bus (plan 20261022_01, decision 11).
+//! The herdr event subscription, feeding the daemon's event bus (plan
+//! 20261022_01, decision 11): the status of watched panes, and always
+//! herdr's focus and its panes' lifecycle (plan 20261023_03, decision
+//! 12).
 //!
 //! herdr closes any connection that receives a second `events.subscribe`,
-//! so the watch set can only change by reconnecting with a new one.
+//! so the subscription set can only change by reconnecting with a new one;
+//! the focus and pane subscriptions join the watch set's, and the
+//! connection stays open with no pane watched.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +23,13 @@ use crate::watch::WatchRegistry;
 /// How long to wait before reconnecting after herdr closes the event stream.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
+/// What the daemon subscribes to while `panes` are watched.
+pub fn subscriptions(panes: &[String]) -> Vec<Subscription> {
+    let mut subs = Subscription::focus_and_panes().to_vec();
+    subs.extend(panes.iter().map(Subscription::agent_status));
+    subs
+}
+
 pub async fn run(
     transport: HerdrTransport,
     client: HerdrClient,
@@ -28,21 +39,12 @@ pub async fn run(
     let mut changes = registry.subscribe_changes();
     loop {
         let panes = registry.watched();
-        if panes.is_empty() {
-            if changes.changed().await.is_err() {
-                return;
-            }
-            continue;
-        }
-
-        let subscriptions: Vec<Subscription> =
-            panes.iter().map(Subscription::agent_status).collect();
         log::info!(
-            "Subscribing to agent status for {} pane(s): {:?}",
+            "Subscribing to herdr's focus and panes, and agent status for {} pane(s): {:?}",
             panes.len(),
             panes
         );
-        let mut stream = match transport.open_event_stream(&subscriptions).await {
+        let mut stream = match transport.open_event_stream(&subscriptions(&panes)).await {
             Ok(stream) => stream,
             Err(e) => {
                 log::warn!("Failed to open herdr event stream: {e}; retrying");
@@ -72,6 +74,21 @@ pub async fn run(
                             });
                         }
                     }
+                    Some(HerdrEvent::PaneFocused { pane_id, .. }) => {
+                        let _ = events.send(CoreEvent::Focus { pane_id: Some(pane_id) });
+                    }
+                    Some(HerdrEvent::TabFocused { .. }) => {
+                        let _ = events.send(CoreEvent::Focus { pane_id: None });
+                    }
+                    Some(HerdrEvent::PaneUpdated(pane)) => {
+                        let _ = events.send(CoreEvent::Pane {
+                            pane_id: pane.pane_id.clone(),
+                            closed: false,
+                        });
+                    }
+                    Some(HerdrEvent::PaneClosed { pane_id, .. }) => {
+                        let _ = events.send(CoreEvent::Pane { pane_id, closed: true });
+                    }
                     Some(HerdrEvent::SubscriptionStarted) => {
                         log::info!("herdr event subscription is live");
                     }
@@ -81,8 +98,6 @@ pub async fn run(
                     Some(HerdrEvent::Other { event, .. }) => {
                         log::debug!("Ignoring unsubscribed herdr event '{event}'");
                     }
-                    // Focus and pane events: not subscribed to yet.
-                    Some(other) => log::debug!("Ignoring herdr event {other:?}"),
                     None => {
                         log::info!("herdr event stream closed; reconnecting");
                         tokio::time::sleep(RECONNECT_DELAY).await;
@@ -98,5 +113,25 @@ pub async fn run(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_and_panes_are_always_subscribed() {
+        let none = serde_json::to_value(subscriptions(&[])).unwrap();
+        assert_eq!(
+            none,
+            serde_json::json!([
+                {"type": "pane.focused"}, {"type": "tab.focused"},
+                {"type": "pane.updated"}, {"type": "pane.closed"}
+            ])
+        );
+        let one = subscriptions(&["w1:p6".to_string()]);
+        assert_eq!(one.len(), 5);
+        assert_eq!(one[4], Subscription::agent_status("w1:p6"));
     }
 }

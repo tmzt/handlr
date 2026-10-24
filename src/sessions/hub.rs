@@ -647,6 +647,18 @@ impl Tailer {
         self.wake.notify_one();
     }
 
+    /// The journal's confirmations of this session without an outcome.
+    pub fn unresolved(&self) -> Vec<Approval> {
+        self.state
+            .lock()
+            .unwrap()
+            .approvals
+            .iter()
+            .filter(|a| a.outcome.is_none())
+            .cloned()
+            .collect()
+    }
+
     /// The newest whole line.
     pub fn newest_line(&self) -> u32 {
         self.state.lock().unwrap().index.lines()
@@ -680,6 +692,17 @@ impl Tailer {
             live: &snapshot.live,
             secrets: &snapshot.secrets,
         })
+    }
+
+    /// A snapshot with the file read to its end and the cards and the
+    /// pending question brought up to date first (what changed goes to the
+    /// subscribers too). Blocks on the file.
+    pub fn fresh_snapshot(&self) -> Snapshot {
+        if let Some(batch) = self.check() {
+            let _ = self.tx.send(Arc::new(batch));
+        }
+        self.check_cards_now();
+        self.snapshot()
     }
 
     /// A snapshot for a history page: the state now.

@@ -8,6 +8,7 @@ pub mod companion;
 pub mod conn;
 pub mod link;
 pub mod speech;
+mod subscriptions;
 mod watcher;
 
 use std::io::IsTerminal;
@@ -27,6 +28,7 @@ use crate::core::agents;
 use crate::core::confirm::{Broker, ConfirmEvent, ConfirmView, DEFAULT_TTL, WordPriors};
 use crate::core::naming::{self, Names};
 use crate::sessions::Sessions;
+use crate::sessions::hub::SessionHub;
 use crate::watch::WatchRegistry;
 
 /// The socket `handlr serve` listens on unless `[server] socket` says otherwise.
@@ -46,6 +48,11 @@ pub enum CoreEvent {
         agent: String,
         status: AgentStatus,
     },
+    /// herdr's focus moved: to `pane_id`, or to a tab whose focused pane
+    /// a snapshot gives (plan 20261023_03, decision 12).
+    Focus { pane_id: Option<String> },
+    /// A pane changed, or closed: its session subscriptions read it again.
+    Pane { pane_id: String, closed: bool },
 }
 
 /// Everything a connection needs, shared by all of them.
@@ -67,6 +74,8 @@ pub struct Daemon {
     pub turns: companion::TurnService,
     /// The agents' own session transcripts (plan 20261022_03).
     pub sessions: Arc<Sessions>,
+    /// Their tailers, for session subscriptions (plan 20261023_03).
+    pub hub: Arc<SessionHub>,
     /// `speech.summarize`: the summary prompt and its kept answers (plan
     /// 20261023_05).
     pub speech: speech::SpeechService,
@@ -108,8 +117,10 @@ impl Daemon {
             .clone()
             .unwrap_or_else(|| Arc::new(Sessions::new()));
         let speech = speech::SpeechService::new(config, turns.speech.clone());
+        let hub = SessionHub::new(Arc::clone(&sessions), config.urls.repowiki_url.clone());
         Arc::new(Daemon {
             sessions,
+            hub,
             speech,
             broker,
             client,
@@ -286,6 +297,7 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
             }
         });
     }
+    tokio::spawn(subscriptions::journal_confirmations(Arc::clone(&daemon)));
     if let Some(transport) = options.event_transport {
         tokio::spawn(watcher::run(
             transport,
