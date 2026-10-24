@@ -1471,3 +1471,14 @@ drag are sent only when the window changed, with no other throttle.
 
 A correction to `f14c2e4`'s message, "apps: lock libhandlr_proto 0.3.7":
 it locked 0.3.6. `3672a86` locks 0.3.7.
+
+## 2026-10-24 01:06 EDT — plan 20261024_01, step 5: the jump line's tap adds new content below and scrolls, in place of the swap
+
+Agreed with the owner (2026-10-24); see the L3 amendment of the same
+time in plan 20261022_03. This replaces item 3 of the 00:36 EDT entry
+("tapping it swaps in the new ribbon and jumps to the end"). With a new
+outline held aside, the tap adds the new outline's sections that come
+after the old ribbon's newest serial below its end, and scrolls there in
+2 s on an ease-in-out curve. The rest of the new outline is merged once
+the view is at the bottom and following. Holding the outline aside while
+scrolled back (item 3's first half, and item 4) stands.
