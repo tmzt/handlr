@@ -1002,3 +1002,38 @@ Tests: the line is hidden while following and shown when scrolled back;
 its text for nothing new, one new section and several; a long message
 cut with "…"; a tap follows again at the bottom; and showing or hiding it
 does not move the scrollback.
+
+## Amendment — 2026-10-24 01:06 EDT: the jump line scrolls to the end in 2 s on an ease-in-out curve (living section L3)
+
+The owner (2026-10-24): "jump to end should be a scroll, if new content
+inject it below the old ribbon end and keep going"; "it should be the
+proper speed for a constant time scroll, as in it should take 2s
+regardless of distance"; "possibly with an accel curve"; then "yes". This
+replaces item 3 of the 00:05 EDT amendment ("tapping it jumps to the
+bottom"), and the tap's swap and jump in plan 20261024_01's departure of
+00:36 EDT, item 3 (recorded in CHANGES.md).
+
+1. **A timed scroll.** Tapping the jump line scrolls to the end in exactly
+   2 s, whatever the distance. The position follows a cubic ease-in-out
+   from where the view was to the end: it speeds up through the first
+   second and slows through the second, with zero speed at both ends. The
+   speed comes from the distance.
+2. **A growing end.** The end is read again each frame. If it grows during
+   the scroll, the curve keeps its timing and lands on the new end at 2 s.
+3. **A touch stops it,** as it catches a fling. Contents are not fetched
+   while it runs; placeholders fill in once it lands.
+4. **Following again** once it lands.
+5. **New content goes below.** While a new outline is held aside, the tap
+   does not swap the ribbon. The new outline's sections whose serials come
+   after the old ribbon's newest are added below its end, and the scroll
+   carries on into them. Once the view is at the bottom and following, the
+   rest of the new outline is merged in silently, and the view stays at the
+   bottom.
+6. **The label** is unchanged: `-- new content --` while a new outline is
+   held aside, and `-- N new: … --` or `-- jump to end --` otherwise.
+
+Tests: the scroll takes 2 s from one screen back and from 300; its
+speed is zero at both ends and highest midway; an end that grows during
+it is reached at 2 s; a touch stops it; it follows at the end; and with a
+new outline held aside, the newer sections go below the old end, the
+scroll reaches them, and the merge at the bottom does not move the view.
