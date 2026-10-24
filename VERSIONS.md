@@ -82,3 +82,13 @@ Not strictly additive (plan 20261023_04, the 17:04 EDT amendment, A4):
     `Asking { question }`, an object tagged by `state` on the wire
     (`{"state": "stopped", "line": "Done."}`);
   - `common::TURN_TEXT_MAX` (200), the longest text a `Turn` carries.
+
+## libhandlr_proto 0.3.1 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.3.1`)
+
+Additive, by the owner's ruling (2026-10-23: "I would consider it
+additive, just patch level"; Rule 5.4 would count a field added to a
+public struct as not strictly additive):
+
+- **Added:** `common::ClientOptionsParams::background` (`bool`, defaulted
+  on the wire): the companion's link sleeps, and the daemon sends it only
+  what needs the user.

@@ -245,6 +245,11 @@ pub struct ClientOptionsParams {
     /// of a complex reply.
     #[serde(default)]
     pub spoken_output: bool,
+    /// The app is in the background and its link sleeps: the daemon sends
+    /// only what needs the user (a confirmation, an agent blocked, asking
+    /// or done), and holds the rest until it is off again.
+    #[serde(default)]
+    pub background: bool,
 }
 
 /// The pane herdr reports as focused, named as `AgentInfo` names it
@@ -739,6 +744,7 @@ mod tests {
         });
         round_trip(ClientOptionsParams {
             spoken_output: true,
+            background: true,
         });
         round_trip(AgentsReadResult {
             text: "ok".to_string(),
