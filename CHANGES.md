@@ -1736,3 +1736,8 @@ Tests:
 - a refusal that won't be asked again opens the settings;
 - each ⓘ opens its modal, which closes at once;
 - nothing is asked at start.
+
+## 2026-10-24 12:38 EDT — correction: the time of the entry replaced above
+
+The previous entry names the entry it replaces as "2026-10-24 12:5x EDT".
+That entry is dated 2026-10-24 12:35 EDT.
