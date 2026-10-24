@@ -1389,3 +1389,33 @@ Tests:
   range;
 - the full drop leaves only the screen's blocks and the outline;
 - scrolling after it reads back from disk.
+
+## Amendment — 2026-10-24 12:22 EDT: pull past the end to refresh (living section L3)
+
+The owner (2026-10-24): "deliberate scroll up past end should solicit
+recent data from daemon, like pull to refresh"; then "yes".
+1. **The gesture.** At the bottom, a finger dragging the content further
+   up overscrolls with resistance (half the finger's movement), up to
+   96 pt. A dim line shows below the last section:
+   - `-- pull to refresh --`;
+   - `-- release to refresh --` once past 64 pt.
+
+   Letting go past 64 pt refreshes. Letting go before springs back. A
+   fling reaching the end never triggers it.
+2. **The refresh:**
+   - a timed ping (`PING_WAIT_RESUME`, 3 s), reconnecting at once if the
+     link is dead;
+   - a resubscribe with `after`, `from` and `epoch`, so anything missed
+     arrives;
+   - a fetch of the newest screen's contents, whatever their revs.
+3. **Feedback.** While it runs, the line reads `-- refreshing… --` and the
+   view stays overscrolled. Then it reads `-- up to date --`, or
+   `-- N new --` when sections arrived, for 1 s, and springs back to the
+   bottom, following.
+
+Tests:
+- the resistance and the two texts by distance;
+- release past 64 pt sends the ping, the resubscribe and the fetch;
+- release before springs back with nothing sent;
+- a fling to the end sends nothing;
+- the result line, then the spring back.
