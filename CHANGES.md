@@ -1975,3 +1975,30 @@ redrawing before the fade finished, so the panel stayed part-transparent. The
 settings screen's modal stack now uses `ModalTransition::Instant`: dialogs open
 and close in one frame at full opacity, in place of the 2026-10-24 entry
 "confirming modals close at once" (Timed, 0.18 s in, 0 out).
+
+## 2026-10-24 14:20 EDT — plan 20261024_02: an Enable button for battery optimization, status lines from `enabled_text`/`disabled_text`, and `build.rs` reruns on copy changes
+
+The owner (2026-10-24): "battery options needing OS approval should have small
+0.8% text Enable button on right"; "what does Optimized mean?"; "it should have
+a short summary of the feature status taken from enabled_text key for the
+option".
+- **Enable.** While handlr isn't exempt, the *Battery optimization* row has a
+  small *Enable* button on its right in place of the "›", its text at 0.8 of
+  the label's size (`LinkRow.action`, `ACTION_PART` = `ControlPart::Value`,
+  since `Custom` parts are a Markdown note's links). The button asks the system
+  (Android's Allow dialog). The row itself opens the list of every app's
+  setting. Once exempt, the row shows the "›" again.
+- **Status lines.** A copy object may carry `enabled_text` and `disabled_text`,
+  a row's one-line status by whether its feature is on (`CopyText::status`).
+  The battery row's subtitle uses them in place of the bare "Exempt" and
+  "Optimized" (which meant Android's battery optimization is on for handlr,
+  so Doze and App Standby may defer its network):
+  - "Exempt: Android doesn't hold back handlr's network";
+  - "Optimized: Android may hold back handlr's network when idle".
+
+  The `battery_exempt` and `battery_optimized` keys are gone.
+- **A fix to the copy build:** libmorph-build prints `rerun-if-changed` lines of
+  its own, which turned off cargo's "rerun on any change in the package" rule
+  that the plan 20261024_04 departures entry relied on (item 4). Edits to
+  `SETTINGS_COPY.md` were not picked up. `build.rs` now names the copy file,
+  `src`, `build`, `build.rs`, `Cargo.toml` and `icon`.
