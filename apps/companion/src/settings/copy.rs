@@ -18,6 +18,8 @@ pub struct CopyText {
     /// off (`enabled_text`, `disabled_text`).
     pub enabled_text: Option<&'static str>,
     pub disabled_text: Option<&'static str>,
+    /// A Markdown link, drawn last, after any vendor addition.
+    pub link: Option<&'static str>,
     pub slots: &'static [&'static str],
     /// `(vendor, text)`: appended on that vendor's phones.
     pub vendors: &'static [(&'static str, &'static str)],
@@ -38,7 +40,8 @@ impl CopyText {
         self.title.unwrap_or(self.text)
     }
 
-    /// Its text, and after it the addition for `vendor` when there is one.
+    /// Its text, then the addition for `vendor` when there is one, then its
+    /// link last.
     pub fn body(&self, vendor: Option<&str>) -> String {
         let addition = vendor.and_then(|v| {
             self.vendors
@@ -46,10 +49,16 @@ impl CopyText {
                 .find(|(name, _)| name.eq_ignore_ascii_case(v))
                 .map(|(_, text)| *text)
         });
-        match addition {
-            Some(more) => format!("{}\n\n{more}", self.text),
-            None => self.text.to_string(),
+        let mut out = self.text.to_string();
+        if let Some(more) = addition {
+            out.push_str("\n\n");
+            out.push_str(more);
         }
+        if let Some(link) = self.link {
+            out.push_str("\n\n");
+            out.push_str(link);
+        }
+        out
     }
 
     /// [`CopyText::body`] with each `{{ [sigil] name }}` replaced from
@@ -97,11 +106,19 @@ mod tests {
     #[test]
     fn a_vendor_addition_is_appended_and_none_is_the_base_text() {
         let base = BACKGROUND.body(None);
-        assert_eq!(base, BACKGROUND.text);
+        assert!(base.starts_with(BACKGROUND.text));
         assert!(!base.contains("Freecess"), "One UI's text is Samsung's");
         let samsung = BACKGROUND.body(Some("samsung"));
-        assert!(samsung.starts_with(&base), "appended, never replacing");
+        assert!(
+            samsung.starts_with(BACKGROUND.text),
+            "appended, never replacing"
+        );
         assert!(samsung.contains("Freecess"));
+        // The link is last, after the vendor's addition.
+        let link = BACKGROUND.link.expect("a link");
+        assert!(link.starts_with("[Android documentation]("));
+        assert!(base.ends_with(link) && samsung.ends_with(link));
+        assert!(samsung.find("Freecess") < samsung.find(link));
         assert_eq!(BACKGROUND.body(Some("Samsung")), samsung);
         assert_eq!(BACKGROUND.body(Some("google")), base);
     }

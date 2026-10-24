@@ -87,7 +87,8 @@ key's text on that vendor's phones.
     open. Android requires that service's ongoing notification; without
     `POST_NOTIFICATIONS` it shows only in the running apps list. Doze
     can still delay the network unless *Battery optimization* is off.
-    [Foreground services](https://developer.android.com/develop/background-work/services/fgs)
+- link: |
+    [Android documentation](https://developer.android.com/develop/background-work/services/fgs)
 
 # [Copy] background.samsung
 
@@ -107,7 +108,8 @@ key's text on that vendor's phones.
     asks for only here, when you turn this on. Alerts come over the
     background connection, so they need *Stay connected in the
     background*.
-    [Notification permission](https://developer.android.com/develop/ui/views/notifications/notification-permission)
+- link: |
+    [Android documentation](https://developer.android.com/develop/ui/views/notifications/notification-permission)
 
 # [Copy] alerts_needs_background
 
@@ -138,7 +140,8 @@ key's text on that vendor's phones.
     while the phone is idle, network access can still be deferred to
     maintenance windows. It doesn't override **Restricted** battery use,
     which stops background work entirely.
-    [Doze and App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby)
+- link: |
+    [Android documentation](https://developer.android.com/training/monitoring-device-state/doze-standby)
 
 # [Copy] battery_enable
 
@@ -154,6 +157,7 @@ key's text on that vendor's phones.
     handlr to **Never sleeping apps** under *Battery*, *Background usage
     limits*. Android's battery optimization exemption doesn't cover
     these lists.
+- link: |
     [dontkillmyapp.com/samsung](https://dontkillmyapp.com/samsung)
 
 # [Copy] clear_cache

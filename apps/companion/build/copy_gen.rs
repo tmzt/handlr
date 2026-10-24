@@ -6,7 +6,8 @@
 //! its unit tests. Each `# [Copy] <key>` object has an optional `title`, a
 //! `text` (Markdown, which may hold `{{ [abc] name }}` slots), optional
 //! `enabled_text` and `disabled_text` (a row's one-line status, by whether
-//! its feature is on), and one member per slot it declares. `# [Copy] <key>.<vendor>` (the vendor
+//! its feature is on), an optional `link` (a Markdown link, drawn last,
+//! after any vendor addition), and one member per slot it declares. `# [Copy] <key>.<vendor>` (the vendor
 //! lower-cased) is a vendor subkey: on that vendor's phones its text is
 //! appended after the base key's.
 //!
@@ -27,6 +28,8 @@ pub struct Entry {
     /// A row's status line while its feature is on, and while it is off.
     pub enabled_text: Option<String>,
     pub disabled_text: Option<String>,
+    /// A Markdown link, drawn last.
+    pub link: Option<String>,
     /// The slots it declares, its subkeys' included.
     pub slots: Vec<String>,
     /// `(vendor, text)`, appended on that vendor's phones.
@@ -41,6 +44,7 @@ struct Raw {
     text: String,
     enabled_text: Option<String>,
     disabled_text: Option<String>,
+    link: Option<String>,
     slots: Vec<String>,
 }
 
@@ -99,6 +103,7 @@ pub fn parse(md: &str) -> Result<Vec<Entry>, String> {
                 title: raw.title.clone(),
                 enabled_text: raw.enabled_text.clone(),
                 disabled_text: raw.disabled_text.clone(),
+                link: raw.link.clone(),
                 text: raw.text.clone(),
                 slots: raw.slots.clone(),
                 vendors: Vec::new(),
@@ -113,7 +118,11 @@ pub fn parse(md: &str) -> Result<Vec<Entry>, String> {
         let base = entries
             .get_mut(&raw.key)
             .ok_or_else(|| format!("`{name}` has no base key `{}`", raw.key))?;
-        if raw.title.is_some() || raw.enabled_text.is_some() || raw.disabled_text.is_some() {
+        if raw.title.is_some()
+            || raw.enabled_text.is_some()
+            || raw.disabled_text.is_some()
+            || raw.link.is_some()
+        {
             return Err(format!("`{name}`: a vendor subkey has only a text"));
         }
         let used = slots_in(&raw.text).map_err(|e| format!("`{name}`: {e}"))?;
@@ -163,6 +172,7 @@ fn collect(nodes: &[libtypedmd::Node], out: &mut Vec<Raw>) -> Result<(), String>
         let mut text = None;
         let mut enabled_text = None;
         let mut disabled_text = None;
+        let mut link = None;
         let mut slots = Vec::new();
         for child in &node.nodes {
             let Some(member) = child.as_member() else {
@@ -174,6 +184,7 @@ fn collect(nodes: &[libtypedmd::Node], out: &mut Vec<Raw>) -> Result<(), String>
                 "text" => text = Some(value.trim().to_string()),
                 "enabled_text" => enabled_text = Some(value.trim().to_string()),
                 "disabled_text" => disabled_text = Some(value.trim().to_string()),
+                "link" => link = Some(value.trim().to_string()),
                 slot => slots.push(slot.to_string()),
             }
         }
@@ -185,6 +196,7 @@ fn collect(nodes: &[libtypedmd::Node], out: &mut Vec<Raw>) -> Result<(), String>
             text,
             enabled_text,
             disabled_text,
+            link,
             slots,
         });
     }
@@ -235,13 +247,14 @@ pub fn generate(md: &str, used: &[String]) -> Result<String, String> {
             .map(|(v, t)| format!("({v:?}, {t:?})"))
             .collect();
         out.push_str(&format!(
-            "\npub const {}: CopyText = CopyText {{\n    key: {:?},\n    title: {:?},\n    text: {:?},\n    enabled_text: {:?},\n    disabled_text: {:?},\n    slots: &{:?},\n    vendors: &[{}],\n}};\n",
+            "\npub const {}: CopyText = CopyText {{\n    key: {:?},\n    title: {:?},\n    text: {:?},\n    enabled_text: {:?},\n    disabled_text: {:?},\n    link: {:?},\n    slots: &{:?},\n    vendors: &[{}],\n}};\n",
             e.key.to_ascii_uppercase(),
             e.key,
             e.title,
             e.text,
             e.enabled_text,
             e.disabled_text,
+            e.link,
             e.slots,
             vendors.join(", "),
         ));
