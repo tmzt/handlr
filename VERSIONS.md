@@ -99,3 +99,17 @@ Additive:
 
 - **Added:** `common::PingParams` (`active: Option<bool>`), `ping`'s params:
   the companion says whether the app is in front.
+
+## libhandlr_proto 0.3.3 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.3.3`)
+
+Additive, by the owner's ruling ("appending to a struct is additive"):
+
+- **Added:**
+  - `common::Link` (`text`, `url`): a repowiki link for a `docs/…` path;
+  - `common::Entry::links` (`Vec<Link>`, defaulted and left out of the
+    wire when empty);
+  - `common::PendingQuestion::about_plan` (`bool`), `plan`
+    (`Option<String>`, the plan's spoken name) and `links`
+    (`Vec<Link>`), each defaulted and left out of the wire when empty:
+    the companion offers approve, improve and implement for a question
+    about a plan (plan 20261022_03, the 21:57 EDT amendment).

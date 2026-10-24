@@ -323,6 +323,19 @@ pub struct Entry {
     /// At most `ENTRY_SUMMARY_MAX` characters, cut at a character boundary
     /// with "…".
     pub summary: String,
+    /// The repowiki links for the `docs/…` paths in `summary`, when the
+    /// daemon has a `[repowiki] url` (plan 20261022_03, the 21:57 EDT
+    /// amendment). Left out of the wire when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+/// A link for a `docs/…` path in an entry's or question's text: `text` is
+/// the path as it is written there, `url` its page on repowiki.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    pub text: String,
+    pub url: String,
 }
 
 /// The longest `Entry::summary`, in characters.
@@ -337,6 +350,19 @@ pub struct PendingQuestion {
     pub text: String,
     /// The reply's timestamp, RFC 3339.
     pub ts: String,
+    /// The question is about a plan: it names a `docs/design/…_PLAN.md`
+    /// or says "plan", "amendment", "draft" or "approve". The companion
+    /// offers approve, improve and implement in place of Yes and No.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub about_plan: bool,
+    /// The plan's spoken name ("the overview screen plan"), when exactly
+    /// one plan path names it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+    /// The repowiki links for the `docs/…` paths in `text`, as
+    /// [`Entry::links`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
 }
 
 /// The longest `PendingQuestion::text`, in characters.
@@ -643,11 +669,44 @@ mod tests {
             kind: EntryKind::ToolUse,
             tool: Some("Bash".into()),
             summary: "Bash {\"command\":\"ls\"}".into(),
+            links: vec![],
+        });
+        round_trip(Entry {
+            ts: "t".into(),
+            role: Role::Assistant,
+            kind: EntryKind::Text,
+            tool: None,
+            summary: "See docs/design/X_PLAN.md".into(),
+            links: vec![Link {
+                text: "docs/design/X_PLAN.md".into(),
+                url: "http://wiki/#/src--handlr/docs/design/X_PLAN".into(),
+            }],
         });
         round_trip(PendingQuestion {
             text: "Shall I go on?".into(),
             ts: "2026-10-23T06:00:00.000Z".into(),
+            about_plan: false,
+            plan: None,
+            links: vec![],
         });
+        round_trip(PendingQuestion {
+            text: "Approve docs/design/X_PLAN.md?".into(),
+            ts: "t".into(),
+            about_plan: true,
+            plan: Some("the x plan".into()),
+            links: vec![Link {
+                text: "docs/design/X_PLAN.md".into(),
+                url: "u".into(),
+            }],
+        });
+        // Old JSON reads, and empty new fields stay off the wire.
+        let q: PendingQuestion =
+            serde_json::from_value(json!({"text": "Go on?", "ts": "t"})).unwrap();
+        assert!(!q.about_plan && q.plan.is_none() && q.links.is_empty());
+        assert_eq!(
+            serde_json::to_value(&q).unwrap(),
+            json!({"text": "Go on?", "ts": "t"})
+        );
         assert_eq!(
             serde_json::to_value(EntryKind::ToolResult).unwrap(),
             json!("tool_result")
@@ -657,6 +716,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(text.tool, None);
+        assert!(text.links.is_empty());
+        assert_eq!(
+            serde_json::to_value(&text).unwrap(),
+            json!({"ts": "t", "role": "user", "kind": "text", "summary": "hi"})
+        );
     }
 
     #[test]
@@ -691,6 +755,9 @@ mod tests {
                     pending_question: Some(PendingQuestion {
                         text: "Shall I go on?".to_string(),
                         ts: "2026-10-23T06:00:00.000Z".to_string(),
+                        about_plan: false,
+                        plan: None,
+                        links: vec![],
                     }),
                 }),
                 turn: Some(Turn::Asking {
@@ -729,6 +796,7 @@ mod tests {
                     kind: EntryKind::Text,
                     tool: None,
                     summary: "hi".to_string(),
+                    links: vec![],
                 }],
                 pending_question: None,
             }),
