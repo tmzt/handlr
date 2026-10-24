@@ -269,13 +269,30 @@ pub fn outline_view(
     sections: &Sections,
     hide: impl Fn(&AgentCard) -> bool,
 ) -> (Vec<ViewSection>, Option<Serial>) {
+    outline_view_appending(outline, sections, None, hide)
+}
+
+/// [`outline_view`], with the newer sections of an outline held aside
+/// added below the end (plan 20261022_03, the 01:06 EDT amendment, item
+/// 5): the slots of `newer`'s outline whose serials come after the
+/// newest of `outline` (all of them when they are of another session
+/// file), with their contents from `newer`'s sections, else from
+/// `sections`, else pending. They keep their own indexes when those all
+/// come after `outline`'s last; otherwise each is placed at `outline`'s
+/// last index + 1 + its own, which keeps their order below the end.
+pub fn outline_view_appending(
+    outline: &Outline,
+    sections: &Sections,
+    newer: Option<(&Outline, &Sections)>,
+    hide: impl Fn(&AgentCard) -> bool,
+) -> (Vec<ViewSection>, Option<Serial>) {
     let mut out = Vec::with_capacity(outline.len());
     let mut pinned: Option<(CardKind, Serial)> = None;
-    for slot in outline.slots() {
-        let shows = match sections.get(slot.serial) {
+    let mut push = |slot: &Slot, index: u64, held: Option<&Section>| {
+        let shows = match held {
             Some(section) => match shows_of(section, &hide, &mut pinned) {
                 Some(shows) => shows,
-                None => continue,
+                None => return,
             },
             None => Shows::Pending {
                 kind: slot.kind,
@@ -284,12 +301,70 @@ pub fn outline_view(
             },
         };
         out.push(ViewSection {
-            index: slot.index,
+            index,
             serial: slot.serial,
             shows,
         });
+    };
+    for slot in outline.slots() {
+        push(slot, slot.index, sections.get(slot.serial));
+    }
+    if let Some((new, new_sections)) = newer {
+        let newest = outline.slots().map(|s| s.serial.to_u64()).max();
+        let other_file = matches!(
+            (new.file(), outline.file()),
+            (Some(a), Some(b)) if a != b
+        );
+        let added: Vec<&Slot> = new
+            .slots()
+            .filter(|s| other_file || newest.is_none_or(|n| s.serial.to_u64() > n))
+            .collect();
+        let last = outline.slots().next_back().map(|s| s.index);
+        let keep_own = match (last, added.first()) {
+            (Some(last), Some(first)) => first.index > last,
+            _ => true,
+        };
+        for slot in added {
+            let index = match last {
+                Some(last) if !keep_own => last + 1 + slot.index,
+                _ => slot.index,
+            };
+            let held = new_sections
+                .get(slot.serial)
+                .or_else(|| sections.get(slot.serial));
+            push(slot, index, held);
+        }
     }
     (out, pinned.map(|(_, serial)| serial))
+}
+
+/// The end of an outline held aside, for the jump line's state (plan
+/// 20261022_03, the 01:07 EDT amendment): its live cards and its newest
+/// held section, in index order, at the outline's indexes. Only the
+/// contents held in `sections` count; `hide` drops a card as in
+/// [`outline_view`].
+pub fn held_end(
+    outline: &Outline,
+    sections: &Sections,
+    hide: impl Fn(&AgentCard) -> bool,
+) -> Vec<ViewSection> {
+    let mut held: Vec<(u64, &Section)> = sections
+        .iter()
+        .filter_map(|s| outline.slot_of(s.serial).map(|slot| (slot.index, s)))
+        .collect();
+    held.sort_by_key(|&(index, _)| index);
+    let newest = held.last().map(|&(index, _)| index);
+    let mut pinned = None;
+    held.into_iter()
+        .filter(|&(index, s)| Some(index) == newest || s.card.as_ref().is_some_and(|c| c.live))
+        .filter_map(|(index, s)| {
+            shows_of(s, &hide, &mut pinned).map(|shows| ViewSection {
+                index,
+                serial: s.serial,
+                shows,
+            })
+        })
+        .collect()
 }
 
 /// What `section` shows, or `None` for a card `hide` drops. A live card

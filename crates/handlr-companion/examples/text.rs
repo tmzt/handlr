@@ -185,6 +185,7 @@ fn print_event(event: Event) {
             start,
             terminal_on,
             new_content,
+            held_end: _,
         } => {
             if new_content {
                 println!("* new content");

@@ -95,9 +95,11 @@ pub enum Input {
     /// decision 6): contents are fetched around it and forgotten far from
     /// it, and while it is scrolled back a new outline is held aside.
     Window(ViewWindow),
-    /// The jump line's tap while it reads `-- new content --`: the
-    /// outline held aside replaces the one shown (CHANGES.md, 2026-10-24
-    /// 00:36 EDT, item 3).
+    /// The jump line's tap while a new outline is held aside: its
+    /// sections newer than the shown ribbon's newest are added below the
+    /// ribbon's end, and the rest is merged in once the window is back at
+    /// the bottom, following (plan 20261022_03, the 01:06 EDT amendment,
+    /// item 5; CHANGES.md, 2026-10-24 01:06 EDT).
     ApplyOutline,
 }
 
@@ -391,9 +393,14 @@ pub enum Event {
         /// the view's: the view does not follow it.
         terminal_on: Option<String>,
         /// A new outline (a reset, or a new session file) is held aside
-        /// while the view is scrolled back: the jump line reads `-- new
-        /// content --`, and [`Input::ApplyOutline`] shows it.
+        /// while the view is scrolled back: the jump line's tap sends
+        /// [`Input::ApplyOutline`], which adds its newer sections below.
         new_content: bool,
+        /// The end of the new outline held aside, until its tap: its live
+        /// cards and its newest held section, in index order, for the jump
+        /// line's state (plan 20261022_03, the 01:07 EDT amendment). Empty
+        /// when none is held aside, or once its newer sections are below.
+        held_end: Vec<ViewSection>,
     },
     Error(String),
 }
@@ -879,6 +886,10 @@ struct AgentView {
     outline: Outline,
     /// A new outline held aside while scrolled back.
     incoming: Option<HeldOutline>,
+    /// The jump line was tapped with `incoming` held: its sections newer
+    /// than the shown ribbon's newest show below the ribbon's end until
+    /// it is applied at the bottom.
+    appending: bool,
     /// Contents with no slot in the outline are to be dropped once it is
     /// complete (a reset, merged by serial).
     orphans: bool,
@@ -920,6 +931,7 @@ impl AgentView {
             outline_mode: false,
             outline: Outline::default(),
             incoming: None,
+            appending: false,
             orphans: false,
             window: None,
             asking: BTreeSet::new(),
@@ -946,6 +958,7 @@ impl AgentView {
 
     /// Shows the outline held aside, its contents merged in by serial.
     fn apply_incoming(&mut self) -> bool {
+        self.appending = false;
         let Some(incoming) = self.incoming.take() else {
             return false;
         };
@@ -1075,6 +1088,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 start,
                 terminal_on,
                 new_content,
+                held_end,
             },
             Event::AgentView {
                 name: name_b,
@@ -1088,6 +1102,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 start: start_b,
                 terminal_on: terminal_on_b,
                 new_content: new_content_b,
+                held_end: held_end_b,
             },
         ) => {
             name == name_b
@@ -1099,6 +1114,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 && start == start_b
                 && terminal_on == terminal_on_b
                 && new_content == new_content_b
+                && held_end == held_end_b
                 && sections == sections_b
         }
         _ => a == b,
@@ -1316,11 +1332,12 @@ impl State {
             Input::Window(window) => self.set_window(window, &mut out),
             Input::ApplyOutline => {
                 if let Some(v) = self.view.as_mut()
-                    && v.apply_incoming()
+                    && v.incoming.is_some()
+                    && !v.appending
                 {
-                    v.reflatten();
-                    v.see_all();
-                    self.fetch_contents(&mut out);
+                    // Below the old end; merged once back at the bottom.
+                    v.appending = true;
+                    log::info!("view: the new outline's newer sections added below the end");
                     self.show_view(&mut out);
                 }
             }
@@ -1368,7 +1385,12 @@ impl State {
             answered && c.live && c.kind == crate::view::CardKind::Question
         };
         let (sections, pinned) = if v.outline_mode {
-            crate::view::outline_view(&v.outline, &v.sections, hide)
+            let newer = v
+                .incoming
+                .as_ref()
+                .filter(|_| v.appending)
+                .map(|i| (&i.outline, &i.sections));
+            crate::view::outline_view_appending(&v.outline, &v.sections, newer, hide)
         } else {
             v.sections.view(hide)
         };
@@ -1401,6 +1423,12 @@ impl State {
             },
             terminal_on,
             new_content: v.incoming.is_some(),
+            held_end: v
+                .incoming
+                .as_ref()
+                .filter(|_| !v.appending)
+                .map(|i| crate::view::held_end(&i.outline, &i.sections, hide))
+                .unwrap_or_default(),
         })
     }
 
@@ -2783,6 +2811,7 @@ impl State {
             v.start = false;
             v.outline = Outline::default();
             v.incoming = None;
+            v.appending = false;
             v.orphans = false;
             v.generation += 1;
             if d.reason.as_deref() == Some(common::delivery_reasons::PANE_CLOSED) {
@@ -6409,14 +6438,132 @@ mod tests {
             outline_delivery(false, vec![slot_in(FILE, 40, 0)], vec![], Some(40), 78),
         );
         assert_eq!(ribbon(&s), before);
-        // The jump line's tap: the new one, its contents merged.
+        // The jump line's tap (plan 20261022_03, the 01:06 EDT amendment,
+        // item 5): no swap. The new outline's sections after the old
+        // ribbon's newest go below its end, at their own indexes (they
+        // come after 29), with the contents held for them.
         let out = s.input(Input::ApplyOutline);
+        assert!(content_asks(&out).is_empty(), "{out:?}");
+        assert!(new_content(&s), "the rest still held aside");
+        let r = ribbon(&s);
+        assert_eq!(&r[..30], &before[..]);
+        assert_eq!(
+            r[30..].iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            (30..41).collect::<Vec<_>>()
+        );
+        assert!(held_indexes(&s).contains(&39));
+        let appended = serials(&s);
+        // Scrolling there reports nothing; landing at the bottom,
+        // following, merges the rest in silently: the same sections in the
+        // same order, so the view at the bottom does not move.
+        let out = s.input(window((31, 40), (0, 40), (0, 40), false));
         assert!(!new_content(&s));
+        assert_eq!(serials(&s), appended);
         let r = ribbon(&s);
         assert_eq!(r.len(), 41);
         assert!(held_indexes(&s).contains(&39) && held_indexes(&s).contains(&5));
-        // Merged by serial at unchanged revs: nothing is fetched again.
-        assert!(content_asks(&out).is_empty(), "{out:?}");
+        // Merged by serial at unchanged revs: only what was never held is
+        // fetched.
+        let asked: Vec<u64> = content_asks(&out)
+            .iter()
+            .flat_map(|&(lo, hi, _)| lo..=hi)
+            .collect();
+        assert!(
+            asked
+                .iter()
+                .all(|i| (0..10).contains(i) || (30..=40).contains(i)),
+            "{asked:?}"
+        );
+    }
+
+    /// The view's serials, in ribbon order.
+    fn serials(s: &State) -> Vec<common::Serial> {
+        match s.agent_view() {
+            Some(Event::AgentView { sections, .. }) => sections.iter().map(|v| v.serial).collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn held_end_of(s: &State) -> Vec<(u64, crate::view::Shows)> {
+        match s.agent_view() {
+            Some(Event::AgentView { held_end, .. }) => {
+                held_end.into_iter().map(|v| (v.index, v.shows)).collect()
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn newer_sections_whose_indexes_come_before_the_old_end_keep_their_order_below_it() {
+        let (mut s, out) = outline_of(30);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        s.input(window((5, 10), (0, 29), (0, 29), true));
+        let before = serials(&s);
+        // A reset in which two old sections are gone: the newer serials
+        // (lines 31..35) have indexes 28..32, not after the old end's 29.
+        let fresh: Vec<Value> = (0..35u64)
+            .filter(|i| !(5..7).contains(i))
+            .map(|i| {
+                let index = if i < 5 { i } else { i - 2 };
+                json!({"index": index, "serial": serial_in(FILE, i), "kind": "text",
+                       "lines": 2, "chars": 40, "rev": 0})
+            })
+            .collect();
+        deliver_outline(
+            &mut s,
+            outline_delivery(true, fresh, vec![content(34)], Some(32), 78),
+        );
+        assert_eq!(serials(&s), before);
+        s.input(Input::ApplyOutline);
+        let r = ribbon(&s);
+        assert_eq!(r.len(), 35);
+        // Placed at the old last index + 1 + their own: 58..=62, in order.
+        assert_eq!(
+            r[30..].iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            (58..63).collect::<Vec<_>>()
+        );
+        let tail: Vec<common::Serial> = serials(&s)[30..].to_vec();
+        assert_eq!(
+            tail,
+            (30..35u64)
+                .map(|i| common::Serial::new(FILE, i as u32 + 1, 0))
+                .collect::<Vec<_>>()
+        );
+        assert!(r[34].1, "34's contents, held aside, shown");
+        // At the bottom: merged, the newest sections still last, in order.
+        s.input(window((50, 62), (0, 62), (0, 62), false));
+        let now = serials(&s);
+        assert_eq!(now.len(), 33);
+        assert_eq!(&now[28..], &tail[..]);
+        assert_eq!(ribbon(&s).last().unwrap().0, 32);
+    }
+
+    #[test]
+    fn the_end_of_an_outline_held_aside_is_given_for_the_jump_line() {
+        let (mut s, out) = outline_of(30);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        assert!(held_end_of(&s).is_empty(), "none held aside");
+        s.input(window((5, 10), (0, 29), (0, 29), true));
+        let mut fresh = slots(0..32);
+        fresh[30] = json!({"index": 30, "serial": serial_in(FILE, 30), "kind": "card",
+                           "lines": 1, "chars": 20, "rev": 0});
+        let question = json!({"serial": serial_in(FILE, 30), "index": 30, "kind": "card", "card": {
+            "card": "question", "live": true, "title": "Claude is asking",
+            "text": "Which one?"}});
+        deliver_outline(
+            &mut s,
+            outline_delivery(true, fresh, vec![question, content(31)], Some(31), 78),
+        );
+        let end = held_end_of(&s);
+        assert_eq!(end.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [30, 31]);
+        assert!(
+            matches!(&end[0].1, crate::view::Shows::Card(c) if c.live && c.text == "Which one?")
+        );
+        // Once its newer sections are below the end, they are in the
+        // ribbon itself.
+        s.input(Input::ApplyOutline);
+        assert!(held_end_of(&s).is_empty());
+        assert_eq!(ribbon(&s).len(), 32);
     }
 
     #[test]
@@ -6454,7 +6601,15 @@ mod tests {
         assert!(new_content(&s));
         assert_eq!(ribbon(&s), before, "the old session stays until the tap");
         assert_eq!(summaries(&s)[0], "s0");
+        // The tap: the new session's sections below the old one's end, in
+        // order after its last index.
         s.input(Input::ApplyOutline);
+        let r = ribbon(&s);
+        assert_eq!(&r[..30], &before[..]);
+        assert_eq!(&r[30..], [(30, true), (31, true), (32, true)]);
+        assert_eq!(summaries(&s)[30..], ["new", "new", "new"]);
+        // At the bottom, following: the old session goes.
+        s.input(window((30, 32), (0, 32), (0, 32), false));
         assert_eq!(ribbon(&s), [(0, true), (1, true), (2, true)]);
         assert_eq!(summaries(&s), ["new", "new", "new"]);
     }
