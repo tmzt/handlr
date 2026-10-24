@@ -2705,7 +2705,9 @@ impl AgentScreen {
                     // Two fingers down is never a tap.
                     return None;
                 }
-                self.hit(x, y)
+                // A control the settings turn off takes no tap (plan
+                // 20261024_02, decision 4).
+                self.hit(x, y).filter(|&hit| crate::settings::allows(hit))
             }
             TouchPhase::Cancelled => {
                 let thumb = self.thumb.take().is_some();
@@ -2903,11 +2905,16 @@ impl AgentScreen {
             }
         }
         if let Some(d) = &self.frame.dictation {
+            let start = list.instances.len();
             for f in &d.fills {
                 fill(list, f.rect, f.color, f.radius);
             }
             for r in &d.rows {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+            }
+            // Without the microphone, the dictation card is dim.
+            if !crate::settings::current().microphone {
+                crate::settings::dim_since(list, start);
             }
             for b in &d.buttons {
                 SquareButton::draw(
@@ -2955,8 +2962,12 @@ impl AgentScreen {
         }
         let sg_px = SUGGEST_PT * s;
         for g in &self.frame.suggestions {
+            let start = list.instances.len();
             let y = g.rect.y + (g.rect.h - line_h(sg_px)) * 0.5;
             ctx.draw_text(list, g.label, [g.rect.x + 4.0 * s, y], sg_px, g.color);
+            if !crate::settings::allows(g.hit) {
+                crate::settings::dim_since(list, start);
+            }
         }
         for b in &self.frame.buttons {
             SquareButton::draw(
@@ -5503,5 +5514,67 @@ mod tests {
         }
         assert_eq!(b.bar_alpha(), BAR_ALPHA);
         assert!(b.thumb_rect().is_some());
+    }
+
+    // The settings' toggles (plan 20261024_02, decision 4).
+
+    fn alpha_in(list: &DrawList, r: Rect) -> f32 {
+        list.instances
+            .iter()
+            .filter(|i| r.contains(i.position))
+            .map(|i| i.color[3])
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn controls_the_settings_turn_off_are_dim_and_take_no_taps() {
+        use crate::settings::{self, DISABLED_ALPHA, Settings};
+        let cards = vec![card(CardKind::Question, 3, true)];
+        let mut a = screen(conversation(3), cards, Some(0));
+        a.set_read_aloud(true);
+        let tap = |a: &mut AgentScreen, r: Rect| {
+            a.touch(1, TouchPhase::Started, r.x + 5.0, r.y + 5.0, Duration::ZERO);
+            a.touch(1, TouchPhase::Ended, r.x + 5.0, r.y + 5.0, MS)
+        };
+        for (off, hits) in [
+            (
+                Settings {
+                    sound: false,
+                    ..Settings::default()
+                },
+                vec![AgentHit::ReadAloud],
+            ),
+            (
+                Settings {
+                    microphone: false,
+                    ..Settings::default()
+                },
+                vec![AgentHit::Message, AgentHit::Reply],
+            ),
+        ] {
+            settings::set_current(Settings::default());
+            for &hit in &hits {
+                let r = a.rect_of(hit).unwrap_or_else(|| panic!("{hit:?} shown"));
+                assert_eq!(tap(&mut a, r), Some(hit), "{hit:?} live");
+            }
+            settings::set_current(off);
+            a.invalidate();
+            let mut list = DrawList::new();
+            a.draw(&mut list, &DrawContext::default(), None);
+            for &hit in &hits {
+                let r = a.rect_of(hit).unwrap();
+                assert!(
+                    (alpha_in(&list, r) - DISABLED_ALPHA).abs() < 1e-6,
+                    "{hit:?} dim"
+                );
+                assert_eq!(tap(&mut a, r), None, "{hit:?} takes no tap");
+            }
+            // A card's Yes and No still work.
+            if !off.microphone {
+                let yes = a.rect_of(AgentHit::Suggest(Suggestion::Yes)).unwrap();
+                assert_eq!(tap(&mut a, yes), Some(AgentHit::Suggest(Suggestion::Yes)));
+            }
+        }
+        settings::set_current(Settings::default());
     }
 }

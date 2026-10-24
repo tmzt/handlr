@@ -9,6 +9,7 @@ use crate::agent::{
     AgentHit, CANCEL_GLYPH, CELL_EM, DIM, DOT, FG, FlowButton, PLAY_GLYPH, RECORDING, Row,
     SEND_GLYPH, SKIP_GLYPH, Terminal, button, draw_row, fill, term_h,
 };
+use crate::settings;
 
 /// `glyph` centred in `rect` at `px`, from the terminal face; `fallback`
 /// in the context's font without it.
@@ -40,12 +41,58 @@ fn draw_glyph(
 
 /// Draws `b` at `rect`: the take-a-message button as a white record dot on
 /// blue, the play button as its glyph (bright when `read_aloud`), and the
-/// rest as labelled buttons.
+/// rest as labelled buttons. A button the settings turn off (plan
+/// 20261024_02, decision 4) is drawn at 35%, showing nothing live.
 pub struct SquareButton;
 
 impl SquareButton {
+    /// Draws `b`, live or not as [`settings::allows`] says.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
+        list: &mut DrawList,
+        ctx: &DrawContext,
+        term: Option<&Terminal>,
+        b: &FlowButton,
+        rect: Rect,
+        s: f32,
+        read_aloud: bool,
+        speaking: bool,
+        recording: bool,
+    ) {
+        let enabled = settings::allows(b.hit);
+        Self::draw_enabled(
+            list, ctx, term, b, rect, s, read_aloud, speaking, recording, enabled,
+        );
+    }
+
+    /// Draws `b`, dim and showing nothing live unless `enabled`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_enabled(
+        list: &mut DrawList,
+        ctx: &DrawContext,
+        term: Option<&Terminal>,
+        b: &FlowButton,
+        rect: Rect,
+        s: f32,
+        read_aloud: bool,
+        speaking: bool,
+        recording: bool,
+        enabled: bool,
+    ) {
+        let start = list.instances.len();
+        let (read_aloud, speaking, recording) = if enabled {
+            (read_aloud, speaking, recording)
+        } else {
+            (false, false, false)
+        };
+        Self::draw_live(list, ctx, term, b, rect, s, read_aloud, speaking, recording);
+        if !enabled {
+            settings::dim_since(list, start);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_live(
         list: &mut DrawList,
         ctx: &DrawContext,
         term: Option<&Terminal>,

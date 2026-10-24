@@ -157,6 +157,17 @@ impl KeyStore for VaultKeyStore {
             .put(SERVER_BLOB, &bytes)
             .map_err(|e| e.to_string())
     }
+
+    /// *Unpair this device* (plan 20261024_02): the server blob and the
+    /// static key go from their stores.
+    fn forget(&mut self) -> Result<(), String> {
+        self.store
+            .delete(SERVER_BLOB)
+            .map_err(|e| format!("the server blob: {e}"))?;
+        key_store::delete(&self.vault, KEY_NAME).map_err(|e| format!("the static key: {e}"))?;
+        log::info!("keys: the static key and the paired server are deleted");
+        Ok(())
+    }
 }
 
 /// The server blob: `FileKeyStore`'s `server.toml`, the key in base64.

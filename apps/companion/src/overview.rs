@@ -16,9 +16,17 @@
 //! reads replies from an agent view's pane only, so it is dim and does
 //! nothing until a view has been opened; record takes a message for
 //! herdr's focused agent. A tap on nothing is the main screen's tap.
+//!
+//! The gear ([`Gear`]) at the right of the title opens the settings
+//! (plan 20261024_02). What they turn off is off here too (decision 4):
+//! play without sound, record without the microphone or the general agent,
+//! and the dictation card without the microphone are drawn dim and take no
+//! taps, and without the general agent the strip and the overlay are
+//! hidden.
 
 pub mod agent_card;
 pub mod card_grid;
+pub mod gear;
 pub mod turn_log;
 pub mod turn_overlay;
 pub mod turn_strip;
@@ -37,8 +45,10 @@ use crate::agent::{
 };
 use crate::controls::scroll::Touched;
 use crate::controls::{ControlRow, SquareButton};
+use crate::settings;
 use crate::ui::{Layout, Line, MUTED, TEXT, wrap};
 pub use card_grid::CardGrid;
+pub use gear::Gear;
 pub use turn_log::TurnLog;
 pub use turn_overlay::TurnOverlay;
 pub use turn_strip::TurnStrip;
@@ -52,6 +62,8 @@ pub enum OverviewHit {
     Bottom(AgentHit),
     /// A tap on no control.
     Tap,
+    /// The gear: open the settings.
+    Settings,
 }
 
 /// A card above the bottom row: its lines and, for a confirmation being
@@ -72,6 +84,8 @@ enum Target {
     Sheet,
     /// The dimmed cards above the open overlay: a tap closes it.
     Shade,
+    /// The gear.
+    Gear,
     /// A control, or nothing.
     Other,
 }
@@ -105,8 +119,11 @@ pub struct Overview {
     /// An agent view has been opened: play reads its replies.
     play_live: bool,
     headings: Vec<Heading>,
+    gear: Gear,
     /// The confirmation and dictation cards as placed.
     panels: Vec<Flow>,
+    /// The first of `panels` is the dictation card.
+    dictation_shown: bool,
     buttons: Vec<FlowButton>,
     hits: Vec<(AgentHit, Rect)>,
     touch: Option<(u64, Target)>,
@@ -137,7 +154,9 @@ impl Overview {
             speaking: false,
             play_live: false,
             headings: Vec::new(),
+            gear: Gear::default(),
             panels: Vec::new(),
+            dictation_shown: false,
             buttons: Vec::new(),
             hits: Vec::new(),
             touch: None,
@@ -221,6 +240,25 @@ impl Overview {
         }
     }
 
+    /// Whether the strip shows: a line of Gemini's, and the general agent
+    /// on (plan 20261024_02, decision 4).
+    fn strip_shown(&self) -> bool {
+        self.strip.visible() && settings::current().general_agent
+    }
+
+    /// The settings changed: what they turn off is redrawn, and without the
+    /// general agent the strip and the overlay go.
+    pub fn settings_changed(&mut self) {
+        if !settings::current().general_agent {
+            self.overlay.close();
+        }
+        self.settle();
+    }
+
+    pub fn gear(&self) -> Gear {
+        self.gear
+    }
+
     /// The strip may have changed: when it shows or hides, the cards' room
     /// changes with it.
     fn strip_changed(&mut self, shown: bool) {
@@ -288,6 +326,7 @@ impl Overview {
             });
             *y += pt * s * 1.35;
         };
+        self.gear = Gear::place(l.w, pad, y, TITLE_PT * s * 1.35, s);
         heading("handlr", TITLE_PT, TEXT, &mut y);
         for line in &self.status {
             heading(line, STATUS_PT, MUTED, &mut y);
@@ -306,10 +345,12 @@ impl Overview {
         let mut panels = Vec::new();
         // While a confirmation asks, the message makes way for it.
         let asking = self.card.as_ref().is_some_and(|c| c.confirm.is_some());
+        self.dictation_shown = false;
         if let Some(lines) = self.dictation.as_ref().filter(|_| !asking) {
             let p = panel(lines, None, pad, l.w - 2.0 * pad, above, s);
             above -= p.height + 8.0 * s;
             panels.push(p);
+            self.dictation_shown = true;
         }
         if let Some(card) = &self.card {
             let p = panel(&card.lines, card.confirm, pad, l.w - 2.0 * pad, above, s);
@@ -320,7 +361,7 @@ impl Overview {
 
         // The strip above them while it shows, and the cards on the rest.
         let bottom = above.max(top);
-        let strip_h = if self.strip.visible() {
+        let strip_h = if self.strip_shown() {
             TurnStrip::HEIGHT * s
         } else {
             0.0
@@ -373,6 +414,8 @@ impl Overview {
         if phase == TouchPhase::Started {
             let target = if self.hit(x, y).is_some() {
                 Target::Other
+            } else if self.gear.contains(x, y) {
+                Target::Gear
             } else if self.overlay.is_open() {
                 if self.overlay.contains(x, y) {
                     Target::Sheet
@@ -381,7 +424,7 @@ impl Overview {
                 } else {
                     Target::Other
                 }
-            } else if self.strip.contains(x, y) {
+            } else if self.strip_shown() && self.strip.contains(x, y) {
                 Target::Strip
             } else if self.grid.viewport().contains([x, y]) {
                 Target::Grid
@@ -400,7 +443,7 @@ impl Overview {
         let touched = match target {
             Target::Grid => self.grid.touch(id, phase, x, y, now),
             Target::Sheet => self.overlay.touch(id, phase, x, y, now),
-            Target::Strip | Target::Shade | Target::Other => match phase {
+            Target::Strip | Target::Shade | Target::Gear | Target::Other => match phase {
                 TouchPhase::Ended => Touched::Tap,
                 _ => Touched::Nothing,
             },
@@ -426,9 +469,12 @@ impl Overview {
                     None
                 }
                 Target::Sheet => Some(OverviewHit::Tap),
+                Target::Gear => self.gear.contains(x, y).then_some(OverviewHit::Settings),
                 Target::Other => match self.hit(x, y) {
                     // Nothing to read until a view has been opened.
                     Some(AgentHit::ReadAloud) if !self.play_live => None,
+                    // Turned off in the settings: no tap.
+                    Some(hit) if !settings::allows_on_overview(hit) => None,
                     Some(hit) => Some(OverviewHit::Bottom(hit)),
                     None => Some(OverviewHit::Tap),
                 },
@@ -470,13 +516,18 @@ impl Overview {
             let w = ctx.text_advance(&h.text, h.px);
             ctx.draw_text(list, &h.text, [(l.w - w) * 0.5, h.y], h.px, h.color);
         }
+        self.gear.draw(list);
         self.grid.draw(list, ctx);
-        self.strip.draw(list, ctx);
-        self.overlay.draw(list, ctx, l.w);
+        if self.strip_shown() {
+            self.strip.draw(list, ctx);
+        }
+        if settings::current().general_agent {
+            self.overlay.draw(list, ctx, l.w);
+        }
         let recording = self.dictation.is_some();
         let read_aloud = self.read_aloud && self.play_live;
         let draw_button = |list: &mut DrawList, b: &FlowButton| {
-            SquareButton::draw(
+            SquareButton::draw_enabled(
                 list,
                 ctx,
                 term,
@@ -486,14 +537,21 @@ impl Overview {
                 read_aloud,
                 self.speaking,
                 recording,
+                settings::allows_on_overview(b.hit),
             );
         };
-        for p in &self.panels {
+        let microphone = settings::current().microphone;
+        for (i, p) in self.panels.iter().enumerate() {
+            let start = list.instances.len();
             for f in &p.fills {
                 fill(list, f.rect, f.color, f.radius);
             }
             for r in &p.rows {
                 ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+            }
+            // The dictation card without the microphone: dim.
+            if i == 0 && self.dictation_shown && !microphone {
+                settings::dim_since(list, start);
             }
             for b in &p.buttons {
                 draw_button(list, b);
@@ -971,5 +1029,114 @@ mod tests {
         assert!(o.draw(&mut list, &ctx, None));
         o.push_turn(Speaker::User, "hello".into());
         assert!(o.draw(&mut list, &ctx, None));
+    }
+
+    /// The opacity of what is drawn inside `r`, at most.
+    fn alpha_in(list: &DrawList, r: Rect) -> f32 {
+        list.instances
+            .iter()
+            .filter(|i| r.contains(i.position))
+            .map(|i| i.color[3])
+            .fold(0.0, f32::max)
+    }
+
+    fn with(sound: bool, microphone: bool, general_agent: bool) -> settings::Settings {
+        settings::Settings {
+            sound,
+            microphone,
+            general_agent,
+            ..settings::Settings::default()
+        }
+    }
+
+    #[test]
+    fn the_gear_is_at_the_right_of_the_title_and_opens_the_settings() {
+        let mut o = overview(2);
+        let g = o.gear().rect;
+        let title = &o.headings[0];
+        assert_eq!(title.text, "handlr");
+        assert!((g.x + g.w - (PHONE.w - PAD * 2.0)).abs() < 0.01);
+        assert_eq!(g.w, Gear::SIZE * 2.0);
+        assert!(g.y <= title.y + title.px && g.y + g.h >= title.y);
+        assert_eq!(
+            tap(&mut o, g.x + g.w * 0.5, g.y + g.h * 0.5),
+            Some(OverviewHit::Settings)
+        );
+    }
+
+    #[test]
+    fn controls_the_settings_turn_off_are_dim_and_take_no_taps() {
+        let mut o = overview(2);
+        o.set_play(true, false, true);
+        let ctx = DrawContext::default();
+        let play = o.rect_of(AgentHit::ReadAloud).unwrap();
+        let record = o.rect_of(AgentHit::Message).unwrap();
+        let mut list = DrawList::new();
+        o.draw(&mut list, &ctx, None);
+        assert_eq!(alpha_in(&list, play), 1.0);
+        assert_eq!(alpha_in(&list, record), 1.0);
+
+        for (settings, off) in [
+            (with(false, true, true), AgentHit::ReadAloud),
+            (with(true, false, true), AgentHit::Message),
+            // Record on the overview is the general agent's too.
+            (with(true, true, false), AgentHit::Message),
+        ] {
+            settings::set_current(settings);
+            o.settings_changed();
+            let mut list = DrawList::new();
+            o.draw(&mut list, &ctx, None);
+            let r = o.rect_of(off).unwrap();
+            assert!(
+                (alpha_in(&list, r) - settings::DISABLED_ALPHA).abs() < 1e-6,
+                "{off:?} dim"
+            );
+            assert_eq!(
+                tap(&mut o, r.x + 5.0, r.y + 5.0),
+                None,
+                "{off:?} takes no tap"
+            );
+        }
+        // The dictation card, without the microphone.
+        settings::set_current(with(true, false, true));
+        o.set_dictation(Some(vec![Line {
+            text: "Taking a message".into(),
+            size: 15.0,
+            color: MUTED,
+            gap: 28.0,
+        }]));
+        let mut list = DrawList::new();
+        o.draw(&mut list, &ctx, None);
+        let card = o.panels[0].fills[0].rect;
+        assert!((alpha_in(&list, card) - settings::DISABLED_ALPHA).abs() < 1e-6);
+        let send = o.rect_of(AgentHit::Submit).unwrap();
+        assert_eq!(tap(&mut o, send.x + 5.0, send.y + 5.0), None);
+        settings::set_current(settings::Settings::default());
+    }
+
+    #[test]
+    fn without_the_general_agent_the_strip_and_overlay_are_hidden() {
+        let mut o = overview(4);
+        talk(&mut o, 2);
+        open(&mut o);
+        let strip = o.strip().rect();
+        settings::set_current(with(true, true, false));
+        o.settings_changed();
+        assert!(!o.overlay().is_open());
+        // The cards take the strip's room, and a tap there is no strip.
+        let grid = o.grid().viewport();
+        assert!(grid.y + grid.h >= strip.y + strip.h - 0.01);
+        assert!(tap(&mut o, 540.0, strip.y + strip.h * 0.5).is_some());
+        assert!(!o.overlay().is_open());
+        // Gemini's lines come in hidden, and show again with it on.
+        o.push_turn(Speaker::Gemini, "Still here.".into());
+        let mut list = DrawList::new();
+        o.draw(&mut list, &DrawContext::default(), None);
+        assert!(o.grid().viewport().y + o.grid().viewport().h >= strip.y + strip.h - 0.01);
+        settings::set_current(settings::Settings::default());
+        o.settings_changed();
+        let grid = o.grid().viewport();
+        assert!((grid.y + grid.h - o.strip().rect().y).abs() < 0.01);
+        assert_eq!(o.strip().rect().h, TurnStrip::HEIGHT * 2.0);
     }
 }

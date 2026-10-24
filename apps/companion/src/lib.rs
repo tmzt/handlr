@@ -39,11 +39,21 @@
 //! scrollback with its priority cards; Back, or the system Back, returns
 //! to the overview. "Take a message" there dictates to that agent, with
 //! its card in the view.
+//!
+//! The settings (plan 20261024_02, `settings.rs`): the gear on the
+//! overview opens them; Back, or the system Back, returns. They are kept in
+//! `settings.toml` in the data directory (on the desktop, the companion's
+//! own, `~/.config/handlr-companion`), given to the client as
+//! [`Input::Settings`], and read by every control they turn off. *Unpair
+//! this device* sends [`Input::Unpair`]; once [`Event::Unpaired`] comes,
+//! the app is back on the pairing screen, and *Delete data* then removes
+//! everything in the data directory but the voice models.
 
 pub mod agent;
 pub mod controls;
 pub mod keys;
 pub mod overview;
+pub mod settings;
 pub mod ui;
 
 use std::path::PathBuf;
@@ -71,6 +81,8 @@ use libmsdf::font::{
 use crate::agent::{AgentHit, AgentScreen, Terminal};
 use crate::keys::VaultKeyStore;
 use crate::overview::{Overview, OverviewHit, Panel};
+use crate::settings::battery::Unreleased;
+use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::ui::{
     CODE, Card, CardState, Hit, Layout, Line, MUTED, Screen, View, WARN, chunk, dictation_lines,
     wrap,
@@ -117,6 +129,7 @@ enum Shown {
     Pairing,
     Overview,
     Agent,
+    Settings,
 }
 
 /// The desktop's command line (Android has none).
@@ -237,6 +250,17 @@ pub struct App {
     /// An agent view has been opened: the overview's play has replies to
     /// read.
     viewed: bool,
+    /// The settings, as last saved, and where `settings.toml` is.
+    settings: Settings,
+    data_dir: Option<PathBuf>,
+    /// The settings screen, while it is open.
+    settings_screen: Option<SettingsScreen>,
+    /// The paired server's name, for the unpair modal.
+    server_name: Option<String>,
+    /// *Delete data* waits for the unpairing to finish.
+    deleting: bool,
+    /// The voice models, which *Delete data* keeps.
+    models: Vec<PathBuf>,
     /// The clock touches and flings are timed by.
     started: Instant,
     /// When the last frame was updated, for a fling's step.
@@ -418,6 +442,7 @@ impl App {
                 // A public key, safe to log, and readable over adb.
                 log::info!("pairing: device code {code}");
                 self.paired = true;
+                self.server_name = Some(server.clone());
                 self.code = Some((code, server));
                 self.note = None;
             }
@@ -512,6 +537,9 @@ impl App {
                     agent.set_held_newer(held_newer);
                 }
             }
+            // The audio played the chime.
+            Event::Ding => log::info!("ding: an agent is done"),
+            Event::Unpaired { daemon } => self.unpaired(daemon),
             // herdr's focus shows on the cards, from the list it refreshes.
             Event::Say(_)
             | Event::Focus(_)
@@ -533,6 +561,7 @@ impl App {
         self.send(Input::OpenAgent(pane_id));
         let mut agent = AgentScreen::new();
         agent.name = name;
+        agent.set_scrollbar(self.settings.scrollbar);
         agent.set_read_aloud(self.read_aloud);
         agent.set_speaking(self.speaking);
         self.agent = Some(agent);
@@ -546,6 +575,127 @@ impl App {
             self.send(Input::CloseAgent);
             self.screen.invalidate();
         }
+    }
+
+    /// Opens the settings screen, from the overview's gear.
+    fn open_settings(&mut self) {
+        log::info!("settings: open");
+        let mut screen = SettingsScreen::new(
+            self.settings,
+            Box::new(Unreleased),
+            cfg!(target_os = "android"),
+        );
+        screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
+        self.settings_screen = Some(screen);
+    }
+
+    /// Closes the settings screen, back to the overview.
+    fn close_settings(&mut self) {
+        if self.settings_screen.take().is_some() {
+            log::info!("settings: closed");
+            self.overview.invalidate();
+        }
+    }
+
+    /// A tap on the settings screen.
+    fn settings_hit(&mut self, hit: SettingsHit) {
+        match hit {
+            SettingsHit::Back => self.close_settings(),
+            SettingsHit::Changed(settings) => self.apply_settings(settings),
+            SettingsHit::Unpair => self.unpair(false),
+            SettingsHit::DeleteData => self.unpair(true),
+        }
+    }
+
+    /// The settings changed: saved, given to the client, and shown by every
+    /// control they turn off.
+    fn apply_settings(&mut self, settings: Settings) {
+        self.settings = settings;
+        settings::set_current(settings);
+        if let Some(dir) = &self.data_dir
+            && let Err(e) = settings.save(dir)
+        {
+            log::warn!("settings: {e}");
+        }
+        self.send(Input::Settings(settings.to_client()));
+        if let Some(agent) = &mut self.agent {
+            agent.set_scrollbar(settings.scrollbar);
+            agent.invalidate();
+        }
+        self.overview.settings_changed();
+    }
+
+    /// *Unpair this device*, and *Delete data* (`delete`) after it.
+    fn unpair(&mut self, delete: bool) {
+        log::info!(
+            "settings: {}",
+            if delete {
+                "deleting the data"
+            } else {
+                "unpairing"
+            }
+        );
+        self.deleting = delete;
+        if self.companion.is_some() {
+            self.send(Input::Unpair);
+        } else {
+            // No key storage, so no pairing to forget.
+            self.unpaired(false);
+        }
+    }
+
+    /// The pairing is forgotten: back to the pairing screen, and the data
+    /// deleted if that was asked.
+    fn unpaired(&mut self, daemon: bool) {
+        log::info!(
+            "pairing: unpaired{}",
+            if daemon { "" } else { " here only" }
+        );
+        self.paired = false;
+        self.online = false;
+        self.code = None;
+        self.server_name = None;
+        self.card = None;
+        self.dictation = None;
+        self.agents.clear();
+        self.pending.clear();
+        if self.agent.take().is_some() {
+            self.send(Input::CloseAgent);
+        }
+        self.viewed = false;
+        self.settings_screen = None;
+        self.overview = Overview::new();
+        self.screen.invalidate();
+        self.link = "not paired \u{b7} paste a pairing URL below".into();
+        self.note = Some(if daemon {
+            ("unpaired".into(), MUTED)
+        } else {
+            (
+                "unpaired on this phone; handlr lists it until it is removed from auth.toml".into(),
+                WARN,
+            )
+        });
+        if std::mem::take(&mut self.deleting) {
+            self.delete_data();
+        }
+    }
+
+    /// *Delete data*: everything in the data directory but the voice
+    /// models, and the settings back to their defaults.
+    fn delete_data(&mut self) {
+        if let Some(dir) = &self.data_dir {
+            match settings::delete_data(dir, &self.models) {
+                Ok(n) => log::info!("settings: deleted {n} entries of the data directory"),
+                Err(e) => {
+                    log::error!("settings: deleting the data: {e}");
+                    self.note = Some((format!("deleting the data: {e}"), WARN));
+                }
+            }
+        }
+        self.settings = Settings::default();
+        settings::set_current(self.settings);
+        self.send(Input::Settings(self.settings.to_client()));
+        self.overview.settings_changed();
     }
 
     /// A tap on one of the agent view's controls, or the overview's.
@@ -728,13 +878,20 @@ impl App {
             agent.set_layout(layout);
             agent.set_dictation(self.dictation.as_ref().map(dictation_lines));
         }
+        if let Some(screen) = &mut self.settings_screen {
+            screen.set_layout(layout);
+            screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
+        }
+        // Without the microphone, nothing listens: the sound line says so.
+        let sound = if self.settings.microphone {
+            self.sound.clone()
+        } else {
+            "microphone off".to_string()
+        };
         if !self.pairing() {
             let o = &mut self.overview;
             o.set_layout(layout);
-            o.set_status(
-                vec![self.link.clone(), self.sound.clone()],
-                self.note.clone(),
-            );
+            o.set_status(vec![self.link.clone(), sound], self.note.clone());
             o.set_card(self.card.as_ref().map(|c| Panel {
                 lines: c.lines(),
                 confirm: c.asks().then_some(c.confirm_id),
@@ -770,7 +927,7 @@ impl App {
             }
         }
         let view = View {
-            status: vec![self.link.clone(), self.sound.clone()],
+            status: vec![self.link.clone(), sound],
             code,
             field: self.field.clone(),
             field_focused: self.field_focused,
@@ -849,6 +1006,24 @@ impl MorphApp for App {
 
         let args = Args::parse(ctx.args());
         let audio_config = audio_config(ctx, &args);
+        // The app's data directory; on the desktop, the companion's own.
+        let data_dir = ctx
+            .data_dir()
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| Some(FileKeyStore::default_dir()));
+        let settings = data_dir.as_deref().map(Settings::load).unwrap_or_default();
+        settings::set_current(settings);
+        log::info!("settings: {settings:?}");
+        // The voice models, where they are in the data directory.
+        let models = [&audio_config.stt.model_dir, &audio_config.tts.model_dir]
+            .into_iter()
+            .filter(|m| {
+                data_dir
+                    .as_ref()
+                    .is_some_and(|d| m.parent() == Some(d.as_path()))
+            })
+            .cloned()
+            .collect();
         let mut app = Self {
             fonts,
             roboto,
@@ -883,6 +1058,12 @@ impl MorphApp for App {
             read_aloud: false,
             speaking: false,
             viewed: false,
+            settings,
+            data_dir,
+            settings_screen: None,
+            server_name: None,
+            deleting: false,
+            models,
             started: Instant::now(),
             last_update: Instant::now(),
         };
@@ -890,6 +1071,7 @@ impl MorphApp for App {
         match key_store(ctx, &args) {
             Ok((keys, server)) => {
                 app.paired = server.is_some();
+                app.server_name = server.clone();
                 app.link = match server {
                     Some(name) => format!("connecting to {name}\u{2026}"),
                     None => "not paired \u{b7} paste a pairing URL below".into(),
@@ -908,7 +1090,9 @@ impl MorphApp for App {
                         .max(handlr_companion::DICTATION_SILENCE)
                         .as_secs_f64()
                 );
-                app.companion = Some(Companion::spawn(config, keys));
+                let companion = Companion::spawn(config, keys);
+                companion.send(Input::Settings(app.settings.to_client()));
+                app.companion = Some(companion);
             }
             Err(e) => {
                 log::error!("keys: {e}");
@@ -996,7 +1180,9 @@ impl MorphApp for App {
         }
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
-        if let Some(agent) = &mut self.agent {
+        if let Some(screen) = &mut self.settings_screen {
+            screen.tick(dt);
+        } else if let Some(agent) = &mut self.agent {
             agent.tick(dt);
         } else {
             self.overview.tick(dt);
@@ -1019,6 +1205,12 @@ impl MorphApp for App {
     /// hits. On the pairing screen, only a touch's end counts.
     fn on_touch(&mut self, _ctx: &mut MorphContext, touch: Touch) {
         let now = self.started.elapsed();
+        if let Some(screen) = &mut self.settings_screen {
+            if let Some(hit) = screen.touch(touch.id, touch.phase, touch.x, touch.y, now) {
+                self.settings_hit(hit);
+            }
+            return;
+        }
         if let Some(agent) = &mut self.agent {
             if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
                 self.agent_hit(hit);
@@ -1033,6 +1225,7 @@ impl MorphApp for App {
                 Some(OverviewHit::Agent(pane_id)) => self.open_agent(pane_id),
                 Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
                 Some(OverviewHit::Tap) => self.send(Input::Tap),
+                Some(OverviewHit::Settings) => self.open_settings(),
                 None => {}
             }
             return;
@@ -1053,6 +1246,15 @@ impl MorphApp for App {
     /// Typing into the focused field (desktop): Enter pairs, Escape clears.
     /// libmorph has no Backspace, paste or on-screen keyboard yet.
     fn on_key(&mut self, _ctx: &mut MorphContext, key: Key) -> KeyStatus {
+        // The system Back cancels the settings' modal, or closes them.
+        if matches!(key, Key::Back | Key::Escape)
+            && let Some(screen) = &mut self.settings_screen
+        {
+            if !screen.back() {
+                self.close_settings();
+            }
+            return KeyStatus::Handled;
+        }
         // The system Back closes the agent view.
         if self.agent.is_some() && matches!(key, Key::Back | Key::Escape) {
             self.close_agent();
@@ -1101,6 +1303,7 @@ impl MorphApp for App {
             px_range: BUNDLED_ATLAS_PX_RANGE,
         };
         let shown = match (&self.agent, self.pairing()) {
+            _ if self.settings_screen.is_some() => Shown::Settings,
             (Some(_), _) => Shown::Agent,
             (None, true) => Shown::Pairing,
             (None, false) => Shown::Overview,
@@ -1113,11 +1316,15 @@ impl MorphApp for App {
             if let Some(agent) = &mut self.agent {
                 agent.invalidate();
             }
+            if let Some(screen) = &mut self.settings_screen {
+                screen.invalidate();
+            }
         }
-        match &mut self.agent {
-            Some(agent) => agent.draw(&mut self.list, &draw, Some(&term)),
-            None if shown == Shown::Pairing => self.screen.draw(&mut self.list, &draw),
-            None => self.overview.draw(&mut self.list, &draw, Some(&term)),
+        match (&mut self.settings_screen, &mut self.agent) {
+            (Some(screen), _) => screen.draw(&mut self.list, &draw, Some(&term)),
+            (None, Some(agent)) => agent.draw(&mut self.list, &draw, Some(&term)),
+            (None, None) if shown == Shown::Pairing => self.screen.draw(&mut self.list, &draw),
+            (None, None) => self.overview.draw(&mut self.list, &draw, Some(&term)),
         };
         let (w, h) = frame.size;
         self.sdf.render_draw_list_in(
