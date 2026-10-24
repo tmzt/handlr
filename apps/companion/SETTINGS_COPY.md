@@ -158,6 +158,11 @@ key's text on that vendor's phones.
     these lists.
     [dontkillmyapp.com/samsung](https://dontkillmyapp.com/samsung)
 
+# [Copy] clear_cache
+
+- [abc] size: the cache's size in MB
+- text: Clear cache ({{ [abc] size }} MB)
+
 # [Copy] unpair
 
 - title: Unpair this device

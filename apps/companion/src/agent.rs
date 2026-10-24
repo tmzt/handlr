@@ -37,7 +37,7 @@ use std::time::Duration;
 use std::collections::{HashMap, HashSet};
 
 use handlr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
-use handlr_companion::{AgentCard, CardKind, Shows, Suggestion, ViewSection};
+use handlr_companion::{AgentCard, Bookend, CardKind, Pressure, Shows, Suggestion, ViewSection};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
 use libhandlr_proto::common::{Entry, EntryKind, Link, Role, Serial};
 use libmorph::TouchPhase;
@@ -127,9 +127,19 @@ const BACK_GLYPH: &str = "\u{2039}";
 /// shows while a reply is being read (no ⏭ in the face: play and a bar).
 pub(crate) const PLAY_GLYPH: &str = "\u{25B6}";
 pub(crate) const SKIP_GLYPH: &str = "\u{25B6}\u{2502}";
-/// Lines of a tool result shown: one, or a diff's or an error's first few.
-const RESULT_LINES: usize = 12;
+/// Lines of a folded tool result shown: one, or a diff's or an error's
+/// first few.
+const DIFF_LINES: usize = 4;
 const ERROR_LINES: usize = 4;
+/// Lines of a summary card's short form, at most (the 12:08 EDT
+/// amendment).
+const SHORT_LINES: usize = 3;
+/// The dim word at a cut short form's bottom right.
+pub const MORE: &str = "more";
+/// The dim label over a summary card's spoken text.
+pub const SPOKEN: &str = "spoken";
+/// A point's mark.
+const BULLET: &str = "\u{2022} ";
 /// Lines of the pinned card's text.
 const PIN_LINES: usize = 3;
 /// Lines of the dictation card shown at most: its tail.
@@ -264,6 +274,13 @@ pub enum AgentHit {
     Link(usize),
     /// The jump line: back to the bottom, following.
     JumpToEnd,
+    /// A tool call, a diff or a summary card in the scrollback: expand it,
+    /// or fold it again (plan 20261022_03, the L3 amendments of 2026-10-24
+    /// 11:54 to 12:03 EDT). Its section's packed serial.
+    Fold(u64),
+    /// A summary card's play button: say its spoken text again. The packed
+    /// serial of its card.
+    Replay(u64),
 }
 
 /// A button, in the flow or on the screen.
@@ -293,24 +310,114 @@ pub struct Flow {
     /// The span of the flow's y whose entries and cards have their rows
     /// laid out; `None` for all of them.
     pub kept: Option<(f32, f32)>,
+    /// Areas a tap folds or expands: a tool section, a diff or a summary
+    /// card, the whole block ([`AgentHit::Fold`]).
+    pub taps: Vec<(AgentHit, Rect)>,
 }
 
-/// How an entry is drawn: its lines, their size and colours, and whether
-/// it sits on the grey band.
-fn entry_lines(e: &Entry, cols: impl Fn(f32) -> usize) -> (Vec<(String, f32, [f32; 4])>, bool) {
+/// What a block is laid out with besides its section: its key (the packed
+/// serial, for its taps), whether the user expanded it, whether sound is
+/// on (a summary card's replay button), and, for a summary card, the
+/// whole reply it is about when held.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BlockState {
+    pub key: u64,
+    pub expanded: bool,
+    pub sound: bool,
+    pub context: Option<String>,
+}
+
+impl Default for BlockState {
+    fn default() -> Self {
+        BlockState {
+            key: 0,
+            expanded: false,
+            sound: true,
+            context: None,
+        }
+    }
+}
+
+impl BlockState {
+    /// A summary card's form in the scrollback: short, or expanded.
+    fn form(&self, card: &AgentCard) -> CardForm<'_> {
+        if !card.is_summary() {
+            CardForm::Text {
+                max_lines: usize::MAX,
+            }
+        } else if self.expanded {
+            CardForm::Expanded {
+                context: self.context.as_deref(),
+                max_lines: usize::MAX,
+                key: self.key,
+                sound: self.sound,
+            }
+        } else {
+            CardForm::Short {
+                context: self.context.as_deref(),
+            }
+        }
+    }
+}
+
+/// An entry's whole text: `Entry::text` when the daemon sent it (plan
+/// 20261022_03, the L3 amendment of 2026-10-24 11:54 EDT), else `summary`
+/// (an older daemon, or a text that was not cut).
+pub fn full_text(e: &Entry) -> &str {
+    e.text.as_deref().unwrap_or(&e.summary)
+}
+
+/// `raw` after `lead`, wrapped at `cols`, its own indentation kept and
+/// the lines after the first indented under it.
+fn wrap_indented(lead: &str, raw: &str, cols: usize) -> Vec<String> {
+    let body = raw.trim_start();
+    let indent = format!("{lead}{}", &raw[..raw.len() - body.len()]);
+    let width = indent.chars().count();
+    let hang = " ".repeat(width);
+    wrap_hard(body, cols.saturating_sub(width).max(1))
+        .into_iter()
+        .enumerate()
+        .map(|(i, l)| format!("{}{l}", if i == 0 { &indent } else { &hang }))
+        .collect()
+}
+
+/// A laid-out line of an entry: its text, type size and colour.
+type EntryLine = (String, f32, [f32; 4]);
+
+/// Marks the last of `lines` as cut: "…" at its end, unless it has one.
+fn mark_cut(lines: &mut [EntryLine]) {
+    if let Some((last, _, _)) = lines.last_mut()
+        && !last.ends_with('\u{2026}')
+    {
+        last.push('\u{2026}');
+    }
+}
+
+/// How an entry is drawn: its lines, their size and colours, whether it
+/// sits on the grey band, and whether it is folded with more to show.
+/// Text shows whole; a tool call and its result, and a diff, fold to
+/// their first lines unless `expanded` (the 11:54 and 11:59 EDT
+/// amendments).
+fn entry_lines(
+    e: &Entry,
+    expanded: bool,
+    cols: impl Fn(f32) -> usize,
+) -> (Vec<EntryLine>, bool, bool) {
     let mut lines = Vec::new();
+    let mut more = false;
+    let full = full_text(e);
     match (e.role, e.kind) {
         (Role::User, EntryKind::Text) => {
-            for l in wrap_hard(e.summary.trim(), cols(TEXT_PT)) {
+            for l in wrap_hard(full.trim(), cols(TEXT_PT)) {
                 lines.push((l, TEXT_PT, FG));
             }
-            return (lines, true);
+            return (lines, true, false);
         }
         (_, EntryKind::Text) => {
             // Replies are plain; inside a fenced block, diff lines are green
             // and red and the fences dim.
             let mut fenced = false;
-            for raw in e.summary.trim().split('\n') {
+            for raw in full.trim().split('\n') {
                 let fence = raw.trim_start().starts_with("```");
                 let color = if fence {
                     DIM
@@ -328,31 +435,66 @@ fn entry_lines(e: &Entry, cols: impl Fn(f32) -> usize) -> (Vec<(String, f32, [f3
             }
         }
         (_, EntryKind::ToolUse) => {
-            let first = e.summary.lines().next().unwrap_or("");
-            lines.push((one_line(&format!("> {first}"), cols(TOOL_PT)), TOOL_PT, DIM));
-        }
-        (_, EntryKind::ToolResult) => {
-            if let Some(error) = e.summary.strip_prefix("error: ") {
-                let wrapped = wrap_hard(&format!("! {}", error.trim()), cols(TOOL_PT));
-                for l in wrapped.into_iter().take(ERROR_LINES) {
-                    lines.push((l, TOOL_PT, RED));
-                }
-            } else if is_diff(&e.summary) {
-                for raw in e.summary.lines().take(RESULT_LINES) {
-                    let color = diff_colour(raw).unwrap_or(DIM);
-                    lines.push((one_line(&format!("  {raw}"), cols(TOOL_PT)), TOOL_PT, color));
+            let text = full.trim_end();
+            let first = text.lines().next().unwrap_or("");
+            if expanded {
+                for (i, raw) in text.lines().enumerate() {
+                    let lead = if i == 0 { "> " } else { "  " };
+                    for l in wrap_indented(lead, raw, cols(TOOL_PT)) {
+                        lines.push((l, TOOL_PT, DIM));
+                    }
                 }
             } else {
-                let first = e
-                    .summary
-                    .lines()
-                    .find(|l| !l.trim().is_empty())
-                    .unwrap_or("");
-                lines.push((one_line(&format!("  {first}"), cols(TOOL_PT)), TOOL_PT, DIM));
+                let line = format!("> {first}");
+                more = line.chars().count() > cols(TOOL_PT) || text.lines().nth(1).is_some();
+                lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, DIM));
+            }
+        }
+        (_, EntryKind::ToolResult) => {
+            if let Some(error) = full.strip_prefix("error: ") {
+                let wrapped = wrap_hard(&format!("! {}", error.trim()), cols(TOOL_PT));
+                more = !expanded && wrapped.len() > ERROR_LINES;
+                let shown = if expanded { usize::MAX } else { ERROR_LINES };
+                for l in wrapped.into_iter().take(shown) {
+                    lines.push((l, TOOL_PT, RED));
+                }
+            } else if is_diff(full) {
+                let raws: Vec<&str> = full.trim_end().lines().collect();
+                if expanded {
+                    for raw in raws {
+                        let color = diff_colour(raw).unwrap_or(DIM);
+                        for l in wrap_indented("  ", raw, cols(TOOL_PT)) {
+                            lines.push((l, TOOL_PT, color));
+                        }
+                    }
+                } else {
+                    more = raws.len() > DIFF_LINES;
+                    for raw in raws.iter().take(DIFF_LINES) {
+                        let color = diff_colour(raw).unwrap_or(DIM);
+                        let line = format!("  {raw}");
+                        more |= line.chars().count() > cols(TOOL_PT);
+                        lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, color));
+                    }
+                }
+            } else if expanded {
+                for raw in full.trim_end().lines() {
+                    for l in wrap_indented("  ", raw, cols(TOOL_PT)) {
+                        lines.push((l, TOOL_PT, DIM));
+                    }
+                }
+            } else {
+                let mut shown = full.lines().filter(|l| !l.trim().is_empty());
+                let first = shown.next().unwrap_or("");
+                let line = format!("  {first}");
+                more = line.chars().count() > cols(TOOL_PT) || shown.next().is_some();
+                lines.push((one_line(&line, cols(TOOL_PT)), TOOL_PT, DIM));
             }
         }
     }
-    (lines, false)
+    if more {
+        mark_cut(&mut lines);
+    }
+    (lines, false, more)
 }
 
 /// A diff line's colour: `+` green and `-` red, but not `+++` or `---`.
@@ -422,9 +564,155 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
     }
 }
 
+/// How a card's text is laid out (plan 20261022_03, the L3 amendments of
+/// 2026-10-24 12:03 to 12:08 EDT).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CardForm<'a> {
+    /// Its text, at most `max_lines` lines, the last cut with "…".
+    Text { max_lines: usize },
+    /// A summary card folded: its title and short form, with "more" when
+    /// the short form is cut. `context` is the reply it is about, when
+    /// held.
+    Short { context: Option<&'a str> },
+    /// A summary card expanded: the whole reply (at most `max_lines`
+    /// lines), its points, and its spoken text, with a replay button for
+    /// the block `key` when `sound` is on.
+    Expanded {
+        context: Option<&'a str>,
+        max_lines: usize,
+        key: u64,
+        sound: bool,
+    },
+}
+
+/// One line of a summary card's form.
+#[derive(Clone, Debug, PartialEq)]
+enum Part {
+    /// The short form, or the full context.
+    Body(String),
+    /// A line of a point, the first with its bullet.
+    Point(String),
+    /// The dim "spoken" label.
+    Label,
+    /// A line of the spoken text.
+    Spoken(String),
+}
+
+/// A summary card's short form at `cols` (the 12:08 EDT amendment): the
+/// daemon's summary (`spoken`) whole when it has one; else the reply's
+/// opening (`context`, else the card's text), its first paragraph, or,
+/// when its first line ends in ":", the lines after it too, up to
+/// `SHORT_LINES` lines. Whether it is cut: the last line then ends with
+/// "…".
+pub fn short_form(card: &AgentCard, context: Option<&str>, cols: usize) -> (Vec<String>, bool) {
+    if let Some(spoken) = card
+        .spoken
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        return (wrap_hard(spoken, cols), false);
+    }
+    let source = context.unwrap_or(&card.text).trim();
+    let raws: Vec<&str> = source.lines().map(str::trim_end).collect();
+    let lead_in = raws.first().is_some_and(|l| l.ends_with(':'));
+    let opening: Vec<&str> = if lead_in {
+        raws.iter()
+            .copied()
+            .filter(|l| !l.trim().is_empty())
+            .collect()
+    } else {
+        raws.iter()
+            .copied()
+            .take_while(|l| !l.trim().is_empty())
+            .collect()
+    };
+    let rest = raws.iter().filter(|l| !l.trim().is_empty()).count() > opening.len();
+    let mut lines: Vec<String> = opening.iter().flat_map(|l| wrap_hard(l, cols)).collect();
+    let mut cut = rest;
+    if lines.len() > SHORT_LINES {
+        lines.truncate(SHORT_LINES);
+        cut = true;
+    }
+    if cut && let Some(last) = lines.last_mut() {
+        if last.chars().count() >= cols {
+            let kept: String = last.chars().take(cols.saturating_sub(1)).collect();
+            *last = kept;
+        }
+        if !last.ends_with('\u{2026}') {
+            last.push('\u{2026}');
+        }
+    }
+    (lines, cut)
+}
+
+/// Whether a summary card's expanded form shows more than its short one.
+pub fn summary_folds(card: &AgentCard, context: Option<&str>, cols: usize) -> bool {
+    card.is_summary()
+        && (short_form(card, context, cols).1 || !card.points.is_empty() || card.spoken.is_some())
+}
+
+/// A summary card's lines in `form`, at `cols`, and whether its short form
+/// is cut. Without the daemon's spoken text there is no spoken part: what
+/// reading aloud would say is worked out when it is said.
+fn summary_parts(card: &AgentCard, form: CardForm, cols: usize) -> (Vec<Part>, bool) {
+    match form {
+        CardForm::Text { .. } => (Vec::new(), false),
+        CardForm::Short { context } => {
+            let (lines, cut) = short_form(card, context, cols);
+            (lines.into_iter().map(Part::Body).collect(), cut)
+        }
+        CardForm::Expanded {
+            context, max_lines, ..
+        } => {
+            let source = context.unwrap_or(&card.text).trim();
+            let mut body = wrap_hard(source, cols);
+            if body.len() > max_lines {
+                body.truncate(max_lines.max(1));
+                if let Some(last) = body.last_mut() {
+                    last.push('\u{2026}');
+                }
+            }
+            let mut parts: Vec<Part> = body.into_iter().map(Part::Body).collect();
+            for p in &card.points {
+                let wrapped = wrap_hard(p.trim(), cols.saturating_sub(2).max(1));
+                for (i, l) in wrapped.into_iter().enumerate() {
+                    let lead = if i == 0 { BULLET } else { "  " };
+                    parts.push(Part::Point(format!("{lead}{l}")));
+                }
+            }
+            if let Some(spoken) = card
+                .spoken
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                parts.push(Part::Label);
+                parts.extend(wrap_hard(spoken, cols).into_iter().map(Part::Spoken));
+            }
+            (parts, false)
+        }
+    }
+}
+
+/// The replay button beside the "spoken" label at `(x, y)`, for the block
+/// `key`: the play glyph alone, dim.
+fn replay_button(key: u64, x: f32, y: f32, s: f32) -> FlowButton {
+    let h = line_h(TOOL_PT * s).max(REPLAY_W * s);
+    FlowButton {
+        hit: AgentHit::Replay(key),
+        rect: Rect::new(x, y - (h - line_h(TOOL_PT * s)) * 0.5, REPLAY_W * s, h),
+        label: "",
+        bg: DIM,
+    }
+}
+
+/// The replay button's width and height, in points.
+const REPLAY_W: f32 = 28.0;
+
 /// A live card's block at `y`, `w` wide from `x`: its fills, rows and
-/// buttons, and its height. At most `max_lines` lines of its text. Its
-/// links are marked by their index in `targets`.
+/// buttons, and its height. Its text as `form` says. Its links are marked
+/// by their index in `targets`.
 #[allow(clippy::too_many_arguments)]
 fn card_block(
     card: &AgentCard,
@@ -432,7 +720,7 @@ fn card_block(
     y: f32,
     w: f32,
     s: f32,
-    max_lines: usize,
+    form: CardForm,
     targets: &[Link],
     flow: &mut Flow,
 ) -> f32 {
@@ -440,15 +728,31 @@ fn card_block(
     let inner_x = x + EDGE * s + pad;
     let inner_w = w - EDGE * s - 2.0 * pad;
     let (title_px, text_px) = (TITLE_PT * s, CARD_PT * s);
-    let mut lines = wrap_hard(card.text.trim(), columns(inner_w, text_px));
-    if lines.len() > max_lines {
-        lines.truncate(max_lines);
-        if let Some(last) = lines.last_mut() {
-            last.push('\u{2026}');
+    let label_px = TOOL_PT * s;
+    let cols = columns(inner_w, text_px);
+    let (parts, cut) = match form {
+        CardForm::Text { max_lines } => {
+            let mut lines = wrap_hard(card.text.trim(), cols);
+            if lines.len() > max_lines {
+                lines.truncate(max_lines);
+                if let Some(last) = lines.last_mut() {
+                    last.push('\u{2026}');
+                }
+            }
+            (lines.into_iter().map(Part::Body).collect(), false)
         }
-    }
+        _ => summary_parts(card, form, cols),
+    };
+    let part_h = |p: &Part| match p {
+        Part::Label => line_h(label_px) + 4.0 * s,
+        _ => line_h(text_px),
+    };
+    let lines_h: f32 = parts.iter().map(part_h).sum();
     let acts = actions(card);
-    let mut h = pad + line_h(title_px) + 4.0 * s + lines.len() as f32 * line_h(text_px) + pad;
+    let mut h = pad + line_h(title_px) + 4.0 * s + lines_h + pad;
+    if cut {
+        h += line_h(label_px);
+    }
     if !acts.is_empty() {
         h += ACTION_H * s + pad * 0.5;
     }
@@ -479,16 +783,51 @@ fn card_block(
     });
     ty += line_h(title_px) + 4.0 * s;
     let first_text = flow.rows.len();
-    for l in lines {
+    for p in parts {
+        let (text, px, color) = match p {
+            Part::Body(t) | Part::Point(t) | Part::Spoken(t) => (t, text_px, FG),
+            Part::Label => {
+                flow.rows.push(Row {
+                    text: SPOKEN.to_string(),
+                    x: inner_x,
+                    y: ty + 4.0 * s,
+                    px: label_px,
+                    color: DIM,
+                    mono: false,
+                });
+                if let CardForm::Expanded {
+                    key, sound: true, ..
+                } = form
+                {
+                    let lx = inner_x + (SPOKEN.len() as f32 + 1.0) * label_px * 0.5;
+                    flow.buttons.push(replay_button(key, lx, ty + 4.0 * s, s));
+                }
+                ty += line_h(label_px) + 4.0 * s;
+                continue;
+            }
+        };
         flow.rows.push(Row {
-            text: l,
+            text,
             x: inner_x,
             y: ty,
-            px: text_px,
-            color: FG,
+            px,
+            color,
             mono: false,
         });
         ty += line_h(text_px);
+    }
+    if cut {
+        // "more", small and dim, at the card's bottom right.
+        let w_more = MORE.len() as f32 * label_px * 0.5;
+        flow.rows.push(Row {
+            text: MORE.to_string(),
+            x: inner_x + inner_w - w_more,
+            y: ty,
+            px: label_px,
+            color: DIM,
+            mono: false,
+        });
+        ty += line_h(label_px);
     }
     link_spans::mark(flow, first_text, &card.links, targets);
     if !acts.is_empty() {
@@ -581,7 +920,8 @@ impl Pen {
 }
 
 /// Lays out `card` at `y` into `flow`; the y after it. A live card that
-/// is `pinned` shows at the bottom instead, and keeps only its place.
+/// is `pinned` shows at the bottom instead, and keeps only its place. A
+/// summary card shows its short or expanded form as `state` says.
 fn lay_out_card(
     card: &AgentCard,
     pinned: bool,
@@ -589,6 +929,7 @@ fn lay_out_card(
     pen: Pen,
     targets: &[Link],
     flow: &mut Flow,
+    state: &BlockState,
 ) -> f32 {
     let s = pen.s;
     flow.card_y.push(y);
@@ -598,27 +939,108 @@ fn lay_out_card(
     } else if card.live {
         let y = y + 8.0 * s;
         *flow.card_y.last_mut().expect("pushed") = y;
-        y + card_block(card, pen.pad, y, pen.text_w, s, usize::MAX, targets, flow) + 12.0 * s
+        let form = state.form(card);
+        y + card_block(card, pen.pad, y, pen.text_w, s, form, targets, flow) + 12.0 * s
+    } else if card.is_summary() {
+        lay_out_resolved_summary(card, y, pen, state, flow)
     } else {
-        // Resolved: ordinary scrollback, one dim line.
-        let text = format!("-- {}: {}", card.title, card.text.replace('\n', " "));
-        flow.rows.push(Row {
-            text: one_line(&text, pen.cols(TOOL_PT)),
-            x: pen.pad,
-            y,
-            px: TOOL_PT * s,
-            color: DIM,
-            mono: true,
-        });
-        y + term_h(TOOL_PT * s) + 4.0 * s
+        // Resolved: ordinary scrollback, dim, shown whole (the 11:59 EDT
+        // amendment).
+        let text = format!("-- {}: {}", card.title, card.text.trim());
+        let px = TOOL_PT * s;
+        let mut ly = y;
+        for line in wrap_hard(&text, pen.cols(TOOL_PT)) {
+            flow.rows.push(Row {
+                text: line,
+                x: pen.pad,
+                y: ly,
+                px,
+                color: DIM,
+                mono: true,
+            });
+            ly += term_h(px);
+        }
+        ly.max(y + term_h(px)) + 4.0 * s
     }
 }
 
+/// A resolved summary card in the scrollback: `-- <title>: ` and its
+/// short form, dim, with "more" at the bottom right when cut; or,
+/// expanded, its title, the whole reply, its points and its spoken text
+/// with the replay button.
+fn lay_out_resolved_summary(
+    card: &AgentCard,
+    y: f32,
+    pen: Pen,
+    state: &BlockState,
+    flow: &mut Flow,
+) -> f32 {
+    let s = pen.s;
+    let px = TOOL_PT * s;
+    let lh = term_h(px);
+    let lead = format!("-- {}: ", card.title);
+    let indent = " ".repeat(3);
+    let cols = pen
+        .cols(TOOL_PT)
+        .saturating_sub(lead.chars().count())
+        .max(8);
+    let form = state.form(card);
+    let (parts, cut) = summary_parts(card, form, cols);
+    let mut ly = y;
+    let push = |flow: &mut Flow, text: String, color: [f32; 4], ly: &mut f32| {
+        flow.rows.push(Row {
+            text,
+            x: pen.pad,
+            y: *ly,
+            px,
+            color,
+            mono: true,
+        });
+        *ly += lh;
+    };
+    let expanded = matches!(form, CardForm::Expanded { .. });
+    if expanded {
+        push(flow, format!("-- {}", card.title), DIM, &mut ly);
+    }
+    for (i, p) in parts.into_iter().enumerate() {
+        match p {
+            Part::Body(t) if !expanded && i == 0 => push(flow, format!("{lead}{t}"), DIM, &mut ly),
+            Part::Body(t) if !expanded => push(flow, format!("{indent}{t}"), DIM, &mut ly),
+            Part::Body(t) | Part::Point(t) => push(flow, format!("{indent}{t}"), FG, &mut ly),
+            Part::Spoken(t) => push(flow, format!("{indent}{t}"), FG, &mut ly),
+            Part::Label => {
+                let label = format!("{indent}{SPOKEN}");
+                if state.sound {
+                    let lx = pen.pad + (label.chars().count() as f32 + 1.0) * px * CELL_EM;
+                    flow.buttons.push(replay_button(state.key, lx, ly, s));
+                }
+                push(flow, label, DIM, &mut ly);
+            }
+        }
+    }
+    if cut {
+        // "more", at the bottom right.
+        let w_more = MORE.len() as f32 * px * CELL_EM;
+        flow.rows.push(Row {
+            text: MORE.to_string(),
+            x: pen.pad + pen.text_w - w_more,
+            y: ly,
+            px,
+            color: DIM,
+            mono: true,
+        });
+        ly += lh;
+    }
+    ly.max(y + lh) + 4.0 * s
+}
+
 /// Lays out entry `e` at `y` into `flow`, after an entry that
-/// `previous_compacts`; the y after it.
+/// `previous_compacts`, a tool call or diff folded unless `expanded`; the
+/// y after it.
 fn lay_out_entry(
     e: &Entry,
     previous_compacts: bool,
+    expanded: bool,
     y: f32,
     pen: Pen,
     targets: &[Link],
@@ -636,7 +1058,7 @@ fn lay_out_entry(
         flow.entry_y.push(y);
         return y + NoticeLine::lay_out(e, origin, pen.pad, y, pen.cols(TOOL_PT), s, targets, flow);
     }
-    let (lines, band) = entry_lines(e, |pt| pen.cols(pt));
+    let (lines, band, _) = entry_lines(e, expanded, |pt| pen.cols(pt));
     let gap = match (e.role, e.kind) {
         (_, EntryKind::Text) => 10.0 * s,
         _ => 2.0 * s,
@@ -735,7 +1157,15 @@ pub fn lay_out_flow_in(
         while let Some(card) = cards.get(next_card).filter(|c| c.at <= i) {
             let at = mark(&flow);
             let top = y;
-            y = lay_out_card(card, pinned == Some(next_card), y, pen, &targets, &mut flow);
+            y = lay_out_card(
+                card,
+                pinned == Some(next_card),
+                y,
+                pen,
+                &targets,
+                &mut flow,
+                &BlockState::default(),
+            );
             prune(&mut flow, at, top, y);
             next_card += 1;
         }
@@ -746,7 +1176,7 @@ pub fn lay_out_flow_in(
             .checked_sub(1)
             .and_then(|p| entries.get(p))
             .is_some_and(NoticeLine::compacts);
-        y = lay_out_entry(e, previous_compacts, y, pen, &targets, &mut flow);
+        y = lay_out_entry(e, previous_compacts, false, y, pen, &targets, &mut flow);
         prune(&mut flow, at, top, y);
     }
     flow.height = y + 16.0 * s;
@@ -761,30 +1191,73 @@ pub fn lay_out_flow_in(
 /// to its own. A live card that is `pinned` keeps no height; the first
 /// entry comes after one that `after_compact`.
 pub fn lay_out_block(shows: &Shows, pinned: bool, after_compact: bool, width: f32, s: f32) -> Flow {
+    lay_out_block_as(
+        shows,
+        pinned,
+        after_compact,
+        &BlockState::default(),
+        width,
+        s,
+    )
+}
+
+/// As [`lay_out_block`], folded or expanded as `state` says. A block that
+/// folds (a tool call or diff with more than its first lines, or a summary
+/// card) is a tap area, [`AgentHit::Fold`] of its key.
+pub fn lay_out_block_as(
+    shows: &Shows,
+    pinned: bool,
+    after_compact: bool,
+    state: &BlockState,
+    width: f32,
+    s: f32,
+) -> Flow {
     let mut flow = Flow::default();
     let pen = Pen::new(width, s);
     let mut y = 0.0;
+    let mut folds = false;
     match shows {
         Shows::Entries(entries) => {
             flow.targets = link_spans::targets(entries.iter().map(|e| &e.links[..]));
             let targets = std::mem::take(&mut flow.targets);
             let mut previous_compacts = after_compact;
             for e in entries {
-                y = lay_out_entry(e, previous_compacts, y, pen, &targets, &mut flow);
+                y = lay_out_entry(
+                    e,
+                    previous_compacts,
+                    state.expanded,
+                    y,
+                    pen,
+                    &targets,
+                    &mut flow,
+                );
                 previous_compacts = NoticeLine::compacts(e);
+                folds |= e.origin.is_none() && entry_lines(e, false, |pt| pen.cols(pt)).2;
             }
             flow.targets = targets;
         }
         Shows::Card(card) => {
             let targets = link_spans::targets([&card.links[..]]);
-            y = lay_out_card(card, pinned, y, pen, &targets, &mut flow);
+            y = lay_out_card(card, pinned, y, pen, &targets, &mut flow, state);
             flow.targets = targets;
+            let cols = if card.live {
+                columns(pen.text_w - EDGE * s - 2.0 * CARD_PAD * s, CARD_PT * s)
+            } else {
+                pen.cols(TOOL_PT)
+                    .saturating_sub(card.title.chars().count() + 5)
+                    .max(8)
+            };
+            folds = !(card.live && pinned) && summary_folds(card, state.context.as_deref(), cols);
         }
         Shows::Pending { kind, lines, chars } => {
             y = lay_out_pending(*kind, *lines, *chars, pen, &mut flow);
         }
     }
     flow.height = y;
+    if folds {
+        flow.taps
+            .push((AgentHit::Fold(state.key), Rect::new(0.0, 0.0, width, y)));
+    }
     flow
 }
 
@@ -1086,6 +1559,65 @@ pub const JUMP_TO_END: &str = "-- jump to end --";
 /// distance (plan 20261022_03, the 01:06 EDT amendment, item 1).
 pub const JUMP_SCROLL: Duration = Duration::from_secs(2);
 
+/// `-- <what>: <line> --` in at most `cols` characters, the line cut to
+/// fit; `-- <what> --` without one.
+fn state_line(what: &str, line: &str, cols: usize) -> String {
+    if line.is_empty() {
+        return format!("-- {what} --");
+    }
+    let lead = format!("-- {what}: ");
+    let room = cols.saturating_sub(lead.chars().count() + 3).max(1);
+    format!("{lead}{} --", one_line(line, room))
+}
+
+/// Pull to refresh (plan 20261022_03, the L3 amendment of 2026-10-24
+/// 12:22 EDT): the finger's movement past the end counts at this share,
+/// up to `PULL_MAX` points; let go past `PULL_ARM`, it refreshes.
+const PULL_RESIST: f32 = 0.5;
+pub const PULL_MAX: f32 = 96.0;
+pub const PULL_ARM: f32 = 64.0;
+/// How fast a pull springs back, in points a second.
+const PULL_SPRING: f32 = 480.0;
+/// How long the refresh's result line shows.
+pub const PULL_RESULT: Duration = Duration::from_secs(1);
+pub const PULL_TO_REFRESH: &str = "-- pull to refresh --";
+pub const RELEASE_TO_REFRESH: &str = "-- release to refresh --";
+pub const REFRESHING: &str = "-- refreshing\u{2026} --";
+pub const UP_TO_DATE: &str = "-- up to date --";
+/// A section label's text before its card's summary arrives.
+pub const DONE: &str = "Done";
+
+/// Where a pull to refresh is.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum PullState {
+    #[default]
+    Idle,
+    /// Let go past `PULL_ARM`: the client refreshes.
+    Refreshing,
+    /// The result line, `t` seconds in.
+    Result {
+        text: String,
+        color: [f32; 4],
+        t: f32,
+    },
+}
+
+/// A section label on the scrollbar's scale (the 12:27 EDT amendment):
+/// its text and pill, and whether it is the one nearest the thumb.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SectionLabel {
+    pub text: String,
+    pub rect: Rect,
+    pub nearest: bool,
+}
+
+/// A label's pill and text, in the text colour at these opacities; the
+/// one nearest the thumb brighter.
+const LABEL_BG: f32 = 0.10;
+const LABEL_TEXT: f32 = 0.60;
+const LABEL_NEAR_BG: f32 = 0.20;
+const LABEL_NEAR_TEXT: f32 = 0.90;
+
 /// The cubic ease-in-out of the jump scroll: from 0 at `u = 0` to 1 at
 /// `u = 1`, with zero speed at both ends and the highest midway.
 pub fn ease_in_out(u: f32) -> f32 {
@@ -1224,6 +1756,8 @@ struct Block {
     pinned: bool,
     /// The first entry comes after a compaction's line.
     after_compact: bool,
+    /// Folded or expanded, sound, and a summary card's reply.
+    state: BlockState,
     /// Laid out at y = 0: its height, its entries' and card's tops and its
     /// links always; its rows, fills, buttons and link spans while `rows`.
     flow: Flow,
@@ -1239,6 +1773,7 @@ impl Block {
             shows,
             pinned: false,
             after_compact: false,
+            state: BlockState::default(),
             flow: Flow::default(),
             rows: false,
             stale: true,
@@ -1246,7 +1781,14 @@ impl Block {
     }
 
     fn lay_out(&mut self, width: f32, s: f32) {
-        self.flow = lay_out_block(&self.shows, self.pinned, self.after_compact, width, s);
+        self.flow = lay_out_block_as(
+            &self.shows,
+            self.pinned,
+            self.after_compact,
+            &self.state,
+            width,
+            s,
+        );
         self.rows = true;
         self.stale = false;
     }
@@ -1257,6 +1799,7 @@ impl Block {
         self.flow.fills = Vec::new();
         self.flow.buttons = Vec::new();
         self.flow.links = Vec::new();
+        self.flow.taps = Vec::new();
         self.rows = false;
     }
 
@@ -1312,6 +1855,11 @@ pub struct AgentScreen {
     /// The pinned card shows all its text (owner, 2026-10-23: "clicking an
     /// abbreviated question should expand the text and card").
     pin_expanded: bool,
+    /// The sections the user expanded (tool calls, diffs, summary cards),
+    /// by packed serial, while the view is open.
+    expanded: HashSet<u64>,
+    /// *All sound* is on: summary cards draw their replay button.
+    sound: bool,
     /// Seconds since the entries or the status last changed.
     quiet_for: f32,
     /// The response just sent, until the session shows it.
@@ -1361,6 +1909,20 @@ pub struct AgentScreen {
     held_newer: Vec<OutlineSlot>,
     /// A placeholder was on screen at the last draw: the shimmer runs.
     placeholders_shown: bool,
+    /// How far the view is pulled past its end, in pixels, and the pull's
+    /// state; it springs back while `springing`.
+    pull: f32,
+    pull_state: PullState,
+    springing: bool,
+    /// A pull was let go past `PULL_ARM`: the client is to refresh.
+    wants_refresh: bool,
+    /// The Finished cards' slots, for the section labels.
+    bookends: Vec<Bookend>,
+    /// The section labels, while they show: seconds since the thumb was
+    /// let go (0 while it is held).
+    labels: Option<f32>,
+    /// Memory pressure, until the app is back in front.
+    pressure: Option<Pressure>,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -1373,8 +1935,81 @@ impl AgentScreen {
             dirty: true,
             loading: true,
             flow_stale: true,
+            sound: true,
             ..Default::default()
         }
+    }
+
+    /// *All sound* on or off: summary cards' replay buttons show or go.
+    pub fn set_sound(&mut self, on: bool) {
+        if on == self.sound {
+            return;
+        }
+        self.sound = on;
+        for b in self.blocks.values_mut() {
+            if b.card().is_some_and(AgentCard::is_summary) {
+                b.stale = true;
+            }
+        }
+        let keep = self.keep_anchors();
+        self.refresh_blocks();
+        self.hold(keep);
+        self.flow_stale = true;
+        self.settle();
+    }
+
+    /// Expands the section `key`, or folds it again (the 11:54 EDT
+    /// amendment, item 2): its block is laid out again, and the view holds
+    /// by the section at its top, so it does not move.
+    pub fn toggle_fold(&mut self, key: u64) {
+        if !self.expanded.remove(&key) {
+            self.expanded.insert(key);
+        }
+        log::info!(
+            "agent view: section {} {}",
+            Serial::from_u64(key),
+            if self.expanded.contains(&key) {
+                "expanded"
+            } else {
+                "folded"
+            }
+        );
+        let keep = self.anchors();
+        self.refresh_blocks();
+        self.hold(keep);
+        self.follow = self.offset >= self.max_offset() - 1.0 && self.follow;
+        self.flow_stale = true;
+        self.settle();
+    }
+
+    /// Whether the section `key` is expanded.
+    pub fn is_expanded(&self, key: u64) -> bool {
+        self.expanded.contains(&key)
+    }
+
+    /// The spoken text of the summary card `key`, for its replay button.
+    pub fn spoken_of(&self, key: u64) -> Option<String> {
+        self.blocks
+            .get(&key)
+            .and_then(Block::card)
+            .and_then(|c| c.spoken.clone())
+    }
+
+    /// The whole reply a card on the line of `serial` is about: the last
+    /// reply in the sections on that line, as held.
+    fn context_of(&self, serial: Serial) -> Option<String> {
+        self.slots
+            .iter()
+            .filter(|s| s.serial.file == serial.file && s.serial.line == serial.line)
+            .filter_map(|s| match &self.blocks.get(&s.serial.to_u64())?.shows {
+                Shows::Entries(entries) => entries
+                    .iter()
+                    .rev()
+                    .find(|e| e.role == Role::Assistant && e.kind == EntryKind::Text)
+                    .map(|e| full_text(e).to_string()),
+                _ => None,
+            })
+            .next_back()
     }
 
     /// New content: the view's sections in serial order, the pinned card's
@@ -1524,11 +2159,34 @@ impl AgentScreen {
         let mut after_compact = false;
         let mut top = ribbon_top(s);
         self.tops.clear();
+        // Each summary card's reply, by its line (the 12:03 EDT
+        // amendment's full context).
+        let contexts: HashMap<u64, Option<String>> = self
+            .slots
+            .iter()
+            .filter(|slot| {
+                self.blocks
+                    .get(&slot.serial.to_u64())
+                    .and_then(Block::card)
+                    .is_some_and(AgentCard::is_summary)
+            })
+            .map(|slot| (slot.serial.to_u64(), self.context_of(slot.serial)))
+            .collect();
         #[cfg(test)]
         let mut laid = 0;
         for slot in &mut self.slots {
             let key = slot.serial.to_u64();
             let b = self.blocks.get_mut(&key).expect("a block for each slot");
+            let state = BlockState {
+                key,
+                expanded: self.expanded.contains(&key),
+                sound: self.sound,
+                context: contexts.get(&key).cloned().flatten(),
+            };
+            if b.state != state {
+                b.state = state;
+                b.stale = true;
+            }
             // Only what changes the block counts: the pin for a live card,
             // the neighbour for a first entry that is a compaction's.
             let is_pinned = pinned == Some(key) && b.card().is_some_and(|c| c.live);
@@ -1654,6 +2312,11 @@ impl AgentScreen {
                 link: map[x.link],
                 ..*x
             }));
+            flow.taps.extend(
+                f.taps
+                    .iter()
+                    .map(|&(hit, r)| (hit, Rect::new(r.x, r.y + top, r.w, r.h))),
+            );
         }
         #[cfg(test)]
         {
@@ -1720,13 +2383,16 @@ impl AgentScreen {
     }
 
     /// The span of the flow's y to lay rows out for: the window and
-    /// `KEEP_SCREENS` screens on each side.
+    /// `KEEP_SCREENS` screens on each side, or fewer under memory
+    /// pressure.
     fn keep_span(&self) -> (f32, f32) {
+        let k = self.keep_screens();
+        if k == 0.0 {
+            let v = self.frame.viewport.h.max(1.0);
+            return (self.offset, self.offset + v);
+        }
         let screen = self.frame.viewport.h.max(self.layout.h).max(1.0);
-        (
-            self.offset - KEEP_SCREENS * screen,
-            self.offset + screen + KEEP_SCREENS * screen,
-        )
+        (self.offset - k * screen, self.offset + screen + k * screen)
     }
 
     /// Whether the flow is to be put together again: it is stale, or the
@@ -1740,8 +2406,16 @@ impl AgentScreen {
             return true;
         };
         let screen = self.frame.viewport.h.max(self.layout.h).max(1.0);
-        let short_above = lo > 0.0 && self.offset - screen < lo;
-        let short_below = hi < self.ribbon_height() && self.offset + 2.0 * screen > hi;
+        // Within a screen of the edge; at once at `Low`, which keeps no
+        // margin.
+        let margin = screen * self.keep_screens().min(1.0);
+        let short_above = lo > 0.0 && self.offset - margin < lo;
+        let window = if margin > 0.0 {
+            screen
+        } else {
+            self.frame.viewport.h
+        };
+        let short_below = hi < self.ribbon_height() && self.offset + window + margin > hi;
         short_above || short_below
     }
 
@@ -1874,7 +2548,12 @@ impl AgentScreen {
         let s = self.scale();
         let w = self.layout.w - 2.0 * PAD * s;
         let inner_w = w - EDGE * s - 2.0 * CARD_PAD * s;
-        wrap_hard(card.text.trim(), columns(inner_w, CARD_PT * s)).len() > PIN_LINES
+        let cols = columns(inner_w, CARD_PT * s);
+        if card.is_summary() {
+            let context = self.pinned.and_then(|p| self.context_of(p));
+            return summary_folds(card, context.as_deref(), cols);
+        }
+        wrap_hard(card.text.trim(), cols).len() > PIN_LINES
     }
 
     /// Whether something is being said; with read aloud on, the play button
@@ -2032,19 +2711,25 @@ impl AgentScreen {
             } else {
                 PIN_LINES
             };
+            // A summary card folds to its short form, and expands to its
+            // reply, points and spoken text (the 12:03 EDT amendment).
+            let context = self.pinned.and_then(|p| self.context_of(p));
+            let form = match (card.is_summary(), self.pin_expanded) {
+                (false, _) => CardForm::Text { max_lines },
+                (true, false) => CardForm::Short {
+                    context: context.as_deref(),
+                },
+                (true, true) => CardForm::Expanded {
+                    context: context.as_deref(),
+                    max_lines,
+                    key: self.pinned.map_or(0, Serial::to_u64),
+                    sound: self.sound,
+                },
+            };
             // The full card, laid out once to know its height.
             let mut full = Flow::default();
             let targets = &self.flow.targets;
-            let h = card_block(
-                card,
-                pad,
-                0.0,
-                l.w - 2.0 * pad,
-                s,
-                max_lines,
-                targets,
-                &mut full,
-            );
+            let h = card_block(card, pad, 0.0, l.w - 2.0 * pad, s, form, targets, &mut full);
             full_top = above - h;
             if compact {
                 let bar = Rect::new(pad, above - BAR_H * s, l.w - 2.0 * pad, BAR_H * s);
@@ -2082,7 +2767,7 @@ impl AgentScreen {
                     full_top,
                     l.w - 2.0 * pad,
                     s,
-                    max_lines,
+                    form,
                     targets,
                     &mut flow,
                 );
@@ -2138,6 +2823,17 @@ impl AgentScreen {
     /// else `-- jump to end --`. The states come from the live cards, of
     /// the ribbon and of an outline held aside, and herdr's status.
     fn jump_line(&self, cols: usize) -> (String, [f32; 4]) {
+        match self.end_state(true) {
+            Some((what, line, color)) => (state_line(what, &line, cols), color),
+            None => (JUMP_TO_END.to_string(), DIM),
+        }
+    }
+
+    /// The state at the session's end, the first that holds of a question
+    /// waiting, an approval needed, something broken, a finished turn (its
+    /// card's short form: the daemon's summary when it has one) and, with
+    /// `working`, the agent working: what it is, its line, and its colour.
+    fn end_state(&self, working: bool) -> Option<(&'static str, String, [f32; 4])> {
         // The ribbon's sections, then those held aside (newer), oldest
         // first.
         let shows: Vec<&Shows> = self
@@ -2149,35 +2845,274 @@ impl AgentScreen {
         let live = |kind: CardKind| {
             shows.iter().rev().find_map(|sh| match sh {
                 Shows::Card(c) if c.live && c.kind == kind => {
-                    Some(text_line(&c.text).unwrap_or(c.title.trim()).to_string())
+                    let short = c.spoken.as_deref().and_then(text_line);
+                    Some(
+                        short
+                            .or_else(|| text_line(&c.text))
+                            .unwrap_or(c.title.trim())
+                            .to_string(),
+                    )
                 }
                 _ => None,
             })
         };
-        let working = self.status == "working";
-        let state = if let Some(q) = live(CardKind::Question) {
+        let is_working = self.status == "working";
+        if let Some(q) = live(CardKind::Question) {
             Some(("question", q, accent(CardKind::Question)))
         } else if let Some(a) = live(CardKind::Approval) {
             Some(("approval", a, accent(CardKind::Approval)))
         } else if let Some(b) = live(CardKind::Broke) {
             Some(("broke", b, RED))
-        } else if let Some(d) = live(CardKind::Finished).filter(|_| !working) {
+        } else if let Some(d) = live(CardKind::Finished).filter(|_| !is_working) {
             Some(("done", d, GREEN))
-        } else if working {
+        } else if is_working && working {
             let newest = shows.iter().rev().find_map(|sh| first_line(sh));
             Some(("working", newest.unwrap_or_default(), DIM))
         } else {
             None
-        };
-        let Some((what, line, color)) = state else {
-            return (JUMP_TO_END.to_string(), DIM);
-        };
-        if line.is_empty() {
-            return (format!("-- {what} --"), color);
         }
-        let lead = format!("-- {what}: ");
-        let room = cols.saturating_sub(lead.chars().count() + 3).max(1);
-        (format!("{lead}{} --", one_line(&line, room)), color)
+    }
+
+    /// Whether a refresh is asked for: the pull past the end was let go
+    /// past `PULL_ARM` (plan
+    /// 20261022_03, the L3 amendment of 2026-10-24 12:22 EDT). Once per
+    /// pull.
+    pub fn take_refresh(&mut self) -> bool {
+        std::mem::take(&mut self.wants_refresh)
+    }
+
+    /// How far the view is pulled past its end, in pixels.
+    pub fn pull(&self) -> f32 {
+        self.pull
+    }
+
+    /// The dim line below the last section while pulled, refreshing, or
+    /// giving the refresh's result.
+    pub fn pull_line(&self) -> Option<(String, [f32; 4])> {
+        match &self.pull_state {
+            PullState::Refreshing => Some((REFRESHING.to_string(), DIM)),
+            PullState::Result { text, color, .. } => Some((text.clone(), *color)),
+            PullState::Idle if self.pull > 0.0 => {
+                let text = if self.pull >= PULL_ARM * self.scale() {
+                    RELEASE_TO_REFRESH
+                } else {
+                    PULL_TO_REFRESH
+                };
+                Some((text.to_string(), DIM))
+            }
+            PullState::Idle => None,
+        }
+    }
+
+    /// The refresh is done ([`handlr_companion::Event::Refreshed`]): `new`
+    /// sections came. Its result line shows for `PULL_RESULT`: the end's
+    /// state as the jump line says it, else `-- N new --`, or `-- up to
+    /// date --` with nothing new (the 12:23 EDT amendment); then the view
+    /// springs back to the bottom, following.
+    pub fn refreshed(&mut self, new: usize) {
+        if self.pull_state != PullState::Refreshing {
+            return;
+        }
+        let s = self.scale();
+        let cols = columns(self.layout.w - 2.0 * PAD * s, TOOL_PT * s);
+        let (text, color) = match (new, self.end_state(false)) {
+            (0, _) => (UP_TO_DATE.to_string(), DIM),
+            (_, Some((what, line, color))) => (state_line(what, &line, cols), color),
+            (n, None) => (format!("-- {n} new --"), DIM),
+        };
+        log::info!("agent view: refreshed, {new} new");
+        self.pull_state = PullState::Result {
+            text,
+            color,
+            t: 0.0,
+        };
+        self.dirty = true;
+    }
+
+    /// A finger's move of `delta` pixels (down positive) at the end: the
+    /// part past the end pulls, at half the finger's movement, up to
+    /// `PULL_MAX`; moving back, the pull goes first. Whether it took the
+    /// move.
+    fn pull_by(&mut self, delta: f32) -> bool {
+        if self.pull_state != PullState::Idle {
+            return false;
+        }
+        let s = self.scale();
+        let max = self.max_offset();
+        if self.pull > 0.0 {
+            let p = self.pull - delta * PULL_RESIST;
+            self.springing = false;
+            self.dirty = true;
+            if p >= 0.0 {
+                self.pull = p.min(PULL_MAX * s);
+                return true;
+            }
+            // Back past the end: the rest scrolls.
+            self.pull = 0.0;
+            self.scroll_to(max + p / PULL_RESIST);
+            return true;
+        }
+        let target = self.offset - delta;
+        if target <= max || delta >= 0.0 {
+            return false;
+        }
+        self.scroll_to(max);
+        self.pull = ((target - max) * PULL_RESIST).min(PULL_MAX * s);
+        self.springing = false;
+        self.dirty = true;
+        true
+    }
+
+    /// The finger let go of a pull: past `PULL_ARM` it refreshes, holding
+    /// there until the result; before, it springs back.
+    fn release_pull(&mut self) {
+        let s = self.scale();
+        if self.pull >= PULL_ARM * s && self.pull_state == PullState::Idle {
+            log::info!("agent view: pulled to refresh");
+            self.pull = PULL_ARM * s;
+            self.pull_state = PullState::Refreshing;
+            self.wants_refresh = true;
+        } else {
+            self.springing = true;
+        }
+        self.dirty = true;
+    }
+
+    /// The pull's result line's time, and its spring back.
+    fn step_pull(&mut self, dt: Duration) {
+        if let PullState::Result { t, .. } = &mut self.pull_state {
+            *t += dt.as_secs_f32();
+            if *t >= PULL_RESULT.as_secs_f32() {
+                self.pull_state = PullState::Idle;
+                self.springing = true;
+            }
+            self.dirty = true;
+        }
+        if self.springing && self.drag.is_none() {
+            let s = self.scale();
+            self.pull = (self.pull - PULL_SPRING * s * dt.as_secs_f32()).max(0.0);
+            self.dirty = true;
+            if self.pull <= 0.0 {
+                self.springing = false;
+                let end = self.max_offset();
+                self.scroll_to(end);
+            }
+        }
+    }
+
+    /// The scrollbar's section labels (the 12:27 EDT amendment), while the
+    /// thumb is dragged and as it fades: each bookend's at its share of the
+    /// calculated length down the track, centred on the screen; those that
+    /// would overlap give way to the one nearest the thumb.
+    pub fn section_labels(&self) -> Vec<SectionLabel> {
+        if self.labels.is_none() || self.bookends.is_empty() {
+            return Vec::new();
+        }
+        let Some((thumb, _)) = self.thumb_track() else {
+            return Vec::new();
+        };
+        let l = &self.layout;
+        let s = self.scale();
+        let v = self.frame.viewport;
+        let total = self.calculated_length().max(1.0);
+        let px = TOOL_PT * s;
+        let cols = columns(l.w - 6.0 * PAD * s, px);
+        let h = line_h(px) + 8.0 * s;
+        let thumb_y = thumb.y + thumb.h * 0.5;
+        let mut placed: Vec<(f32, SectionLabel)> = self
+            .bookends
+            .iter()
+            .filter_map(|b| {
+                let i = self.slot_of(b.serial.to_u64())?;
+                let share = (self.tops[i] / total).clamp(0.0, 1.0);
+                let y = v.y + share * v.h;
+                let summary = b.summary.as_deref().unwrap_or(DONE);
+                let text = match &b.time {
+                    Some(t) => format!("{summary} \u{b7} {t}"),
+                    None => summary.to_string(),
+                };
+                let text = one_line(&text, cols);
+                let w = text.chars().count() as f32 * px * 0.5 + 2.0 * PAD * s;
+                let rect = Rect::new((l.w - w) * 0.5, y - h * 0.5, w, h);
+                Some((
+                    (y - thumb_y).abs(),
+                    SectionLabel {
+                        text,
+                        rect,
+                        nearest: false,
+                    },
+                ))
+            })
+            .collect();
+        placed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut shown: Vec<SectionLabel> = Vec::new();
+        for (i, (_, mut label)) in placed.into_iter().enumerate() {
+            let r = label.rect;
+            let clear = shown
+                .iter()
+                .all(|o| r.y + r.h + 2.0 * s <= o.rect.y || r.y >= o.rect.y + o.rect.h + 2.0 * s);
+            if clear {
+                label.nearest = i == 0;
+                shown.push(label);
+            }
+        }
+        shown.sort_by(|a, b| a.rect.y.total_cmp(&b.rect.y));
+        shown
+    }
+
+    /// The section labels' opacity: whole while the thumb is dragged and
+    /// `BAR_HOLD` after, then fading over `BAR_FADE` with the thumb.
+    pub fn labels_alpha(&self) -> f32 {
+        let Some(t) = self.labels else {
+            return 0.0;
+        };
+        1.0 - ((t - BAR_HOLD.as_secs_f32()) / BAR_FADE.as_secs_f32()).clamp(0.0, 1.0)
+    }
+
+    /// The Finished cards' slots ([`handlr_companion::Event::AgentView`]'s
+    /// `bookends`), for the section labels.
+    pub fn set_bookends(&mut self, bookends: Vec<Bookend>) {
+        if bookends != self.bookends {
+            self.bookends = bookends;
+            self.dirty = true;
+        }
+    }
+
+    /// Memory pressure (the 12:21 EDT amendment): laid-out rows are kept
+    /// only this close to the window, and, at `Low`, only on screen, the
+    /// shimmer with them. `None` once the app is back in front.
+    pub fn set_pressure(&mut self, pressure: Option<Pressure>) {
+        if pressure == self.pressure {
+            return;
+        }
+        self.pressure = pressure;
+        if pressure == Some(Pressure::Low) {
+            self.shimmer = 0.0;
+            self.placeholders_shown = false;
+        }
+        self.flow_stale = true;
+        self.settle();
+    }
+
+    /// How many screens either side of the window keep their rows.
+    fn keep_screens(&self) -> f32 {
+        match self.pressure {
+            None | Some(Pressure::UiHidden) => KEEP_SCREENS,
+            Some(Pressure::Background) => 1.0,
+            Some(Pressure::Low) => 0.0,
+        }
+    }
+
+    /// The blocks with laid-out rows, by packed serial.
+    pub fn laid_out(&self) -> Vec<u64> {
+        let mut keys: Vec<u64> = self
+            .blocks
+            .iter()
+            .filter(|(_, b)| b.rows)
+            .map(|(k, _)| *k)
+            .collect();
+        keys.sort_unstable();
+        keys
     }
 
     /// The jump line's tap: scrolls to the end in `JUMP_SCROLL` on an
@@ -2398,6 +3333,7 @@ impl AgentScreen {
         let bottom = top + screen;
         self.window = Some(ViewWindow {
             shown: span(top, bottom),
+            close: span(top - screen, bottom + screen),
             near: span(top - KEEP_SCREENS * screen, bottom + KEEP_SCREENS * screen),
             keep: span(
                 top - FORGET_SCREENS * screen,
@@ -2474,6 +3410,16 @@ impl AgentScreen {
             let rect = link_spans::rect(&self.flow.rows[span.row], span, v.y - self.offset);
             if rect.y + rect.h * 0.5 >= v.y && rect.y + rect.h * 0.5 <= v.y + v.h {
                 self.hits.push((AgentHit::Link(span.link), rect));
+            }
+        }
+        // Last: a block that folds, where nothing else in it was hit, as
+        // much of it as is in the window.
+        for &(hit, r) in &self.flow.taps {
+            let top = (v.y + r.y - self.offset).max(v.y);
+            let bottom = (v.y + r.y + r.h - self.offset).min(v.y + v.h);
+            if bottom > top {
+                self.hits
+                    .push((hit, Rect::new(r.x, top, r.w, bottom - top)));
             }
         }
     }
@@ -2587,6 +3533,7 @@ impl AgentScreen {
                         from: self.offset,
                     });
                     self.bar = Some(0.0);
+                    self.labels = Some(0.0);
                     if !on_thumb {
                         self.drag_thumb(y);
                     }
@@ -2640,7 +3587,10 @@ impl AgentScreen {
                 if moved {
                     let factor = if n >= 2 { TWO_FINGER } else { 1.0 };
                     self.bar = Some(0.0);
-                    self.scroll_to(self.offset - factor * mean);
+                    // One finger past the end pulls to refresh.
+                    if n >= 2 || !self.pull_by(factor * mean) {
+                        self.scroll_to(self.offset - factor * mean);
+                    }
                 }
                 None
             }
@@ -2672,6 +3622,11 @@ impl AgentScreen {
                     return None;
                 }
                 let d = self.drag.take()?;
+                if d.moved && self.pull > 0.0 && self.pull_state == PullState::Idle {
+                    // A pull let go: no fling.
+                    self.release_pull();
+                    return None;
+                }
                 if d.moved {
                     // A finger that stopped before lifting does not fling.
                     let still = now.saturating_sub(d.last_t) > Duration::from_millis(100);
@@ -2710,6 +3665,9 @@ impl AgentScreen {
                 self.hit(x, y).filter(|&hit| crate::settings::allows(hit))
             }
             TouchPhase::Cancelled => {
+                if self.pull > 0.0 && self.pull_state == PullState::Idle {
+                    self.springing = true;
+                }
                 let thumb = self.thumb.take().is_some();
                 if self.drag.take().is_some() || thumb {
                     if thumb {
@@ -2727,6 +3685,7 @@ impl AgentScreen {
     pub fn tick(&mut self, dt: Duration) -> bool {
         let moved = self.step(dt);
         self.step_bar(dt);
+        self.step_pull(dt);
         moved
     }
 
@@ -2734,6 +3693,15 @@ impl AgentScreen {
     /// then fading over `BAR_FADE`; frames are asked for while it shows or
     /// fades, and once more as it goes, but not after.
     fn step_bar(&mut self, dt: Duration) {
+        // The section labels show while the thumb is held, and fade with
+        // it.
+        if self.thumb.is_some() {
+            self.labels = Some(0.0);
+        } else if let Some(t) = self.labels {
+            let t = t + dt.as_secs_f32();
+            self.labels = (t < (BAR_HOLD + BAR_FADE).as_secs_f32()).then_some(t);
+            self.dirty = true;
+        }
         if self.scrolling() {
             self.bar = Some(0.0);
             self.dirty = true;
@@ -2798,10 +3766,10 @@ impl AgentScreen {
         let recording = self.dictation.is_some();
         fill(list, Rect::new(0.0, 0.0, l.w, l.h), BG, 0.0);
 
-        // The flow, in its window.
+        // The flow, in its window, pulled up by a pull to refresh.
         let v = self.frame.viewport;
         list.push_clip(v.pos(), v.size());
-        let dy = v.y - self.offset;
+        let dy = v.y - self.offset - self.pull;
         let visible = |y: f32, h: f32| y + h + dy >= v.y && y + dy <= v.y + v.h;
         let mut placeholders = false;
         for f in &self.flow.fills {
@@ -2854,10 +3822,43 @@ impl AgentScreen {
                 DIM,
             );
         }
+        // The pull's line, dim, centred in the space below the last
+        // section.
+        if let Some((text, color)) = self.pull_line() {
+            let px = TOOL_PT * s;
+            let w = text.chars().count() as f32 * px * 0.5;
+            let bottom = v.y + self.ribbon_height() - self.offset - self.pull;
+            let y = bottom + (self.pull - line_h(px)) * 0.5;
+            let x = ((l.w - w) * 0.5).max(PAD * s);
+            ctx.draw_text(list, &text, [x, y], px, color);
+        }
         // The scrollbar's thumb, while it shows.
         if let Some(r) = self.thumb_rect() {
             let color = [FG[0], FG[1], FG[2], self.bar_alpha()];
             fill(list, r, color, r.w / 2.0);
+        }
+        // The section labels over the scrollback, in the thumb's grays.
+        let alpha = self.labels_alpha();
+        if alpha > 0.0 {
+            let px = TOOL_PT * s;
+            for label in self.section_labels() {
+                let (bg, fg) = if label.nearest {
+                    (LABEL_NEAR_BG, LABEL_NEAR_TEXT)
+                } else {
+                    (LABEL_BG, LABEL_TEXT)
+                };
+                let r = label.rect;
+                fill(list, r, [FG[0], FG[1], FG[2], bg * alpha], r.h / 2.0);
+                let w = label.text.chars().count() as f32 * px * 0.5;
+                let pos = [r.x + (r.w - w) * 0.5, r.y + (r.h - line_h(px)) * 0.5];
+                ctx.draw_text(
+                    list,
+                    &label.text,
+                    pos,
+                    px,
+                    [FG[0], FG[1], FG[2], fg * alpha],
+                );
+            }
         }
         list.push_clip_end();
 
@@ -3079,6 +4080,8 @@ mod tests {
             confirm_id: (kind == CardKind::Approval).then_some(7),
             about_plan: false,
             links: Vec::new(),
+            points: Vec::new(),
+            spoken: None,
         }
     }
 
@@ -3346,16 +4349,20 @@ mod tests {
             assert_eq!(dot.color, input_box::AMBER);
             assert!(dot.x < rows[0].x);
         }
-        assert!(row("Nothing else").is_empty(), "first line only");
-        // Two lines at most, the second cut.
+        // Whole, never cut (plan 20261022_03, the L3 amendment of
+        // 2026-10-24 11:54 EDT).
+        assert_eq!(
+            row("docs-writer: ")[0].text,
+            "docs-writer: Rebased on main. Nothing else."
+        );
         let report: Vec<&Row> = flow
             .rows
             .iter()
             .filter(|r| r.text.contains("long report") || r.text.contains("goes on"))
             .collect();
-        assert_eq!(report.len(), 2);
+        assert!(report.len() > 2);
         assert!(report[0].text.starts_with("subagent: "));
-        assert!(report[1].text.ends_with('\u{2026}'));
+        assert!(!report.iter().any(|r| r.text.ends_with('\u{2026}')));
         // A compaction is shown once.
         assert_eq!(row("\u{203B} conversation compacted").len(), 1);
     }
@@ -5578,5 +6585,506 @@ mod tests {
             }
         }
         settings::set_current(Settings::default());
+    }
+
+    // Plan 20261022_03, the L3 amendments of 2026-10-24 11:54 to 12:27 EDT.
+
+    fn texts(flow: &Flow) -> Vec<String> {
+        flow.rows.iter().map(|r| r.text.clone()).collect()
+    }
+
+    fn with_text(mut e: Entry, text: &str) -> Entry {
+        e.text = Some(text.to_string());
+        e
+    }
+
+    #[test]
+    fn a_long_reply_shows_whole_and_the_summary_stands_in_without_text() {
+        let long: String = (0..400).map(|i| format!("w{i:03} ")).collect();
+        assert!(long.len() >= 2000);
+        let e = with_text(
+            entry(Role::Assistant, EntryKind::Text, "w000 w001\u{2026}"),
+            &long,
+        );
+        let f = lay_out_block(&Shows::Entries(vec![e]), false, false, PHONE.w, PHONE.scale);
+        let all = texts(&f).join(" ");
+        assert!((0..400).all(|i| all.contains(&format!("w{i:03}"))));
+        assert!(!all.contains('\u{2026}'), "never cut");
+        assert!(f.taps.is_empty(), "text does not fold");
+        // An older daemon: the summary.
+        let e = entry(Role::Assistant, EntryKind::Text, "Only the summary.");
+        let f = lay_out_block(&Shows::Entries(vec![e]), false, false, PHONE.w, PHONE.scale);
+        assert_eq!(texts(&f), ["Only the summary."]);
+    }
+
+    #[test]
+    fn a_context_line_shows_whole() {
+        let mut e = entry(Role::User, EntryKind::Text, "short");
+        e.origin = Some("peer:docs".into());
+        let long: String = (0..60).map(|i| format!("p{i:02} ")).collect();
+        let e = with_text(e, &long);
+        let f = lay_out_block(&Shows::Entries(vec![e]), false, false, PHONE.w, PHONE.scale);
+        let all = texts(&f).join(" ");
+        assert!(all.contains("p00") && all.contains("p59"), "{all}");
+        assert!(!all.contains('\u{2026}'));
+    }
+
+    /// 40 replies, the section at index 20 replaced by `shows`, scrolled
+    /// back so that it is in the window's lower half.
+    fn with_section(shows: Shows) -> (AgentScreen, u64) {
+        let mut sections = outline_sections(40, 0..40);
+        sections[20].shows = shows;
+        let key = sections[20].serial.to_u64();
+        let mut a = AgentScreen::new();
+        a.set_layout(PHONE);
+        give(&mut a, "idle", sections, None);
+        scrolled_back(&mut a);
+        let i = a.slot_of(key).unwrap();
+        let top = a.tops[i] - a.frame().viewport.h * 0.5;
+        a.scroll_to(top);
+        assert!(!a.following());
+        (a, key)
+    }
+
+    /// Where the block `key` is on screen.
+    fn block_point(a: &AgentScreen, key: u64) -> [f32; 2] {
+        let i = a.slot_of(key).unwrap();
+        let v = a.frame().viewport;
+        [PHONE.w * 0.5, v.y + a.tops[i] - a.offset() + 6.0]
+    }
+
+    fn block_texts(a: &AgentScreen, key: u64) -> Vec<String> {
+        texts(&a.blocks[&key].flow)
+    }
+
+    fn tool_section() -> Shows {
+        let call = with_text(
+            entry(Role::Assistant, EntryKind::ToolUse, "Bash cargo test"),
+            "Bash cargo test\n  --workspace\n  --all-targets",
+        );
+        let lines: Vec<String> = (1..=30).map(|i| format!("line {i}")).collect();
+        let result = with_text(
+            entry(Role::Tool, EntryKind::ToolResult, "line 1"),
+            &lines.join("\n"),
+        );
+        Shows::Entries(vec![call, result])
+    }
+
+    #[test]
+    fn a_tool_call_folds_and_a_tap_expands_it_without_moving_the_view() {
+        let (mut a, key) = with_section(tool_section());
+        let folded = block_texts(&a, key);
+        assert_eq!(
+            folded,
+            ["> Bash cargo test\u{2026}", "  line 1\u{2026}"],
+            "its first lines, marked"
+        );
+        let [x, y] = block_point(&a, key);
+        assert_eq!(a.hit(x, y), Some(AgentHit::Fold(key)));
+        let place = a.place();
+        a.toggle_fold(key);
+        assert!(a.is_expanded(key));
+        let open = block_texts(&a, key);
+        assert!(open.contains(&"    --all-targets".to_string()), "{open:?}");
+        assert!(open.contains(&"  line 30".to_string()), "{open:?}");
+        assert!(!open.iter().any(|l| l.ends_with('\u{2026}')));
+        assert_eq!(a.place(), place, "the view does not move");
+        // Tapped again: folded.
+        a.toggle_fold(key);
+        assert_eq!(block_texts(&a, key), folded);
+        assert_eq!(a.place(), place);
+    }
+
+    #[test]
+    fn a_diff_folds_and_expands_as_a_tool_call_does() {
+        let patch = "@@ -1,3 +1,3 @@\n-old\n+new\n context\n-a\n+b\n c";
+        let result = with_text(entry(Role::Tool, EntryKind::ToolResult, "@@"), patch);
+        let (mut a, key) = with_section(Shows::Entries(vec![result]));
+        let folded = block_texts(&a, key);
+        assert_eq!(folded.len(), DIFF_LINES);
+        assert!(folded.last().unwrap().ends_with('\u{2026}'));
+        a.toggle_fold(key);
+        let open = block_texts(&a, key);
+        assert_eq!(open.len(), 7);
+        assert_eq!(open.last().unwrap(), "   c");
+        // Its colours stay a diff's.
+        let rows = &a.blocks[&key].flow.rows;
+        assert_eq!(rows[2].color, GREEN);
+    }
+
+    #[test]
+    fn a_resolved_card_shows_whole() {
+        let mut done = card(CardKind::Approval, 0, false);
+        done.title = "Approved".into();
+        done.text = (0..40).map(|i| format!("word{i} ")).collect();
+        let f = lay_out_block(&Shows::Card(done), false, false, PHONE.w, PHONE.scale);
+        assert!(f.rows.len() > 1);
+        let all = texts(&f).join(" ");
+        assert!(all.contains("word0") && all.contains("word39"));
+        assert!(!all.contains('\u{2026}'));
+        assert!(f.taps.is_empty(), "it does not fold");
+    }
+
+    const REPLY: &str =
+        "Landed it.\n\nThe settings screen has its rows, the scrollbar setting, and Clear cache.";
+
+    fn finished(points: &[&str], spoken: Option<&str>) -> AgentCard {
+        AgentCard {
+            title: "Finished".into(),
+            text: "Landed it.".into(),
+            points: points.iter().map(|p| p.to_string()).collect(),
+            spoken: spoken.map(str::to_string),
+            ..card(CardKind::Finished, 0, false)
+        }
+    }
+
+    /// A screen with a reply on line 21 and its Finished card after it.
+    fn with_finished(card: AgentCard) -> (AgentScreen, u64) {
+        let mut sections = outline_sections(40, 0..40);
+        let reply = Serial::new(FILE, 21, 0);
+        sections[20] = ViewSection {
+            index: 20,
+            serial: reply,
+            shows: Shows::Entries(vec![with_text(
+                entry(Role::Assistant, EntryKind::Text, "Landed it."),
+                REPLY,
+            )]),
+        };
+        let serial = Serial::new(FILE, 21, 194);
+        sections.insert(
+            21,
+            ViewSection {
+                index: 0,
+                serial,
+                shows: Shows::Card(card),
+            },
+        );
+        let mut a = AgentScreen::new();
+        a.set_layout(PHONE);
+        give(&mut a, "idle", sections, None);
+        scrolled_back(&mut a);
+        let key = serial.to_u64();
+        let i = a.slot_of(key).unwrap();
+        a.scroll_to(a.tops[i] - a.frame().viewport.h * 0.5);
+        (a, key)
+    }
+
+    #[test]
+    fn a_summary_card_folds_to_its_summary_and_expands_to_the_reply_points_and_spoken_text() {
+        let (mut a, key) = with_finished(finished(
+            &["Rows for each setting.", "Clear cache."],
+            Some("Landed the settings screen."),
+        ));
+        assert_eq!(
+            block_texts(&a, key),
+            ["-- Finished: Landed the settings screen."],
+            "folded: the title and the daemon's summary"
+        );
+        let [x, y] = block_point(&a, key);
+        assert_eq!(a.hit(x, y), Some(AgentHit::Fold(key)));
+        let place = a.place();
+        a.toggle_fold(key);
+        let open = block_texts(&a, key);
+        assert_eq!(open[0], "-- Finished");
+        let all = open.join("\n");
+        assert!(all.contains("Landed it."), "{all}");
+        assert!(all.contains("Clear cache."), "the whole reply: {all}");
+        assert!(
+            open.contains(&format!("   {BULLET}Rows for each setting.")),
+            "{open:?}"
+        );
+        assert!(open.contains(&format!("   {SPOKEN}")), "{open:?}");
+        assert_eq!(open.last().unwrap(), "   Landed the settings screen.");
+        let buttons = &a.blocks[&key].flow.buttons;
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].hit, AgentHit::Replay(key));
+        assert_eq!(
+            a.spoken_of(key).as_deref(),
+            Some("Landed the settings screen.")
+        );
+        assert_eq!(a.place(), place, "the view does not move");
+        // Sound off: no replay button.
+        a.set_sound(false);
+        assert!(a.blocks[&key].flow.buttons.is_empty());
+        a.set_sound(true);
+        // Tapped again: folded.
+        a.toggle_fold(key);
+        assert_eq!(block_texts(&a, key).len(), 1);
+        // With no points, there is no list.
+        let (mut a, key) = with_finished(finished(&[], Some("Landed it.")));
+        a.toggle_fold(key);
+        assert!(!block_texts(&a, key).iter().any(|l| l.contains(BULLET)));
+    }
+
+    #[test]
+    fn the_pinned_summary_card_expands_to_its_points_and_spoken_text() {
+        let mut live = finished(&["One.", "Two."], Some("Landed the settings screen."));
+        live.live = true;
+        let mut a = screen(conversation(3), vec![live], Some(0));
+        let pin_texts = |a: &AgentScreen| texts(&a.frame().pin.as_ref().unwrap().flow);
+        assert_eq!(pin_texts(&a), ["Finished", "Landed the settings screen."]);
+        let pin = a.frame().pin.as_ref().unwrap().rect;
+        assert_eq!(a.hit(pin.x + 40.0, pin.y + 40.0), Some(AgentHit::Expand));
+        a.toggle_expand();
+        let open = pin_texts(&a);
+        assert!(open.contains(&format!("{BULLET}One.")), "{open:?}");
+        assert!(open.contains(&SPOKEN.to_string()), "{open:?}");
+        let buttons = &a.frame().pin.as_ref().unwrap().flow.buttons;
+        assert!(buttons.iter().any(|b| matches!(b.hit, AgentHit::Replay(_))));
+    }
+
+    #[test]
+    fn a_short_form_never_reads_as_cut_off() {
+        let cols = 40;
+        // With the daemon's summary: the summary.
+        let c = finished(&[], Some("Pushed the fix."));
+        assert_eq!(
+            short_form(&c, Some(REPLY), cols),
+            (vec!["Pushed the fix.".to_string()], false)
+        );
+        // A lead-in takes the list after it, cut with "…" and "more".
+        let list = "Written and pushed:\n- src/a.rs\n- src/b.rs\n- src/c.rs\n- src/d.rs";
+        let c = finished(&[], None);
+        let (lines, cut) = short_form(&c, Some(list), cols);
+        assert_eq!(
+            lines,
+            ["Written and pushed:", "- src/a.rs", "- src/b.rs\u{2026}"]
+        );
+        assert!(cut);
+        let f = lay_out_block(
+            &Shows::Card(AgentCard {
+                text: list.into(),
+                ..finished(&[], None)
+            }),
+            false,
+            false,
+            PHONE.w,
+            PHONE.scale,
+        );
+        let t = texts(&f);
+        assert_eq!(t[0], "-- Finished: Written and pushed:");
+        assert!(t.iter().any(|l| l.ends_with('\u{2026}')), "{t:?}");
+        assert_eq!(t.last().unwrap(), MORE);
+        assert_eq!(f.taps.len(), 1, "it expands");
+        // A short reply shows whole, with no "more".
+        let c = AgentCard {
+            text: "All done.".into(),
+            ..finished(&[], None)
+        };
+        assert_eq!(
+            short_form(&c, None, cols),
+            (vec!["All done.".to_string()], false)
+        );
+        let f = lay_out_block(&Shows::Card(c), false, false, PHONE.w, PHONE.scale);
+        assert_eq!(texts(&f), ["-- Finished: All done."]);
+        assert!(f.taps.is_empty(), "nothing more to show");
+    }
+
+    #[test]
+    fn low_memory_leaves_only_the_screens_blocks_laid_out() {
+        let mut a = outline_screen(300, 0..300);
+        scrolled_back(&mut a);
+        a.scroll_to(a.max_offset() / 2.0);
+        let before = a.laid_out().len();
+        a.set_pressure(Some(Pressure::Low));
+        let v = a.frame().viewport;
+        let mut on_screen: Vec<u64> = a
+            .slots
+            .iter()
+            .zip(&a.tops)
+            .filter(|(slot, top)| **top + slot.height >= a.offset() && **top <= a.offset() + v.h)
+            .map(|(slot, _)| slot.serial.to_u64())
+            .collect();
+        on_screen.sort_unstable();
+        assert_eq!(a.laid_out(), on_screen);
+        assert!(before > on_screen.len());
+        // Background keeps a screen either side; back in front, as before.
+        a.set_pressure(Some(Pressure::Background));
+        let one = a.laid_out().len();
+        assert!(one > on_screen.len() && one < before, "{one}");
+        a.set_pressure(None);
+        assert_eq!(a.laid_out().len(), before);
+    }
+
+    /// One finger dragging up by `dy` pixels from `y`, in steps of 10.
+    fn pull_up(a: &mut AgentScreen, y: f32, dy: f32, t: Duration) -> Duration {
+        let steps = (dy / 10.0) as u32;
+        drag(a, y, y - dy, steps, t)
+    }
+
+    #[test]
+    fn pulling_past_the_end_resists_and_says_pull_then_release() {
+        let s = PHONE.scale;
+        let mut a = outline_screen(100, 0..100);
+        assert!(a.following());
+        let t = pull_up(&mut a, 1500.0, 200.0, Duration::ZERO);
+        // Past the 10 pt slop, the rest at half: 180 px, 90.
+        assert!((a.pull() - 90.0).abs() < 0.5, "{}", a.pull());
+        assert_eq!(a.offset(), a.max_offset());
+        assert_eq!(a.pull_line().unwrap().0, PULL_TO_REFRESH);
+        for i in 1..=10 {
+            a.touch(1, TouchPhase::Moved, 540.0, 1300.0 - 10.0 * i as f32, t);
+        }
+        assert!(a.pull() >= PULL_ARM * s);
+        assert_eq!(a.pull_line().unwrap().0, RELEASE_TO_REFRESH);
+        // At most 96 pt.
+        for i in 1..=60 {
+            a.touch(1, TouchPhase::Moved, 540.0, 1200.0 - 10.0 * i as f32, t);
+        }
+        assert_eq!(a.pull(), PULL_MAX * s);
+        // Back down: the pull goes first.
+        a.touch(1, TouchPhase::Moved, 540.0, 700.0, t);
+        assert!((a.pull() - (PULL_MAX * s - 50.0)).abs() < 0.5);
+        assert_eq!(a.offset(), a.max_offset());
+    }
+
+    #[test]
+    fn letting_go_past_64_pt_refreshes_and_shows_the_result_then_springs_back() {
+        let s = PHONE.scale;
+        let mut a = outline_screen(100, 0..100);
+        let t = pull_up(&mut a, 1500.0, 400.0, Duration::ZERO);
+        a.touch(1, TouchPhase::Ended, 540.0, 1100.0, t + MS);
+        assert!(a.take_refresh());
+        assert!(!a.take_refresh(), "once");
+        assert_eq!(a.fling, 0.0);
+        assert_eq!(a.pull(), PULL_ARM * s, "held overscrolled");
+        assert_eq!(a.pull_line().unwrap().0, REFRESHING);
+        for _ in 0..50 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.pull(), PULL_ARM * s, "while it runs");
+        a.refreshed(0);
+        assert_eq!(a.pull_line().unwrap().0, UP_TO_DATE);
+        for _ in 0..40 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.pull_line().unwrap().0, UP_TO_DATE, "for 1 s");
+        for _ in 0..40 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.pull(), 0.0, "sprung back");
+        assert!(a.pull_line().is_none());
+        assert!(a.following());
+        assert_eq!(a.offset(), a.max_offset());
+    }
+
+    #[test]
+    fn the_refresh_result_is_the_ends_state_or_n_new() {
+        let refreshed_with = |cards: Vec<AgentCard>, pinned, new| {
+            let mut a = screen(conversation(10), cards, pinned);
+            let t = pull_up(&mut a, 1500.0, 400.0, Duration::ZERO);
+            a.touch(1, TouchPhase::Ended, 540.0, 1100.0, t + MS);
+            assert!(a.take_refresh());
+            a.refreshed(new);
+            a.pull_line().unwrap()
+        };
+        let (text, color) = refreshed_with(vec![card(CardKind::Question, 40, true)], Some(0), 2);
+        assert_eq!(text, "-- question: Shall I go on? --");
+        assert_eq!(color, accent(CardKind::Question));
+        let done = AgentCard {
+            live: true,
+            ..finished(&[], Some("Landed the settings screen."))
+        };
+        let (text, _) = refreshed_with(vec![done], Some(0), 1);
+        assert_eq!(text, "-- done: Landed the settings screen. --");
+        let (text, _) = refreshed_with(vec![], None, 3);
+        assert_eq!(text, "-- 3 new --");
+        let (text, _) = refreshed_with(vec![card(CardKind::Question, 40, true)], Some(0), 0);
+        assert_eq!(text, UP_TO_DATE);
+    }
+
+    #[test]
+    fn letting_go_early_springs_back_and_a_fling_to_the_end_refreshes_nothing() {
+        let mut a = outline_screen(100, 0..100);
+        let t = pull_up(&mut a, 1500.0, 100.0, Duration::ZERO);
+        assert!(a.pull() > 0.0);
+        a.touch(1, TouchPhase::Ended, 540.0, 1400.0, t + MS);
+        assert!(!a.take_refresh());
+        for _ in 0..30 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.pull(), 0.0);
+        assert!(a.following());
+        // A hard fling from scrolled back to the end.
+        scrolled_back(&mut a);
+        let t = drag(&mut a, 1500.0, 1200.0, 5, Duration::from_secs(10));
+        assert!(!a.following() && a.pull() == 0.0);
+        a.touch(1, TouchPhase::Ended, 540.0, 1200.0, t);
+        assert!(a.fling != 0.0, "a fling");
+        for _ in 0..200 {
+            a.tick(FRAME);
+        }
+        assert!(a.following());
+        assert_eq!(a.pull(), 0.0);
+        assert!(!a.take_refresh());
+    }
+
+    fn bookend(i: u64, summary: Option<&str>, time: Option<&str>) -> Bookend {
+        Bookend {
+            serial: Serial::new(FILE, i as u32 + 1, 0),
+            summary: summary.map(str::to_string),
+            time: time.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn section_labels_show_on_the_scrollbars_scale_while_its_thumb_is_dragged() {
+        let mut a = midway();
+        a.set_bookends(vec![
+            bookend(60, Some("Landed the settings screen"), Some("12:41")),
+            bookend(220, None, Some("13:05")),
+            bookend(221, None, None),
+        ]);
+        assert!(a.section_labels().is_empty(), "not while just scrolled");
+        // The thumb grabbed.
+        let r = a.thumb_rect().unwrap();
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
+        let v = a.frame().viewport;
+        let total = a.calculated_length();
+        let labels = a.section_labels();
+        let first = &labels[0];
+        assert_eq!(first.text, "Landed the settings screen \u{b7} 12:41");
+        // At its share of the track, centred on the screen.
+        let i = a.slot_of(Serial::new(FILE, 61, 0).to_u64()).unwrap();
+        let want = v.y + a.tops[i] / total * v.h;
+        assert!((first.rect.y + first.rect.h / 2.0 - want).abs() < 0.5);
+        assert!((first.rect.x + first.rect.w / 2.0 - PHONE.w / 2.0).abs() < 0.5);
+        // Two that would overlap: the one nearer the thumb shows.
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert_eq!(labels[1].text, "Done \u{b7} 13:05");
+        assert_eq!(labels.iter().filter(|l| l.nearest).count(), 1);
+        // The thumb taken near the first: it is the nearest, and brighter.
+        a.touch(1, TouchPhase::Moved, x, want, MS);
+        let labels = a.section_labels();
+        assert!(labels[0].nearest && !labels[1].nearest);
+        a.invalidate();
+        let mut list = DrawList::new();
+        a.draw(&mut list, &DrawContext::default(), None);
+        // (No font here: the pills are what is drawn.)
+        let near = alpha_in(&list, labels[0].rect);
+        let far = alpha_in(&list, labels[1].rect);
+        assert!((near - LABEL_NEAR_BG).abs() < 1e-4, "{near}");
+        assert!((far - LABEL_BG).abs() < 1e-4, "{far}");
+        // Near the last: it gives way the other way, and reads "Done".
+        let j = a.slot_of(Serial::new(FILE, 222, 0).to_u64()).unwrap();
+        let last = v.y + a.tops[j] / total * v.h;
+        a.touch(1, TouchPhase::Moved, x, last + 20.0, MS * 2);
+        let labels = a.section_labels();
+        assert!(
+            labels.iter().any(|l| l.text == DONE && l.nearest),
+            "{labels:?}"
+        );
+        // Let go: they stay 2 s, then fade with the thumb.
+        a.touch(1, TouchPhase::Ended, x, last + 20.0, MS * 3);
+        for _ in 0..90 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.labels_alpha(), 1.0);
+        for _ in 0..30 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.labels_alpha(), 0.0);
+        assert!(a.section_labels().is_empty());
     }
 }

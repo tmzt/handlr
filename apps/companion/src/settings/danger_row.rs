@@ -1,5 +1,7 @@
 //! A destructive settings row (decision 3, *Device*): its label in red,
-//! nothing on the right. A tap asks first, in a confirming modal.
+//! nothing on the right. A tap asks first, in a confirming modal. Also an
+//! action row with no confirmation in the normal text colour (*Clear
+//! cache*, the 12:12 EDT amendment), [`DangerRow::with_color`].
 
 use libcontrols::{
     ControlAction, ControlPart, DrawContext, DrawControl, EventContext, HostedControl,
@@ -15,6 +17,8 @@ pub struct DangerRow {
     pub label: String,
     pub rect: Rect,
     pub scale: f32,
+    /// Red, unless given another.
+    pub color: [f32; 4],
 }
 
 impl DangerRow {
@@ -23,7 +27,14 @@ impl DangerRow {
             label: label.to_string(),
             rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             scale,
+            color: RED,
         }
+    }
+
+    /// The label in `color` instead of red.
+    pub fn with_color(mut self, color: [f32; 4]) -> Self {
+        self.color = color;
+        self
     }
 }
 
@@ -35,7 +46,7 @@ impl DrawControl for DangerRow {
             &self.label,
             [self.rect.x + PAD * self.scale, label_y(self.rect, px)],
             px,
-            RED,
+            self.color,
         );
     }
 }

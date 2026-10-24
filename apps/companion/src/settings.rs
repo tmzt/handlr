@@ -227,7 +227,7 @@ pub fn set_current(settings: Settings) {
 pub fn allows(hit: AgentHit) -> bool {
     let s = current();
     match hit {
-        AgentHit::ReadAloud => s.sound,
+        AgentHit::ReadAloud | AgentHit::Replay(_) => s.sound,
         AgentHit::Message
         | AgentHit::Reply
         | AgentHit::Submit

@@ -64,7 +64,8 @@ use handlr_audio::libvoicexn::config::SttQuant;
 use handlr_audio::libvoicexn::vad::GateState;
 use handlr_audio::{AudioConfig, AudioEvent, AudioSession};
 use handlr_companion::{
-    Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore, Suggestion,
+    Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore, Pressure,
+    Suggestion,
 };
 use libcontrols::DrawContext;
 use libhandlr_proto::common::AgentInfo;
@@ -266,6 +267,8 @@ pub struct App {
     deleting: bool,
     /// The voice models, which *Delete data* keeps.
     models: Vec<PathBuf>,
+    /// The cached sessions' size, in bytes, for *Clear cache (n MB)*.
+    cache: u64,
     /// The clock touches and flings are timed by.
     started: Instant,
     /// When the last frame was updated, for a fling's step.
@@ -530,6 +533,7 @@ impl App {
                 new_content,
                 held_end,
                 held_newer,
+                bookends,
             } => {
                 if let Some(agent) = &mut self.agent {
                     agent.set_loading(loading);
@@ -540,10 +544,22 @@ impl App {
                     agent.set_new_content(new_content);
                     agent.set_held_end(held_end);
                     agent.set_held_newer(held_newer);
+                    agent.set_bookends(bookends);
                 }
             }
             // The audio played the chime.
             Event::Ding => log::info!("ding: an agent is done"),
+            Event::Refreshed { new } => {
+                if let Some(agent) = &mut self.agent {
+                    agent.refreshed(new);
+                }
+            }
+            Event::Cache { bytes } => {
+                self.cache = bytes;
+                if let Some(screen) = &mut self.settings_screen {
+                    screen.set_cache(bytes);
+                }
+            }
             Event::Unpaired { daemon } => self.unpaired(daemon),
             // herdr's focus shows on the cards, from the list it refreshes.
             Event::Say(_)
@@ -567,10 +583,24 @@ impl App {
         let mut agent = AgentScreen::new();
         agent.name = name;
         agent.set_scrollbar(self.settings.scrollbar);
+        agent.set_sound(self.settings.sound);
         agent.set_read_aloud(self.read_aloud);
         agent.set_speaking(self.speaking);
         self.agent = Some(agent);
         self.viewed = true;
+    }
+
+    /// The phone is short of memory (plan 20261022_03, the L3 amendment
+    /// of 2026-10-24 12:21 EDT): the client drops cached views and far
+    /// contents, and the agent view frees the rows of blocks off screen.
+    // TODO(libmorph 0.4.0): call from `on_trim_memory` (`UI_HIDDEN`,
+    // `BACKGROUND`) and `on_low_memory` once libmorph delivers them.
+    pub fn memory_pressure(&mut self, pressure: Pressure) {
+        log::info!("memory: {pressure:?}");
+        self.send(Input::Memory(pressure));
+        if let Some(agent) = &mut self.agent {
+            agent.set_pressure(Some(pressure));
+        }
     }
 
     /// Closes the agent view, back to the overview.
@@ -593,6 +623,7 @@ impl App {
         .with_faces(Some(std::sync::Arc::clone(&self.faces)))
         .with_build_info(settings::build_info::build_info());
         screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
+        screen.set_cache(self.cache);
         self.settings_screen = Some(screen);
     }
 
@@ -611,6 +642,10 @@ impl App {
             SettingsHit::Changed(settings) => self.apply_settings(settings),
             SettingsHit::Unpair => self.unpair(false),
             SettingsHit::DeleteData => self.unpair(true),
+            SettingsHit::ClearCache => {
+                log::info!("settings: clearing the cache");
+                self.send(Input::ClearCache);
+            }
         }
     }
 
@@ -627,6 +662,7 @@ impl App {
         self.send(Input::Settings(settings.to_client()));
         if let Some(agent) = &mut self.agent {
             agent.set_scrollbar(settings.scrollbar);
+            agent.set_sound(settings.sound);
             agent.invalidate();
         }
         self.overview.settings_changed();
@@ -727,6 +763,17 @@ impl App {
             AgentHit::Expand => {
                 if let Some(agent) = &mut self.agent {
                     agent.toggle_expand();
+                }
+            }
+            AgentHit::Fold(key) => {
+                if let Some(agent) = &mut self.agent {
+                    agent.toggle_fold(key);
+                }
+            }
+            AgentHit::Replay(key) => {
+                if let Some(text) = self.agent.as_ref().and_then(|a| a.spoken_of(key)) {
+                    log::info!("agent view: replaying a card's spoken text");
+                    self.send(Input::Replay(text));
                 }
             }
             AgentHit::Pin => {
@@ -979,9 +1026,13 @@ impl MorphApp for App {
         self.send(Input::Background(true));
     }
 
-    /// Back on screen: the link wakes and catches up.
+    /// Back on screen: the link wakes and catches up, and memory pressure
+    /// is over.
     fn on_resume(&mut self, _ctx: &mut MorphContext) {
         self.send(Input::Background(false));
+        if let Some(agent) = &mut self.agent {
+            agent.set_pressure(None);
+        }
     }
 
     /// A `handlr://` link opened the app (libmorph 0.3.2). Only a pairing
@@ -1100,6 +1151,7 @@ impl MorphApp for App {
             server_name: None,
             deleting: false,
             models,
+            cache: 0,
             started: Instant::now(),
             last_update: Instant::now(),
         };
@@ -1228,6 +1280,11 @@ impl MorphApp for App {
         // (plan 20261023_03, A7).
         if self.agent.as_mut().is_some_and(|a| a.take_load_earlier()) {
             self.send(Input::LoadEarlier);
+        }
+        // Pulled past the end and let go: refresh (plan 20261022_03, the
+        // L3 amendment of 2026-10-24 12:22 EDT).
+        if self.agent.as_mut().is_some_and(|a| a.take_refresh()) {
+            self.send(Input::Refresh);
         }
         // Where the window is, for the contents fetched around it and an
         // outline held aside while scrolled back (plan 20261024_01).

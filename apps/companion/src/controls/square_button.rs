@@ -127,6 +127,10 @@ impl SquareButton {
                 };
                 draw_glyph(list, ctx, term, glyph, fallback, rect, px, color);
             }
+            // A summary card's replay: the play glyph alone, dim.
+            AgentHit::Replay(_) => {
+                draw_glyph(list, ctx, term, PLAY_GLYPH, ">", rect, 18.0 * s, DIM);
+            }
             AgentHit::Submit if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);
                 draw_glyph(list, ctx, term, SEND_GLYPH, ">", rect, px, FG);

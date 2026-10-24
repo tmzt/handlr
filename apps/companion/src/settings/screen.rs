@@ -17,8 +17,10 @@
 //!   vendor's battery page when the phone has one, and a note when battery
 //!   use is restricted; until libmorph's battery wrapper is released, one
 //!   note, "Battery settings need an app update";
-//! - **Device**, last, in red: *Unpair this device* and *Delete data*,
-//!   each behind a confirming modal ([`Confirm`]).
+//! - **Device**, last: *Clear cache (n MB)* in the normal text colour,
+//!   with no confirmation (the 12:12 EDT amendment), then, in red, *Unpair
+//!   this device* and *Delete data*, each behind a confirming modal
+//!   ([`Confirm`]).
 //!
 //! Rows with a long explanation have an ⓘ that opens it in a modal
 //! ([`InfoModal`]): *General agent*, the two above, *Battery optimization*
@@ -154,6 +156,22 @@ pub enum SettingsHit {
     Unpair,
     /// *Delete* in its modal.
     DeleteData,
+    /// *Clear cache*, with something cached: the cached sessions go.
+    ClearCache,
+}
+
+/// *Clear cache (n MB)*'s label for a cache of `bytes`: n in MB, one
+/// decimal under 10, and "0 MB" when empty.
+pub fn clear_cache_label(bytes: u64) -> String {
+    let mb = bytes as f64 / (1024.0 * 1024.0);
+    let n = if bytes == 0 {
+        "0".to_string()
+    } else if mb < 10.0 {
+        format!("{mb:.1}")
+    } else {
+        format!("{mb:.0}")
+    };
+    copy::CLEAR_CACHE.fill(None, &[("size", &n)])
 }
 
 /// Which modal is open, and its buttons.
@@ -197,6 +215,7 @@ struct Nodes {
     optimization: NodeId,
     vendor: NodeId,
     restricted: NodeId,
+    clear_cache: NodeId,
     unpair: NodeId,
     delete: NodeId,
 }
@@ -222,6 +241,8 @@ pub struct SettingsScreen {
     /// The daemon's name, and whether it is online, for the unpair modal.
     daemon: String,
     online: bool,
+    /// The cached sessions' size, in bytes, for *Clear cache (n MB)*.
+    cache: u64,
     /// The open modal, and its Cancel and action buttons (an ⓘ's: OK
     /// twice).
     asking: Option<(Asking, NodeId, NodeId)>,
@@ -262,6 +283,7 @@ impl SettingsScreen {
             no_vendor: false,
             daemon: "handlr".to_string(),
             online: false,
+            cache: 0,
             asking: None,
             modal_text: None,
             tapped_link: None,
@@ -332,6 +354,16 @@ impl SettingsScreen {
     pub fn set_daemon(&mut self, name: &str, online: bool) {
         self.daemon = name.to_string();
         self.online = online;
+    }
+
+    /// The cached sessions' size, in bytes: *Clear cache (n MB)*.
+    pub fn set_cache(&mut self, bytes: u64) {
+        if bytes != self.cache {
+            self.cache = bytes;
+            if self.nodes.is_some() {
+                self.place();
+            }
+        }
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
@@ -424,6 +456,10 @@ impl SettingsScreen {
         };
         let optimization = link(&mut router, copy::BATTERY_OPTIMIZATION.label());
         let vendor = link(&mut router, copy::SAMSUNG_BATTERY.label());
+        let clear_cache = router.add(
+            under,
+            DangerRow::new(&clear_cache_label(self.cache), s).with_color(FG),
+        );
         let unpair = router.add(under, DangerRow::new(copy::UNPAIR.label(), s));
         let delete = router.add(under, DangerRow::new(copy::DELETE_DATA.label(), s));
         let _ = ModalStack::install(
@@ -450,6 +486,7 @@ impl SettingsScreen {
             optimization,
             vendor,
             restricted,
+            clear_cache,
             unpair,
             delete,
         });
@@ -613,11 +650,14 @@ impl SettingsScreen {
                     }
                 }
                 Section::Device => {
-                    for id in [n.unpair, n.delete] {
+                    for id in [n.clear_cache, n.unpair, n.delete] {
                         let rect = row(&mut y);
                         if let Some(d) = router.get_mut::<DangerRow>(id) {
                             d.rect = rect;
                         }
+                    }
+                    if let Some(d) = router.get_mut::<DangerRow>(n.clear_cache) {
+                        d.label = clear_cache_label(self.cache);
                     }
                 }
             }
@@ -659,7 +699,7 @@ impl SettingsScreen {
                 .map(|l| (l.label.clone(), l.rect))
         }))
         .chain(
-            [n.unpair, n.delete]
+            [n.clear_cache, n.unpair, n.delete]
                 .into_iter()
                 .filter_map(|id| r.get::<DangerRow>(id).map(|d| (d.label.clone(), d.rect))),
         )
@@ -877,6 +917,9 @@ impl SettingsScreen {
                 self.place();
             }
             return None;
+        } else if target == n.clear_cache {
+            // No confirmation; nothing to do when empty.
+            return (self.cache > 0).then_some(SettingsHit::ClearCache);
         } else if target == n.unpair {
             self.ask(Asking::Unpair);
             return None;
@@ -1417,6 +1460,30 @@ mod tests {
         );
         assert!(s.scroll().offset()[1] > 0.0);
         assert_eq!(s.settings(), Settings::default());
+    }
+
+    #[test]
+    fn clear_cache_shows_its_size_and_clears_with_no_confirmation() {
+        assert_eq!(clear_cache_label(0), "Clear cache (0 MB)");
+        assert_eq!(clear_cache_label(2_621_440), "Clear cache (2.5 MB)");
+        assert_eq!(clear_cache_label(15 * 1024 * 1024), "Clear cache (15 MB)");
+        let mut s = plain();
+        // Empty: shown, and does nothing.
+        let empty = s.row_rect("Clear cache (0 MB)").unwrap();
+        let unpair = s.row_rect("Unpair this device").unwrap();
+        assert!(empty.y < unpair.y, "before Unpair, in Device");
+        assert_eq!(tap_row(&mut s, "Clear cache (0 MB)"), None);
+        assert!(!s.asking());
+        s.set_cache(2_621_440);
+        assert!(s.row_rect("Clear cache (0 MB)").is_none());
+        assert_eq!(
+            tap_row(&mut s, "Clear cache (2.5 MB)"),
+            Some(SettingsHit::ClearCache)
+        );
+        assert!(!s.asking(), "no confirmation");
+        // Kept across a new layout.
+        s.set_layout(Layout { w: 1200.0, ..PHONE });
+        assert!(s.row_rect("Clear cache (2.5 MB)").is_some());
     }
 
     #[test]

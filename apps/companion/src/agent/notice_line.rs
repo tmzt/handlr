@@ -1,46 +1,41 @@
 //! An entry that is context, not the user's words nor the agent's (an
 //! `Entry::origin`: a finished task, another session's or a subagent's
-//! message, a recap, a compaction), drawn in the scrollback as one dim
-//! line, two at most, after a small amber dot (the CHANGES.md addendum of
-//! 2026-10-23 22:31 EDT): `task finished: <summary>`, `<peer>: <first
-//! line>`, `subagent: <first line>`, `※ <recap>`, `※ conversation
-//! compacted`. It never sits on the user's band and never makes a card.
+//! message, a recap, a compaction), drawn in the scrollback as dim lines
+//! after a small amber dot (the CHANGES.md addendum of 2026-10-23 22:31
+//! EDT): `task finished: <text>`, `<peer>: <text>`, `subagent: <text>`,
+//! `※ <recap>`, `※ conversation compacted`. Its whole text shows, never
+//! cut (plan 20261022_03, the L3 amendment of 2026-10-24 11:54 EDT). It
+//! never sits on the user's band and never makes a card.
 
 use libhandlr_proto::common::Entry;
 
 use super::input_box::AMBER;
-use super::{CELL_EM, DIM, Flow, Row, TOOL_PT, link_spans, one_line, term_h, wrap_hard};
+use super::{CELL_EM, DIM, Flow, Row, TOOL_PT, full_text, link_spans, term_h, wrap_hard};
 
 /// The dot before a notice, from the terminal face's symbol page.
 pub const DOT: &str = "\u{25CF}";
 /// The recap and compaction mark.
 pub const MARK: &str = "\u{203B}";
-/// The most lines a notice takes.
-const LINES: usize = 2;
 
 pub struct NoticeLine;
 
 impl NoticeLine {
-    /// What a notice says for an entry with `origin`.
-    pub fn text(origin: &str, summary: &str) -> String {
-        let first = summary
-            .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty())
-            .unwrap_or("");
-        let all = summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    /// What a notice says for an entry with `origin`: its whole text, on
+    /// one line before wrapping.
+    pub fn text(origin: &str, text: &str) -> String {
+        let all = text.split_whitespace().collect::<Vec<_>>().join(" ");
         if origin == "task" {
-            format!("task finished: {first}")
+            format!("task finished: {all}")
         } else if let Some(name) = origin.strip_prefix("peer:") {
-            format!("{name}: {first}")
+            format!("{name}: {all}")
         } else if origin.starts_with("agent:") {
-            format!("subagent: {first}")
+            format!("subagent: {all}")
         } else if origin == "recap" {
             format!("{MARK} {all}")
         } else if origin == "compact" {
             format!("{MARK} conversation compacted")
         } else {
-            format!("{origin}: {first}")
+            format!("{origin}: {all}")
         }
     }
 
@@ -82,12 +77,7 @@ impl NoticeLine {
             mono: true,
         });
         let width = cols.saturating_sub(2).max(1);
-        let mut lines = wrap_hard(&Self::text(origin, &e.summary), width);
-        if lines.len() > LINES {
-            let rest = lines[LINES - 1..].join(" ");
-            lines.truncate(LINES - 1);
-            lines.push(one_line(&rest, width));
-        }
+        let lines = wrap_hard(&Self::text(origin, full_text(e)), width);
         let first_row = flow.rows.len();
         let mut ly = y;
         for line in lines {
@@ -114,15 +104,15 @@ mod tests {
     fn each_origin_says_where_it_is_from() {
         assert_eq!(
             NoticeLine::text("task", "Build finished\nmore"),
-            "task finished: Build finished"
+            "task finished: Build finished more"
         );
         assert_eq!(
             NoticeLine::text("peer:docs-writer", "\nRebased on main.\n\nDone."),
-            "docs-writer: Rebased on main."
+            "docs-writer: Rebased on main. Done."
         );
         assert_eq!(
             NoticeLine::text("agent:a0123", "Added the test.\nIt passes."),
-            "subagent: Added the test."
+            "subagent: Added the test. It passes."
         );
         assert_eq!(
             NoticeLine::text("recap", "You asked for the build.\nIt passed."),
