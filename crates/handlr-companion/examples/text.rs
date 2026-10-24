@@ -184,7 +184,11 @@ fn print_event(event: Event) {
             loading_earlier,
             start,
             terminal_on,
+            new_content,
         } => {
+            if new_content {
+                println!("* new content");
+            }
             if let Some(t) = typed {
                 println!("* typed: {t}");
             }

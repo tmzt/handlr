@@ -19,12 +19,10 @@
 //! also be flattened into the entries of its non-card sections and the
 //! cards placed among them ([`Sections::flatten`]).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-pub use libhandlr_proto::common::CardKind;
-use libhandlr_proto::common::{
-    CardBody, Entry, EntryKind, Link, Role, Section, SectionKind, Serial,
-};
+use libhandlr_proto::common::{CardBody, Entry, EntryKind, Link, Role, Section, Serial};
+pub use libhandlr_proto::common::{CardKind, SectionKind, Slot};
 
 /// A card as the view shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,23 +59,30 @@ pub enum Shows {
     Entries(Vec<Entry>),
     /// Its `at` is 0: [`flatten_view`] places it.
     Card(AgentCard),
+    /// Outline mode (plan 20261024_01, decision 7): a slot whose contents
+    /// are not held, with its kind and size for the height estimate.
+    Pending {
+        kind: SectionKind,
+        lines: u32,
+        chars: u32,
+    },
 }
 
 /// One section of the view, as the app lays it out: one block of the
 /// ribbon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ViewSection {
-    /// Its place in the ribbon: increasing with the serial, from
-    /// [`section_index`].
+    /// Its place in the ribbon: the daemon's index in outline mode (plan
+    /// 20261024_01, [`outline_view`]); from a daemon without outlines, its
+    /// place among those held ([`section_index`]).
     pub index: u64,
     pub serial: Serial,
     pub shows: Shows,
 }
 
 /// The ribbon index of `section`, held `position`th among the view's
-/// sections (0 the oldest held). For now it is that position; a later plan
-/// has the daemon send a contiguous index with each section, which takes
-/// its place here.
+/// sections (0 the oldest held), for a daemon that sends no outline: that
+/// position. In outline mode the daemon's index is used instead.
 pub fn section_index(position: usize, section: &Section) -> u64 {
     let _ = section;
     position as u64
@@ -104,15 +109,223 @@ pub fn flatten_view(
                     ..card.clone()
                 });
             }
+            Shows::Pending { .. } => {}
         }
     }
     (entries, cards, pin)
+}
+
+/// Where the app's window is on the ribbon, by index (plan 20261024_01,
+/// decision 6): the indexes it shows, those within `KEEP_SCREENS` screens
+/// of it (whose contents are fetched), and those within 20 screens (whose
+/// contents are kept; the rest are forgotten). Each range is inclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewWindow {
+    pub shown: (u64, u64),
+    pub near: (u64, u64),
+    pub keep: (u64, u64),
+    /// The view is scrolled back, not following the bottom: a new outline
+    /// is held aside until the jump line is tapped (CHANGES.md, 2026-10-24
+    /// 00:36 EDT, items 3 and 4).
+    pub scrolled_back: bool,
+}
+
+/// A session's outline (plan 20261024_01, decision 6): its slots by
+/// index, the indexes known removed, and how far from 0 it is held with
+/// no hole.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Outline {
+    slots: BTreeMap<u64, Slot>,
+    /// Packed serial to index.
+    index_of: HashMap<u64, u64>,
+    removed: BTreeSet<u64>,
+    last: Option<u64>,
+    epoch: Option<u64>,
+    /// Every index below it is held or known removed.
+    contiguous: u64,
+}
+
+impl Outline {
+    pub fn new(epoch: Option<u64>) -> Self {
+        Outline {
+            epoch,
+            ..Outline::default()
+        }
+    }
+
+    /// Insert or replace the slot at its index. A serial held at another
+    /// index leaves it.
+    pub fn put(&mut self, slot: Slot) {
+        let key = slot.serial.to_u64();
+        if let Some(old) = self.slots.insert(slot.index, slot)
+            && old.serial != slot.serial
+        {
+            self.index_of.remove(&old.serial.to_u64());
+        }
+        if let Some(was) = self.index_of.insert(key, slot.index)
+            && was != slot.index
+        {
+            self.slots.remove(&was);
+        }
+        self.removed.remove(&slot.index);
+        self.advance();
+    }
+
+    /// The index no longer stands: its slot, if held, is returned.
+    pub fn remove(&mut self, index: u64) -> Option<Slot> {
+        let slot = self.slots.remove(&index);
+        if let Some(s) = &slot {
+            self.index_of.remove(&s.serial.to_u64());
+        }
+        self.removed.insert(index);
+        self.advance();
+        slot
+    }
+
+    fn advance(&mut self) {
+        while self.slots.contains_key(&self.contiguous) || self.removed.contains(&self.contiguous) {
+            self.contiguous += 1;
+        }
+    }
+
+    pub fn set_last(&mut self, last: Option<u64>) {
+        self.last = last;
+    }
+
+    /// The epoch, when one is given.
+    pub fn set_epoch(&mut self, epoch: Option<u64>) {
+        if epoch.is_some() {
+            self.epoch = epoch;
+        }
+    }
+
+    /// The session's highest index, as the daemon last said.
+    pub fn last(&self) -> Option<u64> {
+        self.last
+    }
+
+    pub fn epoch(&self) -> Option<u64> {
+        self.epoch
+    }
+
+    /// The first index neither held nor known removed.
+    pub fn contiguous(&self) -> u64 {
+        self.contiguous
+    }
+
+    /// Every index up to `last` is held or known removed.
+    pub fn complete(&self) -> bool {
+        self.last.is_none_or(|l| self.contiguous > l)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn get(&self, index: u64) -> Option<&Slot> {
+        self.slots.get(&index)
+    }
+
+    /// The slot of the section `serial`, if held.
+    pub fn slot_of(&self, serial: Serial) -> Option<&Slot> {
+        self.index_of
+            .get(&serial.to_u64())
+            .and_then(|i| self.slots.get(i))
+    }
+
+    /// The slots, in index order.
+    pub fn slots(&self) -> impl DoubleEndedIterator<Item = &Slot> {
+        self.slots.values()
+    }
+
+    /// The slots from `from` to `to`, inclusive.
+    pub fn range(&self, from: u64, to: u64) -> impl DoubleEndedIterator<Item = &Slot> {
+        self.slots.range(from..=to.max(from)).map(|(_, s)| s)
+    }
+
+    /// The session file the slots are of, if any is held.
+    pub fn file(&self) -> Option<u32> {
+        self.slots.values().next().map(|s| s.serial.file)
+    }
+
+    /// Where a subscription resumes: the serial of the newest slot below
+    /// the first hole (`after`), and that hole's index (`from`).
+    pub fn resume(&self) -> Option<(Serial, u64)> {
+        let (_, below) = self.slots.range(..self.contiguous).next_back()?;
+        Some((below.serial, self.contiguous))
+    }
+}
+
+/// The view in outline mode: every slot of `outline` in index order, each
+/// its contents held in `sections` or [`Shows::Pending`], and the pinned
+/// card's serial, as [`Sections::view`] gives them. `hide` drops a card
+/// the user has just answered, and its slot.
+pub fn outline_view(
+    outline: &Outline,
+    sections: &Sections,
+    hide: impl Fn(&AgentCard) -> bool,
+) -> (Vec<ViewSection>, Option<Serial>) {
+    let mut out = Vec::with_capacity(outline.len());
+    let mut pinned: Option<(CardKind, Serial)> = None;
+    for slot in outline.slots() {
+        let shows = match sections.get(slot.serial) {
+            Some(section) => match shows_of(section, &hide, &mut pinned) {
+                Some(shows) => shows,
+                None => continue,
+            },
+            None => Shows::Pending {
+                kind: slot.kind,
+                lines: slot.lines,
+                chars: slot.chars,
+            },
+        };
+        out.push(ViewSection {
+            index: slot.index,
+            serial: slot.serial,
+            shows,
+        });
+    }
+    (out, pinned.map(|(_, serial)| serial))
+}
+
+/// What `section` shows, or `None` for a card `hide` drops. A live card
+/// ranks for the pin in `pinned`: the highest, the newest of its kind
+/// (sections given oldest first).
+fn shows_of(
+    section: &Section,
+    hide: &impl Fn(&AgentCard) -> bool,
+    pinned: &mut Option<(CardKind, Serial)>,
+) -> Option<Shows> {
+    match (&section.kind, &section.card) {
+        (SectionKind::Card, Some(body)) => {
+            // `at` is a flattened view's: here it is 0, so a card stays as
+            // it was when sections come before it.
+            let card = card_of(body, 0);
+            if hide(&card) {
+                return None;
+            }
+            if card.live && pinned.is_none_or(|(kind, _)| card.kind <= kind) {
+                *pinned = Some((card.kind, section.serial));
+            }
+            Some(Shows::Card(card))
+        }
+        // A card without a body, or a kind from a newer daemon: its
+        // entries, if any, are shown as they are.
+        _ => Some(Shows::Entries(section.entries.clone())),
+    }
 }
 
 /// The sections of one agent view, by packed serial.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sections {
     map: BTreeMap<u64, Section>,
+    /// The slot `rev` each section's contents were fetched at (outline
+    /// mode, plan 20261024_01; 0 otherwise).
+    revs: HashMap<u64, u32>,
     /// The session file the sections are of (the serials' prefix), once
     /// known.
     file: Option<u32>,
@@ -122,6 +335,7 @@ impl Sections {
     /// Drop everything: a reset, or another session.
     pub fn clear(&mut self) {
         self.map.clear();
+        self.revs.clear();
         self.file = None;
     }
 
@@ -141,13 +355,20 @@ impl Sections {
     /// Insert `section`, or replace the one with its serial. A section of
     /// another session file than the one held is ignored (`false`).
     pub fn put(&mut self, section: Section) -> bool {
+        self.put_rev(section, 0)
+    }
+
+    /// As [`Sections::put`], its contents being of the slot's `rev`.
+    pub fn put_rev(&mut self, section: Section, rev: u32) -> bool {
         let file = section.serial.file;
         match self.file {
             Some(held) if held != file => return false,
             Some(_) => {}
             None => self.file = Some(file),
         }
-        self.map.insert(section.serial.to_u64(), section);
+        let key = section.serial.to_u64();
+        self.map.insert(key, section);
+        self.revs.insert(key, rev);
         true
     }
 
@@ -155,6 +376,39 @@ impl Sections {
     pub fn remove(&mut self, serial: Serial) {
         if self.file == Some(serial.file) {
             self.map.remove(&serial.to_u64());
+            self.revs.remove(&serial.to_u64());
+        }
+    }
+
+    /// The section at `serial`, if held.
+    pub fn get(&self, serial: Serial) -> Option<&Section> {
+        self.map.get(&serial.to_u64())
+    }
+
+    /// The slot `rev` the contents at `serial` were fetched at, if held.
+    pub fn rev(&self, serial: Serial) -> Option<u32> {
+        self.revs.get(&serial.to_u64()).copied()
+    }
+
+    /// Keeps only the sections `keep` says to.
+    pub fn retain(&mut self, mut keep: impl FnMut(&Section) -> bool) {
+        let revs = &mut self.revs;
+        self.map.retain(|k, s| {
+            let kept = keep(s);
+            if !kept {
+                revs.remove(k);
+            }
+            kept
+        });
+    }
+
+    /// Takes in `other`'s sections with their revs, replacing those held
+    /// at the same serials; those of another file are left out.
+    pub fn merge(&mut self, other: Sections) {
+        let Sections { map, revs, .. } = other;
+        for (k, section) in map {
+            let rev = revs.get(&k).copied().unwrap_or(0);
+            self.put_rev(section, rev);
         }
     }
 
@@ -182,22 +436,8 @@ impl Sections {
         // The pinned card's rank, newest first among equals.
         let mut pinned: Option<(CardKind, Serial)> = None;
         for (position, section) in self.map.values().enumerate() {
-            let shows = match (&section.kind, &section.card) {
-                (SectionKind::Card, Some(body)) => {
-                    // `at` is a flattened view's: here it is 0, so a card
-                    // stays as it was when sections come before it.
-                    let card = card_of(body, 0);
-                    if hide(&card) {
-                        continue;
-                    }
-                    if card.live && pinned.is_none_or(|(kind, _)| card.kind <= kind) {
-                        pinned = Some((card.kind, section.serial));
-                    }
-                    Shows::Card(card)
-                }
-                // A card without a body, or a kind from a newer daemon:
-                // its entries, if any, are shown as they are.
-                _ => Shows::Entries(section.entries.clone()),
+            let Some(shows) = shows_of(section, &hide, &mut pinned) else {
+                continue;
             };
             out.push(ViewSection {
                 index: section_index(position, section),

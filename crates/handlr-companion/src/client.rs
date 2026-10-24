@@ -13,7 +13,7 @@
 //! every input and message and every [`TICK`]; a test gives any times it
 //! likes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::time::Duration;
 
 use handlr_speech::LocalTime;
@@ -22,7 +22,7 @@ use libhandlr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use crate::view::{Sections, ViewSection};
+use crate::view::{Outline, Sections, ViewSection, ViewWindow};
 use crate::wire;
 
 /// What the app tells the client.
@@ -91,6 +91,14 @@ pub enum Input {
     /// In the background the link is a single sleeping socket: no polling,
     /// a slow ping, and only what the daemon pushes.
     Background(bool),
+    /// Where the agent view's window is on its ribbon (plan 20261024_01,
+    /// decision 6): contents are fetched around it and forgotten far from
+    /// it, and while it is scrolled back a new outline is held aside.
+    Window(ViewWindow),
+    /// The jump line's tap while it reads `-- new content --`: the
+    /// outline held aside replaces the one shown (CHANGES.md, 2026-10-24
+    /// 00:36 EDT, item 3).
+    ApplyOutline,
 }
 
 /// A tapped suggestion on its way: its own approval, once confirmed.
@@ -382,6 +390,10 @@ pub enum Event {
         /// herdr's focus, shown, when the terminal is on another pane than
         /// the view's: the view does not follow it.
         terminal_on: Option<String>,
+        /// A new outline (a reset, or a new session file) is held aside
+        /// while the view is scrolled back: the jump line reads `-- new
+        /// content --`, and [`Input::ApplyOutline`] shows it.
+        new_content: bool,
     },
     Error(String),
 }
@@ -610,6 +622,39 @@ enum Sent {
     Options,
     /// `ping`, after a quiet spell.
     Ping,
+    /// `session.content` for this subscription (plan 20261024_01): the
+    /// slots asked for, as (index, serial, rev) when asked, under the
+    /// view's outline generation `generation`.
+    Content {
+        subscription: u64,
+        generation: u64,
+        asked: Vec<(u64, common::Serial, u32)>,
+        slots_only: bool,
+    },
+}
+
+/// The most `session.content` requests in flight at once.
+pub const CONTENT_IN_FLIGHT: usize = 2;
+/// The most indexes one `session.content` range spans.
+pub const CONTENT_RANGE: u64 = common::SECTIONS_MAX as u64;
+/// Indexes needing contents this close together are asked for in one
+/// range, with those held between them.
+const CONTENT_MERGE_GAP: u64 = 16;
+/// The indexes whose contents are fetched before the app gives a window:
+/// the newest, as at the bottom.
+const DEFAULT_NEAR: u64 = common::CONTENT_LIMIT_DEFAULT as u64;
+/// How long an outline's first hole must stay unfilled before it is asked
+/// for with `slots_only`: the chunks of an outline still being sent are
+/// not asked for again.
+pub const GAP_WAIT: Duration = Duration::from_secs(1);
+
+/// A new outline that came while the view was scrolled back, held aside
+/// with the contents that came with it (CHANGES.md, 2026-10-24 00:36 EDT,
+/// items 3 and 4).
+#[derive(Debug, Default)]
+struct HeldOutline {
+    outline: Outline,
+    sections: Sections,
 }
 
 /// A reply to read aloud, in its turn (plan 20261023_05, decisions 5 and
@@ -826,6 +871,33 @@ struct AgentView {
     typed: Option<String>,
     /// The event as last given.
     shown: Option<Event>,
+    /// The daemon sends outlines (its deliveries carry an epoch): plan
+    /// 20261024_01. Without, the view is as before: sections and history
+    /// pages.
+    outline_mode: bool,
+    /// The outline shown, by index; contents by serial in `sections`.
+    outline: Outline,
+    /// A new outline held aside while scrolled back.
+    incoming: Option<HeldOutline>,
+    /// Contents with no slot in the outline are to be dropped once it is
+    /// complete (a reset, merged by serial).
+    orphans: bool,
+    /// The app's window, as last given.
+    window: Option<ViewWindow>,
+    /// The indexes whose contents are being fetched.
+    asking: BTreeSet<u64>,
+    /// `session.content` requests in flight.
+    in_flight: usize,
+    /// A `slots_only` request for a hole is in flight.
+    gap_asked: bool,
+    /// The building outline's first hole as last seen, and since when.
+    hole: (u64, Duration),
+    /// Contents asked for and not given, by packed serial, at their rev:
+    /// not asked again until the rev changes.
+    unavailable: HashMap<u64, u32>,
+    /// Bumped with each new outline: a `slots_only` answer for an older
+    /// one is dropped.
+    generation: u64,
 }
 
 impl AgentView {
@@ -845,6 +917,105 @@ impl AgentView {
             replied_to: None,
             typed: None,
             shown: None,
+            outline_mode: false,
+            outline: Outline::default(),
+            incoming: None,
+            orphans: false,
+            window: None,
+            asking: BTreeSet::new(),
+            in_flight: 0,
+            gap_asked: false,
+            hole: (0, Duration::ZERO),
+            unavailable: HashMap::new(),
+            generation: 0,
+        }
+    }
+
+    /// The outline being built, and the contents it takes: the one held
+    /// aside, else the one shown.
+    fn building(&mut self) -> (&mut Outline, &mut Sections) {
+        match self.incoming.as_mut() {
+            Some(i) => (&mut i.outline, &mut i.sections),
+            None => (&mut self.outline, &mut self.sections),
+        }
+    }
+
+    fn scrolled_back(&self) -> bool {
+        self.window.is_some_and(|w| w.scrolled_back)
+    }
+
+    /// Shows the outline held aside, its contents merged in by serial.
+    fn apply_incoming(&mut self) -> bool {
+        let Some(incoming) = self.incoming.take() else {
+            return false;
+        };
+        log::info!(
+            "view: the new outline applied, {} slot(s)",
+            incoming.outline.len()
+        );
+        let other_file = matches!(
+            (incoming.outline.file(), self.sections.file()),
+            (Some(a), Some(b)) if a != b
+        );
+        if other_file {
+            self.sections = incoming.sections;
+        } else {
+            self.sections.merge(incoming.sections);
+        }
+        self.outline = incoming.outline;
+        self.orphans = true;
+        self.drop_orphans();
+        true
+    }
+
+    /// Once the outline shown is complete after a reset, the contents with
+    /// no slot in it go.
+    fn drop_orphans(&mut self) {
+        if !self.orphans || !self.outline.complete() {
+            return;
+        }
+        self.orphans = false;
+        let outline = &self.outline;
+        self.sections
+            .retain(|s| outline.slot_of(s.serial).is_some());
+    }
+
+    /// Forgets contents outside the window's `keep` range, except the
+    /// newest `LIVE_INLINE` indexes' and live cards' (the jump line and
+    /// the pin need them). The outline is always kept.
+    fn forget(&mut self) {
+        let Some(w) = self.window.filter(|_| self.outline_mode) else {
+            return;
+        };
+        let (lo, hi) = w.keep;
+        let newest = self
+            .outline
+            .last()
+            .map_or(0, |l| l.saturating_sub(common::LIVE_INLINE - 1));
+        let outline = &self.outline;
+        let before = self.sections.len();
+        self.sections.retain(|s| {
+            let live_card = s.card.as_ref().is_some_and(|c| c.live);
+            match outline.slot_of(s.serial) {
+                Some(slot) => (lo..=hi).contains(&slot.index) || slot.index >= newest || live_card,
+                // No slot: an orphan, dropped once the outline is complete.
+                None => true,
+            }
+        });
+        let forgotten = before - self.sections.len();
+        if forgotten > 0 {
+            log::debug!("view: {forgotten} far section(s) forgotten");
+        }
+    }
+
+    /// The first hole of the outline being built moved: note when.
+    fn note_hole(&mut self, now: Duration) {
+        let at = match &self.incoming {
+            Some(i) => i.outline.contiguous(),
+            None => self.outline.contiguous(),
+        };
+        if at != self.hole.0 {
+            self.hole = (at, now);
         }
     }
 
@@ -862,37 +1033,29 @@ impl AgentView {
 }
 
 /// The serials of `now` whose sections differ from `before`'s, and those of
-/// `before` that `now` no longer has, in serial order. Both lists are in
-/// serial order.
+/// `before` that `now` no longer has, in serial order. The lists may be in
+/// any order (in outline mode they are in index order, which a late card
+/// can take out of serial order).
 fn changed_serials(before: &[ViewSection], now: &[ViewSection]) -> Vec<common::Serial> {
-    let mut changed = Vec::new();
-    let (mut a, mut b) = (before.iter().peekable(), now.iter().peekable());
-    loop {
-        match (a.peek(), b.peek()) {
-            (None, None) => break,
-            (Some(x), Some(y)) if x.serial == y.serial => {
-                // A new index alone (sections paged in before it) is not
-                // a change: the block is as it was.
-                if x.shows != y.shows {
-                    changed.push(y.serial);
-                }
-                a.next();
-                b.next();
-            }
-            (Some(x), Some(y)) if x.serial.to_u64() < y.serial.to_u64() => {
-                changed.push(x.serial);
-                a.next();
-            }
-            (Some(x), None) => {
-                changed.push(x.serial);
-                a.next();
-            }
-            (_, Some(y)) => {
-                changed.push(y.serial);
-                b.next();
-            }
-        }
-    }
+    let was: HashMap<u64, &ViewSection> = before.iter().map(|v| (v.serial.to_u64(), v)).collect();
+    let mut changed: Vec<common::Serial> = now
+        .iter()
+        // A new index alone (sections paged in before it) is not a
+        // change: the block is as it was.
+        .filter(|v| {
+            was.get(&v.serial.to_u64())
+                .is_none_or(|b| b.shows != v.shows)
+        })
+        .map(|v| v.serial)
+        .collect();
+    let is: std::collections::HashSet<u64> = now.iter().map(|v| v.serial.to_u64()).collect();
+    changed.extend(
+        before
+            .iter()
+            .filter(|v| !is.contains(&v.serial.to_u64()))
+            .map(|v| v.serial),
+    );
+    changed.sort_by_key(|s| s.to_u64());
     changed
 }
 
@@ -911,6 +1074,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 loading_earlier,
                 start,
                 terminal_on,
+                new_content,
             },
             Event::AgentView {
                 name: name_b,
@@ -923,6 +1087,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 loading_earlier: loading_earlier_b,
                 start: start_b,
                 terminal_on: terminal_on_b,
+                new_content: new_content_b,
             },
         ) => {
             name == name_b
@@ -933,6 +1098,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 && loading_earlier == loading_earlier_b
                 && start == start_b
                 && terminal_on == terminal_on_b
+                && new_content == new_content_b
                 && sections == sections_b
         }
         _ => a == b,
@@ -1061,6 +1227,9 @@ impl State {
             v.subscription = None;
             v.subscribing = false;
             v.history = false;
+            v.in_flight = 0;
+            v.asking.clear();
+            v.gap_asked = false;
         }
         self.recompute_view(&mut out);
         if self.turn.take().is_some() {
@@ -1144,6 +1313,17 @@ impl State {
                 self.list_if_due(&mut out);
             }
             Input::LoadEarlier => self.load_earlier(&mut out),
+            Input::Window(window) => self.set_window(window, &mut out),
+            Input::ApplyOutline => {
+                if let Some(v) = self.view.as_mut()
+                    && v.apply_incoming()
+                {
+                    v.reflatten();
+                    v.see_all();
+                    self.fetch_contents(&mut out);
+                    self.show_view(&mut out);
+                }
+            }
             Input::Follow(on) => {
                 self.follow = on;
                 if on {
@@ -1184,9 +1364,14 @@ impl State {
             .replied_to
             .as_ref()
             .is_some_and(|ts| v.pending_question.as_ref().is_some_and(|q| &q.ts == ts));
-        let (sections, pinned) = v
-            .sections
-            .view(|c| answered && c.live && c.kind == crate::view::CardKind::Question);
+        let hide = |c: &crate::view::AgentCard| {
+            answered && c.live && c.kind == crate::view::CardKind::Question
+        };
+        let (sections, pinned) = if v.outline_mode {
+            crate::view::outline_view(&v.outline, &v.sections, hide)
+        } else {
+            v.sections.view(hide)
+        };
         let changed = match &v.shown {
             Some(Event::AgentView {
                 sections: before, ..
@@ -1207,9 +1392,15 @@ impl State {
             changed,
             loading: !v.answered,
             typed: v.typed.clone(),
-            loading_earlier: v.history,
-            start: v.start,
+            loading_earlier: v.history && !v.outline_mode,
+            // In outline mode, once the outline is held from index 0.
+            start: if v.outline_mode {
+                v.outline.contiguous() > 0
+            } else {
+                v.start
+            },
             terminal_on,
+            new_content: v.incoming.is_some(),
         })
     }
 
@@ -1274,13 +1465,25 @@ impl State {
         }
         v.subscribing = true;
         let pane_id = v.pane_id.clone();
+        // In outline mode, from the first hole of the newest outline held
+        // (plan 20261024_01, decision 6, and its epoch, CHANGES.md
+        // 2026-10-24 00:36 EDT).
+        let (after, from, epoch) = if v.outline_mode {
+            let o = v.incoming.as_ref().map_or(&v.outline, |i| &i.outline);
+            match o.resume() {
+                Some((after, from)) => (Some(after), Some(from), o.epoch()),
+                None => (None, None, None),
+            }
+        } else {
+            (v.sections.newest(), None, None)
+        };
         let params = common::SessionSubscribeParams {
             pane_id: pane_id.clone(),
             sections: VIEW_SECTIONS,
-            after: v.sections.newest(),
-            outline: false,
-            from: None,
-            epoch: None,
+            after,
+            outline: true,
+            from,
+            epoch,
         };
         out.push(self.request(methods::SESSION_SUBSCRIBE, params, Sent::Subscribe(pane_id)));
     }
@@ -1304,7 +1507,8 @@ impl State {
         if !self.online() {
             return;
         }
-        let Some(v) = self.view.as_mut() else {
+        // In outline mode the whole session is in the outline: no pages.
+        let Some(v) = self.view.as_mut().filter(|v| !v.outline_mode) else {
             return;
         };
         let (Some(id), Some(before)) = (v.subscription, v.sections.oldest()) else {
@@ -1320,6 +1524,249 @@ impl State {
             sections: HISTORY_PAGE,
         };
         out.push(self.request(methods::SESSION_HISTORY, params, Sent::History(id)));
+        self.show_view(out);
+    }
+
+    /// The app's window moved (plan 20261024_01, decision 6): back at the
+    /// bottom, an outline held aside is shown at once; far contents are
+    /// forgotten and near ones fetched.
+    fn set_window(&mut self, window: ViewWindow, out: &mut Vec<Output>) {
+        let Some(v) = self.view.as_mut() else {
+            return;
+        };
+        if v.window == Some(window) {
+            return;
+        }
+        v.window = Some(window);
+        if !window.scrolled_back && v.apply_incoming() {
+            v.reflatten();
+            v.see_all();
+        }
+        v.forget();
+        v.reflatten();
+        self.fetch_contents(out);
+        self.show_view(out);
+    }
+
+    /// Asks `session.content` for the contents of the window's near slots
+    /// that are missing or older than their slot's `rev` (plan 20261024_01,
+    /// decision 6): ranges of at most `CONTENT_RANGE` indexes, the nearest
+    /// the window first, with at most `CONTENT_IN_FLIGHT` requests in
+    /// flight. Not while the outline shown is incomplete or another is
+    /// held aside: indexes are the daemon's newest outline's.
+    fn fetch_contents(&mut self, out: &mut Vec<Output>) {
+        if !self.online() {
+            return;
+        }
+        let Some(v) = self.view.as_mut() else {
+            return;
+        };
+        let Some(id) = v.subscription.filter(|_| v.outline_mode) else {
+            return;
+        };
+        if v.incoming.is_some() || !v.outline.complete() || v.in_flight >= CONTENT_IN_FLIGHT {
+            return;
+        }
+        let Some(last) = v.outline.last() else {
+            return;
+        };
+        let (shown, near) = match v.window {
+            Some(w) => (w.shown, w.near),
+            None => {
+                let near = (last.saturating_sub(DEFAULT_NEAR - 1), last);
+                (near, near)
+            }
+        };
+        let needed: Vec<u64> = v
+            .outline
+            .range(near.0, near.1)
+            .filter(|slot| !v.asking.contains(&slot.index))
+            .filter(|slot| v.sections.rev(slot.serial) != Some(slot.rev))
+            .filter(|slot| v.unavailable.get(&slot.serial.to_u64()) != Some(&slot.rev))
+            .map(|slot| slot.index)
+            .collect();
+        // Runs of the needed indexes, close together and at most a range.
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for i in needed {
+            match runs.last_mut() {
+                Some((lo, hi)) if i - *hi <= CONTENT_MERGE_GAP && i - *lo < CONTENT_RANGE => {
+                    *hi = i
+                }
+                _ => runs.push((i, i)),
+            }
+        }
+        let distance = |&(lo, hi): &(u64, u64)| {
+            if hi < shown.0 {
+                shown.0 - hi
+            } else {
+                lo.saturating_sub(shown.1)
+            }
+        };
+        runs.sort_by_key(distance);
+        let room = CONTENT_IN_FLIGHT - v.in_flight;
+        let mut requests = Vec::new();
+        for (lo, hi) in runs.into_iter().take(room) {
+            let asked: Vec<(u64, common::Serial, u32)> = v
+                .outline
+                .range(lo, hi)
+                .map(|s| (s.index, s.serial, s.rev))
+                .collect();
+            v.asking.extend(asked.iter().map(|a| a.0));
+            v.in_flight += 1;
+            let params = common::SessionContentParams {
+                subscription_id: id,
+                from: Some(lo),
+                to: Some(hi),
+                limit: common::SECTIONS_MAX,
+                slots_only: false,
+            };
+            let sent = Sent::Content {
+                subscription: id,
+                generation: v.generation,
+                asked,
+                slots_only: false,
+            };
+            requests.push((params, sent));
+        }
+        for (params, sent) in requests {
+            out.push(self.request(methods::SESSION_CONTENT, params, sent));
+        }
+    }
+
+    /// Asks for the slots of the building outline's first hole, once it
+    /// has stayed for `GAP_WAIT` (plan 20261024_01, decisions 3 and 6):
+    /// a delivery was missed, not an outline still on its way.
+    fn fill_gaps(&mut self, out: &mut Vec<Output>) {
+        if !self.online() {
+            return;
+        }
+        let now = self.now;
+        let Some(v) = self.view.as_mut() else {
+            return;
+        };
+        let Some(id) = v.subscription.filter(|_| v.outline_mode) else {
+            return;
+        };
+        v.note_hole(now);
+        if v.gap_asked || v.in_flight >= CONTENT_IN_FLIGHT {
+            return;
+        }
+        let since = v.hole.1;
+        let generation = v.generation;
+        let (outline, _) = v.building();
+        let Some(last) = outline.last().filter(|_| !outline.complete()) else {
+            return;
+        };
+        if now.saturating_sub(since) < GAP_WAIT {
+            return;
+        }
+        let from = outline.contiguous();
+        let to = last.min(from + CONTENT_RANGE - 1);
+        log::info!("view: outline hole at {from}; asking for {from}..={to}");
+        v.gap_asked = true;
+        v.in_flight += 1;
+        let params = common::SessionContentParams {
+            subscription_id: id,
+            from: Some(from),
+            to: Some(to),
+            limit: common::SECTIONS_MAX,
+            slots_only: true,
+        };
+        let sent = Sent::Content {
+            subscription: id,
+            generation,
+            asked: Vec::new(),
+            slots_only: true,
+        };
+        out.push(self.request(methods::SESSION_CONTENT, params, sent));
+    }
+
+    /// A `session.content` answer (plan 20261024_01, decision 4): slots
+    /// for a hole, or contents, each kept at the rev it was asked at.
+    fn content_answered(
+        &mut self,
+        sent: Sent,
+        result: Option<common::SessionContentResult>,
+        out: &mut Vec<Output>,
+    ) {
+        let Sent::Content {
+            subscription,
+            generation,
+            asked,
+            slots_only,
+        } = sent
+        else {
+            return;
+        };
+        let now = self.now;
+        let Some(v) = self
+            .view
+            .as_mut()
+            .filter(|v| v.subscription == Some(subscription))
+        else {
+            return;
+        };
+        v.in_flight = v.in_flight.saturating_sub(1);
+        for (i, _, _) in &asked {
+            v.asking.remove(i);
+        }
+        if slots_only {
+            v.gap_asked = false;
+        }
+        if let Some(r) = result.filter(|_| generation == v.generation) {
+            if slots_only {
+                log::info!(
+                    "view: {} slot(s) for a hole, {} removed",
+                    r.slots.len(),
+                    r.removed_index.len()
+                );
+                let (outline, sections) = v.building();
+                for slot in r.slots {
+                    outline.put(slot);
+                }
+                for i in r.removed_index {
+                    if let Some(slot) = outline.remove(i) {
+                        sections.remove(slot.serial);
+                    }
+                }
+                if r.last > outline.last() {
+                    outline.set_last(r.last);
+                }
+                v.note_hole(now);
+                v.drop_orphans();
+            } else {
+                log::info!(
+                    "view: contents of {} section(s) for {} asked",
+                    r.sections.len(),
+                    asked.len()
+                );
+                let mut given = std::collections::HashSet::new();
+                for s in r.sections {
+                    let Some(&(_, _, rev)) = asked.iter().find(|a| a.1 == s.serial) else {
+                        continue;
+                    };
+                    if v.outline.slot_of(s.serial).is_some() {
+                        given.insert(s.serial.to_u64());
+                        v.sections.put_rev(s, rev);
+                    }
+                }
+                for (_, serial, rev) in &asked {
+                    if !given.contains(&serial.to_u64()) {
+                        v.unavailable.insert(serial.to_u64(), *rev);
+                    }
+                }
+                for i in r.removed_index {
+                    if let Some(slot) = v.outline.remove(i) {
+                        v.sections.remove(slot.serial);
+                    }
+                }
+                v.reflatten();
+                // Scrollback, not live: none of it is read aloud.
+                v.see_all();
+            }
+        }
+        self.fetch_contents(out);
+        self.fill_gaps(out);
         self.show_view(out);
     }
 
@@ -1458,6 +1905,7 @@ impl State {
         }
         self.show_dictation(out);
         self.list_if_due(out);
+        self.fill_gaps(out);
         if !self.reading.is_empty() {
             self.read_in_order();
             self.flush_notices(out);
@@ -1925,6 +2373,14 @@ impl State {
                 }
                 Sent::Options => log::warn!("client.options: {message}"),
                 Sent::Ping => {}
+                sent @ Sent::Content { .. } => {
+                    // The session changed under the range: the reset that
+                    // follows brings the new outline.
+                    if error.code != libhandlr_proto::envelope::codes::SESSION_CHANGED {
+                        log::warn!("session.content: {message}");
+                    }
+                    self.content_answered(sent, None, out);
+                }
                 Sent::Summarize(serial) => {
                     log::info!("speech.summarize: {message}; reading the reply here");
                     self.summarized(serial, None, out);
@@ -2133,6 +2589,13 @@ impl State {
                     self.summarized(serial, None, out);
                 }
             },
+            sent @ Sent::Content { .. } => match parse::<common::SessionContentResult>(result) {
+                Ok(r) => self.content_answered(sent, Some(r), out),
+                Err(e) => {
+                    log::warn!("a bad session.content result: {e}");
+                    self.content_answered(sent, None, out);
+                }
+            },
             Sent::Interrupt | Sent::ConfirmReply(_) | Sent::Options | Sent::Ping => {}
         }
     }
@@ -2296,27 +2759,38 @@ impl State {
     /// goes in at its serial, replacing the one held there, and `removed`
     /// ones go. Sections of another session file are ignored without a
     /// reset.
-    fn delivered(&mut self, d: common::SessionDelivery, out: &mut Vec<Output>) {
+    fn delivered(&mut self, mut d: common::SessionDelivery, out: &mut Vec<Output>) {
         let read_aloud = self.read_aloud;
         let Some(v) = self.view.as_mut() else {
             return;
         };
         let first = !v.answered;
         v.answered = true;
-        if let Some(status) = d.status {
+        if let Some(status) = d.status.take() {
             v.status = status;
         }
-        if let Some(question) = d.pending_question {
+        if let Some(question) = d.pending_question.take() {
             v.pending_question = question;
         }
+        if d.epoch.is_some() && !v.outline_mode {
+            log::info!("view: the daemon sends outlines");
+            v.outline_mode = true;
+        }
+        let now = self.now;
         if d.session.is_none() {
             // No session to show: why is in `reason`.
             v.sections.clear();
             v.start = false;
+            v.outline = Outline::default();
+            v.incoming = None;
+            v.orphans = false;
+            v.generation += 1;
             if d.reason.as_deref() == Some(common::delivery_reasons::PANE_CLOSED) {
                 // No more deliveries come; the subscription is over.
                 v.subscription = None;
             }
+        } else if v.outline_mode {
+            take_outline(v, d, now);
         } else {
             log::info!(
                 "view: delivery, reset {}, {} section(s), {} removed, {} held",
@@ -2376,6 +2850,8 @@ impl State {
             self.ask_list(out);
         }
         self.read_in_order();
+        self.fetch_contents(out);
+        self.fill_gaps(out);
         self.recompute_view(out);
         self.flush_notices(out);
     }
@@ -2733,6 +3209,79 @@ impl State {
 }
 
 /// An agent's reply: its prose, which is what reading aloud reads.
+/// An outline delivery for view `v` at `now` (plan 20261024_01, decision
+/// 3, as CHANGES.md 2026-10-24 00:36 EDT changes it). A reset drops only
+/// the outline: the new one is merged by serial, the contents held staying
+/// valid unless their slot's `rev` changed, and those with no slot in it
+/// dropped once it is complete. A reset while scrolled back is held aside,
+/// and the old ribbon stays until it is applied. Otherwise its slots and
+/// removed indexes go into the outline being built, and the contents that
+/// ride along go in at their slots' revs.
+fn take_outline(v: &mut AgentView, d: common::SessionDelivery, now: Duration) {
+    log::info!(
+        "view: outline delivery, reset {}, {} slot(s), {} section(s), {} removed, last {:?}, {} held",
+        d.reset,
+        d.slots.len(),
+        d.sections.len(),
+        d.removed_index.len(),
+        d.last,
+        v.outline.len()
+    );
+    if d.reset {
+        v.generation += 1;
+        v.unavailable.clear();
+        let fresh = Outline::new(d.epoch);
+        if v.scrolled_back() && !v.outline.is_empty() {
+            // Held aside: the old ribbon stays until the jump line's tap.
+            let sections = v.incoming.take().map(|i| i.sections).unwrap_or_default();
+            v.incoming = Some(HeldOutline {
+                outline: fresh,
+                sections,
+            });
+        } else {
+            if let Some(incoming) = v.incoming.take() {
+                v.sections.merge(incoming.sections);
+            }
+            v.outline = fresh;
+            v.orphans = true;
+        }
+        v.hole = (0, now);
+    }
+    let (outline, sections) = v.building();
+    outline.set_epoch(d.epoch);
+    for slot in &d.slots {
+        outline.put(*slot);
+    }
+    for &i in &d.removed_index {
+        if let Some(slot) = outline.remove(i) {
+            sections.remove(slot.serial);
+        }
+    }
+    outline.set_last(d.last);
+    // A new session file: nothing held is of it.
+    if let (Some(file), Some(held)) = (outline.file(), sections.file())
+        && file != held
+    {
+        sections.clear();
+    }
+    for serial in d.removed {
+        sections.remove(serial);
+    }
+    for s in d.sections {
+        let rev = outline
+            .slot_of(s.serial)
+            .or_else(|| d.slots.iter().find(|slot| slot.serial == s.serial))
+            .map_or(0, |slot| slot.rev);
+        sections.put_rev(s, rev);
+    }
+    v.note_hole(now);
+    if v.incoming.is_some() && !v.scrolled_back() {
+        v.apply_incoming();
+    }
+    v.drop_orphans();
+    v.forget();
+}
+
 fn is_reply(e: &common::Entry) -> bool {
     e.role == common::Role::Assistant && e.kind == common::EntryKind::Text
 }
@@ -4055,7 +4604,10 @@ mod tests {
         let out = s.input(Input::OpenAgent("w2:pZ".into()));
         let subs = requests(&out, "session.subscribe");
         assert_eq!(subs.len(), 1, "{out:?}");
-        assert_eq!(subs[0].params, json!({"pane_id": "w2:pZ", "sections": 200}));
+        assert_eq!(
+            subs[0].params,
+            json!({"pane_id": "w2:pZ", "sections": 200, "outline": true})
+        );
         assert_eq!(requests(&out, "agents.list").len(), 1);
         assert!(requests(&out, "session.peek").is_empty());
         // Shown at once, empty and loading, until the subscription answers.
@@ -4172,7 +4724,7 @@ mod tests {
         assert_eq!(subs.len(), 1, "{out:?}");
         assert_eq!(
             subs[0].params,
-            json!({"pane_id": "w2:pZ", "sections": 200, "after": serial(2, 128)})
+            json!({"pane_id": "w2:pZ", "sections": 200, "after": serial(2, 128), "outline": true})
         );
         assert!(requests(&out, "session.peek").is_empty());
         // Only what was missed comes, not a reset: what was shown stays.
@@ -4474,7 +5026,10 @@ mod tests {
             json!({"subscription_id": 1})
         );
         let subs = requests(&out, "session.subscribe");
-        assert_eq!(subs[0].params, json!({"pane_id": "w9:p1", "sections": 200}));
+        assert_eq!(
+            subs[0].params,
+            json!({"pane_id": "w9:p1", "sections": 200, "outline": true})
+        );
         // A fresh view of the new pane.
         assert!(summaries(&s).is_empty());
         // A pane with no agent is not followed.
@@ -5490,5 +6045,417 @@ mod tests {
         let pings = requests(&out, "ping");
         assert_eq!(pings.len(), 1, "{out:?}");
         assert_eq!(pings[0].params["active"], true);
+    }
+
+    // Outline mode (plan 20261024_01, step 4, and CHANGES.md 2026-10-24
+    // 00:36 EDT).
+
+    const EPOCH: u64 = 77;
+
+    /// The serial of index `i` in file `file`: on line `i + 1`.
+    fn serial_in(file: u32, i: u64) -> String {
+        common::Serial::new(file, i as u32 + 1, 0).to_string()
+    }
+
+    fn slot_in(file: u32, i: u64, rev: u32) -> Value {
+        json!({"index": i, "serial": serial_in(file, i), "kind": "text",
+               "lines": 2, "chars": 40, "rev": rev})
+    }
+
+    fn slots(range: std::ops::Range<u64>) -> Vec<Value> {
+        range.map(|i| slot_in(FILE, i, 0)).collect()
+    }
+
+    fn content_in(file: u32, i: u64, summary: &str) -> Value {
+        json!({"serial": serial_in(file, i), "index": i, "kind": "text", "entries": [
+            {"ts": format!("t{i}"), "role": "assistant", "kind": "text", "summary": summary}
+        ]})
+    }
+
+    fn content(i: u64) -> Value {
+        content_in(FILE, i, &format!("s{i}"))
+    }
+
+    /// An outline delivery for subscription 1.
+    fn outline_delivery(
+        reset: bool,
+        slots: Vec<Value>,
+        sections: Vec<Value>,
+        last: Option<u64>,
+        epoch: u64,
+    ) -> Value {
+        json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+            "reset": reset, "session": {"session_id": "s1", "matched": "id"},
+            "reason": null, "status": "idle", "sections": sections, "slots": slots,
+            "last": last, "epoch": epoch})
+    }
+
+    fn deliver_outline(s: &mut State, delivery: Value) -> Vec<Output> {
+        s.incoming(note("session.delivery", delivery))
+    }
+
+    /// The view of w2:pZ open, its subscription answered with `first`.
+    fn outlined(first: Value) -> (State, Vec<Output>) {
+        let mut s = online();
+        s.input(Input::Tick(secs(100.0)));
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let list = requests(&out, "agents.list")[0].clone();
+        s.incoming(response(
+            list.id,
+            json!({"agents": [agent_info("w2:pZ", "idle")]}),
+        ));
+        let sub = requests(&out, "session.subscribe")[0].id.clone();
+        let out = s.incoming(response(
+            sub,
+            json!({"subscription_id": 1, "delivery": first}),
+        ));
+        (s, out)
+    }
+
+    /// A complete outline of `n` sections, the newest `LIVE_INLINE`'s
+    /// contents with it.
+    fn outline_of(n: u64) -> (State, Vec<Output>) {
+        let inline = (n.saturating_sub(common::LIVE_INLINE)..n)
+            .map(content)
+            .collect();
+        outlined(outline_delivery(
+            true,
+            slots(0..n),
+            inline,
+            n.checked_sub(1),
+            EPOCH,
+        ))
+    }
+
+    /// The view's sections as (index, held or pending).
+    fn ribbon(s: &State) -> Vec<(u64, bool)> {
+        match s.agent_view() {
+            Some(Event::AgentView { sections, .. }) => sections
+                .iter()
+                .map(|v| {
+                    (
+                        v.index,
+                        !matches!(v.shows, crate::view::Shows::Pending { .. }),
+                    )
+                })
+                .collect(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn held_indexes(s: &State) -> Vec<u64> {
+        ribbon(s)
+            .into_iter()
+            .filter(|(_, held)| *held)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn new_content(s: &State) -> bool {
+        matches!(
+            s.agent_view(),
+            Some(Event::AgentView {
+                new_content: true,
+                ..
+            })
+        )
+    }
+
+    /// The `session.content` requests in `out`, as (from, to, slots_only).
+    fn content_asks(out: &[Output]) -> Vec<(u64, u64, bool)> {
+        requests(out, "session.content")
+            .iter()
+            .map(|r| {
+                (
+                    r.params["from"].as_u64().unwrap(),
+                    r.params["to"].as_u64().unwrap(),
+                    r.params["slots_only"] == true,
+                )
+            })
+            .collect()
+    }
+
+    /// Answers the `session.content` request `r` with the contents of
+    /// every index it asked for.
+    fn answer_content(s: &mut State, r: &Request) -> Vec<Output> {
+        let from = r.params["from"].as_u64().unwrap();
+        let to = r.params["to"].as_u64().unwrap();
+        s.incoming(response(
+            r.id.clone(),
+            json!({"sections": (from..=to).map(content).collect::<Vec<_>>(),
+                   "first": 0, "last": to, "more": false}),
+        ))
+    }
+
+    fn window(shown: (u64, u64), near: (u64, u64), keep: (u64, u64), back: bool) -> Input {
+        Input::Window(ViewWindow {
+            shown,
+            near,
+            keep,
+            scrolled_back: back,
+        })
+    }
+
+    #[test]
+    fn the_view_subscribes_for_an_outline() {
+        let mut s = online();
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        assert_eq!(
+            requests(&out, "session.subscribe")[0].params,
+            json!({"pane_id": "w2:pZ", "sections": 200, "outline": true})
+        );
+    }
+
+    #[test]
+    fn the_outline_is_held_complete_across_chunked_deliveries() {
+        // 3000 sections: 2000 slots, then the rest with the newest
+        // contents.
+        let (mut s, out) = outlined(outline_delivery(
+            true,
+            slots(0..2000),
+            vec![],
+            Some(2999),
+            EPOCH,
+        ));
+        // Still arriving: no contents asked for, no hole filled.
+        assert!(content_asks(&out).is_empty(), "{out:?}");
+        assert_eq!(ribbon(&s).len(), 2000);
+        let inline: Vec<Value> = (2992..3000).map(content).collect();
+        let out = deliver_outline(
+            &mut s,
+            outline_delivery(false, slots(2000..3000), inline, Some(2999), EPOCH),
+        );
+        let r = ribbon(&s);
+        assert_eq!(r.len(), 3000);
+        assert!(
+            r.iter()
+                .enumerate()
+                .all(|(i, (index, _))| *index == i as u64)
+        );
+        assert_eq!(held_indexes(&s), (2992..3000).collect::<Vec<_>>());
+        // Complete: the newest screens' contents are asked for, the held
+        // ones not again.
+        assert_eq!(content_asks(&out), [(2950, 2991, false)]);
+        // No hole: nothing more on later ticks.
+        let out = s.input(Input::Tick(secs(105.0)));
+        assert!(content_asks(&out).is_empty(), "{out:?}");
+        // In outline mode, the start is known: index 0 is held.
+        assert!(matches!(
+            s.agent_view(),
+            Some(Event::AgentView {
+                start: true,
+                loading_earlier: false,
+                ..
+            })
+        ));
+        // And no history pages are asked.
+        assert!(requests(&s.input(Input::LoadEarlier), "session.history").is_empty());
+    }
+
+    #[test]
+    fn a_hole_in_the_outline_is_asked_for_with_slots_only() {
+        let (mut s, _) = outline_of(10);
+        // A slot past a hole: 10..=14 were missed.
+        let out = deliver_outline(
+            &mut s,
+            outline_delivery(false, vec![slot_in(FILE, 15, 0)], vec![], Some(15), EPOCH),
+        );
+        assert!(
+            content_asks(&out).is_empty(),
+            "the hole may still be on its way"
+        );
+        let out = s.input(Input::Tick(secs(100.5)));
+        assert!(content_asks(&out).is_empty());
+        let out = s.input(Input::Tick(secs(101.5)));
+        let asks = requests(&out, "session.content");
+        assert_eq!(content_asks(&out), [(10, 15, true)]);
+        // Once in flight, not again.
+        assert!(content_asks(&s.input(Input::Tick(secs(103.0)))).is_empty());
+        let out = s.incoming(response(
+            asks[0].id.clone(),
+            json!({"slots": slots(10..14), "removed_index": [14], "first": 0, "last": 15}),
+        ));
+        let r = ribbon(&s);
+        assert_eq!(
+            r.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15]
+        );
+        // Complete now: the contents near the bottom are fetched (0 and 1
+        // are still on their way from the first answer).
+        assert_eq!(content_asks(&out), [(10, 15, false)]);
+        assert!(content_asks(&s.input(Input::Tick(secs(110.0)))).is_empty());
+    }
+
+    #[test]
+    fn contents_are_asked_for_around_the_window_two_requests_at_most() {
+        let (mut s, out) = outline_of(1000);
+        let first = requests(&out, "session.content");
+        assert_eq!(content_asks(&out), [(950, 991, false)]);
+        answer_content(&mut s, first[0]);
+        // The window scrolled back: the near slots, nearest first, in
+        // ranges of at most 200, two in flight.
+        let out = s.input(window((500, 510), (400, 620), (0, 999), true));
+        assert_eq!(content_asks(&out), [(400, 599, false), (600, 620, false)]);
+        let asked = requests(&out, "session.content")
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        // Moved again while both are in flight: nothing more.
+        let out = s.input(window((100, 110), (50, 160), (0, 999), true));
+        assert!(content_asks(&out).is_empty());
+        // One answered: the new window's are asked, the nearest first.
+        let out = answer_content(&mut s, &asked[1]);
+        assert_eq!(content_asks(&out), [(50, 160, false)]);
+        let held = held_indexes(&s);
+        assert!(held.contains(&600) && held.contains(&620) && !held.contains(&400));
+        // Only around the window: nothing between is held.
+        assert!(!held.iter().any(|i| (161..400).contains(i)));
+    }
+
+    #[test]
+    fn a_replaced_slots_stale_contents_are_fetched_again() {
+        let (mut s, out) = outline_of(100);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        assert!(held_indexes(&s).contains(&60));
+        // Slot 60 replaced, its contents not along (not among the newest).
+        let out = deliver_outline(
+            &mut s,
+            outline_delivery(false, vec![slot_in(FILE, 60, 1)], vec![], Some(99), EPOCH),
+        );
+        assert_eq!(content_asks(&out), [(60, 60, false)]);
+        // Shown as held until then: the old contents stand.
+        assert!(held_indexes(&s).contains(&60));
+        let r = requests(&out, "session.content")[0].clone();
+        let out = answer_content(&mut s, &r);
+        assert!(content_asks(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn far_contents_are_forgotten_and_the_outline_kept() {
+        let (mut s, out) = outline_of(1000);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        let out = s.input(window((100, 110), (50, 160), (0, 400), true));
+        for r in requests(&out, "session.content") {
+            answer_content(&mut s, r);
+        }
+        assert!(held_indexes(&s).contains(&100));
+        // The far end's contents go, but the newest LIVE_INLINE stay.
+        let held = held_indexes(&s);
+        assert!(!held.iter().any(|i| (401..992).contains(i)), "{held:?}");
+        assert!(held.contains(&999));
+        // Back to the bottom: the near ones go far, and are forgotten.
+        s.input(window((990, 999), (900, 999), (500, 999), false));
+        let held = held_indexes(&s);
+        assert!(!held.contains(&100));
+        assert_eq!(ribbon(&s).len(), 1000, "the outline is all kept");
+    }
+
+    #[test]
+    fn a_reset_is_merged_by_serial_and_unchanged_revs_are_not_fetched_again() {
+        let (mut s, out) = outline_of(60);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        assert_eq!(held_indexes(&s), (10..60).collect::<Vec<_>>());
+        s.input(window((40, 50), (10, 59), (0, 59), false));
+        // The daemon restarted: a new epoch's outline. Index 20's section is
+        // gone (one fewer below 20 moves the rest), 30's has a new rev.
+        let mut fresh: Vec<Value> = Vec::new();
+        for i in (0..60).filter(|&i| i != 20) {
+            let index = if i < 20 { i } else { i - 1 };
+            let rev = u32::from(i == 30);
+            fresh.push(
+                json!({"index": index, "serial": serial_in(FILE, i), "kind": "text",
+                              "lines": 2, "chars": 40, "rev": rev}),
+            );
+        }
+        let out = deliver_outline(&mut s, outline_delivery(true, fresh, vec![], Some(58), 78));
+        let r = ribbon(&s);
+        assert_eq!(r.len(), 59);
+        // Held by serial: only the changed rev is asked for again.
+        assert_eq!(content_asks(&out), [(29, 29, false)]);
+        let held = held_indexes(&s);
+        assert_eq!(held.len(), 49, "the 49 still in the outline, 20's dropped");
+        assert!(held.contains(&19) && held.contains(&57));
+        // The reset's epoch is the one held now.
+        s.disconnected(1000);
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(id, json!({"server": "handlr"})));
+        let params = &requests(&out, "session.subscribe")[0].params;
+        assert_eq!(params["epoch"], 78);
+        assert_eq!(params["from"], 59);
+        assert_eq!(params["after"], json!(serial_in(FILE, 59)));
+    }
+
+    #[test]
+    fn a_new_outline_while_scrolled_back_is_held_aside_until_applied() {
+        let (mut s, out) = outline_of(30);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        s.input(window((5, 10), (0, 29), (0, 29), true));
+        let before = ribbon(&s);
+        // A reset: the old ribbon stays, and the event says one waits.
+        let out = deliver_outline(
+            &mut s,
+            outline_delivery(true, slots(0..40), vec![content(39)], Some(39), 78),
+        );
+        assert!(new_content(&s));
+        assert_eq!(ribbon(&s), before);
+        assert!(
+            content_asks(&out).is_empty(),
+            "nothing fetched for the old ribbon"
+        );
+        // A later delivery goes to the one held aside too.
+        deliver_outline(
+            &mut s,
+            outline_delivery(false, vec![slot_in(FILE, 40, 0)], vec![], Some(40), 78),
+        );
+        assert_eq!(ribbon(&s), before);
+        // The jump line's tap: the new one, its contents merged.
+        let out = s.input(Input::ApplyOutline);
+        assert!(!new_content(&s));
+        let r = ribbon(&s);
+        assert_eq!(r.len(), 41);
+        assert!(held_indexes(&s).contains(&39) && held_indexes(&s).contains(&5));
+        // Merged by serial at unchanged revs: nothing is fetched again.
+        assert!(content_asks(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_new_outline_while_following_is_shown_at_once() {
+        let (mut s, _) = outline_of(30);
+        s.input(window((20, 29), (0, 29), (0, 29), false));
+        deliver_outline(
+            &mut s,
+            outline_delivery(true, slots(0..35), vec![], Some(34), 78),
+        );
+        assert!(!new_content(&s));
+        assert_eq!(ribbon(&s).len(), 35);
+        // Held aside while back, applied by returning to the bottom.
+        s.input(window((5, 10), (0, 29), (0, 34), true));
+        deliver_outline(
+            &mut s,
+            outline_delivery(true, slots(0..36), vec![], Some(35), 79),
+        );
+        assert!(new_content(&s));
+        s.input(window((26, 35), (0, 35), (0, 35), false));
+        assert!(!new_content(&s));
+        assert_eq!(ribbon(&s).len(), 36);
+    }
+
+    #[test]
+    fn a_new_session_file_while_scrolled_back_waits_and_replaces_everything() {
+        let (mut s, out) = outline_of(30);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        s.input(window((5, 10), (0, 29), (0, 29), true));
+        let before = ribbon(&s);
+        let other = FILE + 1;
+        let fresh: Vec<Value> = (0..3).map(|i| slot_in(other, i, 0)).collect();
+        let inline: Vec<Value> = (0..3).map(|i| content_in(other, i, "new")).collect();
+        deliver_outline(&mut s, outline_delivery(true, fresh, inline, Some(2), 78));
+        assert!(new_content(&s));
+        assert_eq!(ribbon(&s), before, "the old session stays until the tap");
+        assert_eq!(summaries(&s)[0], "s0");
+        s.input(Input::ApplyOutline);
+        assert_eq!(ribbon(&s), [(0, true), (1, true), (2, true)]);
+        assert_eq!(summaries(&s), ["new", "new", "new"]);
     }
 }
