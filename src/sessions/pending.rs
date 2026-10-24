@@ -52,7 +52,14 @@ pub fn pending_question(
     if after.iter().any(Item::is_user_said) {
         return None;
     }
-    let paragraph = final_paragraph(&items[last].text)?;
+    question_in(&items[last])
+}
+
+/// The question a reply asks, whether or not it waits: its final
+/// paragraph when that asks, redacted, cut and marked about a plan. The
+/// sections' resolved Question cards come from it (plan 20261023_03, A3).
+pub fn question_in(reply: &Item) -> Option<PendingQuestion> {
+    let paragraph = final_paragraph(&reply.text)?;
     if !asks(paragraph) {
         return None;
     }
@@ -60,7 +67,7 @@ pub fn pending_question(
     let (about_plan, plan) = super::links::plan_question(&redacted);
     Some(PendingQuestion {
         text: cut(&redacted, PENDING_QUESTION_MAX),
-        ts: items[last].ts.clone(),
+        ts: reply.ts.clone(),
         about_plan,
         plan,
         links: Vec::new(),

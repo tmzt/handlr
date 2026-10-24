@@ -14,9 +14,12 @@
 pub mod claude;
 pub mod codex;
 pub mod context;
+pub mod hub;
+pub mod journal;
 pub mod links;
 pub mod pending;
 pub mod redact;
+pub mod sections;
 pub mod turn;
 
 use std::collections::HashMap;
@@ -291,6 +294,9 @@ pub struct SessionRead {
 pub struct Sessions {
     pub claude: claude::ClaudeCode,
     pub codex: codex::Codex,
+    /// Where the approval journals are kept (plan 20261023_03, A4):
+    /// `.local/state/handlr/sessions` under the home.
+    pub state: PathBuf,
 }
 
 impl Default for Sessions {
@@ -307,11 +313,17 @@ impl Sessions {
     }
 
     /// The readers for the files under `home` (`.claude/projects`,
-    /// `.codex/sessions`).
+    /// `.codex/sessions`), with the approval journals in
+    /// `.local/state/handlr/sessions` under it.
     pub fn with_home(home: &Path) -> Self {
         Sessions {
             claude: claude::ClaudeCode::new(home.join(".claude").join("projects")),
             codex: codex::Codex::new(home.join(".codex").join("sessions")),
+            state: home
+                .join(".local")
+                .join("state")
+                .join("handlr")
+                .join("sessions"),
         }
     }
 
