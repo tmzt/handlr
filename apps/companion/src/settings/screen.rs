@@ -692,6 +692,8 @@ impl SettingsScreen {
                                 // Not yet exempt: *Enable* asks the system.
                                 link.action = (!b.ignoring_optimizations)
                                     .then(|| copy::BATTERY_ENABLE.text.to_string());
+                                // Exempt: nothing on the right.
+                                link.chevron = false;
                                 // Taller when its status wraps, beside the button.
                                 link.rect.h = link.height(row_h);
                                 y += link.rect.h;

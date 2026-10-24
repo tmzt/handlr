@@ -19,9 +19,6 @@ use crate::ui::TEXT;
 /// The action button's fill: a quiet raised grey, as the settings buttons.
 const BUTTON_BG: [f32; 4] = [0.24, 0.25, 0.31, 1.0];
 
-/// The "›".
-const CHEVRON: &str = "\u{203A}";
-
 /// The action button's part: the system's approval, not the page.
 /// (`Custom` parts are a Markdown note's links.)
 pub const ACTION_PART: ControlPart = ControlPart::Value;
@@ -41,6 +38,9 @@ pub struct LinkRow {
     /// A small button on the right, in place of the "›", for the system's
     /// approval (*Enable*).
     pub action: Option<String>,
+    /// The "›" on the right, when there is no action button. Off for a row
+    /// whose setting is already granted, which shows nothing there.
+    pub chevron: bool,
 }
 
 impl LinkRow {
@@ -53,6 +53,7 @@ impl LinkRow {
             info: false,
             label_w: 0.0,
             action: None,
+            chevron: true,
         }
     }
 
@@ -186,18 +187,17 @@ impl DrawControl for LinkRow {
             );
             return;
         }
-        let chevron_px = 1.4 * px;
-        let w = ctx.text_advance(CHEVRON, chevron_px);
-        ctx.draw_text(
-            list,
-            CHEVRON,
-            [
-                self.rect.x + self.rect.w - PAD * s - w,
-                label_y(self.rect, chevron_px),
-            ],
-            chevron_px,
-            DIM,
-        );
+        if !self.chevron {
+            return;
+        }
+        // Drawn as two strokes: the face has no "›", which showed as an
+        // empty box.
+        let h = 0.36 * px;
+        let x1 = self.rect.x + self.rect.w - PAD * s;
+        let cy = self.rect.y + self.rect.h * 0.5;
+        let t = 1.6 * s;
+        list.push_line([x1 - h * 0.6, cy - h], [x1, cy], t, DIM);
+        list.push_line([x1, cy], [x1 - h * 0.6, cy + h], t, DIM);
     }
 }
 
