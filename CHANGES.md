@@ -1688,3 +1688,51 @@ Tests:
 - a refusal that won't be asked again opens the settings page;
 - the toggle follows the real permission;
 - nothing is asked at start.
+
+## 2026-10-24 12:38 EDT — plan 20261024_02, decision 3: Background and Notifications as two sections, with ⓘ modals for long explanations
+
+Agreed with the owner (2026-10-24): "the two are separate concerns,
+background and notify when in background"; "add i tooltip/modals for long
+explanations"; then "yes". This replaces the entry "a Notifications
+section; notifications asked for only from it" (2026-10-24 12:5x EDT, the
+entry just before this one).
+- **Background** (between Display and Battery):
+  - ***Stay connected in the background*** (a toggle, on): on, the app starts
+    the foreground service when it connects, so the link survives in the
+    background. Off, the link sleeps when the app is left, as now. It asks
+    for no permission.
+  - Its ⓘ: "Android only lets handlr stay connected in the background while
+    it shows an ongoing notification. Without notification permission, that
+    notification appears only in the running apps list."
+- **Notifications** (after Background):
+  - ***Alert when an agent needs you*** (a toggle, off): on, while the app is
+    in the background, a question, an approval or a finished turn posts a
+    notification, and tapping it opens that agent.
+    - Turning it on is the only place `POST_NOTIFICATIONS` is asked for.
+      When Android won't ask again, it opens the app's notification
+      settings.
+    - The toggle shows the real permission.
+    - With *Stay connected in the background* off, the row is dim, with the
+      line "Needs Stay connected in the background".
+  - Its ⓘ: "handlr can tell you when an agent finishes or needs an answer
+    while you're in another app."
+- **ⓘ modals:**
+  - **The button:** a row with a long explanation has a small ⓘ after its
+    label, a 44 pt target in the dim colour.
+  - **The modal:** a tap opens libcontrols' `ModalDialog` with the row's name
+    as its title, the explanation, and *OK*. It closes at once, as the
+    confirm modals do. A tap outside, or Back, also closes it.
+  - **Which rows:** the two above, *Battery optimization*, *Samsung battery
+    (app sleeping)* and *General agent*, each with a sentence or two.
+  - **Inline:** short state lines stay under their rows ("Exempt", "Off:
+    notification shows only in running apps").
+- **Never asked otherwise,** and until libmorph 0.4.0 is wired in both
+  sections say they need an app update when used.
+
+Tests:
+- both sections' place and defaults;
+- the alerts row is dim with the background off;
+- turning alerts on asks once;
+- a refusal that won't be asked again opens the settings;
+- each ⓘ opens its modal, which closes at once;
+- nothing is asked at start.
