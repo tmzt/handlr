@@ -17,9 +17,9 @@ log = "0.4"
 # libmobile use.
 cpal = { version = "0.18.2", optional = true }
 # `morph`: libmorph's Sink and Source types, at the companion app's
-# revision (libmorph 0.3.2). The adapters are in src/morph.rs, so
+# revision (libmorph 0.4.1). The adapters are in src/morph.rs, so
 # libvoicexn's own `morph` feature, and its older libmorph, stay off.
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862", default-features = false, optional = true }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "2ffc94c30859e3f753b2d9ebf2e6e7f79ff7bc36", default-features = false, optional = true }
 
 [features]
 default = []
