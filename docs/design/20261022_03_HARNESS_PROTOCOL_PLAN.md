@@ -1037,3 +1037,31 @@ speed is zero at both ends and highest midway; an end that grows during
 it is reached at 2 s; a touch stops it; it follows at the end; and with a
 new outline held aside, the newer sections go below the old end, the
 scroll reaches them, and the merge at the bottom does not move the view.
+
+## Amendment — 2026-10-24 01:07 EDT: the jump line says what is at the end (living section L3)
+
+The owner (2026-10-24): "the new should reflect what is, such as done or a
+question"; then "yes". This replaces the jump line's text in item 2 of
+the 00:05 EDT amendment (`-- <newest message> --`, `-- N new: … --`) and
+item 6 of the previous amendment (`-- new content --`). The tap, the 2 s
+scroll and new content going below all stand.
+
+While scrolled back, the line shows the state at the session's end. The
+first that holds wins:
+1. a question is waiting: `-- question: <its first line> --`, in the
+   question card's accent;
+2. approval is needed: `-- approval: <the command> --`, in the approval
+   card's accent;
+3. something broke: `-- broke: <the error's first line> --`, in red;
+4. the turn is finished: `-- done: <the reply's first line> --`, in green;
+5. the agent is working: `-- working: <the newest section's first line> --`,
+   dim;
+6. nothing has arrived since the view left the bottom: `-- jump to end --`,
+   dim.
+
+The states come from the live cards and herdr's status, as the pinned
+card and the overview's turn do. Each line is cut to fit with "…". A new
+outline held aside has no text of its own: the state line covers it.
+
+Tests: each state's text and colour, the order when several hold, a long
+line cut with "…", and `-- jump to end --` when nothing is new.
