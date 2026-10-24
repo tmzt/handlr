@@ -1432,3 +1432,40 @@ amendment "the jump line says what is at the end"):
 - `-- N new --` only as the fallback, when none of those holds.
 
 With nothing new, it reads `-- up to date --`.
+
+## Amendment — 2026-10-24 12:27 EDT: section labels at the Finished cards, on the scrollbar's scale (living section L3)
+
+The owner (2026-10-24): "if it makes sense I'd like to plan section labels
+while scrolling with scrollbar based on the finished messages, which
+become bookends"; "they would have the same basic gray variations as the
+scroll and land in place of the finish messages on the same scale as the
+scrollbar, like a label attached to each place but centered on the main
+screen, alpha transparent overlay"; then "yes".
+1. **Bookends.** Each Finished card closes a section of the session.
+2. **When:** the labels show while the scrollbar is in use (a thumb or band
+   drag), and fade with the thumb.
+3. **Where:**
+   - vertically, each label sits at its Finished card's place on the
+     scrollbar's scale: a bookend 40% through the calculated length is 40%
+     down the track;
+   - horizontally, it is centred on the main screen.
+4. **Look:** an alpha-transparent overlay in the scrollbar's grays.
+   - **Each label:** a rounded pill, the text colour at about 10%, with its
+     text at about 60%.
+   - **The label nearest the thumb:** about 20% and 90%.
+
+   The scrollback shows beneath.
+5. **Text:** the bookend's short summary (`CardBody`'s summary when it has
+   one) and its time, as "Landed the settings screen · 12:41", cut to one
+   line. Before a summary arrives: "Done · 12:41".
+6. **Crowding:** labels that would overlap give way to the one nearest the
+   thumb, and show again as the thumb moves.
+7. **Data:** the daemon marks Finished-card slots in the outline, so labels
+   are placed before contents load. Their text comes with the cards.
+
+Tests:
+- labels show during a thumb drag and fade with it;
+- a bookend's label sits at its share of the track, centred;
+- the nearest is brighter;
+- overlapping labels give way to the nearest;
+- a label without a summary reads "Done · time".
