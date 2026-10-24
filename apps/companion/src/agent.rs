@@ -5,7 +5,9 @@
 //! One flow per agent: its transcript laid out at the phone's width in a
 //! terminal style (a dark background, bright colours, the user's turns on a
 //! grey band, replies plain, tool calls as dim one-liners, diff lines green
-//! and red, errors red), with the priority cards at their places in it.
+//! and red, errors red, and context such as a finished task or a peer's
+//! message as a dim line after an amber dot), with the priority cards at
+//! their places in it.
 //! Live cards are raised panels with an accent edge, larger text and their
 //! actions; resolved ones are one dim line.
 //!
@@ -41,9 +43,11 @@ use crate::ui::{Layout, Line};
 mod dictation_card;
 mod input_box;
 pub mod link_spans;
+mod notice_line;
 use dictation_card::DictationCard;
 use input_box::InputBox;
 use link_spans::LinkSpan;
+use notice_line::NoticeLine;
 
 pub const BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
 pub const FG: [f32; 4] = [0.94, 0.95, 0.96, 1.0];
@@ -537,6 +541,17 @@ pub fn lay_out_flow(
             next_card += 1;
         }
         let Some(e) = entries.get(i) else { break };
+        if let Some(origin) = e.origin.as_deref() {
+            // Context: one dim line or two, after an amber dot.
+            if NoticeLine::repeats(e, i.checked_sub(1).and_then(|p| entries.get(p))) {
+                flow.entry_y.push(y);
+                continue;
+            }
+            y += 4.0 * s;
+            flow.entry_y.push(y);
+            y += NoticeLine::lay_out(e, origin, pad, y, cols(TOOL_PT), s, &targets, &mut flow);
+            continue;
+        }
         let (lines, band) = entry_lines(e, cols);
         let gap = match (e.role, e.kind) {
             (_, EntryKind::Text) => 10.0 * s,
@@ -1571,6 +1586,7 @@ mod tests {
             tool: None,
             summary: summary.to_string(),
             links: Vec::new(),
+            origin: None,
         }
     }
 
@@ -1745,6 +1761,86 @@ mod tests {
         for l in wrap_hard(&"word ".repeat(50), 13) {
             assert!(l.chars().count() <= 13, "{l}");
         }
+    }
+
+    #[test]
+    fn a_context_entry_is_a_dim_line_after_an_amber_dot_and_makes_no_card() {
+        let notice = |origin: &str, text: &str| Entry {
+            origin: Some(origin.to_string()),
+            ..entry(Role::User, EntryKind::Text, text)
+        };
+        let entries = vec![
+            entry(Role::User, EntryKind::Text, "please fix it"),
+            entry(Role::Assistant, EntryKind::Text, "Fixed."),
+            notice("task", "Build finished"),
+            notice("peer:docs-writer", "Rebased on main.\nNothing else."),
+            notice("agent:a0123", &"A long report that goes on. ".repeat(40)),
+            notice("recap", "You asked for a fix; it is done."),
+            notice("compact", "Conversation compacted"),
+            notice("compact", "Conversation compacted (ctrl+o for history)"),
+        ];
+        let flow = lay_out_flow(&entries, &[], None, 1080.0, 2.0);
+        assert_eq!(flow.entry_y.len(), entries.len());
+        // Only the user's own words are on the band.
+        let bands = flow.fills.iter().filter(|f| f.color == BAND).count();
+        assert_eq!(bands, 1);
+        let row = |prefix: &str| -> Vec<&Row> {
+            flow.rows
+                .iter()
+                .filter(|r| r.text.starts_with(prefix))
+                .collect()
+        };
+        for text in [
+            "task finished: Build finished",
+            "docs-writer: Rebased on main.",
+            "\u{203B} You asked for a fix; it is done.",
+        ] {
+            let rows = row(text);
+            assert_eq!(rows.len(), 1, "{text}: {:?}", flow.rows);
+            assert_eq!(rows[0].color, DIM);
+            assert_eq!(rows[0].px, TOOL_PT * 2.0);
+            // The dot before it, amber, on the same line.
+            let dot = flow
+                .rows
+                .iter()
+                .find(|r| r.text == notice_line::DOT && r.y == rows[0].y)
+                .expect("a dot");
+            assert_eq!(dot.color, input_box::AMBER);
+            assert!(dot.x < rows[0].x);
+        }
+        assert!(row("Nothing else").is_empty(), "first line only");
+        // Two lines at most, the second cut.
+        let report: Vec<&Row> = flow
+            .rows
+            .iter()
+            .filter(|r| r.text.contains("long report") || r.text.contains("goes on"))
+            .collect();
+        assert_eq!(report.len(), 2);
+        assert!(report[0].text.starts_with("subagent: "));
+        assert!(report[1].text.ends_with('\u{2026}'));
+        // A compaction is shown once.
+        assert_eq!(row("\u{203B} conversation compacted").len(), 1);
+        // The client makes no card of them.
+        let facts = handlr_companion::view::Facts {
+            name: "Claude",
+            status: "idle",
+            entries: &entries[2..],
+            pending_question: None,
+            confirms: &[],
+            turn: None,
+        };
+        assert!(handlr_companion::view::live_cards(&facts).is_empty());
+        let facts = handlr_companion::view::Facts {
+            entries: &entries,
+            ..facts
+        };
+        let cards = handlr_companion::view::live_cards(&facts);
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].anchor,
+            handlr_companion::view::Anchor::Entry(entries[1].clone()),
+            "finished at the reply, not at the context after it"
+        );
     }
 
     #[test]
@@ -2303,6 +2399,8 @@ mod tests {
             ("skip", SKIP_GLYPH),
             ("prompt", "\u{203A}"),
             ("cancel", CANCEL_GLYPH),
+            ("notice dot", notice_line::DOT),
+            ("notice mark", notice_line::MARK),
         ] {
             let line = shaper.line(glyph, GlyphStyle::Regular);
             let found = line
