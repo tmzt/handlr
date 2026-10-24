@@ -30,11 +30,12 @@ use std::thread;
 use std::time::Duration;
 
 pub use client::{
-    DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Settings, Speaker, Suggestion,
+    CACHED_VIEWS, DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Pressure, Settings,
+    Speaker, Suggestion,
 };
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
-pub use view::{AgentCard, CardKind, Shows, ViewSection};
+pub use view::{AgentCard, Bookend, CardKind, Shows, ViewSection};
 
 /// How the client runs.
 #[derive(Debug, Clone, PartialEq, Eq)]

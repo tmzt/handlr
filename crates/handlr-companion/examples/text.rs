@@ -138,6 +138,8 @@ fn print_event(event: Event) {
         Event::StopSpeaking => println!("* stop speaking"),
         Event::Arm => println!("* listening"),
         Event::Ding => println!("* ding: an agent is done"),
+        Event::Refreshed { new } => println!("* refreshed: {new} new"),
+        Event::Cache { bytes } => println!("* cache: {bytes} bytes"),
         Event::Unpaired { daemon } => {
             println!("* unpaired{}", if daemon { "" } else { " here only" })
         }
@@ -191,6 +193,7 @@ fn print_event(event: Event) {
             new_content,
             held_end: _,
             held_newer: _,
+            bookends: _,
         } => {
             if new_content {
                 println!("* new content");

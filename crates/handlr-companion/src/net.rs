@@ -231,7 +231,12 @@ impl Net {
                             let tick = self.tick();
                             let mut outputs = self.state.input(tick);
                             outputs.extend(self.state.input(input));
-                            self.emit_offline(outputs);
+                            if self.emit_offline(outputs) {
+                                // A refresh: connect now, the backoff
+                                // started over.
+                                self.backoff.reset();
+                                break;
+                            }
                         }
                         None => return,
                     },
@@ -255,15 +260,19 @@ impl Net {
 
     /// Gives events while there is no connection, and forgets the pairing
     /// when told to. The state sends nothing while offline, so anything
-    /// else is only logged.
-    fn emit_offline(&mut self, outputs: Vec<Output>) {
+    /// else is only logged. Whether the state asked to connect now
+    /// ([`Output::Reconnect`]).
+    fn emit_offline(&mut self, outputs: Vec<Output>) -> bool {
+        let mut reconnect = false;
         for output in outputs {
             match output {
                 Output::Event(e) => self.emit(e),
                 Output::Forget { daemon } => self.forget(daemon),
+                Output::Reconnect => reconnect = true,
                 other => log::warn!("nothing to send it on: {other:?}"),
             }
         }
+        reconnect
     }
 
     /// Deletes the key and the server record, so the next connection is
@@ -571,6 +580,8 @@ impl Net {
                     self.forget(daemon);
                     return Some(End::Closed);
                 }
+                // Already connected.
+                Output::Reconnect => {}
             }
         }
         None

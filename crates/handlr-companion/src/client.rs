@@ -108,7 +108,48 @@ pub enum Input {
     /// is asked to forget it (`link.unpair`), then the pairing is forgotten
     /// here, answered or not. Offline, it is forgotten here at once.
     Unpair,
+    /// The agent view was pulled past its end and let go (plan 20261022_03,
+    /// the L3 amendment of 2026-10-24 12:22 EDT): a timed ping
+    /// (reconnecting at once when offline), a resubscribe that resumes
+    /// where the view is, and a fetch of the newest screen's contents,
+    /// whatever their revs. [`Event::Refreshed`] says when it is done.
+    Refresh,
+    /// A summary card's play button: say its spoken text again (the
+    /// 12:03 EDT amendment, item 3). Nothing with sound off.
+    Replay(String),
+    /// The phone is short of memory (the 12:21 EDT amendment): cached
+    /// closed views go, least recently used first, and the open view keeps
+    /// fewer contents, by the grade. Until libmorph 0.4.0 delivers the
+    /// phone's events, nothing sends it but the tests.
+    Memory(Pressure),
+    /// *Clear cache* (plan 20261024_02, the 12:12 EDT amendment): the
+    /// closed views kept in memory are dropped.
+    ClearCache,
 }
+
+/// A grade of memory pressure (plan 20261022_03, the L3 amendment of
+/// 2026-10-24 12:21 EDT), in increasing order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Pressure {
+    /// libmorph's `on_trim_memory` at `UI_HIDDEN`: closed views go but the
+    /// most recent; the open view keeps contents within 5 screens.
+    UiHidden,
+    /// `on_trim_memory` at `BACKGROUND`: every closed view goes; the open
+    /// view keeps contents within 1 screen.
+    Background,
+    /// `on_low_memory`: a full drop, so the app is not killed. Every
+    /// closed view goes; the open view keeps only what is on screen, and
+    /// its outline.
+    Low,
+}
+
+/// The closed agent views kept in memory, the most recently closed first
+/// kept (plan 20261022_03, the L3 amendment of 2026-10-24 12:15 EDT, item
+/// 1).
+pub const CACHED_VIEWS: usize = 3;
+
+/// How long a refresh may take before its result is given with what came.
+pub const REFRESH_WAIT: Duration = Duration::from_secs(5);
 
 /// The settings the client acts on (plan 20261024_02, decisions 3 and 4).
 /// Each is on by default.
@@ -445,6 +486,9 @@ pub enum Event {
         /// length (plan 20261022_03, the 11:09 EDT amendment, item 2).
         /// Empty when none is held aside, or once they are below the end.
         held_newer: Vec<crate::view::Slot>,
+        /// The Finished cards' slots, in index order, for the scrollbar's
+        /// section labels (the 12:27 EDT amendment).
+        bookends: Vec<crate::view::Bookend>,
     },
     /// An agent finished a turn: a new Finished card, on the overview's
     /// list or in the agent view (plan 20261024_02, decision 3). Play the
@@ -456,6 +500,16 @@ pub enum Event {
     /// lists it until it is removed from `auth.toml`.
     Unpaired {
         daemon: bool,
+    },
+    /// A refresh ([`Input::Refresh`]) is done: `new` sections came that
+    /// the view did not hold before it.
+    Refreshed {
+        new: usize,
+    },
+    /// The size of the closed views kept in memory, in bytes, whenever it
+    /// changes: *Clear cache (n MB)*.
+    Cache {
+        bytes: u64,
     },
     Error(String),
 }
@@ -480,6 +534,8 @@ pub enum Output {
     /// close the connection, and give [`Event::Unpaired`] with `daemon`
     /// (plan 20261024_02, decision 3).
     Forget { daemon: bool },
+    /// Offline: connect again now, not after the backoff (a refresh).
+    Reconnect,
 }
 
 /// Notices held at most, the oldest dropped beyond it (decision 4).
@@ -706,6 +762,8 @@ enum Sent {
         generation: u64,
         asked: Vec<(u64, common::Serial, u32)>,
         slots_only: bool,
+        /// A refresh's fetch of the newest screen.
+        refresh: bool,
     },
 }
 
@@ -746,6 +804,10 @@ struct Reading {
     text: String,
     /// When the summary was asked for.
     asked_at: Duration,
+    /// The reply's section, whose line a Finished card with the spoken
+    /// text shares (CHANGES.md, 2026-10-24 12:06 EDT: read aloud uses
+    /// `CardBody.spoken`).
+    section: Option<common::Serial>,
     /// What to say, once known.
     ready: Option<String>,
 }
@@ -922,6 +984,25 @@ pub struct State {
     /// Panes whose finished turn the agent view has dinged: the list's
     /// next stopped turn for them is the same one, and is not dinged again.
     dinged: HashSet<String>,
+    /// The closed views kept in memory, the least recently used first, at
+    /// most [`CACHED_VIEWS`] (plan 20261022_03, the L3 amendments of
+    /// 2026-10-24 12:12 and 12:15 EDT).
+    closed: VecDeque<AgentView>,
+    /// Their size as last given ([`Event::Cache`]).
+    cache_shown: u64,
+    /// A refresh running ([`Input::Refresh`]).
+    refresh: Option<Refresh>,
+}
+
+/// A refresh running (plan 20261022_03, the L3 amendment of 2026-10-24
+/// 12:22 EDT): the serials the view held when it began, and which of its
+/// resubscribe and its fetch have answered.
+#[derive(Debug)]
+struct Refresh {
+    before: HashSet<u64>,
+    subscribed: bool,
+    fetched: bool,
+    since: Duration,
 }
 
 /// The open agent view (plan 20261022_03, step 4), fed by its session
@@ -993,6 +1074,12 @@ struct AgentView {
     /// ding: a Finished card shown after that is new (plan 20261024_02).
     /// The one shown on opening is not.
     worked: bool,
+    /// Reopened from the cache: the next delivery is the backfill of what
+    /// happened while it was closed, and none of its replies is read.
+    backfill: bool,
+    /// The memory pressure the view is under, until the app is back in
+    /// front: it keeps and fetches contents only that close to the window.
+    pressure: Option<Pressure>,
 }
 
 impl AgentView {
@@ -1026,6 +1113,8 @@ impl AgentView {
             generation: 0,
             finished: None,
             worked: false,
+            backfill: false,
+            pressure: None,
         }
     }
 
@@ -1082,15 +1171,26 @@ impl AgentView {
     /// Forgets contents outside the window's `keep` range, except the
     /// newest `LIVE_INLINE` indexes' and live cards' (the jump line and
     /// the pin need them). The outline is always kept.
+    ///
+    /// Under memory pressure (the 12:21 EDT amendment) the range is the
+    /// grade's, and the newest are kept only within it.
     fn forget(&mut self) {
         let Some(w) = self.window.filter(|_| self.outline_mode) else {
             return;
         };
-        let (lo, hi) = w.keep;
-        let newest = self
-            .outline
-            .last()
-            .map_or(0, |l| l.saturating_sub(common::LIVE_INLINE - 1));
+        let (lo, hi) = match self.pressure {
+            None => w.keep,
+            Some(Pressure::UiHidden) => w.near,
+            Some(Pressure::Background) => w.close,
+            Some(Pressure::Low) => w.shown,
+        };
+        let newest = match self.pressure {
+            Some(_) => u64::MAX,
+            None => self
+                .outline
+                .last()
+                .map_or(0, |l| l.saturating_sub(common::LIVE_INLINE - 1)),
+        };
         let outline = &self.outline;
         let before = self.sections.len();
         self.sections.retain(|s| {
@@ -1105,6 +1205,68 @@ impl AgentView {
         if forgotten > 0 {
             log::debug!("view: {forgotten} far section(s) forgotten");
         }
+    }
+
+    /// The indexes whose contents are fetched around the window `w`: those
+    /// within `KEEP_SCREENS`, or fewer under memory pressure.
+    fn fetch_span(&self, w: ViewWindow) -> (u64, u64) {
+        match self.pressure {
+            None | Some(Pressure::UiHidden) => w.near,
+            Some(Pressure::Background) => w.close,
+            Some(Pressure::Low) => w.shown,
+        }
+    }
+
+    /// Closed, to be kept in the cache: it has no subscription, nothing in
+    /// flight and no window, and an outline held aside is shown, as it
+    /// reopens at the bottom (the 12:12 EDT amendment, items 1 and 3).
+    fn park(&mut self) {
+        self.subscription = None;
+        self.subscribing = false;
+        self.history = false;
+        self.in_flight = 0;
+        self.asking.clear();
+        self.gap_asked = false;
+        self.window = None;
+        self.shown = None;
+        self.typed = None;
+        self.replied_to = None;
+        self.pressure = None;
+        if self.apply_incoming() {
+            self.reflatten();
+        }
+        self.see_all();
+    }
+
+    /// Roughly how many bytes the view holds: its sections, twice (the map
+    /// and the flattened entries), and its outline.
+    fn bytes(&self) -> u64 {
+        fn entry(e: &common::Entry) -> usize {
+            64 + e.ts.len()
+                + e.summary.len()
+                + e.text.as_ref().map_or(0, String::len)
+                + e.tool.as_ref().map_or(0, String::len)
+                + e.links
+                    .iter()
+                    .map(|l| l.text.len() + l.url.len())
+                    .sum::<usize>()
+        }
+        let sections: usize = self
+            .sections
+            .iter()
+            .map(|s| {
+                let card = s.card.as_ref().map_or(0, |c| {
+                    c.title.len()
+                        + c.text.len()
+                        + c.points.iter().map(String::len).sum::<usize>()
+                        + c.spoken.as_ref().map_or(0, String::len)
+                });
+                64 + card + s.entries.iter().map(entry).sum::<usize>()
+            })
+            .sum();
+        let flattened: usize = self.entries.iter().map(entry).sum();
+        let outline = self.outline.len() * (std::mem::size_of::<crate::view::Slot>() + 32);
+        (sections + flattened + outline) as u64
     }
 
     /// The first hole of the outline being built moved: note when.
@@ -1176,6 +1338,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 new_content,
                 held_end,
                 held_newer,
+                bookends,
             },
             Event::AgentView {
                 name: name_b,
@@ -1191,6 +1354,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 new_content: new_content_b,
                 held_end: held_end_b,
                 held_newer: held_newer_b,
+                bookends: bookends_b,
             },
         ) => {
             name == name_b
@@ -1204,6 +1368,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 && new_content == new_content_b
                 && held_end == held_end_b
                 && held_newer == held_newer_b
+                && bookends == bookends_b
                 && sections == sections_b
         }
         _ => a == b,
@@ -1256,6 +1421,9 @@ impl State {
             settings: Settings::default(),
             unpairing: None,
             dinged: HashSet::new(),
+            closed: VecDeque::new(),
+            cache_shown: 0,
+            refresh: None,
         }
     }
 
@@ -1438,9 +1606,8 @@ impl State {
             Input::Scratch => self.scratch(&mut out),
             Input::OpenAgent(pane_id) => self.open_agent(pane_id, &mut out),
             Input::CloseAgent => {
-                self.unsubscribe(&mut out);
+                self.close_view(&mut out);
                 // Back on the overview: its list is refreshed.
-                self.view = None;
                 self.list_wanted = true;
                 self.list_if_due(&mut out);
             }
@@ -1487,8 +1654,223 @@ impl State {
             }
             Input::Settings(settings) => self.set_settings(settings, &mut out),
             Input::Unpair => self.unpair(&mut out),
+            Input::Refresh => self.refresh(&mut out),
+            Input::Replay(text) => {
+                if self.settings.sound && !text.trim().is_empty() {
+                    if self.speaking {
+                        out.push(event(Event::StopSpeaking));
+                    }
+                    out.push(event(Event::Say(text)));
+                }
+            }
+            Input::Memory(pressure) => self.memory(pressure, &mut out),
+            Input::ClearCache => {
+                log::info!("cache: {} closed view(s) cleared", self.closed.len());
+                self.closed.clear();
+                self.show_cache(&mut out);
+            }
         }
         self.gate(out)
+    }
+
+    /// Closes the open view, if any: its subscription ends, and it is kept
+    /// in the cache of closed views, the least recently used going beyond
+    /// [`CACHED_VIEWS`] (plan 20261022_03, the L3 amendment of 2026-10-24
+    /// 12:15 EDT, item 1).
+    fn close_view(&mut self, out: &mut Vec<Output>) {
+        self.unsubscribe(out);
+        self.refresh = None;
+        let Some(mut v) = self.view.take() else {
+            return;
+        };
+        v.park();
+        self.closed.retain(|c| c.pane_id != v.pane_id);
+        self.closed.push_back(v);
+        while self.closed.len() > CACHED_VIEWS {
+            // TODO(plan 20261023_09): page the least recent out to the
+            // phone's redb store (its decision 6) instead of dropping it.
+            if let Some(gone) = self.closed.pop_front() {
+                log::info!(
+                    "cache: the least recent closed view dropped ({} bytes)",
+                    gone.bytes()
+                );
+            }
+        }
+        self.show_cache(out);
+    }
+
+    /// The closed views' size, when it changed since last given.
+    fn show_cache(&mut self, out: &mut Vec<Output>) {
+        let bytes = self.cache_bytes();
+        if self.cache_shown != bytes {
+            self.cache_shown = bytes;
+            out.push(event(Event::Cache { bytes }));
+        }
+    }
+
+    /// The closed views' size in memory, in bytes.
+    pub fn cache_bytes(&self) -> u64 {
+        self.closed.iter().map(AgentView::bytes).sum()
+    }
+
+    /// The panes of the closed views kept, the least recently used first.
+    pub fn cached_panes(&self) -> Vec<String> {
+        self.closed.iter().map(|v| v.pane_id.clone()).collect()
+    }
+
+    /// Memory pressure (plan 20261022_03, the L3 amendment of 2026-10-24
+    /// 12:21 EDT): the closed views go, the least recently used first,
+    /// keeping only the most recent at `UiHidden`; the open view keeps
+    /// contents only as close to its window as the grade says, until the
+    /// app is back in front.
+    fn memory(&mut self, pressure: Pressure, out: &mut Vec<Output>) {
+        let keep = usize::from(pressure == Pressure::UiHidden);
+        log::info!(
+            "memory: {pressure:?}; {} closed view(s), {keep} kept",
+            self.closed.len()
+        );
+        while self.closed.len() > keep {
+            // TODO(plan 20261023_09): page out to the phone's redb store
+            // instead of dropping it, so reopening reads it back at once.
+            self.closed.pop_front();
+        }
+        if let Some(v) = self.view.as_mut() {
+            if v.pressure.is_none_or(|p| p < pressure) {
+                v.pressure = Some(pressure);
+            }
+            v.forget();
+            v.reflatten();
+        }
+        self.show_cache(out);
+        self.show_view(out);
+    }
+
+    /// The serials the open view shows, packed.
+    fn view_serials(&self) -> HashSet<u64> {
+        match self.agent_view() {
+            Some(Event::AgentView { sections, .. }) => {
+                sections.iter().map(|v| v.serial.to_u64()).collect()
+            }
+            _ => HashSet::new(),
+        }
+    }
+
+    /// Pull to refresh (plan 20261022_03, the L3 amendment of 2026-10-24
+    /// 12:22 EDT, item 2): a ping timed at `PING_WAIT_RESUME`, or, offline,
+    /// a connection now; a resubscribe resuming where the view is; and,
+    /// once it answers, a fetch of the newest screen's contents.
+    fn refresh(&mut self, out: &mut Vec<Output>) {
+        if self.view.is_none() {
+            out.push(event(Event::Refreshed { new: 0 }));
+            return;
+        }
+        let before = self.view_serials();
+        self.refresh = Some(Refresh {
+            before,
+            subscribed: false,
+            fetched: false,
+            since: self.now,
+        });
+        if !self.online() {
+            log::info!("refresh: offline; connecting now");
+            out.push(Output::Reconnect);
+            return;
+        }
+        log::info!("refresh: a ping and a resubscribe");
+        let params = common::PingParams {
+            active: Some(!self.background),
+        };
+        out.push(self.request(methods::PING, params, Sent::Ping));
+        self.ping_sent = Some(self.now);
+        self.ping_wait = PING_WAIT_RESUME;
+        self.unsubscribe(out);
+        if let Some(v) = self.view.as_mut() {
+            // What was asked on the old subscription is not answered for
+            // the new one.
+            v.in_flight = 0;
+            v.asking.clear();
+            v.gap_asked = false;
+        }
+        self.subscribe(out);
+    }
+
+    /// The refresh's resubscribe answered: the newest screen's contents
+    /// are fetched, whatever their revs.
+    fn refresh_subscribed(&mut self, out: &mut Vec<Output>) {
+        if self.refresh.as_ref().is_none_or(|r| r.subscribed) {
+            return;
+        }
+        let fetching = self.refresh_fetch(out);
+        if let Some(r) = self.refresh.as_mut() {
+            r.subscribed = true;
+            r.fetched |= !fetching;
+        }
+        self.finish_refresh(out);
+    }
+
+    /// Asks for the contents of the newest screen, from the window's top
+    /// (the newest `DEFAULT_NEAR` without one) to the outline's end.
+    /// Whether it asked.
+    fn refresh_fetch(&mut self, out: &mut Vec<Output>) -> bool {
+        if !self.online() {
+            return false;
+        }
+        let Some(v) = self.view.as_mut() else {
+            return false;
+        };
+        let (Some(id), Some(last)) = (v.subscription.filter(|_| v.outline_mode), v.outline.last())
+        else {
+            return false;
+        };
+        let lo = v
+            .window
+            .map_or(last.saturating_sub(DEFAULT_NEAR - 1), |w| w.shown.0)
+            .max(last.saturating_sub(CONTENT_RANGE - 1));
+        let asked: Vec<(u64, common::Serial, u32)> = v
+            .outline
+            .range(lo, last)
+            .map(|s| (s.index, s.serial, s.rev))
+            .collect();
+        if asked.is_empty() {
+            return false;
+        }
+        v.asking.extend(asked.iter().map(|a| a.0));
+        v.in_flight += 1;
+        let params = common::SessionContentParams {
+            subscription_id: id,
+            from: Some(lo),
+            to: Some(last),
+            limit: common::SECTIONS_MAX,
+            slots_only: false,
+        };
+        let sent = Sent::Content {
+            subscription: id,
+            generation: v.generation,
+            asked,
+            slots_only: false,
+            refresh: true,
+        };
+        out.push(self.request(methods::SESSION_CONTENT, params, sent));
+        true
+    }
+
+    /// Gives the refresh's result once its resubscribe and fetch have
+    /// answered, or `REFRESH_WAIT` has passed.
+    fn finish_refresh(&mut self, out: &mut Vec<Output>) {
+        let Some(r) = &self.refresh else {
+            return;
+        };
+        let timed_out = self.now.saturating_sub(r.since) >= REFRESH_WAIT;
+        if !(timed_out || r.subscribed && r.fetched) {
+            return;
+        }
+        let before = self.refresh.take().map(|r| r.before).unwrap_or_default();
+        let new = self.view_serials().difference(&before).count();
+        log::info!(
+            "refresh: done, {new} new{}",
+            if timed_out { " (timed out)" } else { "" }
+        );
+        out.push(event(Event::Refreshed { new }));
     }
 
     /// The settings changed (plan 20261024_02, decisions 3 and 4).
@@ -1540,6 +1922,9 @@ impl State {
         if self.unpairing.is_some() {
             return;
         }
+        // Another daemon's sessions are not to be shown from the cache.
+        self.closed.clear();
+        self.show_cache(out);
         if self.online() {
             log::info!("unpairing: asking the daemon to forget this device");
             self.unpairing = Some(self.now);
@@ -1621,7 +2006,59 @@ impl State {
                         .collect()
                 })
                 .unwrap_or_default(),
+            bookends: self.bookends(v),
         })
+    }
+
+    /// The open view's bookends (plan 20261022_03, the L3 amendment of
+    /// 2026-10-24 12:27 EDT): the outline's Finished-card slots, or, from a
+    /// daemon without outlines, the Finished cards held; each with its
+    /// card's short summary and its reply's time on the phone's clock, as
+    /// far as they are held.
+    fn bookends(&self, v: &AgentView) -> Vec<crate::view::Bookend> {
+        let serials: Vec<common::Serial> = if v.outline_mode {
+            v.outline
+                .slots()
+                .filter(|s| s.bookend)
+                .map(|s| s.serial)
+                .collect()
+        } else {
+            v.sections
+                .iter()
+                .filter(|s| {
+                    s.card
+                        .as_ref()
+                        .is_some_and(|c| c.card == common::CardKind::Finished)
+                })
+                .map(|s| s.serial)
+                .collect()
+        };
+        let offset = self.local_time.utc_offset_minutes;
+        serials
+            .into_iter()
+            .map(|serial| {
+                let summary = v
+                    .sections
+                    .get(serial)
+                    .and_then(|s| s.card.as_ref())
+                    .and_then(|c| c.spoken.as_deref())
+                    .and_then(|t| t.lines().map(str::trim).find(|l| !l.is_empty()))
+                    .map(str::to_string);
+                // The reply the card closes shares its line.
+                let time = v
+                    .sections
+                    .on_line(serial)
+                    .filter(|s| s.card.is_none())
+                    .flat_map(|s| s.entries.iter())
+                    .rev()
+                    .find_map(|e| crate::view::clock_time(&e.ts, offset));
+                crate::view::Bookend {
+                    serial,
+                    summary,
+                    time,
+                }
+            })
+            .collect()
     }
 
     /// The shown name of the agent in `pane_id`, from `agents.list` or the
@@ -1653,15 +2090,31 @@ impl State {
         if self.view.as_ref().is_some_and(|v| v.pane_id == pane_id) {
             return self.show_view(out);
         }
-        // Another agent's view: its subscription ends.
-        self.unsubscribe(out);
+        // Another agent's view: its subscription ends, and it is cached.
+        self.close_view(out);
         let status = self
             .agents
             .iter()
             .find(|a| a.pane_id == pane_id)
             .map(|a| a.status.clone())
             .unwrap_or_default();
-        self.view = Some(AgentView::new(pane_id, status));
+        // A view closed lately reopens from the cache at once, and resumes
+        // with what came while it was closed (the 12:12 EDT amendment).
+        let view = match self.closed.iter().position(|c| c.pane_id == pane_id) {
+            Some(i) => {
+                let mut v = self.closed.remove(i).expect("a cached view");
+                log::info!(
+                    "view: reopened from the cache, {} section(s), {} slot(s)",
+                    v.sections.len(),
+                    v.outline.len()
+                );
+                v.backfill = true;
+                v
+            }
+            None => AgentView::new(pane_id, status),
+        };
+        self.view = Some(view);
+        self.show_cache(out);
         if self.online() {
             // Names and statuses, for the view's title and its target.
             self.ask_list(out);
@@ -1791,7 +2244,7 @@ impl State {
             return;
         };
         let (shown, near) = match v.window {
-            Some(w) => (w.shown, w.near),
+            Some(w) => (w.shown, v.fetch_span(w)),
             None => {
                 let near = (last.saturating_sub(DEFAULT_NEAR - 1), last);
                 (near, near)
@@ -1845,6 +2298,7 @@ impl State {
                 generation: v.generation,
                 asked,
                 slots_only: false,
+                refresh: false,
             };
             requests.push((params, sent));
         }
@@ -1897,6 +2351,7 @@ impl State {
             generation,
             asked: Vec::new(),
             slots_only: true,
+            refresh: false,
         };
         out.push(self.request(methods::SESSION_CONTENT, params, sent));
     }
@@ -1914,10 +2369,14 @@ impl State {
             generation,
             asked,
             slots_only,
+            refresh,
         } = sent
         else {
             return;
         };
+        if refresh && let Some(r) = self.refresh.as_mut() {
+            r.fetched = true;
+        }
         let now = self.now;
         let Some(v) = self
             .view
@@ -1988,6 +2447,7 @@ impl State {
         self.fetch_contents(out);
         self.fill_gaps(out);
         self.show_view(out);
+        self.finish_refresh(out);
     }
 
     /// With Follow on, an open view moves to herdr's focus when it names
@@ -2194,6 +2654,7 @@ impl State {
         self.show_dictation(out);
         self.list_if_due(out);
         self.fill_gaps(out);
+        self.finish_refresh(out);
         if !self.reading.is_empty() {
             self.read_in_order();
             self.flush_notices(out);
@@ -2710,6 +3171,11 @@ impl State {
                     }
                     out.push(event(Event::Error(format!("session.subscribe: {message}"))));
                     self.show_view(out);
+                    if let Some(r) = self.refresh.as_mut() {
+                        r.subscribed = true;
+                        r.fetched = true;
+                    }
+                    self.finish_refresh(out);
                 }
                 Sent::Unsubscribe => log::debug!("session.unsubscribe: {message}"),
                 Sent::History(id) => {
@@ -2882,6 +3348,7 @@ impl State {
                     v.subscribing = false;
                     v.subscription = Some(r.subscription_id);
                     self.delivered(r.delivery, out);
+                    self.refresh_subscribed(out);
                 }
                 Err(e) => {
                     if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
@@ -2959,6 +3426,13 @@ impl State {
         // The daemon holds the view's deliveries while the link sleeps and
         // sends the catch-up itself on waking.
         if !on {
+            // Back in front: memory pressure is over.
+            if let Some(v) = self.view.as_mut()
+                && v.pressure.take().is_some()
+            {
+                log::info!("memory: back in front; contents fetched as usual");
+                self.fetch_contents(out);
+            }
             self.list_wanted = true;
             self.listed_at = None;
             self.list_if_due(out);
@@ -3016,7 +3490,14 @@ impl State {
 
     /// Ask the daemon how to say a reply, and queue it to be read in its
     /// turn. Offline, it is read through `handlr_speech` here.
-    fn read_reply(&mut self, pane_id: &str, ts: String, text: String, out: &mut Vec<Output>) {
+    fn read_reply(
+        &mut self,
+        pane_id: &str,
+        section: common::Serial,
+        ts: String,
+        text: String,
+        out: &mut Vec<Output>,
+    ) {
         let serial = self.next_reading;
         self.next_reading += 1;
         let ready = if self.online() {
@@ -3035,7 +3516,27 @@ impl State {
             ts,
             text,
             asked_at: self.now,
+            section: Some(section),
             ready,
+        });
+        while self.reading.len() > NOTICE_CAP {
+            self.reading.pop_front();
+        }
+    }
+
+    /// Queues a reply to be read in its turn as its card's spoken text,
+    /// with nothing asked of the daemon.
+    fn queue_spoken(&mut self, section: common::Serial, ts: String, text: String, spoken: String) {
+        let serial = self.next_reading;
+        self.next_reading += 1;
+        log::info!("read aloud: the card's spoken text, not asked again");
+        self.reading.push_back(Reading {
+            serial,
+            ts,
+            text,
+            asked_at: self.now,
+            section: Some(section),
+            ready: Some(spoken),
         });
         while self.reading.len() > NOTICE_CAP {
             self.reading.pop_front();
@@ -3097,7 +3598,7 @@ impl State {
         let Some(v) = self.view.as_mut() else {
             return;
         };
-        let first = !v.answered;
+        let first = !v.answered || std::mem::take(&mut v.backfill);
         v.answered = true;
         if let Some(status) = d.status.take() {
             v.status = status;
@@ -3157,17 +3658,32 @@ impl State {
             }
         }
         // Replies not seen before, read aloud in order, each as the daemon
-        // says (plan 20261023_05); the first backfill's are not.
+        // says (plan 20261023_05); the first backfill's are not. A reply
+        // whose Finished card carries the spoken text is read as that,
+        // without asking again (CHANGES.md, 2026-10-24 12:06 EDT).
         let mut replies = Vec::new();
-        for e in v.entries.iter().filter(|e| is_reply(e)) {
-            if v.seen_replies.insert(e.ts.clone()) && read_aloud && !first {
-                replies.push((e.ts.clone(), e.summary.clone()));
+        for section in v.sections.iter().filter(|s| s.card.is_none()) {
+            for e in section.entries.iter().filter(|e| is_reply(e)) {
+                if v.seen_replies.insert(e.ts.clone()) && read_aloud && !first {
+                    let spoken = card_spoken(&v.sections, section.serial);
+                    replies.push((section.serial, e.ts.clone(), e.summary.clone(), spoken));
+                }
             }
         }
         let pane_id = v.pane_id.clone();
         let ends_on_reply = v.status == "working" && v.entries.last().is_some_and(is_reply);
-        for (ts, text) in replies {
-            self.read_reply(&pane_id, ts, text, out);
+        // A card's spoken text that came for a reply still waiting.
+        for r in self.reading.iter_mut().filter(|r| r.ready.is_none()) {
+            if let Some(spoken) = r.section.and_then(|s| card_spoken(&v.sections, s)) {
+                log::info!("read aloud: the card's spoken text came");
+                r.ready = Some(spoken);
+            }
+        }
+        for (serial, ts, text, spoken) in replies {
+            match spoken {
+                Some(spoken) => self.queue_spoken(serial, ts, text, spoken),
+                None => self.read_reply(&pane_id, serial, ts, text, out),
+            }
         }
         // herdr says working but the session ends on a reply: the daemon's
         // turn says whether it stopped (plan 20261023_04, A4), so the list
@@ -3618,6 +4134,19 @@ fn take_outline(v: &mut AgentView, d: common::SessionDelivery, now: Duration) {
     }
     v.drop_orphans();
     v.forget();
+}
+
+/// The spoken text of the Finished card on the line of the reply section
+/// `reply`, when the daemon summarised it (`[summary] cards`).
+fn card_spoken(sections: &Sections, reply: common::Serial) -> Option<String> {
+    sections
+        .on_line(reply)
+        .filter_map(|s| s.card.as_ref())
+        .filter(|c| c.card == common::CardKind::Finished)
+        .find_map(|c| c.spoken.as_deref())
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
 }
 
 fn is_reply(e: &common::Entry) -> bool {
@@ -6550,8 +7079,20 @@ mod tests {
     }
 
     fn window(shown: (u64, u64), near: (u64, u64), keep: (u64, u64), back: bool) -> Input {
+        window_closely(shown, shown, near, keep, back)
+    }
+
+    /// As [`window`], with the indexes within 1 screen, `close`.
+    fn window_closely(
+        shown: (u64, u64),
+        close: (u64, u64),
+        near: (u64, u64),
+        keep: (u64, u64),
+        back: bool,
+    ) -> Input {
         Input::Window(ViewWindow {
             shown,
+            close,
             near,
             keep,
             scrolled_back: back,
@@ -7300,5 +7841,374 @@ mod tests {
     fn unpairing_offline_forgets_at_once() {
         let mut s = State::new("test");
         assert_eq!(s.input(Input::Unpair), [Output::Forget { daemon: false }]);
+    }
+
+    /// The last agent view given in `out`.
+    fn last_view(out: &[Output]) -> Option<Event> {
+        out.iter().rev().find_map(|o| match o {
+            Output::Event(e @ Event::AgentView { .. }) => Some(e.clone()),
+            _ => None,
+        })
+    }
+
+    fn cache_of(out: &[Output]) -> Option<u64> {
+        out.iter().rev().find_map(|o| match o {
+            Output::Event(Event::Cache { bytes }) => Some(*bytes),
+            _ => None,
+        })
+    }
+
+    fn refreshed(out: &[Output]) -> Option<usize> {
+        out.iter().find_map(|o| match o {
+            Output::Event(Event::Refreshed { new }) => Some(*new),
+            _ => None,
+        })
+    }
+
+    /// The view of w2:pZ, an outline of 10 with every content held.
+    fn held_outline() -> State {
+        let (mut s, out) = outline_of(10);
+        for r in requests(&out, "session.content") {
+            answer_content(&mut s, r);
+        }
+        assert_eq!(held_indexes(&s), (0..10).collect::<Vec<_>>());
+        s
+    }
+
+    #[test]
+    fn a_closed_view_reopens_from_the_cache_at_once_and_resumes_with_from() {
+        let mut s = held_outline();
+        let out = s.input(Input::CloseAgent);
+        assert_eq!(requests(&out, "session.unsubscribe").len(), 1);
+        assert!(cache_of(&out).is_some_and(|b| b > 0), "{out:?}");
+        assert_eq!(s.cached_panes(), ["w2:pZ"]);
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        // At once: no loading, its sections held, none pending.
+        match last_view(&out) {
+            Some(Event::AgentView {
+                loading, sections, ..
+            }) => {
+                assert!(!loading);
+                assert_eq!(sections.len(), 10);
+                assert!(
+                    sections
+                        .iter()
+                        .all(|v| !matches!(v.shows, crate::view::Shows::Pending { .. }))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(s.cached_panes().is_empty());
+        assert_eq!(cache_of(&out), Some(0));
+        // It resumes after what it holds.
+        let sub = requests(&out, "session.subscribe")[0].clone();
+        assert_eq!(sub.params["from"], 10);
+        assert_eq!(sub.params["after"], json!(serial_in(FILE, 9)));
+        assert_eq!(sub.params["epoch"], EPOCH);
+        // What came while it was closed goes below, and is not read aloud.
+        s.input(Input::ReadAloud(true));
+        let out = s.incoming(response(
+            sub.id,
+            json!({"subscription_id": 2, "delivery": outline_delivery(
+                false, slots(10..11), vec![content(10)], Some(10), EPOCH)}),
+        ));
+        assert_eq!(held_indexes(&s), (0..11).collect::<Vec<_>>());
+        assert!(requests(&out, "speech.summarize").is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_fourth_closed_view_drops_the_least_recent() {
+        let mut s = online();
+        for pane in ["a", "b", "c", "d"] {
+            s.input(Input::OpenAgent(pane.into()));
+            s.input(Input::CloseAgent);
+        }
+        assert_eq!(s.cached_panes(), ["b", "c", "d"]);
+        // Opening another moves the open one into the cache too.
+        s.input(Input::OpenAgent("b".into()));
+        s.input(Input::OpenAgent("e".into()));
+        assert_eq!(s.cached_panes(), ["c", "d", "b"]);
+        // One dropped opens as new: loading.
+        let out = s.input(Input::OpenAgent("a".into()));
+        assert!(matches!(
+            last_view(&out),
+            Some(Event::AgentView { loading: true, .. })
+        ));
+    }
+
+    #[test]
+    fn a_reopened_view_merges_a_new_epoch_by_serial() {
+        let mut s = held_outline();
+        s.input(Input::CloseAgent);
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let sub = requests(&out, "session.subscribe")[0].id.clone();
+        // A reset of another epoch: the same serials, one more, no
+        // contents along.
+        s.incoming(response(
+            sub,
+            json!({"subscription_id": 2, "delivery": outline_delivery(
+                true, slots(0..11), vec![], Some(10), EPOCH + 1)}),
+        ));
+        let r = ribbon(&s);
+        assert_eq!(r.len(), 11);
+        assert_eq!(
+            held_indexes(&s),
+            (0..10).collect::<Vec<_>>(),
+            "kept by serial"
+        );
+    }
+
+    #[test]
+    fn clearing_the_cache_empties_it() {
+        let mut s = held_outline();
+        s.input(Input::CloseAgent);
+        assert!(s.cache_bytes() > 0);
+        let out = s.input(Input::ClearCache);
+        assert_eq!(cache_of(&out), Some(0));
+        assert!(s.cached_panes().is_empty());
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        assert!(matches!(
+            last_view(&out),
+            Some(Event::AgentView { loading: true, .. })
+        ));
+    }
+
+    /// The view of w2:pZ, an outline of 1000 held around 500 (from 400 to
+    /// 620) and at its end, with three views closed before it: "a", "b"
+    /// and "c", the least recent first.
+    fn under_pressure() -> State {
+        let mut s = online();
+        for pane in ["a", "b", "c"] {
+            s.input(Input::OpenAgent(pane.into()));
+            s.input(Input::CloseAgent);
+        }
+        s.input(Input::Tick(secs(100.0)));
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let sub = requests(&out, "session.subscribe")[0].id.clone();
+        let inline = (992..1000).map(content).collect();
+        let out = s.incoming(response(
+            sub,
+            json!({"subscription_id": 1, "delivery": outline_delivery(
+                true, slots(0..1000), inline, Some(999), EPOCH)}),
+        ));
+        for r in requests(&out, "session.content") {
+            answer_content(&mut s, r);
+        }
+        let out = s.input(window_closely(
+            (500, 510),
+            (480, 530),
+            (400, 620),
+            (0, 999),
+            true,
+        ));
+        for r in requests(&out, "session.content") {
+            let out = answer_content(&mut s, r);
+            for r in requests(&out, "session.content") {
+                answer_content(&mut s, r);
+            }
+        }
+        let held = held_indexes(&s);
+        assert!((400..=620).all(|i| held.contains(&i)), "{held:?}");
+        assert!(held.contains(&999));
+        s
+    }
+
+    #[test]
+    fn each_memory_grade_drops_the_least_recent_and_keeps_its_range() {
+        let mut s = under_pressure();
+        assert_eq!(s.cached_panes(), ["a", "b", "c"]);
+        s.input(Input::Memory(Pressure::UiHidden));
+        assert_eq!(s.cached_panes(), ["c"], "the most recent stays");
+        let held = held_indexes(&s);
+        assert!(held.iter().all(|i| (400..=620).contains(i)), "{held:?}");
+        assert!(held.contains(&400) && held.contains(&620));
+        s.input(Input::Memory(Pressure::Background));
+        assert!(s.cached_panes().is_empty());
+        assert_eq!(s.cache_bytes(), 0);
+        assert_eq!(held_indexes(&s), (480..=530).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn low_memory_leaves_the_screen_and_the_outline_and_scrolling_fetches_again() {
+        let mut s = under_pressure();
+        s.input(Input::Memory(Pressure::Low));
+        assert!(s.cached_panes().is_empty());
+        assert_eq!(held_indexes(&s), (500..=510).collect::<Vec<_>>());
+        assert_eq!(ribbon(&s).len(), 1000, "the outline is kept");
+        // Scrolled on: only what is on screen is fetched.
+        let out = s.input(window_closely(
+            (100, 110),
+            (90, 120),
+            (50, 160),
+            (0, 999),
+            true,
+        ));
+        assert_eq!(content_asks(&out), [(100, 110, false)]);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        assert_eq!(held_indexes(&s), (100..=110).collect::<Vec<_>>());
+        // Back in front: contents are fetched as usual again.
+        s.input(Input::Background(true));
+        let out = s.input(Input::Background(false));
+        assert_eq!(content_asks(&out), [(50, 160, false)]);
+    }
+
+    #[test]
+    fn a_refresh_pings_resubscribes_and_fetches_the_newest_screen() {
+        let mut s = held_outline();
+        s.input(window((5, 9), (0, 9), (0, 9), false));
+        let out = s.input(Input::Refresh);
+        assert_eq!(requests(&out, "ping").len(), 1);
+        assert_eq!(requests(&out, "session.unsubscribe").len(), 1);
+        let sub = requests(&out, "session.subscribe")[0].clone();
+        assert_eq!(sub.params["from"], 10);
+        assert_eq!(sub.params["epoch"], EPOCH);
+        assert_eq!(refreshed(&out), None);
+        // The ping unanswered for 3 s closes the link.
+        let out = s.input(Input::Tick(secs(103.0)));
+        assert!(out.iter().any(|o| matches!(o, Output::Close(_))), "{out:?}");
+        let mut s = held_outline();
+        s.input(window((5, 9), (0, 9), (0, 9), false));
+        let out = s.input(Input::Refresh);
+        let sub = requests(&out, "session.subscribe")[0].id.clone();
+        // Two new sections come with the resubscribe.
+        let out = s.incoming(response(
+            sub,
+            json!({"subscription_id": 2, "delivery": outline_delivery(
+                false, slots(10..12), vec![content(10)], Some(11), EPOCH)}),
+        ));
+        // The newest screen's contents, held or not.
+        let asks = content_asks(&out);
+        assert!(asks.contains(&(5, 11, false)), "{asks:?}");
+        assert_eq!(refreshed(&out), None);
+        let r = requests(&out, "session.content")
+            .into_iter()
+            .find(|r| r.params["from"] == 5)
+            .unwrap()
+            .clone();
+        let out = answer_content(&mut s, &r);
+        assert_eq!(refreshed(&out), Some(2));
+    }
+
+    #[test]
+    fn a_refresh_offline_connects_now_and_gives_up_after_its_wait() {
+        let mut s = held_outline();
+        s.disconnected(30_000);
+        let out = s.input(Input::Refresh);
+        assert!(out.contains(&Output::Reconnect), "{out:?}");
+        assert_eq!(refreshed(&s.input(Input::Tick(secs(104.0)))), None);
+        assert_eq!(refreshed(&s.input(Input::Tick(secs(105.0)))), Some(0));
+        // Without a view: done at once.
+        let mut s = online();
+        assert_eq!(refreshed(&s.input(Input::Refresh)), Some(0));
+    }
+
+    fn finished_spoken(line: u32, spoken: &str) -> Value {
+        json!({"serial": serial(line, 194), "kind": "card", "card": {
+            "card": "finished", "live": true, "title": "Finished", "text": "Long.",
+            "points": ["One.", "Two."], "spoken": spoken}})
+    }
+
+    #[test]
+    fn read_aloud_uses_the_cards_spoken_text_and_asks_nothing() {
+        let mut s = viewing("working", asking());
+        s.input(Input::ReadAloud(true));
+        s.input(Input::Tick(secs(200.0)));
+        let out = deliver(
+            &mut s,
+            vec![
+                text_at(5, 0, "A long reply, with `code` and paths."),
+                finished_spoken(5, "All done."),
+            ],
+            vec![],
+        );
+        assert!(requests(&out, "speech.summarize").is_empty(), "{out:?}");
+        assert_eq!(said(&out), ["All done."]);
+        // A reply whose card comes after it: the card's text is read, and
+        // the daemon's later answer adds nothing.
+        let out = deliver(&mut s, vec![text_at(7, 0, "Another reply.")], vec![]);
+        let asked = requests(&out, "speech.summarize")[0].clone();
+        assert!(said(&out).is_empty());
+        let out = deliver(&mut s, vec![finished_spoken(7, "Also done.")], vec![]);
+        assert_eq!(said(&out), ["Also done."]);
+        let out = s.incoming(response(asked.id, json!({"read": "Another reply."})));
+        assert!(said(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn the_cards_points_and_spoken_text_reach_the_view() {
+        let mut s = viewing("idle", asking());
+        let out = deliver(&mut s, vec![finished_spoken(5, "All done.")], vec![]);
+        let (_, cards, _) = view_of(&out).unwrap();
+        let card = cards
+            .iter()
+            .find(|c| c.kind == common::CardKind::Finished)
+            .unwrap();
+        assert_eq!(card.points, ["One.", "Two."]);
+        assert_eq!(card.spoken.as_deref(), Some("All done."));
+        assert!(card.is_summary());
+    }
+
+    #[test]
+    fn bookends_come_from_the_outline_with_their_summary_and_time() {
+        let mut s = online();
+        s.set_local_time(LocalTime {
+            hour: 12,
+            minute: 0,
+            second: 0,
+            utc_offset_minutes: -240,
+        });
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let sub = requests(&out, "session.subscribe")[0].id.clone();
+        let card_serial = common::Serial::new(FILE, 2, 194).to_string();
+        let slots = json!([
+            {"index": 0, "serial": serial(2, 0), "kind": "text", "lines": 1, "chars": 9},
+            {"index": 1, "serial": card_serial, "kind": "card", "lines": 1, "chars": 9,
+             "bookend": true},
+            {"index": 2, "serial": serial(3, 0), "kind": "text", "lines": 1, "chars": 9},
+            {"index": 3, "serial": serial(3, 194), "kind": "card", "lines": 1, "chars": 9,
+             "bookend": true},
+        ]);
+        let reply = json!({"serial": serial(2, 0), "kind": "text", "entries": [
+            {"ts": "2026-10-24T16:41:05.120Z", "role": "assistant", "kind": "text",
+             "summary": "Landed it."}]});
+        let mut card = finished_spoken(2, "Landed the settings screen.\nMore.");
+        card["serial"] = json!(card_serial);
+        let delivery = json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+            "reset": true, "session": {"session_id": "s1", "matched": "id"},
+            "reason": null, "status": "idle", "sections": [reply, card], "slots": slots,
+            "last": 3, "epoch": EPOCH});
+        let out = s.incoming(response(
+            sub,
+            json!({"subscription_id": 1, "delivery": delivery}),
+        ));
+        let Some(Event::AgentView { bookends, .. }) = last_view(&out) else {
+            panic!("{out:?}");
+        };
+        assert_eq!(
+            bookends,
+            [
+                crate::view::Bookend {
+                    serial: common::Serial::new(FILE, 2, 194),
+                    summary: Some("Landed the settings screen.".into()),
+                    time: Some("12:41".into()),
+                },
+                crate::view::Bookend {
+                    serial: common::Serial::new(FILE, 3, 194),
+                    summary: None,
+                    time: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn replay_says_the_text_again_only_with_sound() {
+        let mut s = online();
+        assert_eq!(
+            said(&s.input(Input::Replay("All done.".into()))),
+            ["All done."]
+        );
+        s.input(settings(false, true, true, true));
+        assert!(said(&s.input(Input::Replay("All done.".into()))).is_empty());
     }
 }

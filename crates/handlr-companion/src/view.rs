@@ -44,6 +44,64 @@ pub struct AgentCard {
     pub about_plan: bool,
     /// The repowiki links for the `docs/…` paths in `text`.
     pub links: Vec<Link>,
+    /// A summary card's point-by-point summary (`CardBody::points`, plan
+    /// 20261022_03, the L3 amendment of 2026-10-24 12:06 EDT): empty
+    /// without the daemon's `[summary] cards`.
+    pub points: Vec<String>,
+    /// The text read aloud for the card (`CardBody::spoken`), when the
+    /// daemon gave one: a summary card's short form, and its spoken form.
+    pub spoken: Option<String>,
+}
+
+impl AgentCard {
+    /// A summary card (the 12:03 EDT amendment): a Finished card, or any
+    /// card the daemon summarised. It folds into its short form.
+    pub fn is_summary(&self) -> bool {
+        self.kind == CardKind::Finished || !self.points.is_empty() || self.spoken.is_some()
+    }
+}
+
+/// A bookend: a Finished card's slot, which closes a section of the
+/// session, for the scrollbar's section labels (plan 20261022_03, the L3
+/// amendment of 2026-10-24 12:27 EDT). Placed from the outline before any
+/// contents load; its text comes with the card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookend {
+    pub serial: Serial,
+    /// The card's short summary (`CardBody::spoken`'s first line), once
+    /// the card is held and summarised.
+    pub summary: Option<String>,
+    /// The phone's clock time of the reply the card closes, as "12:41",
+    /// once that reply is held.
+    pub time: Option<String>,
+}
+
+/// The phone's clock time, "H:MM", of an RFC 3339 time `ts`, for a phone
+/// `local_offset` minutes ahead of UTC. `None` when `ts` is not one.
+pub fn clock_time(ts: &str, local_offset: i16) -> Option<String> {
+    let b = ts.as_bytes();
+    let num = |i: usize, n: usize| -> Option<i32> {
+        let part = ts.get(i..i + n)?;
+        part.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| part.parse().ok())?
+    };
+    if b.get(10).is_none_or(|&c| c != b'T' && c != b' ') || b.get(13) != Some(&b':') {
+        return None;
+    }
+    let (hour, minute) = (num(11, 2)?, num(14, 2)?);
+    // The zone, after the seconds and any fraction.
+    let zone = ts[16..].find(['Z', 'z', '+', '-']).map(|i| 16 + i)?;
+    let offset = match b[zone] {
+        b'Z' | b'z' => 0,
+        sign => {
+            let (h, m) = (num(zone + 1, 2)?, num(zone + 4, 2)?);
+            let o = h * 60 + m;
+            if sign == b'-' { -o } else { o }
+        }
+    };
+    let local = (hour * 60 + minute - offset + i32::from(local_offset)).rem_euclid(24 * 60);
+    Some(format!("{}:{:02}", local / 60, local % 60))
 }
 
 /// The user's own words: a user text entry with no `origin`. An entry
@@ -122,6 +180,10 @@ pub fn flatten_view(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ViewWindow {
     pub shown: (u64, u64),
+    /// Within 1 screen of the window: what the open view keeps under
+    /// memory pressure's `Background` grade (plan 20261022_03, the L3
+    /// amendment of 2026-10-24 12:21 EDT).
+    pub close: (u64, u64),
     pub near: (u64, u64),
     pub keep: (u64, u64),
     /// The view is scrolled back, not following the bottom: a new outline
@@ -510,6 +572,14 @@ impl Sections {
         self.map.values()
     }
 
+    /// The sections on the session file's line of `serial`, in slot order:
+    /// a card's reply shares its line.
+    pub fn on_line(&self, serial: Serial) -> impl DoubleEndedIterator<Item = &Section> {
+        let lo = Serial::new(serial.file, serial.line, 0).to_u64();
+        let hi = Serial::new(serial.file, serial.line, u8::MAX).to_u64();
+        self.map.range(lo..=hi).map(|(_, s)| s)
+    }
+
     /// The view's sections in serial order, each its entries or its card,
     /// and the pinned
     /// card's serial: the highest live card, the newest of its kind.
@@ -575,6 +645,8 @@ fn card_of(body: &CardBody, at: usize) -> AgentCard {
         confirm_id: body.confirm_id,
         about_plan: body.about_plan,
         links: body.links.clone(),
+        points: body.points.clone(),
+        spoken: body.spoken.clone(),
     }
 }
 
@@ -655,6 +727,42 @@ pub(crate) mod tests {
         assert_eq!(s.newest(), Some(Serial::new(FILE, 5, 1)));
         s.remove(Serial::new(FILE, 5, 0));
         assert_eq!(summaries(&s), ["two, grown", "five b"]);
+    }
+
+    #[test]
+    fn clock_times_are_the_phones() {
+        assert_eq!(
+            clock_time("2026-10-24T16:41:05.120Z", -240).as_deref(),
+            Some("12:41")
+        );
+        assert_eq!(
+            clock_time("2026-10-24T16:41:05+02:00", 0).as_deref(),
+            Some("14:41")
+        );
+        assert_eq!(
+            clock_time("2026-10-24T01:05:00-01:30", 60).as_deref(),
+            Some("3:35")
+        );
+        assert_eq!(
+            clock_time("2026-10-24T00:10:00Z", -60).as_deref(),
+            Some("23:10")
+        );
+        assert_eq!(clock_time("12", 0), None);
+        assert_eq!(clock_time("t5", 0), None);
+    }
+
+    #[test]
+    fn a_lines_sections_are_found_by_serial() {
+        let mut s = Sections::default();
+        s.put(text(4, 0, "four"));
+        s.put(text(5, 0, "five"));
+        s.put(card(5, 194, CardKind::Finished, false));
+        s.put(text(6, 0, "six"));
+        let on: Vec<u8> = s
+            .on_line(Serial::new(FILE, 5, 194))
+            .map(|x| x.serial.slot)
+            .collect();
+        assert_eq!(on, [0, 194]);
     }
 
     #[test]
