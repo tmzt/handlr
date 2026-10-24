@@ -1399,3 +1399,13 @@ build against 0.3.6 with the hub alone).
    a `to`-only or no-bound request, `more` means there are more sections
    before the first one returned. `limit` is capped at 200, including for
    `slots_only`.
+
+## 2026-10-24 00:31 EDT — correction: the libhandlr_proto 0.3.6 commit and tag
+
+This corrects the previous entry's first line. The libhandlr_proto 0.3.6
+commit is `6baa3ee`, not `e971a80`; `e971a80` is handlr-companion's
+compile fix, the commit right after it. The tag `libhandlr_proto-v0.3.6` was
+made, and pushed, at `e971a80` by the same mistake: a commit search matched
+"0.3.6" in the wrong message. Rule 5.1 means a pushed tag is never moved, so
+it stays there. Its tree holds libhandlr_proto 0.3.6 exactly as `6baa3ee`
+does, plus three lines of test and struct fields in handlr-companion.
