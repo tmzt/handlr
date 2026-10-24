@@ -1224,3 +1224,17 @@ Tests:
 - a resolved card expands and folds;
 - on the daemon, `Entry.text` carries the full redacted text, and
   `summary` stays at 500 characters.
+
+## Amendment — 2026-10-24 11:59 EDT: only tool calls and diffs fold by default (living section L3)
+
+The owner (2026-10-24): "default folding only on tool calls and diffs".
+This replaces item 3 of the previous amendment (resolved cards folding)
+and narrows item 2:
+- **Folded by default:** tool calls with their results, and diffs (an
+  edit's patch), each at its first lines with "…", expanding and folding
+  on tap as item 2 says.
+- **Shown whole:** everything else, resolved cards included. The pinned
+  card keeps its own fold, as before.
+
+The previous amendment's tests change to match: a resolved card shows
+whole, and a diff folds and expands as a tool call does.
