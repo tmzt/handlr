@@ -79,6 +79,10 @@ pub enum Input {
     /// The play button while something is being said: stop it, and the
     /// next held reply follows.
     Skip,
+    /// The app went to the background (`true`) or came back (`false`).
+    /// In the background the link is a single sleeping socket: no polling,
+    /// a slow ping, and only what the daemon pushes.
+    Background(bool),
 }
 
 /// A tapped suggestion on its way: its own approval, once confirmed.
@@ -329,6 +333,10 @@ pub const SUMMARY_WAIT: Duration = Duration::from_secs(10);
 /// How long the link may be quiet before a `ping`, and how long the ping
 /// may go unanswered before the link is closed and made again.
 pub const PING_IDLE: Duration = Duration::from_secs(30);
+/// The ping's quiet spell while the app is in the background: under the
+/// usual NAT and carrier idle timeouts, so the one socket survives, but
+/// rare enough to let the radio sleep.
+pub const PING_IDLE_BACKGROUND: Duration = Duration::from_secs(270);
 pub const PING_WAIT: Duration = Duration::from_secs(10);
 
 /// Whether an utterance answers a confirmation with approval: the whole
@@ -653,6 +661,8 @@ pub struct State {
     voice_ended: Option<Duration>,
     /// The play button: the agent view's new replies are read aloud.
     read_aloud: bool,
+    /// The app is in the background: the link sleeps.
+    background: bool,
     /// When anything last came from the daemon, and when a `ping` went
     /// unanswered so far.
     last_heard: Duration,
@@ -744,6 +754,7 @@ impl State {
             voice_reported: false,
             voice_ended: None,
             read_aloud: false,
+            background: false,
             last_heard: Duration::ZERO,
             ping_sent: None,
             reading: VecDeque::new(),
@@ -929,6 +940,7 @@ impl State {
                 approve,
             } => self.answer_id(confirm_id, approve, &mut out),
             Input::Respond(response) => self.respond(response, &mut out),
+            Input::Background(on) => self.set_background(on, &mut out),
             Input::Skip => {
                 if self.speaking {
                     out.push(event(Event::StopSpeaking));
@@ -1024,6 +1036,9 @@ impl State {
     /// Peeks the open view's session if it is due: asked for, or its
     /// interval passed, and never within `PEEK_INTERVAL` of the last.
     fn peek_if_due(&mut self, out: &mut Vec<Output>) {
+        if self.background {
+            return;
+        }
         let (online, now) = (self.online(), self.now);
         let Some(v) = self.view.as_mut() else {
             return;
@@ -1843,6 +1858,34 @@ impl State {
         }
     }
 
+    /// To the background and back (owner, 2026-10-23: "in any case it should
+    /// be a single sleeping socket"). Back in front: one catch-up, a peek
+    /// of the open view and a list, then the usual timers.
+    fn set_background(&mut self, on: bool, out: &mut Vec<Output>) {
+        if on == self.background {
+            return;
+        }
+        self.background = on;
+        log::info!(
+            "link: {}",
+            if on {
+                "sleeping in the background"
+            } else {
+                "awake"
+            }
+        );
+        if !on {
+            if let Some(v) = self.view.as_mut() {
+                v.wanted = true;
+                v.peeked_at = None;
+            }
+            self.list_wanted = true;
+            self.listed_at = None;
+            self.peek_if_due(out);
+            self.list_if_due(out);
+        }
+    }
+
     /// After [`PING_IDLE`] with nothing from the daemon, a `ping`; with no
     /// answer in [`PING_WAIT`], the link is taken as dead and closed, to be
     /// made again (owner, 2026-10-23: "ping 30s is fine, but should only
@@ -1863,7 +1906,12 @@ impl State {
             }
             Some(_) => {}
             None if self.link == Link::Online
-                && self.now.saturating_sub(self.last_heard) >= PING_IDLE =>
+                && self.now.saturating_sub(self.last_heard)
+                    >= if self.background {
+                        PING_IDLE_BACKGROUND
+                    } else {
+                        PING_IDLE
+                    } =>
             {
                 self.ping_sent = Some(self.now);
                 out.push(self.request(methods::PING, common::Empty {}, Sent::Ping));
@@ -2315,7 +2363,7 @@ impl State {
     /// way; every `LIST_INTERVAL` since the last list sent or, once asked
     /// for, `LIST_MIN_INTERVAL` after it.
     fn list_if_due(&mut self, out: &mut Vec<Output>) {
-        if !self.online() || self.listing || self.view.is_some() {
+        if self.background || !self.online() || self.listing || self.view.is_some() {
             return;
         }
         let due = match self.listed_at {
@@ -4510,5 +4558,27 @@ mod tests {
                 .iter()
                 .any(|o| matches!(o, Output::Close(_)))
         );
+    }
+
+    #[test]
+    fn in_the_background_the_link_sleeps_and_wakes_with_one_catch_up() {
+        let mut s = viewing("working", asking());
+        s.input(Input::Background(true));
+        let mut sent = Vec::new();
+        // Four minutes asleep: no peeks, no lists, no pings.
+        for t in (110..=360).step_by(10) {
+            sent.extend(s.input(Input::Tick(secs(t as f64))));
+        }
+        for method in ["session.peek", "agents.list", "ping"] {
+            assert!(requests(&sent, method).is_empty(), "{method}: {sent:?}");
+        }
+        // After 4.5 minutes of quiet, one ping keeps the socket.
+        let out = s.input(Input::Tick(secs(380.0)));
+        assert_eq!(requests(&out, "ping").len(), 1);
+        // Back in front: the view catches up at once.
+        let ping = requests(&out, "ping")[0].clone();
+        s.incoming(response(ping.id, json!({})));
+        let out = s.input(Input::Background(false));
+        assert_eq!(requests(&out, "session.peek").len(), 1, "{out:?}");
     }
 }
