@@ -1409,3 +1409,29 @@ made, and pushed, at `e971a80` by the same mistake: a commit search matched
 "0.3.6" in the wrong message. Rule 5.1 means a pushed tag is never moved, so
 it stays there. Its tree holds libhandlr_proto 0.3.6 exactly as `6baa3ee`
 does, plus three lines of test and struct fields in handlr-companion.
+
+## 2026-10-24 00:36 EDT — plan 20261024_01, steps 3–5: a daemon epoch, outline-only resets merged by serial, and the old ribbon kept while scrolled back
+
+Agreed with the owner (2026-10-24): "just the outline, it should merge the
+new indexes received. it should also keep the old one while scrolled back,
+showing the new content jump label which swaps and jumps to the end"; then
+"yes". This replaces my question about resetting a client that reconnects
+to a restarted daemon (the previous entry's departure 2), and departs from
+decision 3's reset in outline mode and decisions 6 and 7.
+1. **Step 3, the epoch.** Each daemon run picks a random `epoch: u64`, sent
+   in every outline delivery (`SessionDelivery.epoch`) and given back by a
+   resuming client (`SessionSubscribeParams.epoch`). If the client's epoch
+   isn't this run's, the outline starts again from index 0 with `reset`.
+   In outline mode, `reset` drops only the outline, never the contents.
+   Both fields are appended, so this is libhandlr_proto 0.3.7, a patch.
+2. **Step 4, merged by serial.** Contents stay keyed by serial. A new
+   outline replaces only the index-to-serial map. Each new slot is matched
+   to the contents held for its serial, and fetched again only when its
+   `rev` is higher. Contents with no slot in the new outline are dropped.
+3. **Step 5, the old ribbon kept while scrolled back.** A new outline that
+   arrives while the view is scrolled back is held aside, and the view
+   keeps the old ribbon unchanged. The jump line reads `-- new content --`.
+   Tapping it swaps in the new ribbon and jumps to the end. While following,
+   the swap is at once, at the bottom.
+4. **The same for a new session file** (`/clear`): while scrolled back, the
+   old session stays until the tap.
