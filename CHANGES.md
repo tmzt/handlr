@@ -2186,3 +2186,13 @@ pinned-card change.
    `apply_system_bars`. It does nothing until libmorph's call is released.
    libmorph wants linear RGBA, so the theme's sRGB values will need converting
    then.
+
+## 2026-10-24 15:56 EDT — plan 20261023_04 (the overview) and plan 20261024_05 (themes): session colours
+
+From the owner (2026-10-24); see plan 20261022_03's L3 amendment of the same
+time.
+- **The overview** (frozen): each agent's card has a band in its session's
+  colour.
+- **Themes** (in implementation): new optional roles `session_1` to `session_16`,
+  8 hues in a light and a dark variant each, defined in both defaults and
+  inherited by any theme that leaves them out.
