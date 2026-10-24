@@ -81,6 +81,8 @@ pub async fn run(
                     Some(HerdrEvent::Other { event, .. }) => {
                         log::debug!("Ignoring unsubscribed herdr event '{event}'");
                     }
+                    // Focus and pane events: not subscribed to yet.
+                    Some(other) => log::debug!("Ignoring herdr event {other:?}"),
                     None => {
                         log::info!("herdr event stream closed; reconnecting");
                         tokio::time::sleep(RECONNECT_DELAY).await;
