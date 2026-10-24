@@ -1144,3 +1144,36 @@ json), and send it when user resumes app".
 The owner: "make the section urls then option repowiki_url". The 21:57 EDT
 amendment's `[repowiki] url` is `[urls] repowiki_url` instead, so other
 addresses can join it under `[urls]`. Nothing else changes.
+
+## 2026-10-23 22:31 EDT — plan 20261022_03: the Claude Code reader shows everything the terminal shows
+
+The owner: "I'm comparing the terminal and our output, why are there so
+many missing messages?", and "right, this is more for active sessions but
+our history infill should get them also, the ui feels sparse like I'm
+missing something." The reader (`src/sessions/claude.rs`) read only
+`user` and `assistant` lines, so it missed:
+- what the user types while the agent works, which Claude Code records
+  as an `attachment` of type `queued_command` (human origin): now a user
+  text entry like any other;
+- task and background-command notifications (the queued form, and user
+  lines whose `origin.kind` is `task-notification`, which were dropped),
+  cross-session messages and subagent hand-backs (`origin.kind: peer`);
+- `system` lines: `away_summary` recaps and `compact_boundary` /
+  `informational` compaction notices.
+
+These come back as user text entries marked by a new `Entry::origin`
+(libhandlr_proto 0.3.4, a patch by the owner's ruling, "appending to a
+struct is additive"): `"task"` (the notification's `<summary>`),
+`"peer:<name>"`, `"agent:<id>"`, `"recap"`, `"compact"`, each cut to 300
+characters. An entry with an origin is context, never the user speaking:
+it does not answer a pending question, end a turn in the overview, or
+resolve a Question or Finished card, and the app draws it as one dim
+line with an amber dot.
+
+`read_tail` read back at most 2 MiB, but most of a busy session's tail is
+lines with no conversation in them (`api-request-blob`, `api-request`,
+`file-history-snapshot`, `queue-operation`, other attachments, `mode`,
+`permission-mode`, `last-prompt`, `ai-title`), so a peek of 200 entries
+returned 100. Those lines are now recognised from their first bytes and
+not counted: the budget is 2 MiB of conversation lines, with at most
+32 MiB read per call.
