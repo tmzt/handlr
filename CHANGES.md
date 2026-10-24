@@ -2159,3 +2159,30 @@ view was scrolled back (`AgentScreen::compact`). It now folds only when it
 isn't expanded. An expanded card (a Finished card's reply, points and spoken
 text, or a cut question) stays as it is while the view scrolls behind it, until
 it is tapped to fold.
+
+## 2026-10-24 15:55 EDT — plan 20261024_05, steps 1–3: departures
+
+Built in the three companion commits before this entry, rebased over the
+pinned-card change.
+1. **Three extra roles: `fg`, `question` and `toggle`.** The old `FG` (not `TEXT`),
+   the question accent and the toggle's on colour had no exact role.
+   `scrollbar` is libcontrols' indicator colour in settings; the agent view's
+   thumb stays `fg` at its opacity.
+2. **Colours may be `[r, g, b, a]` arrays as well as hex,** because most of
+   today's values aren't n/255 and *Dark (gray)* must match them exactly.
+3. **`theme()` returns a `Colors` copy,** not a `&'static Theme`, since themes are
+   loaded at run time.
+4. **The pairing field is themed** (`input`, with a `band` border). Under *Dark
+   (gray)* it changes slightly from libcontrols' default.
+5. **Not themed:** libcontrols' modal backdrop (black at 0.45) and its brief
+   pressed-button colours.
+6. **A theme change rebuilds the settings router,** as a new layout does, so
+   an open modal closes.
+7. **`apps/Cargo.lock` is in step 1's commit** (`toml` with `preserve_order`).
+8. ***Appearance*'s ⓘ says System is dark** until the app can read the phone's
+   setting. That line goes once libmorph's dark mode is wired in.
+9. **The system bars** (CHANGES.md, earlier today) are computed by
+   `SystemBars::of`, with icons chosen by WCAG luminance, and handed to
+   `apply_system_bars`. It does nothing until libmorph's call is released.
+   libmorph wants linear RGBA, so the theme's sRGB values will need converting
+   then.
