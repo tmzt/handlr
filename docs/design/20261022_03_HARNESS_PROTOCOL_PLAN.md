@@ -1330,3 +1330,34 @@ Tests:
 - a ninth pane drops the least recent;
 - a new epoch merges;
 - clearing the cache empties it.
+
+## Amendment — 2026-10-24 12:15 EDT: closed views paged out to the phone's redb store, a few in memory, and a response to low memory (living section L3)
+
+The owner (2026-10-24): "closed should be paged out to disk (data) with a
+small number of recents in memory, as redb"; "it should also respond to
+memory pressure if possible"; then "yes". This replaces item 1 of the
+previous amendment ("the 8 most recently opened panes" in memory), and
+item 5's "later".
+1. **In memory:** the 3 most recently closed views (outline, contents,
+   epoch and place).
+2. **On disk:** older closed views are paged out to the phone's redb store
+   (plan 20261023_09, decision 6, as amended at the same time). Reopening
+   one reads it back at once, then resumes over the link with `from` and
+   `epoch`. The cap is that plan's: 20 sessions and 50 MB, the least
+   recently viewed dropped first.
+3. **Low memory** (`MobileEvent::LowMemory`, once libmorph passes it to the
+   app; until then, `Input::LowMemory`, tested and never fired):
+   - every cached closed view is paged out, and none is kept in memory;
+   - the open view keeps contents only within 1 screen of the window;
+     the rest is read back from disk or fetched when scrolled to;
+   - the layout caches of blocks off screen are freed.
+
+   Nothing is lost: it is all on disk or on the daemon.
+4. **Clear cache** (the settings plan) empties the memory cache and the
+   redb store, and compacts the file.
+
+Tests:
+- a fourth closed view goes to disk;
+- reopening one from disk shows it at once and resumes;
+- low memory pages everything out and trims the open view to ±1 screen;
+- Clear cache empties both.
