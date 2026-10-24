@@ -769,6 +769,16 @@ impl MorphApp for App {
         let _ = setup;
     }
 
+    /// The app left the screen: the link sleeps (one socket, no polling).
+    fn on_suspend(&mut self, _ctx: &mut MorphContext) {
+        self.send(Input::Background(true));
+    }
+
+    /// Back on screen: the link wakes and catches up.
+    fn on_resume(&mut self, _ctx: &mut MorphContext) {
+        self.send(Input::Background(false));
+    }
+
     /// A `handlr://` link opened the app (libmorph 0.3.2). Only a pairing
     /// link (`handlr://<host>:<port>/pair#…`) is acted on; its fragment is
     /// the pairing string, so nothing past the path is logged.
