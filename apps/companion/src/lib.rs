@@ -461,6 +461,24 @@ fn device_name(args: &Args) -> String {
 }
 
 impl App {
+    /// Puts the settings' theme in force (plan 20261024_05): every screen
+    /// is made again or laid out in its colours and drawn again, and the
+    /// system bars follow it. Nothing when it is in force already.
+    fn apply_theme(&mut self) {
+        let Some(t) = settings::put_theme_in_force(&self.settings) else {
+            return;
+        };
+        log::info!("theme: {}", t.name);
+        self.screen.restyle();
+        self.overview.restyle();
+        if let Some(a) = self.agent.as_mut() {
+            a.restyle();
+        }
+        if let Some(s) = self.settings_screen.as_mut() {
+            s.restyle();
+        }
+    }
+
     /// The app's handling of a pairing URL, however it arrives: the field,
     /// `--pair`, `pair.txt`, and an opened `handlr://` link. The text is
     /// never logged.
@@ -702,6 +720,10 @@ impl App {
     fn open_settings(&mut self) {
         log::info!("settings: open");
         self.follow_permission();
+        // The user's themes.toml is read again: a theme added or changed
+        // there shows in the rows, and in force if it is the one chosen.
+        theme::set_themes(theme::Themes::load(self.data_dir.as_deref()));
+        self.apply_theme();
         let mut screen = SettingsScreen::new(
             self.settings.clone(),
             Box::new(settings::battery::Morph),
@@ -764,6 +786,8 @@ impl App {
             log::warn!("settings: {e}");
         }
         self.send(Input::Settings(settings.to_client()));
+        // *Appearance* and the theme rows apply at once.
+        self.apply_theme();
         if let Some(agent) = &mut self.agent {
             agent.set_scrollbar(settings.scrollbar);
             agent.set_sound(settings.sound);
@@ -1473,7 +1497,7 @@ impl MorphApp for App {
         settings::set_current(settings.clone());
         // The themes: the shipped ones and the user's themes.toml.
         theme::set_themes(theme::Themes::load(data_dir.as_deref()));
-        theme::set_theme(theme::themes().first(true));
+        theme::set_theme(settings.theme(&theme::themes()));
         theme::apply_system_bars(theme::SystemBars::of(&theme()));
         log::info!("settings: {settings:?}");
         // The voice models, where they are in the data directory.

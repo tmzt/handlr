@@ -8,7 +8,11 @@
 //!   through Phonon's voices with a spoken preview, inactive until Phonon
 //!   has loaded and while all sound is off ([`super::voice`]);
 //! - **Voice**: *Microphone* and *General agent (Gemini)*;
-//! - **Display**: *Scrollbar*, "‹ Hidden ›";
+//! - **Display**: *Scrollbar*, "‹ Hidden ›"; then *Appearance* (*System*,
+//!   *Always light*, *Always dark*), *Light theme* and *Dark theme*, the
+//!   themes of each kind by name, each step applied at once; with *Always
+//!   light* or *Always dark*, the other kind's row is drawn dim (plan
+//!   20261024_05, the 15:33 EDT amendment, item 3);
 //! - **Background**: *Stay connected in the background* (on), which runs
 //!   libmorph's foreground service (CHANGES.md 2026-10-24 12:38 EDT), and
 //!   "Needs an app update" while it is on where there is no service;
@@ -26,7 +30,7 @@
 //!   ([`Confirm`]).
 //!
 //! Rows with a long explanation have an ⓘ that opens it in a modal
-//! ([`InfoModal`]): *Voice*, *General agent*, the two above, *Battery optimization*
+//! ([`InfoModal`]): *Voice*, *General agent*, *Appearance*, the two above, *Battery optimization*
 //! and *Samsung battery (app sleeping)*. All the copy is in
 //! `SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
 //! label; a link in it is tappable, and the app opens it with libmorph's
@@ -63,7 +67,7 @@ use super::voice;
 use super::{Settings, scrollbar_label, step_scrollbar};
 use crate::agent::{PAD, Row, Terminal, draw_row, fill, line_h, term_h};
 use crate::markdown_view::{self, Faces, MarkdownView};
-use crate::theme::theme;
+use crate::theme::{self, theme};
 use crate::ui::Layout;
 
 /// After *Enable*, how long to watch for the exemption, and how often to
@@ -141,6 +145,7 @@ enum Info {
     Alerts,
     Optimization,
     Vendor,
+    Appearance,
 }
 
 impl Info {
@@ -152,6 +157,7 @@ impl Info {
             Info::Alerts => copy::ALERTS,
             Info::Optimization => copy::BATTERY_OPTIMIZATION,
             Info::Vendor => copy::SAMSUNG_BATTERY,
+            Info::Appearance => copy::APPEARANCE,
         }
     }
 }
@@ -172,6 +178,15 @@ pub enum SettingsHit {
     DeleteData,
     /// *Clear cache*, with something cached: the cached sessions go.
     ClearCache,
+}
+
+/// An arrow's step: forward for the right one.
+fn step(action: ControlAction) -> Option<bool> {
+    match action {
+        ControlAction::StepRight => Some(true),
+        ControlAction::StepLeft => Some(false),
+        _ => None,
+    }
 }
 
 /// *Clear cache (n MB)*'s label for a cache of `bytes`: n in MB, one
@@ -209,6 +224,7 @@ impl Asking {
             Asking::Info(Info::Alerts) => "info_alerts",
             Asking::Info(Info::Optimization) => "info_optimization",
             Asking::Info(Info::Vendor) => "info_vendor",
+            Asking::Info(Info::Appearance) => "info_appearance",
         }
     }
 }
@@ -223,6 +239,9 @@ struct Nodes {
     microphone: NodeId,
     general_agent: NodeId,
     scrollbar: NodeId,
+    appearance: NodeId,
+    light_theme: NodeId,
+    dark_theme: NodeId,
     background: NodeId,
     background_note: NodeId,
     alerts: NodeId,
@@ -549,6 +568,15 @@ impl SettingsScreen {
                 s,
             ),
         );
+        let option = |router: &mut Router, label: &str, info: bool| {
+            let mut row = OptionRow::new(label, "", s);
+            row.info = info;
+            row.label_w = self.label_w(label);
+            router.add(under, row)
+        };
+        let appearance = option(&mut router, copy::APPEARANCE.label(), true);
+        let light_theme = option(&mut router, copy::LIGHT_THEME.label(), false);
+        let dark_theme = option(&mut router, copy::DARK_THEME.label(), false);
         let background = toggle(&mut router, copy::BACKGROUND.label(), true);
         let alerts = toggle(&mut router, copy::ALERTS.label(), true);
         let background_note = router.add(under, self.note(copy::NEEDS_UPDATE.text));
@@ -586,6 +614,9 @@ impl SettingsScreen {
             microphone,
             general_agent,
             scrollbar,
+            appearance,
+            light_theme,
+            dark_theme,
             background,
             background_note,
             alerts,
@@ -612,6 +643,7 @@ impl SettingsScreen {
         let row_h = ROW_H * s;
         let mut y = viewport.y + 8.0 * s;
         let settings = self.settings.clone();
+        let themes = theme::themes();
         let shown_voice = self.shown_voice();
         let voices_loaded = self.voices.is_some();
         let ready = self.service.ready();
@@ -702,6 +734,19 @@ impl SettingsScreen {
                     if let Some(o) = router.get_mut::<OptionRow>(n.scrollbar) {
                         o.set_rect(rect);
                         o.set_value(scrollbar_label(settings.scrollbar));
+                    }
+                    let rect = row(&mut y);
+                    if let Some(o) = router.get_mut::<OptionRow>(n.appearance) {
+                        o.set_rect(rect);
+                        o.set_value(settings.appearance.label());
+                    }
+                    for (id, dark) in [(n.light_theme, false), (n.dark_theme, true)] {
+                        let rect = row(&mut y);
+                        if let Some(o) = router.get_mut::<OptionRow>(id) {
+                            o.set_rect(rect);
+                            o.set_value(&settings.chosen(&themes, dark).name);
+                            o.enabled = settings.appearance.row_active(dark);
+                        }
                     }
                 }
                 Section::Background | Section::Notifications => {
@@ -808,9 +853,15 @@ impl SettingsScreen {
                 .map(|t| (t.label.clone(), t.rect))
         })
         .chain(
-            [n.voice, n.scrollbar]
-                .into_iter()
-                .filter_map(|id| r.get::<OptionRow>(id).map(|o| (o.label.clone(), o.rect))),
+            [
+                n.voice,
+                n.scrollbar,
+                n.appearance,
+                n.light_theme,
+                n.dark_theme,
+            ]
+            .into_iter()
+            .filter_map(|id| r.get::<OptionRow>(id).map(|o| (o.label.clone(), o.rect))),
         )
         .chain([n.optimization, n.vendor].into_iter().filter_map(|id| {
             r.get::<LinkRow>(id)
@@ -875,6 +926,23 @@ impl SettingsScreen {
         self.router
             .get::<OptionRow>(n.scrollbar)
             .map(OptionRow::value)
+    }
+
+    /// The value shown in the option row `label`, and whether it is
+    /// active.
+    pub fn option_shown(&self, label: &str) -> Option<(String, bool)> {
+        let n = self.nodes.as_ref()?;
+        [
+            n.appearance,
+            n.light_theme,
+            n.dark_theme,
+            n.scrollbar,
+            n.voice,
+        ]
+        .into_iter()
+        .filter_map(|id| self.router.get::<OptionRow>(id))
+        .find(|o| o.label == label)
+        .map(|o| (o.value(), o.enabled))
     }
 
     /// The *Voice* row's value as shown.
@@ -987,6 +1055,7 @@ impl SettingsScreen {
                 (n.alerts, Info::Alerts),
                 (n.optimization, Info::Optimization),
                 (n.vendor, Info::Vendor),
+                (n.appearance, Info::Appearance),
             ]
             .into_iter()
             .find(|(id, _)| *id == target)
@@ -1029,6 +1098,16 @@ impl SettingsScreen {
                 _ => return None,
             };
             s.scrollbar = step_scrollbar(s.scrollbar, forward);
+        } else if target == n.appearance {
+            s.appearance = s.appearance.step(step(action)?);
+        } else if target == n.light_theme || target == n.dark_theme {
+            let dark = target == n.dark_theme;
+            let id = s.step_theme(&theme::themes(), dark, step(action)?);
+            if dark {
+                s.dark_theme = Some(id);
+            } else {
+                s.light_theme = Some(id);
+            }
         } else if target == n.voice {
             let forward = match action {
                 ControlAction::StepRight => true,
@@ -1258,10 +1337,10 @@ impl SettingsScreen {
         if let Some(t) = self.toggle(label) {
             return t.info.then(|| t.info_rect().center());
         }
-        if let Some(o) = self
-            .router
-            .get::<OptionRow>(n.voice)
-            .filter(|o| o.label == label)
+        if let Some(o) = [n.voice, n.appearance]
+            .into_iter()
+            .filter_map(|id| self.router.get::<OptionRow>(id))
+            .find(|o| o.label == label)
         {
             return o.info.then(|| o.info_rect().center());
         }
@@ -1569,6 +1648,147 @@ mod tests {
     }
 
     #[test]
+    fn appearance_steps_and_dims_the_other_kinds_row() {
+        let mut s = plain();
+        let (right, left) = arrows(&s, "Appearance");
+        let shown = |s: &SettingsScreen| {
+            ["Appearance", "Light theme", "Dark theme"].map(|l| s.option_shown(l).unwrap())
+        };
+        assert_eq!(
+            shown(&s),
+            [
+                ("System".to_string(), true),
+                ("Light (black text)".to_string(), true),
+                ("Dark (gray)".to_string(), true),
+            ]
+        );
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let Some(SettingsHit::Changed(now)) = tap(&mut s, right[0], right[1]) else {
+                panic!("the right arrow steps");
+            };
+            seen.push((now.appearance, shown(&s).map(|(_, on)| on)));
+        }
+        use super::super::Appearance::*;
+        assert_eq!(
+            seen,
+            [
+                (Light, [true, true, false]),
+                (Dark, [true, false, true]),
+                (System, [true, true, true]),
+            ]
+        );
+        let Some(SettingsHit::Changed(now)) = tap(&mut s, left[0], left[1]) else {
+            panic!("the left arrow steps");
+        };
+        assert_eq!(now.appearance, Dark);
+        // The inactive row is drawn dim, and its arrows do nothing.
+        let ctx = crate::theme::testing::draw_context();
+        let mut list = DrawList::new();
+        s.draw(&mut list, &ctx, None);
+        let light = s.row_rect("Light theme").unwrap();
+        let drawn: Vec<f32> = list
+            .instances
+            .iter()
+            .filter(|i| light.contains([i.position[0] + 1.0, i.position[1] + 1.0]))
+            .map(|i| i.color[3])
+            .collect();
+        assert!(!drawn.is_empty());
+        assert!(
+            drawn
+                .iter()
+                .all(|&a| a <= crate::settings::DISABLED_ALPHA + 1e-6),
+            "Light theme is dim with Always dark: {drawn:?}"
+        );
+        let (lr, _) = arrows(&s, "Light theme");
+        assert_eq!(tap(&mut s, lr[0], lr[1]), None);
+    }
+
+    #[test]
+    fn the_theme_rows_step_with_wrapping_and_apply_at_once() {
+        use crate::settings::put_theme_in_force;
+        use crate::theme::testing::{draw_context, use_theme};
+        use_theme("dark_gray");
+        let themes = theme::themes();
+        let ctx = draw_context();
+        let mut s = plain();
+        for (label, dark) in [("Dark theme", true), ("Light theme", false)] {
+            let names: Vec<String> = themes.of_kind(dark).map(|t| t.name.clone()).collect();
+            let (right, left) = arrows(&s, label);
+            let mut seen = Vec::new();
+            for _ in 0..names.len() {
+                let Some(SettingsHit::Changed(now)) = tap(&mut s, right[0], right[1]) else {
+                    panic!("{label} steps");
+                };
+                seen.push(s.option_shown(label).unwrap().0);
+                // As the app does with the hit: the theme of the kind in
+                // force (System is dark) applies at once.
+                let changed = put_theme_in_force(&now);
+                assert_eq!(changed.is_some(), dark, "{label}");
+                s.restyle();
+                let mut list = DrawList::new();
+                assert!(s.draw(&mut list, &ctx, None));
+                assert_eq!(list.instances[0].color, now.theme(&themes).colors.bg);
+            }
+            let mut forward = names[1..].to_vec();
+            forward.push(names[0].clone());
+            assert_eq!(seen, forward, "{label}: wraps forward");
+            let Some(SettingsHit::Changed(now)) = tap(&mut s, left[0], left[1]) else {
+                panic!("{label} steps back");
+            };
+            assert_eq!(
+                s.option_shown(label).unwrap().0,
+                *names.last().unwrap(),
+                "and back"
+            );
+            put_theme_in_force(&now);
+        }
+        // Always light: the light row's step applies.
+        let (right, _) = arrows(&s, "Appearance");
+        let Some(SettingsHit::Changed(now)) = tap(&mut s, right[0], right[1]) else {
+            panic!("Appearance steps");
+        };
+        let t = put_theme_in_force(&now).expect("a light theme now");
+        assert!(!t.dark);
+        assert_eq!(t.name, *s.option_shown("Light theme").unwrap().0);
+        assert_eq!(theme(), t.colors);
+        use_theme("dark_gray");
+    }
+
+    #[test]
+    fn the_appearance_and_themes_are_kept_across_a_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = plain();
+        let mut last = None;
+        // The theme rows first: with Always light, the dark row is inactive.
+        for label in ["Light theme", "Dark theme", "Appearance"] {
+            let (right, _) = arrows(&s, label);
+            if let Some(SettingsHit::Changed(now)) = tap(&mut s, right[0], right[1]) {
+                last = Some(now);
+            }
+        }
+        let saved = last.expect("each row steps");
+        saved.save(dir.path()).unwrap();
+        let loaded = Settings::load(dir.path());
+        assert_eq!(loaded, saved);
+        assert_eq!(loaded.appearance, super::super::Appearance::Light);
+        assert_eq!(loaded.light_theme.as_deref(), Some("light_paper"));
+        assert_eq!(loaded.dark_theme.as_deref(), Some("dark_black"));
+        // A new screen with them shows them.
+        let mut again = SettingsScreen::new(loaded, Box::new(NoBattery), false);
+        again.set_layout(PHONE);
+        assert_eq!(
+            again.option_shown("Light theme").unwrap().0,
+            "Light (paper)"
+        );
+        assert_eq!(
+            again.option_shown("Dark theme"),
+            Some(("Dark (black)".to_string(), false)),
+            "kept, and dim with Always light"
+        );
+    }
+
+    #[test]
     fn each_modal_opens_and_cancels_and_its_action_confirms() {
         for (row, hit) in [
             ("Unpair this device", SettingsHit::Unpair),
@@ -1844,6 +2064,7 @@ mod tests {
             (ALERTS, Info::Alerts),
             ("Battery optimization", Info::Optimization),
             ("Samsung battery (app sleeping)", Info::Vendor),
+            ("Appearance", Info::Appearance),
         ] {
             let mut s = screen(true, Box::new(phone()));
             let before = s.settings();

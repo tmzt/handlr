@@ -162,6 +162,16 @@ pub fn set_theme(theme: &Theme) {
     COLORS.with(|c| c.set(theme.colors));
 }
 
+/// Whether the phone is in dark mode, or `None` where that is not known.
+///
+/// TODO(libmorph): libmorph has no dark-mode API yet; handlr asked for
+/// `ctx.dark_mode()` and a change event (plan 20261024_05's 15:33 EDT
+/// amendment, item 5). Until then this is `None`, and *System* acts as
+/// dark; with the event, the app applies the theme again as it changes.
+pub fn system_dark_mode() -> Option<bool> {
+    None
+}
+
 /// Android's status and navigation bars in a theme (CHANGES.md
 /// 2026-10-24 15:36 EDT, plan 20261024_05 decision 6): the status bar in
 /// the theme's `header`, the navigation bar in its `bg`, each with dark

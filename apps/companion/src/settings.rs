@@ -37,6 +37,7 @@ use libmsdf::drawlist::DrawList;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{AgentHit, ScrollbarVisibility};
+use crate::theme::{self, Theme, Themes};
 
 pub use screen::{SettingsHit, SettingsScreen};
 
@@ -70,6 +71,71 @@ pub struct Settings {
     /// or `None` for *Default*. Kept as saved when it is not installed;
     /// [`voice::effective`] says what is spoken.
     pub voice: Option<String>,
+    /// *Appearance* (plan 20261024_05, the 15:33 EDT amendment, item 3).
+    pub appearance: Appearance,
+    /// *Light theme* and *Dark theme*: a theme's id, or `None` for the
+    /// first of its kind. Kept as saved when no theme has it.
+    pub light_theme: Option<String>,
+    pub dark_theme: Option<String>,
+}
+
+/// Which kind of theme is in force: the phone's (*System*), or always one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl Appearance {
+    pub const ALL: [Appearance; 3] = [Appearance::System, Appearance::Light, Appearance::Dark];
+
+    /// As `settings.toml` writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Appearance::System => "system",
+            Appearance::Light => "light",
+            Appearance::Dark => "dark",
+        }
+    }
+
+    /// As the screen shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Appearance::System => copy::APPEARANCE_SYSTEM.text,
+            Appearance::Light => copy::APPEARANCE_LIGHT.text,
+            Appearance::Dark => copy::APPEARANCE_DARK.text,
+        }
+    }
+
+    /// The next one the right arrow (`forward`) or the left gives,
+    /// wrapping: *System*, *Always light*, *Always dark*.
+    pub fn step(self, forward: bool) -> Self {
+        let i = Self::ALL.iter().position(|&a| a == self).unwrap_or(0);
+        let n = Self::ALL.len();
+        Self::ALL[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }]
+    }
+
+    /// Whether a dark theme is in force, with the phone in dark mode or
+    /// not (`system_dark`, `None` when it is not known: then dark).
+    pub fn is_dark(self, system_dark: Option<bool>) -> bool {
+        match self {
+            Appearance::System => system_dark.unwrap_or(true),
+            Appearance::Light => false,
+            Appearance::Dark => true,
+        }
+    }
+
+    /// Whether the row for themes of the kind `dark` is active: both are
+    /// with *System*, and only its own kind's otherwise.
+    pub fn row_active(self, dark: bool) -> bool {
+        self == Appearance::System || self.is_dark(None) == dark
+    }
 }
 
 impl Default for Settings {
@@ -83,6 +149,9 @@ impl Default for Settings {
             background: true,
             alerts: false,
             voice: None,
+            appearance: Appearance::System,
+            light_theme: None,
+            dark_theme: None,
         }
     }
 }
@@ -108,6 +177,18 @@ struct SettingsFile {
     /// Left out for *Default*.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     voice: Option<String>,
+    /// `system`, `light` or `dark`.
+    #[serde(default = "system")]
+    appearance: String,
+    /// Theme ids; left out for the first of their kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    light_theme: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dark_theme: Option<String>,
+}
+
+fn system() -> String {
+    Appearance::System.name().to_string()
 }
 
 fn on() -> bool {
@@ -194,6 +275,12 @@ impl Settings {
             background: file.background,
             alerts: file.alerts,
             voice: file.voice.filter(|v| !v.is_empty()),
+            appearance: Appearance::ALL
+                .into_iter()
+                .find(|a| a.name() == file.appearance)
+                .unwrap_or_default(),
+            light_theme: file.light_theme.filter(|t| !t.is_empty()),
+            dark_theme: file.dark_theme.filter(|t| !t.is_empty()),
         }
     }
 
@@ -209,6 +296,9 @@ impl Settings {
             background: self.background,
             alerts: self.alerts,
             voice: self.voice.clone(),
+            appearance: self.appearance.name().to_string(),
+            light_theme: self.light_theme.clone(),
+            dark_theme: self.dark_theme.clone(),
         };
         let text = toml::to_string(&file).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -218,6 +308,57 @@ impl Settings {
             .and_then(|()| std::fs::rename(&tmp, &path))
             .map_err(|e| format!("{}: {e}", path.display()))
     }
+}
+
+impl Settings {
+    /// The saved theme of the kind `dark`, or the first of its kind when
+    /// `themes` has no theme of that kind with its id.
+    pub fn chosen<'a>(&self, themes: &'a Themes, dark: bool) -> &'a Theme {
+        let id = if dark {
+            &self.dark_theme
+        } else {
+            &self.light_theme
+        };
+        id.as_deref()
+            .and_then(|id| themes.of_kind(dark).find(|t| t.id == id))
+            .unwrap_or_else(|| themes.first(dark))
+    }
+
+    /// The theme in force with these settings and `themes`, by
+    /// *Appearance* and the phone's dark mode ([`theme::system_dark_mode`]).
+    pub fn theme<'a>(&self, themes: &'a Themes) -> &'a Theme {
+        self.chosen(themes, self.appearance.is_dark(theme::system_dark_mode()))
+    }
+
+    /// The next theme of the kind `dark` that the right arrow (`forward`)
+    /// or the left gives, wrapping, from the one shown.
+    pub fn step_theme(&self, themes: &Themes, dark: bool, forward: bool) -> String {
+        let list: Vec<&Theme> = themes.of_kind(dark).collect();
+        let now = self.chosen(themes, dark);
+        let i = list.iter().position(|t| t.id == now.id).unwrap_or(0);
+        let n = list.len();
+        list[if forward {
+            (i + 1) % n
+        } else {
+            (i + n - 1) % n
+        }]
+        .id
+        .clone()
+    }
+}
+
+/// Puts `settings`' theme, from this thread's themes, in force, and gives
+/// the system bars its colours. Returns it when it was not in force
+/// already: then the screens are to be restyled.
+pub fn put_theme_in_force(settings: &Settings) -> Option<Theme> {
+    let themes = theme::themes();
+    let t = settings.theme(&themes);
+    if theme::current_id() == t.id && theme::theme() == t.colors {
+        return None;
+    }
+    theme::set_theme(t);
+    theme::apply_system_bars(theme::SystemBars::of(&t.colors));
+    Some(t.clone())
 }
 
 thread_local! {
@@ -362,6 +503,9 @@ mod tests {
             background: false,
             alerts: true,
             voice: Some("alba".into()),
+            appearance: Appearance::Light,
+            light_theme: Some("solarized_light".into()),
+            dark_theme: Some("nord".into()),
         };
         s.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), s);
@@ -370,10 +514,18 @@ mod tests {
         assert!(!dir.path().join(format!("{FILE}.tmp")).exists());
         assert!(text.contains("background = false") && text.contains("alerts = true"));
         assert!(text.contains("voice = \"alba\""), "{text}");
+        assert!(text.contains("appearance = \"light\""), "{text}");
+        assert!(text.contains("light_theme = \"solarized_light\""), "{text}");
+        assert!(text.contains("dark_theme = \"nord\""), "{text}");
         // *Default* is left out of the file.
         Settings::default().save(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
         assert!(!text.contains("voice"), "{text}");
+        assert!(
+            !text.contains("_theme"),
+            "the first of each kind is left out: {text}"
+        );
+        assert!(text.contains("appearance = \"system\""), "{text}");
 
         std::fs::write(
             dir.path().join(FILE),
@@ -427,6 +579,91 @@ mod tests {
             seen.push(m);
         }
         assert_eq!(&seen[3..], [Disabled, Always, Hidden]);
+    }
+
+    #[test]
+    fn appearance_steps_both_ways_and_wraps_and_picks_the_kind() {
+        let mut a = Appearance::default();
+        assert_eq!(a, Appearance::System);
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            a = a.step(true);
+            seen.push(a);
+        }
+        use Appearance::*;
+        assert_eq!(seen, [Light, Dark, System]);
+        for _ in 0..3 {
+            a = a.step(false);
+            seen.push(a);
+        }
+        assert_eq!(&seen[3..], [Dark, Light, System]);
+        // Until libmorph says, System is dark.
+        assert!(System.is_dark(None) && System.is_dark(Some(true)));
+        assert!(!System.is_dark(Some(false)));
+        assert!(!Light.is_dark(Some(true)) && Dark.is_dark(Some(false)));
+        assert!(System.row_active(true) && System.row_active(false));
+        assert!(Light.row_active(false) && !Light.row_active(true));
+        assert!(Dark.row_active(true) && !Dark.row_active(false));
+        // An unknown appearance in the file is System.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), "appearance = \"sepia\"\n").unwrap();
+        assert_eq!(Settings::load(dir.path()).appearance, System);
+    }
+
+    #[test]
+    fn the_theme_rows_step_through_their_kind_and_wrap() {
+        let themes = Themes::shipped();
+        for dark in [false, true] {
+            let kind: Vec<&str> = themes.of_kind(dark).map(|t| t.id.as_str()).collect();
+            let mut s = Settings::default();
+            assert_eq!(s.chosen(&themes, dark).id, kind[0], "the first by default");
+            let mut seen = Vec::new();
+            for _ in 0..kind.len() {
+                let id = s.step_theme(&themes, dark, true);
+                if dark {
+                    s.dark_theme = Some(id.clone());
+                } else {
+                    s.light_theme = Some(id.clone());
+                }
+                seen.push(id);
+            }
+            let mut forward: Vec<&str> = kind[1..].to_vec();
+            forward.push(kind[0]);
+            assert_eq!(seen, forward, "dark {dark}: wraps forward");
+            assert_eq!(
+                s.step_theme(&themes, dark, false),
+                *kind.last().unwrap(),
+                "and back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_missing_theme_id_falls_back_to_the_first_of_its_kind() {
+        let themes = Themes::shipped();
+        let s = Settings {
+            light_theme: Some("gone".into()),
+            dark_theme: Some("light_paper".into()),
+            ..Settings::default()
+        };
+        assert_eq!(s.chosen(&themes, false).id, "light_black");
+        assert_eq!(
+            s.chosen(&themes, true).id,
+            "dark_gray",
+            "a light id is not a dark theme"
+        );
+        let s = Settings {
+            appearance: Appearance::Light,
+            light_theme: Some("solarized_light".into()),
+            dark_theme: Some("nord".into()),
+            ..Settings::default()
+        };
+        assert_eq!(s.theme(&themes).id, "solarized_light");
+        let s = Settings {
+            appearance: Appearance::System,
+            ..s
+        };
+        assert_eq!(s.theme(&themes).id, "nord", "System is dark for now");
     }
 
     #[test]

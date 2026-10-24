@@ -99,6 +99,37 @@ key's text on that vendor's phones.
 
 - text: Always
 
+# [Copy] appearance
+
+- title: Appearance
+- text: |
+    With *System*, the theme follows the phone's dark mode: the *Light
+    theme* while it is light, and the *Dark theme* while it is dark. Until the app can
+    read the phone's setting, *System* is dark. *Always light* and
+    *Always dark* keep one. More themes can be added in a `themes.toml`
+    beside `settings.toml` in handlr's data directory; it is read each
+    time Settings opens.
+
+# [Copy] appearance_system
+
+- text: System
+
+# [Copy] appearance_light
+
+- text: Always light
+
+# [Copy] appearance_dark
+
+- text: Always dark
+
+# [Copy] light_theme
+
+- text: Light theme
+
+# [Copy] dark_theme
+
+- text: Dark theme
+
 # [Copy] background
 
 - title: Stay connected in the background
