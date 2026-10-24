@@ -1238,3 +1238,34 @@ and narrows item 2:
 
 The previous amendment's tests change to match: a resolved card shows
 whole, and a diff folds and expands as a tool call does.
+
+## Amendment — 2026-10-24 12:03 EDT: summary cards in three forms: short, expanded with points, and spoken (living section L3)
+
+The owner (2026-10-24): "two versions, like the current summary cards,
+expanded has full context and point-by-point summary, third version incl
+spoken version"; then "yes". This replaces "resolved cards included" in
+the previous amendment's "Shown whole". Cards like the current summary
+cards (Finished, and any card with a summary) have three forms:
+1. **Short** (the default, folded): the title and the current short
+   summary, as now.
+2. **Expanded** (tap; tap again folds it):
+   - the full context: the whole reply or question the card is about
+     (`Entry.text`);
+   - then a point-by-point summary, as a bulleted list, when the daemon
+     gives one.
+3. **Spoken:** at the end of the expanded card, under a small dim
+   "spoken" label, the exact text read aloud or to be read. A small play
+   button beside it replays it (not drawn while sound is off, per the
+   settings plan).
+
+The points come from `speech.summarize` (CHANGES.md, the same time).
+Without them, the expanded card shows the full context and the spoken
+text.
+
+Tests:
+- a Finished card folded shows its title and summary;
+- expanded, it shows the full reply, the points, and the spoken text with
+  its play button;
+- with no points, there is no list;
+- tapping again folds it;
+- expanding does not move the view.
