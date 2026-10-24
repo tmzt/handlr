@@ -591,6 +591,7 @@ pub(crate) mod tests {
             summary: summary.to_string(),
             links: Vec::new(),
             origin: None,
+            text: None,
         }
     }
 
@@ -624,6 +625,8 @@ pub(crate) mod tests {
                 confirm_id: (kind == CardKind::Approval).then_some(u64::from(line)),
                 about_plan: false,
                 links: Vec::new(),
+                points: Vec::new(),
+                spoken: None,
             }),
             index: 0,
         }
