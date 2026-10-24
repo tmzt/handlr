@@ -102,6 +102,13 @@ pub enum Suggestion {
     No,
     Continue,
     Compact,
+    /// A plan question's answers (plan 20261022_03, the 21:57 EDT
+    /// amendment): approve sends "Approve the <plan>", implement "Approve
+    /// the <plan> and start building it", and improve takes a message
+    /// starting "Improve the <plan>: ".
+    Approve,
+    Improve,
+    Implement,
 }
 
 impl Suggestion {
@@ -112,6 +119,9 @@ impl Suggestion {
             Suggestion::No => "no",
             Suggestion::Continue => "cont",
             Suggestion::Compact => "cmpct",
+            Suggestion::Approve => "approve",
+            Suggestion::Improve => "improve",
+            Suggestion::Implement => "implement",
         }
     }
 
@@ -123,8 +133,62 @@ impl Suggestion {
             Suggestion::No => ("no", common::SendKind::Message),
             Suggestion::Continue => ("continue", common::SendKind::Command),
             Suggestion::Compact => ("/compact", common::SendKind::Command),
+            Suggestion::Approve => ("Approve the plan", common::SendKind::Message),
+            Suggestion::Improve => ("Improve the plan:", common::SendKind::Message),
+            Suggestion::Implement => (
+                "Approve the plan and start building it",
+                common::SendKind::Message,
+            ),
         }
     }
+
+    /// Whether the tap answers the pending question, so its card goes.
+    fn answers(self) -> bool {
+        matches!(
+            self,
+            Suggestion::Yes | Suggestion::No | Suggestion::Approve | Suggestion::Implement
+        )
+    }
+}
+
+/// The plan as a plan answer names it: its spoken name ("the overview
+/// screen plan"), or "the plan" with none. Only the message filter's
+/// characters are kept.
+fn plan_name(plan: Option<&str>) -> String {
+    let plan: String = plan
+        .unwrap_or("")
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | ',' | '\'') {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    let plan = plan.split_whitespace().collect::<Vec<_>>().join(" ");
+    if plan.is_empty() {
+        "the plan".to_string()
+    } else if plan.to_ascii_lowercase().starts_with("the ") {
+        plan
+    } else {
+        format!("the {plan}")
+    }
+}
+
+/// What a tapped approve, improve or implement says (plan 20261022_03,
+/// the 21:57 EDT amendment): "Approve the <plan>", the start of the
+/// message "Improve the <plan>:", or "Approve the <plan> and start
+/// building it". At most 200 characters.
+pub fn plan_answer(response: Suggestion, plan: Option<&str>) -> Option<String> {
+    let plan = plan_name(plan);
+    let text = match response {
+        Suggestion::Approve => format!("Approve {plan}"),
+        Suggestion::Improve => format!("Improve {plan}:"),
+        Suggestion::Implement => format!("Approve {plan} and start building it"),
+        _ => return None,
+    };
+    Some(text.chars().take(200).collect())
 }
 
 /// How often the `net` thread ticks while connected.
@@ -1236,6 +1300,11 @@ impl State {
     }
 
     fn start_dictation(&mut self, out: &mut Vec<Output>) {
+        self.start_dictation_with(Vec::new(), out);
+    }
+
+    /// Take a message whose first parts are `parts`, already in it.
+    fn start_dictation_with(&mut self, parts: Vec<String>, out: &mut Vec<Output>) {
         if self.dictation.is_some() {
             return;
         }
@@ -1247,7 +1316,7 @@ impl State {
         };
         self.dictation = Some(Dictating {
             fixed_pane,
-            parts: Vec::new(),
+            parts,
             target,
             refresh_target: self.online(),
             phase: DictationPhase::Collecting,
@@ -1389,15 +1458,23 @@ impl State {
             return;
         }
         let (word, kind) = response.send();
-        // A Yes or No answering the agent's question says what it answers.
-        let question = self
-            .view
-            .as_ref()
-            .and_then(|v| v.pending_question.as_ref())
-            .map(|q| q.text.clone());
+        // A Yes or No answering the agent's question says what it answers;
+        // a plan answer names the plan.
+        let pending = self.view.as_ref().and_then(|v| v.pending_question.as_ref());
+        let question = pending.map(|q| q.text.clone());
+        let plan = pending.and_then(|q| q.plan.clone());
+        if response == Suggestion::Improve {
+            // A message in reply to the card, its start already in it, to
+            // dictate the rest.
+            let start = plan_answer(response, plan.as_deref()).unwrap_or_default();
+            return self.start_dictation_with(vec![start], out);
+        }
         let text = match (response, &question) {
             (Suggestion::Yes | Suggestion::No, Some(q)) => {
                 answer_text(response == Suggestion::Yes, q)
+            }
+            (Suggestion::Approve | Suggestion::Implement, _) => {
+                plan_answer(response, plan.as_deref()).unwrap_or_else(|| word.to_string())
             }
             _ => word.to_string(),
         };
@@ -1406,7 +1483,7 @@ impl State {
         // should dismiss the card on the phone side (so immediate)"; "convert
         // the responses to typed amber text with the input box").
         if let Some(v) = self.view.as_mut() {
-            if matches!(response, Suggestion::Yes | Suggestion::No) {
+            if response.answers() {
                 v.replied_to = v.pending_question.as_ref().map(|q| q.ts.clone());
             }
             v.typed = Some(text.clone());
@@ -4184,6 +4261,147 @@ mod tests {
             "Yes, restart the daemon and install the new build"
         );
         assert_eq!(answer_text(true, ""), "Yes");
+    }
+
+    /// A plan question about the overview screen plan, with its link.
+    fn asking_about_a_plan(plan: Option<&str>) -> Value {
+        let mut q = json!({
+            "text": "Shall I build docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md?",
+            "ts": "2", "about_plan": true,
+            "links": [{"text": "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md",
+                       "url": "http://w/#/src--handlr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN"}]
+        });
+        if let Some(p) = plan {
+            q["plan"] = json!(p);
+        }
+        json!({
+            "session_id": "s1", "matched": "id",
+            "entries": [
+                {"ts": "1", "role": "user", "kind": "text", "summary": "go"},
+                {"ts": "2", "role": "assistant", "kind": "text",
+                 "summary": "Done.\n\nShall I build docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md?",
+                 "links": q["links"].clone()}
+            ],
+            "pending_question": q
+        })
+    }
+
+    #[test]
+    fn plan_answers_name_the_plan() {
+        let plan = Some("the overview screen plan");
+        assert_eq!(
+            plan_answer(Suggestion::Approve, plan).unwrap(),
+            "Approve the overview screen plan"
+        );
+        assert_eq!(
+            plan_answer(Suggestion::Implement, plan).unwrap(),
+            "Approve the overview screen plan and start building it"
+        );
+        assert_eq!(
+            plan_answer(Suggestion::Improve, plan).unwrap(),
+            "Improve the overview screen plan:"
+        );
+        assert_eq!(
+            plan_answer(Suggestion::Approve, None).unwrap(),
+            "Approve the plan"
+        );
+        assert_eq!(
+            plan_answer(Suggestion::Implement, Some("harness `protocol` plan")).unwrap(),
+            "Approve the harness protocol plan and start building it"
+        );
+        assert_eq!(plan_answer(Suggestion::Yes, plan), None);
+    }
+
+    #[test]
+    fn a_plan_question_card_carries_about_plan_and_its_links() {
+        let s = viewing(
+            "idle",
+            asking_about_a_plan(Some("the overview screen plan")),
+        );
+        let Some(Event::AgentView { cards, entries, .. }) = s.agent_view() else {
+            panic!("a view");
+        };
+        let card = cards
+            .iter()
+            .find(|c| c.kind == crate::view::CardKind::Question)
+            .unwrap();
+        assert!(card.about_plan);
+        assert_eq!(card.links.len(), 1);
+        assert_eq!(entries[1].links.len(), 1, "entries keep their links");
+        // A plain question is not about a plan.
+        let s = viewing("idle", asking());
+        let Some(Event::AgentView { cards, .. }) = s.agent_view() else {
+            panic!("a view");
+        };
+        assert!(cards.iter().all(|c| !c.about_plan && c.links.is_empty()));
+    }
+
+    #[test]
+    fn approve_and_implement_send_the_plan_answer_and_dismiss_the_card() {
+        for (tapped, said) in [
+            (Suggestion::Approve, "Approve the overview screen plan"),
+            (
+                Suggestion::Implement,
+                "Approve the overview screen plan and start building it",
+            ),
+        ] {
+            let mut s = viewing(
+                "idle",
+                asking_about_a_plan(Some("the overview screen plan")),
+            );
+            let out = s.input(Input::Respond(tapped));
+            let send = requests(&out, "agents.send")[0].clone();
+            assert_eq!(send.params["text"], said);
+            assert_eq!(send.params["kind"], "message");
+            let (_, cards, _) = view_of(&out).expect("the view again");
+            assert!(
+                !cards
+                    .iter()
+                    .any(|c| c.live && c.kind == crate::view::CardKind::Question),
+                "{out:?}"
+            );
+            // The tap is its own approval.
+            s.incoming(response(
+                send.id.clone(),
+                json!({"status": "pending", "confirm_id": 41}),
+            ));
+            let out = s.incoming(note(
+                "confirm.requested",
+                json!({"confirm_id": 41, "pane_id": "w2:pZ", "agent": "claude",
+                       "command": said, "requested_by": "companion:test",
+                       "text": "Approve sending your message to Claude?"}),
+            ));
+            assert_eq!(
+                approvals(&out),
+                vec![json!({"confirm_id": 41, "approve": true})],
+                "own approval"
+            );
+        }
+        // No plan name: "the plan".
+        let mut s = viewing("idle", asking_about_a_plan(None));
+        let out = s.input(Input::Respond(Suggestion::Approve));
+        assert_eq!(
+            requests(&out, "agents.send")[0].params["text"],
+            "Approve the plan"
+        );
+    }
+
+    #[test]
+    fn improve_takes_a_message_starting_with_the_plan() {
+        let mut s = viewing(
+            "idle",
+            asking_about_a_plan(Some("the overview screen plan")),
+        );
+        let out = s.input(Input::Respond(Suggestion::Improve));
+        assert!(requests(&out, "agents.send").is_empty(), "nothing sent yet");
+        let d = dictation_of(&out).expect("taking a message");
+        assert!(d.active);
+        assert_eq!(d.text, "Improve the overview screen plan:");
+        assert_eq!(d.target.as_ref().unwrap().pane_id, "w2:pZ");
+        // The rest is dictated after it.
+        let out = s.input(Input::Utterance("split step two".into()));
+        let d = dictation_of(&out).expect("the message");
+        assert_eq!(d.text, "Improve the overview screen plan: split step two");
     }
 
     #[test]

@@ -21,7 +21,7 @@
 //! the flow, faded, instead of vanishing. The pinned card is the highest
 //! live one.
 
-use libhandlr_proto::common::{Entry, EntryKind, PendingQuestion, Role, Turn};
+use libhandlr_proto::common::{Entry, EntryKind, Link, PendingQuestion, Role, Turn};
 
 /// The kinds of card, highest priority first (the order compares so).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -46,6 +46,21 @@ pub struct AgentCard {
     pub text: String,
     /// The confirmation an Approval card answers.
     pub confirm_id: Option<u64>,
+    /// A Question card's question is about a plan: it offers approve,
+    /// improve and implement in place of Yes and No (plan 20261022_03, the
+    /// 21:57 EDT amendment).
+    pub about_plan: bool,
+    /// The repowiki links for the `docs/…` paths in `text`.
+    pub links: Vec<Link>,
+}
+
+/// The links of `links` whose text is in `text`.
+fn links_in(links: &[Link], text: &str) -> Vec<Link> {
+    links
+        .iter()
+        .filter(|l| text.contains(&l.text))
+        .cloned()
+        .collect()
 }
 
 /// The longest text a Broke or Finished card carries, in characters.
@@ -92,6 +107,8 @@ pub struct Found {
     pub title: String,
     pub text: String,
     pub confirm_id: Option<u64>,
+    pub about_plan: bool,
+    pub links: Vec<Link>,
 }
 
 /// The live cards the four rules find now, highest priority first.
@@ -105,6 +122,8 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
             title: "Approval needed".to_string(),
             text: c.text.clone(),
             confirm_id: Some(c.confirm_id),
+            about_plan: false,
+            links: Vec::new(),
         });
     }
     // 2. The agent is asking.
@@ -122,6 +141,8 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
             title: format!("{} is asking", f.name),
             text: q.text.clone(),
             confirm_id: None,
+            about_plan: q.about_plan,
+            links: links_in(&q.links, &q.text),
         });
     }
     // 3. Something broke: the pane blocked, or the last turn's last tool
@@ -133,6 +154,8 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
             title: "Something broke".to_string(),
             text: format!("{} is blocked and needs your input.", f.name),
             confirm_id: None,
+            about_plan: false,
+            links: Vec::new(),
         });
     }
     let turn = f
@@ -155,12 +178,15 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
             Some(tool) => format!("{tool}: {}", first.trim()),
             None => first.trim().to_string(),
         };
+        let text = cut(&what, CARD_TEXT_MAX);
         found.push(Found {
             kind: CardKind::Broke,
             anchor: Anchor::Entry(result.clone()),
             title: "Something broke".to_string(),
-            text: cut(&what, CARD_TEXT_MAX),
+            links: links_in(&result.links, &text),
+            text,
             confirm_id: None,
+            about_plan: false,
         });
     }
     // 4. Finished: idle after a turn that ended with a reply, or the turn
@@ -173,12 +199,15 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
         if let Some(i) = last_text.filter(|&i| is_reply(&f.entries[i]))
             && question_at != Some(i)
         {
+            let text = cut(first_paragraph(&f.entries[i].summary), CARD_TEXT_MAX);
             found.push(Found {
                 kind: CardKind::Finished,
                 anchor: Anchor::Entry(f.entries[i].clone()),
                 title: "Finished".to_string(),
-                text: cut(first_paragraph(&f.entries[i].summary), CARD_TEXT_MAX),
+                links: links_in(&f.entries[i].links, &text),
+                text,
                 confirm_id: None,
+                about_plan: false,
             });
         }
     }
@@ -258,6 +287,8 @@ struct Remembered {
     title: String,
     text: String,
     confirm_id: Option<u64>,
+    about_plan: bool,
+    links: Vec<Link>,
     live: bool,
 }
 
@@ -298,6 +329,8 @@ impl Cards {
                     r.live = true;
                     r.title = f.title;
                     r.text = f.text;
+                    r.about_plan = f.about_plan;
+                    r.links = f.links;
                 }
                 None => {
                     let anchor = match f.anchor {
@@ -311,6 +344,8 @@ impl Cards {
                         title: f.title,
                         text: f.text,
                         confirm_id: f.confirm_id,
+                        about_plan: f.about_plan,
+                        links: f.links,
                         live: true,
                     });
                 }
@@ -361,6 +396,8 @@ impl Cards {
                     title: r.title.clone(),
                     text: r.text.clone(),
                     confirm_id: r.confirm_id,
+                    about_plan: r.about_plan,
+                    links: r.links.clone(),
                 })
             })
             .collect();
@@ -386,6 +423,7 @@ mod tests {
             kind,
             tool: (kind != EntryKind::Text).then(|| "Bash".to_string()),
             summary: summary.to_string(),
+            links: Vec::new(),
         }
     }
 
@@ -434,6 +472,9 @@ mod tests {
         PendingQuestion {
             text: "Shall I go on?".to_string(),
             ts: ts.to_string(),
+            about_plan: false,
+            plan: None,
+            links: Vec::new(),
         }
     }
 
