@@ -284,6 +284,7 @@ pub(crate) mod tests {
                 summary,
             )],
             card: None,
+            index: 0,
         }
     }
 
@@ -301,6 +302,7 @@ pub(crate) mod tests {
                 about_plan: false,
                 links: Vec::new(),
             }),
+            index: 0,
         }
     }
 

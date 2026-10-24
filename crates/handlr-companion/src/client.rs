@@ -1278,6 +1278,8 @@ impl State {
             pane_id: pane_id.clone(),
             sections: VIEW_SECTIONS,
             after: v.sections.newest(),
+            outline: false,
+            from: None,
         };
         out.push(self.request(methods::SESSION_SUBSCRIBE, params, Sent::Subscribe(pane_id)));
     }
