@@ -15,7 +15,8 @@
 //!    20261023_04, A4: herdr says working while a background agent runs).
 //!
 //! A card is live until it is resolved: the confirmation resolves, a user
-//! entry follows the question, a later tool result succeeds (or the pane
+//! entry follows the question (an entry with an `origin` is context, not
+//! the user), a later tool result succeeds (or the pane
 //! is no longer blocked), or the agent works again. [`Cards`] remembers the
 //! cards it has seen while the view is open, so a resolved one stays in
 //! the flow, faded, instead of vanishing. The pinned card is the highest
@@ -161,7 +162,7 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
     let turn = f
         .entries
         .iter()
-        .rposition(|e| e.role == Role::User && e.kind == EntryKind::Text)
+        .rposition(is_user_said)
         .map_or(0, |i| i + 1);
     if let Some(result) = f.entries[turn..]
         .iter()
@@ -192,10 +193,14 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
     // 4. Finished: idle after a turn that ended with a reply, or the turn
     // stopped on the newest entry. The question card already stands for a
     // reply that asks.
-    let stopped =
-        matches!(f.turn, Some(Turn::Stopped { .. })) && f.entries.last().is_some_and(is_reply);
+    // Context after the reply (a notification, a recap) does not end it.
+    let newest = f.entries.iter().rev().find(|e| e.origin.is_none());
+    let stopped = matches!(f.turn, Some(Turn::Stopped { .. })) && newest.is_some_and(is_reply);
     if matches!(f.status, "idle" | "done") || stopped {
-        let last_text = f.entries.iter().rposition(|e| e.kind == EntryKind::Text);
+        let last_text = f
+            .entries
+            .iter()
+            .rposition(|e| e.kind == EntryKind::Text && e.origin.is_none());
         if let Some(i) = last_text.filter(|&i| is_reply(&f.entries[i]))
             && question_at != Some(i)
         {
@@ -216,6 +221,13 @@ pub fn live_cards(f: &Facts) -> Vec<Found> {
 
 fn is_reply(e: &Entry) -> bool {
     e.role == Role::Assistant && e.kind == EntryKind::Text
+}
+
+/// The user's own words: a user text entry with no `origin`. An entry
+/// with one (a task notification, a peer's message, a recap) is context,
+/// never the user speaking, and makes no card of its own.
+pub fn is_user_said(e: &Entry) -> bool {
+    e.role == Role::User && e.kind == EntryKind::Text && e.origin.is_none()
 }
 
 /// A tool result the reader marked as an error (decision 2).
@@ -424,6 +436,14 @@ mod tests {
             tool: (kind != EntryKind::Text).then(|| "Bash".to_string()),
             summary: summary.to_string(),
             links: Vec::new(),
+            origin: None,
+        }
+    }
+
+    fn context(ts: &str, origin: &str, text: &str) -> Entry {
+        Entry {
+            origin: Some(origin.to_string()),
+            ..user(ts, text)
         }
     }
 
@@ -605,6 +625,60 @@ mod tests {
         // reply): the list is older than the session.
         let went_on = [entries[0].clone(), entries[1].clone(), call("3")];
         assert!(live_cards(&with(&stopped, &went_on)).is_empty());
+    }
+
+    #[test]
+    fn context_entries_are_not_the_user_and_make_no_card() {
+        let ctx = |ts| {
+            [
+                context(ts, "task", "Background command finished"),
+                context(ts, "peer:docs-writer", "Rebased."),
+                context(ts, "agent:a1", "Report."),
+                context(ts, "recap", "You asked for the build."),
+                context(ts, "compact", "Conversation compacted"),
+            ]
+        };
+        // Finished stays finished with context after the reply, idle or
+        // stopped by the session.
+        let mut entries = vec![user("1", "go"), reply("2", "All 12 tests pass.")];
+        entries.extend(ctx("3"));
+        let found = live_cards(&facts("idle", &entries, None, &[]));
+        assert_eq!(kinds(&found), [CardKind::Finished]);
+        assert_eq!(found[0].anchor, Anchor::Entry(entries[1].clone()));
+        let stopped = Turn::Stopped {
+            line: "All 12 tests pass.".to_string(),
+        };
+        let working = Facts {
+            turn: Some(&stopped),
+            ..facts("working", &entries, None, &[])
+        };
+        assert_eq!(kinds(&live_cards(&working)), [CardKind::Finished]);
+        // A question stays asked past context, at its reply.
+        let mut asked = vec![user("1", "go"), reply("2", "Done.\n\nShall I go on?")];
+        asked.extend(ctx("3"));
+        let q = question("2");
+        let mut cards = Cards::default();
+        cards.update(&facts("idle", &asked, Some(&q), &[]));
+        let (placed, pinned) = cards.placed(&asked);
+        assert_eq!(placed.len(), 1);
+        assert_eq!(
+            (placed[0].kind, placed[0].at, placed[0].live),
+            (CardKind::Question, 2, true)
+        );
+        assert_eq!(pinned, Some(0));
+        // A failure in the turn is still the turn's after a notification.
+        let mut broke = vec![user("1", "test it"), call("2"), result("3", "error: boom")];
+        broke.extend(ctx("4"));
+        let found = live_cards(&facts("working", &broke, None, &[]));
+        assert_eq!(kinds(&found), [CardKind::Broke]);
+        assert_eq!(found[0].anchor, Anchor::Entry(broke[2].clone()));
+        // No card is ever at a context entry, and none is the user's.
+        for e in ctx("5") {
+            assert!(!is_user_said(&e));
+            let entries = [user("1", "go"), e];
+            assert!(live_cards(&facts("idle", &entries, None, &[])).is_empty());
+        }
+        assert!(is_user_said(&user("1", "go")));
     }
 
     #[test]

@@ -2115,7 +2115,7 @@ impl State {
             let shown = v
                 .entries
                 .iter()
-                .any(|e| e.role == common::Role::User && same_message(&e.summary, t));
+                .any(|e| crate::view::is_user_said(e) && same_message(&e.summary, t));
             if shown || v.status == "working" {
                 v.typed = None;
             }
