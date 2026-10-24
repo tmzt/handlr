@@ -10,6 +10,8 @@
 //!            <method> [<params as JSON>]
 //! handlr pair [--listen <handlr.sock>] [--name <name>] [--protocols companion,harness]
 //!             [--replace] [--code <code>] [--qr-png <file>]
+//! handlr session tail [--listen <handlr.sock>] [--pane <id or name>] [--follow]
+//!                     [--entries N] [--history N]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -42,6 +44,10 @@ struct AppArgs {
     /// The device code, instead of prompting for it.
     code: Option<String>,
     qr_png: Option<String>,
+    /// `session tail`'s pane, backfill size and history to page back.
+    pane: Option<String>,
+    entries: Option<String>,
+    history: Option<String>,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
@@ -64,6 +70,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         replace: false,
         code: None,
         qr_png: None,
+        pane: None,
+        entries: None,
+        history: None,
     };
 
     while let Some(arg) = args.next() {
@@ -93,6 +102,9 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--code" => parsed.code = args.next(),
             "--replace" => parsed.replace = true,
             "--qr-png" => parsed.qr_png = args.next(),
+            "--pane" => parsed.pane = args.next(),
+            "--entries" => parsed.entries = args.next(),
+            "--history" => parsed.history = args.next(),
             _ if !arg.starts_with("--") => parsed.positional.push(arg),
             _ => {
                 eprintln!("Unknown argument: {}", arg);
@@ -274,6 +286,32 @@ async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
     .await?)
 }
 
+/// `handlr session tail` (plan 20261023_03, section 8): read-only.
+async fn session(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    const USAGE: &str = "usage: handlr session tail [--listen <socket>] [--pane <id or name>] [--follow] [--entries N] [--history N]";
+    if args.positional.first().map(String::as_str) != Some("tail") || args.positional.len() > 1 {
+        return Err(USAGE.into());
+    }
+    let number = |v: &Option<String>, default: usize| -> Result<usize, String> {
+        v.as_deref().map_or(Ok(default), |n| {
+            n.parse().map_err(|_| format!("not a number: {n}"))
+        })
+    };
+    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let socket = daemon_socket(&args, &config);
+    let options = handlr::tail::TailOptions {
+        pane: args.pane.clone(),
+        follow: args.follow,
+        sections: number(
+            &args.entries,
+            libhandlr_proto::common::SUBSCRIBE_SECTIONS_DEFAULT,
+        )?,
+        history: number(&args.history, 0)?,
+    };
+    let mut out = std::io::stdout();
+    Ok(handlr::tail::run(&socket, &options, &mut out).await?)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
@@ -281,7 +319,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut argv: Vec<String> = std::env::args().skip(1).collect();
     let command = match argv.first().map(String::as_str) {
-        Some("serve") | Some("ctl") | Some("pair") => argv.remove(0),
+        Some("serve") | Some("ctl") | Some("pair") | Some("session") => argv.remove(0),
         _ => "serve".to_string(),
     };
     let args = parse_args(argv.into_iter());
@@ -290,6 +328,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command == "pair" {
         std::process::exit(pair(args).await?);
+    }
+    if command == "session" {
+        std::process::exit(session(args).await?);
     }
     if !args.positional.is_empty() {
         return Err(format!("unexpected arguments: {:?}", args.positional).into());

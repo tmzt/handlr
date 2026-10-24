@@ -895,3 +895,121 @@ async fn a_confirmation_for_the_pane_is_an_approval_card_and_journalled() {
     let r = phone.subscribe(json!({"pane_id": "p1"})).await;
     assert!(card(&r["delivery"], false), "{}", r["delivery"]);
 }
+
+/// What `handlr session tail` printed, shared with the test.
+#[derive(Clone, Default)]
+struct Printed(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Printed {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Printed {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// Wait until the output holds `want`.
+    async fn wait_for(&self, want: &str) -> String {
+        let end = Instant::now() + WAIT;
+        loop {
+            let text = self.text();
+            if text.contains(want) {
+                return text;
+            }
+            assert!(Instant::now() < end, "no {want:?} in:\n{text}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// `handlr session tail` against the daemon, printing into `Printed`.
+fn tail(env: &Env, options: handlr::tail::TailOptions) -> (Printed, tokio::task::JoinHandle<()>) {
+    let socket = env.socket.clone();
+    let printed = Printed::default();
+    let mut out = printed.clone();
+    let job = tokio::spawn(async move {
+        let code = handlr::tail::run(&socket, &options, &mut out)
+            .await
+            .unwrap();
+        assert_eq!(code, 0);
+    });
+    (printed, job)
+}
+
+#[tokio::test]
+async fn session_tail_backfills_pages_back_and_prints_what_comes() {
+    let env = start(false).await;
+    let mut lines = Vec::new();
+    for i in 0..30u32 {
+        lines.push(user(1000 + i, &format!("older {i}")));
+    }
+    // 30 older turns, then the six of `start`.
+    let path = env.session(SESSION_A);
+    let six = std::fs::read_to_string(&path).unwrap();
+    write_lines(&path, &lines);
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&six);
+    std::fs::write(&path, text).unwrap();
+    // The newest six sections (a Finished card among them), then 20 more
+    // back: lines 13 to 32.
+    let (printed, job) = tail(
+        &env,
+        handlr::tail::TailOptions {
+            pane: Some("p1".to_string()),
+            sections: 6,
+            history: 20,
+            ..handlr::tail::TailOptions::default()
+        },
+    );
+    printed.wait_for("-- history: 20 section(s) before ").await;
+    append_lines(&path, &[user(2000, "a new prompt")]);
+    let out = printed.wait_for(":37.0 user text: a new prompt").await;
+    job.abort();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "-- subscribed to p1 --", "{out}");
+    assert_eq!(lines[1], "-- reset (backfill) --", "{out}");
+    assert!(out.contains(":33.0 user text: prompt 1"), "{out}");
+    assert!(out.contains(":13.0 user text: older 12"), "{out}");
+    assert!(!out.contains(":12.0 user text"), "only 20 back: {out}");
+}
+
+#[tokio::test]
+async fn session_tail_follows_the_focus_only_when_asked() {
+    let env = start(false).await;
+    write_lines(&env.session(SESSION_B), &[user(1, "the other agent")]);
+    env.pane(|panes| {
+        let mut p2 = panes[0].clone();
+        p2.pane_id = "p2".to_string();
+        p2.agent_session = Some(session_of(SESSION_B));
+        panes.push(p2);
+    })
+    .await;
+    // Without --pane: herdr's focus, p1. One tail follows, one does not.
+    let follow = handlr::tail::TailOptions {
+        follow: true,
+        ..handlr::tail::TailOptions::default()
+    };
+    let (following, a) = tail(&env, follow);
+    let (staying, b) = tail(&env, handlr::tail::TailOptions::default());
+    following.wait_for("-- subscribed to p1 --").await;
+    staying.wait_for("-- subscribed to p1 --").await;
+    env.set_focus("p2").await;
+    env.herdr_event(json!({"event": "pane_focused",
+        "data": {"type": "pane_focused", "pane_id": "p2", "workspace_id": "w1"}}));
+    following.wait_for("-- subscribed to p2 --").await;
+    append_lines(&env.session(SESSION_B), &[user(2, "on p2 now")]);
+    append_lines(&env.session(SESSION_A), &[user(3, "still on p1")]);
+    let out = following.wait_for(":2.0 user text: on p2 now").await;
+    assert!(out.contains("-- following "), "{out}");
+    let out = staying.wait_for(":7.0 user text: still on p1").await;
+    assert!(!out.contains("p2"), "{out}");
+    a.abort();
+    b.abort();
+}

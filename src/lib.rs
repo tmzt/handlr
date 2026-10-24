@@ -10,6 +10,7 @@ pub mod prompts;
 pub mod reasoning;
 pub mod server;
 pub mod sessions;
+pub mod tail;
 pub mod transport;
 pub mod watch;
 
