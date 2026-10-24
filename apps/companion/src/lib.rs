@@ -494,11 +494,16 @@ impl App {
                 pinned,
                 loading,
                 typed,
+                loading_earlier,
+                start,
+                terminal_on,
             } => {
                 if let Some(agent) = &mut self.agent {
                     agent.set_loading(loading);
                     agent.set_typed(typed);
+                    agent.set_terminal_on(terminal_on);
                     agent.set_content(name, status, entries, cards, pinned);
+                    agent.set_history(loading_earlier, start);
                 }
             }
             // herdr's focus shows on the cards, from the list it refreshes.
@@ -982,6 +987,11 @@ impl MorphApp for App {
             self.overview.tick(dt);
         }
         self.lay_out(ctx);
+        // The view's flow came near its top: page in earlier sections
+        // (plan 20261023_03, A7).
+        if self.agent.as_mut().is_some_and(|a| a.take_load_earlier()) {
+            self.send(Input::LoadEarlier);
+        }
     }
 
     /// The controls, and a tap anywhere else. On the overview and in the

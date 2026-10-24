@@ -23,6 +23,9 @@ use crate::agent::{
 };
 use crate::controls::OutlineButton;
 
+/// The chevron after the focused agent's heading.
+pub const CHEVRON: char = '\u{203a}';
+
 /// What a card needs from the user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeedsInput {
@@ -195,12 +198,15 @@ impl AgentCard<'_> {
             });
             *ty += line_h(px);
         };
-        row(
-            one_line(&self.heading(), columns(inner_w, head_px)),
-            head_px,
-            FG,
-            &mut ty,
-        );
+        // herdr's focused agent is a visible control: its heading ends in a
+        // chevron, and a tap opens its view (plan 20261023_03, section 7).
+        let heading = if self.agent.focused {
+            let cols = columns(inner_w, head_px).saturating_sub(2);
+            format!("{} {CHEVRON}", one_line(&self.heading(), cols))
+        } else {
+            one_line(&self.heading(), columns(inner_w, head_px))
+        };
+        row(heading, head_px, FG, &mut ty);
         ty += 2.0 * s;
         let (state, state_color) = self.state();
         row(state, text_px, state_color, &mut ty);
@@ -445,6 +451,12 @@ pub(crate) mod tests {
         });
         let bar = c.flow.fills[1];
         assert_eq!(bar.rect.x, c.rect.x);
+        // Its heading ends in the chevron; another's does not.
+        assert_eq!(
+            c.flow.rows[0].text,
+            format!("Claude \u{b7} handlr \u{b7} 17-hr {CHEVRON}")
+        );
+        assert!(!plain.flow.rows[0].text.ends_with(CHEVRON));
         assert_eq!(bar.rect.w, AgentCard::BAR * 2.0);
         assert_eq!(bar.rect.h, c.rect.h);
         // A tab without a label shows its number.
