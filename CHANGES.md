@@ -2108,3 +2108,15 @@ next release". The *Default* preview reads the new copy key
 `voice_preview_default`, "This is the default voice.", instead of filling
 `voice_preview` with "Default". It is in the next build, not the one just
 installed.
+
+## 2026-10-24 15:19 EDT — the Voice row: long names drawn smaller, and *Default* listed once
+
+The owner (2026-10-24): "adjust font size if too long, and there's two default
+labels".
+- **Long values:** an option row's value is drawn smaller to fit between its
+  arrows, down to 9 pt (estimated at 0.5 em a character). This is for voices
+  such as "Captain Silas Blackwater".
+- **One *Default*:** Phonon can name its own voice "default". That name is left
+  out of the list (case-insensitively), so *Default* appears once, first.
+  Not seen on screen: the phone was in another app. The second "Default" is
+  taken to be Phonon's own.
