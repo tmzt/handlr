@@ -223,7 +223,8 @@ COLOR_XML = """<?xml version="1.0" encoding="utf-8"?>
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--source", default=DEFAULT_SOURCE)
-    ap.add_argument("--hue", type=float, default=DEFAULT_HUE)
+    ap.add_argument("--hue", type=float, default=DEFAULT_HUE,
+                    help="degrees to turn the line art's hue: positive or negative")
     ap.add_argument("--background", default=DEFAULT_BACKGROUND, help="RRGGBB, or 'source'")
     args = ap.parse_args()
 
