@@ -1520,3 +1520,24 @@ then. The resume ping now sets `ping_sent` with its own wait,
 and the subscription resumes (`after`, `from`, `epoch`). The idle ping
 keeps `PING_WAIT` (10 s). This adds to the earlier departure, in which
 the idle ping replaced `SO_KEEPALIVE`.
+
+## 2026-10-24 11:24 EDT — plan 20261022_03 L3, the two-finger scroll and scrollbar amendment: readings in implementing it
+
+Built in the handlr-companion commit (`Event::AgentView.held_newer`, the
+held-aside outline's newer slots, counted in the calculated length; the
+new `view::newer_slots`) and the companion commit after it.
+- **The 5× fling** is 5 × the one-finger fling (after the force curve),
+  then any carried fling is added, under `MAX_FLING_OUT`. It applies when
+  the second-to-last finger lifted within 100 ms of the last: fingers
+  lifted together never leave Android at the same instant.
+- **Three or more fingers** also scroll at 5×. Two fingers down is never a
+  tap.
+- **The thumb** sits 4 pt in from the right edge, so its 12 pt strip ends
+  at the screen's edge. Its length is at most the viewport's height.
+- **While the thumb is dragged:** no window is reported, so contents load
+  where it stops. The pinned card stays in its bar form, and other fingers
+  are ignored.
+- **Multi-touch:** libmorph's Android runner already sends each pointer
+  with its own id, so nothing was needed upstream.
+- handlr-companion's version is not bumped for the new event field, as
+  with the earlier ones.
