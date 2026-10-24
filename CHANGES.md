@@ -1242,3 +1242,44 @@ synthetic, written from herdr's own API schema (`herdr api schema
 from it. Step 1's other half of **Done when**, a subscription with all
 four types accepted by live herdr, is left to the owner's live check
 with step 5.
+
+## 2026-10-23 23:24 EDT — plan 20261023_03, step 3: how the hub numbers, groups and redacts sections
+
+Small departures needed to make A2 and A3 work, built in `src/sessions/`
+(`sections.rs`, `hub.rs`, `journal.rs`):
+- **Slots in fixed ranges.** A2 gives a line's own entries the first
+  slots and the cards after it the next ones, so a card's slot would
+  depend on how many entries the reader finds on the line. Instead:
+  0–63 the line's entries (more go into slot 63's section), 64–127
+  Approval cards (the journal's next free slot), 128 Question, 129 the
+  Broke card of a blocked spell, 130–193 a Broke card at a failing
+  result (130 plus the result's slot), 194 Finished. Within a line the
+  order is still entries, then cards by priority.
+- **Grouping looks back at most 256 lines (`REACH`).** A text entry joins
+  the open text block, and a result its call's section, only within 256
+  lines; and a reply's turn counts as ended (a Finished or resolved
+  Question card) only when the next entry, but for context, is the
+  user's within 256 lines. That makes a section's grouping a function of
+  the 256 lines before it, so a history page read from 256 lines before
+  its span (and 256 past it) gives the same sections and serials as the
+  live tail and a read from the file's start.
+- **Cards that no longer stand are removed, not kept faded.** A Finished
+  card for a reply the agent then carried on from (no user entry
+  followed), a live Question card whose question the agent left, and the
+  Broke card of a blocked spell (which no line of the file records) are
+  not cards that history can rebuild, so when they stop being live the
+  tailer sends their serials in `SessionDelivery::removed`
+  (libhandlr_proto 0.3.5) and the client drops them. Every card left
+  showing is one a history read rebuilds (A8.5).
+- **Secret calls are found file-wide.** Decision 7 remembers the last 512
+  calls, and A5 lets an old result whose call is not on the page keep
+  its text if its own text names no secret path. That would show a
+  `.env` file's contents in history whenever its call was more than a
+  page back. Instead the tailer's one scan of the file (for the line
+  index) also notes the lines holding `.env` or `.private`, parses only
+  those, and keeps the ids of the calls among them that name a secret
+  path; every builder, live or history, redacts their results wherever
+  the call is. The result's own text is still checked for a call no
+  scan found.
+- **The journal also keeps the question's text** (`text`, redacted),
+  which the Approval card shows, beside A4's `command`.
