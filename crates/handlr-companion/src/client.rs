@@ -785,6 +785,8 @@ struct AgentView {
     peeked_at: Option<Duration>,
     /// The session has answered at least once.
     answered: bool,
+    /// The session file the entries come from; another one starts fresh.
+    session_id: Option<String>,
     /// The time of the pending question a tapped Yes or No answered: its
     /// card goes at once, before the session shows the answer.
     replied_to: Option<String>,
@@ -1083,6 +1085,7 @@ impl State {
             peeking: false,
             peeked_at: None,
             answered: false,
+            session_id: None,
             replied_to: None,
             typed: None,
             wanted: true,
@@ -2101,7 +2104,18 @@ impl State {
         let first = v.entries.is_empty() && v.read_upto.is_none();
         match peek.session {
             Some(session) => {
-                v.entries = session.entries;
+                // Keep what the view already showed and lay the new batch
+                // over it, so entries scrolled back to do not vanish when
+                // the newest 200 move on (owner, 2026-10-23: "it might be
+                // the scroll back, it shows and then disappears when it
+                // lands"). A different session file starts fresh.
+                let same_session = v.session_id.is_some() && v.session_id == session.session_id;
+                v.entries = if same_session {
+                    merge_entries(std::mem::take(&mut v.entries), session.entries)
+                } else {
+                    session.entries
+                };
+                v.session_id = session.session_id;
                 v.pending_question = session.pending_question;
             }
             None => {
@@ -2474,6 +2488,32 @@ impl State {
         self.next_request += 1;
         self.sent.insert(id.clone(), sent);
         Output::Send(Request::new(id, method, params))
+    }
+}
+
+/// The most entries an agent view keeps as peeks merge onto it.
+pub const VIEW_KEEP: usize = 1000;
+
+/// `newer` (the latest peek, oldest first) laid over `kept`: the kept
+/// entries older than `newer`'s first stay, and `newer` replaces the rest,
+/// so an entry that changed between peeks is updated. With no overlap the
+/// two may not meet, so `newer` alone, rather than a gap.
+fn merge_entries(mut kept: Vec<common::Entry>, newer: Vec<common::Entry>) -> Vec<common::Entry> {
+    let same = |a: &common::Entry, b: &common::Entry| {
+        a.ts == b.ts && a.role == b.role && a.kind == b.kind && a.tool == b.tool
+    };
+    let Some(first) = newer.first() else {
+        return kept;
+    };
+    match kept.iter().position(|e| same(e, first)) {
+        Some(i) => {
+            kept.truncate(i);
+            kept.extend(newer);
+            let over = kept.len().saturating_sub(VIEW_KEEP);
+            kept.drain(..over);
+            kept
+        }
+        None => newer,
     }
 }
 
@@ -4834,5 +4874,29 @@ mod tests {
         let pings = requests(&out, "ping");
         assert_eq!(pings.len(), 1, "{out:?}");
         assert_eq!(pings[0].params["active"], true);
+    }
+
+    #[test]
+    fn scrolled_back_entries_stay_as_newer_peeks_land() {
+        let e = |ts: &str| common::Entry {
+            ts: ts.to_string(),
+            role: common::Role::Assistant,
+            kind: common::EntryKind::Text,
+            tool: None,
+            summary: format!("at {ts}"),
+            links: Vec::new(),
+            origin: None,
+        };
+        let kept: Vec<_> = ["1", "2", "3", "4"].iter().map(|t| e(t)).collect();
+        // The newest window moved on: 1 and 2 left it, 5 arrived, 3 changed.
+        let mut three = e("3");
+        three.summary = "at 3, with its result".into();
+        let merged = merge_entries(kept.clone(), vec![three.clone(), e("4"), e("5")]);
+        let ts: Vec<&str> = merged.iter().map(|x| x.ts.as_str()).collect();
+        assert_eq!(ts, ["1", "2", "3", "4", "5"]);
+        assert_eq!(merged[2], three, "a changed entry is updated");
+        // No overlap: the newer batch alone, not a gap.
+        let merged = merge_entries(kept, vec![e("9")]);
+        assert_eq!(merged.len(), 1);
     }
 }
