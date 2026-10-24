@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use std::collections::{HashMap, HashSet};
 
-use handlr_companion::view::{SectionKind, ViewWindow};
+use handlr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
 use handlr_companion::{AgentCard, CardKind, Shows, Suggestion, ViewSection};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
 use libhandlr_proto::common::{Entry, EntryKind, Link, Role, Serial};
@@ -891,12 +891,23 @@ fn shimmer_over(r: Rect, t: f32, w: f32) -> Vec<Rect> {
     out
 }
 
-/// A finger on the flow.
+/// One finger of a drag: its id, where it came down, and its last y.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Drag {
+struct Finger {
     id: u64,
     start: [f32; 2],
-    last_y: f32,
+    y: f32,
+}
+
+/// The fingers on the flow (plan 20261022_03, the 11:09 EDT amendment,
+/// item 1): one drag, which a second finger joins without a jump.
+#[derive(Clone, Debug, PartialEq)]
+struct Drag {
+    /// The fingers down, the first one first.
+    fingers: Vec<Finger>,
+    /// The fingers' mean movement, summed: what the samples follow, so a
+    /// finger joining or leaving does not move it.
+    pos: f32,
     last_t: Duration,
     /// Past the slop: a scroll, not a tap.
     moved: bool,
@@ -911,6 +922,11 @@ struct Drag {
     /// (the S23 logged flings of 2.7 million px/s, the "snap back").
     samples: [(Duration, f32); SAMPLES],
     sampled: usize,
+    /// More than one finger came down: never a tap.
+    multi: bool,
+    /// When the fingers went from two to one, if they did: a release soon
+    /// after flings at `TWO_FINGER`, as the fingers lift together.
+    pair_lifted: Option<Duration>,
 }
 
 impl Drag {
@@ -998,6 +1014,23 @@ const FLING_KNEE: f32 = 1000.0;
 const FLING_POWER: f32 = 1.5;
 /// The fastest fling after that curve, and after flicks add up.
 pub(crate) const MAX_FLING_OUT: f32 = 16000.0;
+/// With two fingers down, a drag moves this many times the fingers' mean
+/// movement, and its fling starts at this many times the one-finger
+/// fling (plan 20261022_03, the 11:09 EDT amendment, item 1).
+pub(crate) const TWO_FINGER: f32 = 5.0;
+/// The scrollbar's thumb (the 11:09 EDT amendment, items 2 and 3), in
+/// points: its width, its least length, and the slop either side of it
+/// that is its hit strip. It sits `BAR_SLOP` in from the right edge, so
+/// the strip ends at the edge.
+const BAR_W: f32 = 4.0;
+const BAR_MIN: f32 = 24.0;
+const BAR_SLOP: f32 = 4.0;
+/// The thumb's opacity, in the text's colour.
+const BAR_ALPHA: f32 = 0.35;
+/// How long the scrollbar stays fully visible once the scrolling stops,
+/// then how long it fades out over.
+pub const BAR_HOLD: Duration = Duration::from_secs(2);
+pub const BAR_FADE: Duration = Duration::from_millis(300);
 /// The span the release speed is measured over, back from the last move.
 const SPEED_WINDOW: Duration = Duration::from_millis(100);
 /// A flick within this long of touching a running fling, the same way,
@@ -1062,6 +1095,15 @@ pub fn ease_in_out(u: f32) -> f32 {
     } else {
         1.0 - (-2.0 * u + 2.0).powi(3) / 2.0
     }
+}
+
+/// The scrollbar's thumb held by a finger: its id, the finger's y less the
+/// thumb's top when it came down, and the offset then.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ThumbDrag {
+    id: u64,
+    grab: f32,
+    from: f32,
 }
 
 /// The jump line's scroll to the end, running: where it started, in
@@ -1293,6 +1335,15 @@ pub struct AgentScreen {
     dirty: bool,
     /// Seconds into the placeholders' shimmer sweep.
     shimmer: f32,
+    /// The scrollbar, while it shows: seconds since the scrolling
+    /// stopped (0 while it goes on). `None` once it has faded.
+    bar: Option<f32>,
+    /// The scrollbar's thumb, while a finger drags it.
+    thumb: Option<ThumbDrag>,
+    /// The slots of a new outline held aside that come after the ribbon's
+    /// newest (the event's `held_newer`): counted in the scrollbar's
+    /// length at their estimated heights.
+    held_newer: Vec<OutlineSlot>,
     /// A placeholder was on screen at the last draw: the shimmer runs.
     placeholders_shown: bool,
     /// Blocks laid out, counted for the tests.
@@ -1867,7 +1918,7 @@ impl AgentScreen {
     /// Whether the pinned card is the bar: while a finger scrolls, or the
     /// view is scrolled back.
     pub fn compact(&self) -> bool {
-        !self.follow || self.drag.is_some_and(|d| d.moved)
+        !self.follow || self.thumb.is_some() || self.drag.as_ref().is_some_and(|d| d.moved)
     }
 
     /// Clamps the offset, follows the bottom when following, and places
@@ -2130,6 +2181,7 @@ impl AgentScreen {
             start: self.offset,
             elapsed: Duration::ZERO,
         });
+        self.bar = Some(0.0);
         self.dirty = true;
         std::mem::take(&mut self.new_content)
     }
@@ -2181,12 +2233,108 @@ impl AgentScreen {
         }
     }
 
+    /// The slots of the outline held aside after the ribbon's newest (the
+    /// event's `held_newer`), for the scrollbar's length.
+    pub fn set_held_newer(&mut self, held_newer: Vec<OutlineSlot>) {
+        if held_newer != self.held_newer {
+            self.held_newer = held_newer;
+            self.dirty = true;
+        }
+    }
+
+    /// The scrollbar's calculated length, in pixels: the ribbon, which
+    /// counts every slot at its laid-out or estimated height, and the
+    /// newer sections of an outline held aside at their estimated heights
+    /// (the 11:09 EDT amendment, item 2).
+    fn calculated_length(&self) -> f32 {
+        let (w, s) = (self.layout.w, self.scale());
+        let held: f32 = self
+            .held_newer
+            .iter()
+            .map(|slot| estimate_height(slot.kind, slot.lines, slot.chars, w, s))
+            .sum();
+        self.ribbon_height() + held
+    }
+
+    /// The scrollbar's thumb on screen, for the offset as it is, and the
+    /// offset at the calculated length's end; none when the session fits
+    /// its window. Its length is the window's share of the calculated
+    /// length, at least `BAR_MIN`; it runs from the session's top to that
+    /// end, so with newer sections held aside it stops short at the old
+    /// end.
+    fn thumb_track(&self) -> Option<(Rect, f32)> {
+        let v = self.frame.viewport;
+        let s = self.scale();
+        let total = self.calculated_length();
+        let range = total - self.frame.full_viewport_h;
+        if range <= 0.5 || v.h <= 0.0 {
+            return None;
+        }
+        let len = (v.h / total * v.h).max(BAR_MIN * s).min(v.h);
+        let u = (self.offset / range).clamp(0.0, 1.0);
+        let y = v.y + u * (v.h - len);
+        let x = v.x + v.w - (BAR_SLOP + BAR_W) * s;
+        Some((Rect::new(x, y, BAR_W * s, len), range))
+    }
+
+    /// The scrollbar's thumb on screen, while it shows.
+    pub fn thumb_rect(&self) -> Option<Rect> {
+        (self.bar_alpha() > 0.0)
+            .then(|| self.thumb_track().map(|(r, _)| r))
+            .flatten()
+    }
+
+    /// The thumb's hit strip while it shows: its length, and `BAR_SLOP`
+    /// either side of it.
+    fn thumb_strip(&self) -> Option<Rect> {
+        let s = self.scale();
+        self.thumb_rect()
+            .map(|r| Rect::new(r.x - BAR_SLOP * s, r.y, r.w + 2.0 * BAR_SLOP * s, r.h))
+    }
+
+    /// The thumb's opacity: `BAR_ALPHA` until `BAR_HOLD` after the
+    /// scrolling stopped, then down to 0 over `BAR_FADE`.
+    pub fn bar_alpha(&self) -> f32 {
+        let Some(t) = self.bar else {
+            return 0.0;
+        };
+        let fade = ((t - BAR_HOLD.as_secs_f32()) / BAR_FADE.as_secs_f32()).clamp(0.0, 1.0);
+        BAR_ALPHA * (1.0 - fade)
+    }
+
+    /// Something is scrolling the view: a drag past the slop, a fling,
+    /// the jump scroll or the thumb.
+    fn scrolling(&self) -> bool {
+        self.thumb.is_some()
+            || self.fling != 0.0
+            || self.jump.is_some()
+            || self.drag.as_ref().is_some_and(|d| d.moved)
+    }
+
+    /// Moves the view for the thumb's finger at `y`: in proportion to the
+    /// calculated length, clamped to the ribbon.
+    fn drag_thumb(&mut self, y: f32) {
+        let (Some(t), Some((r, range))) = (self.thumb, self.thumb_track()) else {
+            return;
+        };
+        let v = self.frame.viewport;
+        let travel = v.h - r.h;
+        if travel <= 0.0 {
+            return;
+        }
+        let u = ((y - t.grab - v.y) / travel).clamp(0.0, 1.0);
+        let max = self.max_offset();
+        self.fling = 0.0;
+        self.scroll_to((u * range).min(max));
+    }
+
     /// The window on the ribbon, by index, when it changed since last
     /// taken: for [`handlr_companion::Input::Window`].
     pub fn take_window(&mut self) -> Option<ViewWindow> {
         // Not while the jump scroll runs: nothing is fetched on the way,
-        // and landing reports the bottom, following.
-        if self.jump.is_some() || self.window == self.window_taken {
+        // and landing reports the bottom, following. Nor while the thumb
+        // is dragged: contents load where it stops.
+        if self.jump.is_some() || self.thumb.is_some() || self.window == self.window_taken {
             return None;
         }
         self.window_taken = self.window;
@@ -2363,47 +2511,133 @@ impl AgentScreen {
         let s = self.scale();
         match phase {
             TouchPhase::Started => {
+                if self.thumb.is_some() {
+                    // Another finger while the thumb is held: ignored.
+                    return None;
+                }
+                if let Some(d) = self.drag.as_mut() {
+                    // A second finger joins the drag (the 11:09 EDT
+                    // amendment, item 1): nothing resets or jumps. The same
+                    // id again is a finger whose lift was lost: start over.
+                    if !d.fingers.iter().any(|f| f.id == id) {
+                        d.fingers.push(Finger {
+                            id,
+                            start: [x, y],
+                            y,
+                        });
+                        d.multi = true;
+                        log::info!("agent view: {} fingers down", d.fingers.len());
+                        return None;
+                    }
+                }
                 // A touch stops the jump scroll, as it catches a fling.
                 if self.jump.take().is_some() {
                     log::info!("agent view: jump scroll stopped at {:.0}", self.offset);
                 }
+                // The thumb, while it shows, is a target (item 3).
+                if self.thumb_strip().is_some_and(|r| r.contains([x, y])) {
+                    let top = self.thumb_track().map_or(y, |(r, _)| r.y);
+                    self.fling = 0.0;
+                    self.drag = None;
+                    self.thumb = Some(ThumbDrag {
+                        id,
+                        grab: y - top,
+                        from: self.offset,
+                    });
+                    self.bar = Some(0.0);
+                    self.placed();
+                    return None;
+                }
                 let carried = std::mem::take(&mut self.fling);
                 self.drag = Some(Drag {
+                    fingers: vec![Finger {
+                        id,
+                        start: [x, y],
+                        y,
+                    }],
+                    pos: 0.0,
                     carried,
                     down: now,
-                    id,
-                    start: [x, y],
-                    last_y: y,
                     last_t: now,
                     moved: false,
-                    samples: [(now, y); SAMPLES],
+                    samples: [(now, 0.0); SAMPLES],
                     sampled: 1,
+                    multi: false,
+                    pair_lifted: None,
                 });
                 None
             }
             TouchPhase::Moved => {
-                let mut d = self.drag.filter(|d| d.id == id)?;
+                if let Some(t) = self.thumb {
+                    if t.id == id {
+                        self.drag_thumb(y);
+                    }
+                    return None;
+                }
+                let d = self.drag.as_mut()?;
+                let n = d.fingers.len();
+                let f = d.fingers.iter_mut().find(|f| f.id == id)?;
+                let dy = y - f.y;
+                f.y = y;
                 if !d.moved
-                    && ((y - d.start[1]).abs() > SLOP * s || (x - d.start[0]).abs() > SLOP * s)
+                    && ((y - f.start[1]).abs() > SLOP * s || (x - f.start[0]).abs() > SLOP * s)
                 {
                     d.moved = true;
                 }
-                let dy = y - d.last_y;
-                d.sample(now, y);
-                d.last_y = y;
+                // Each finger's move counts its share of the mean: the
+                // fingers moving together move it by their mean movement.
+                let mean = dy / n as f32;
+                d.pos += mean;
+                let pos = d.pos;
+                d.sample(now, pos);
                 d.last_t = now;
-                self.drag = Some(d);
-                if d.moved {
-                    self.scroll_to(self.offset - dy);
+                let moved = d.moved;
+                if moved {
+                    let factor = if n >= 2 { TWO_FINGER } else { 1.0 };
+                    self.bar = Some(0.0);
+                    self.scroll_to(self.offset - factor * mean);
                 }
                 None
             }
             TouchPhase::Ended => {
-                let d = self.drag.take().filter(|d| d.id == id)?;
+                if let Some(t) = self.thumb {
+                    if t.id == id {
+                        // Letting go leaves the view there: no fling. The
+                        // scrollbar's 2 s start now.
+                        self.thumb = None;
+                        self.bar = Some(0.0);
+                        log::info!(
+                            "agent view: scrollbar drag from {:.0} to {:.0}",
+                            t.from,
+                            self.offset
+                        );
+                        self.scroll_to(self.offset);
+                    }
+                    return None;
+                }
+                let d = self.drag.as_mut()?;
+                let i = d.fingers.iter().position(|f| f.id == id)?;
+                if d.fingers.len() > 1 {
+                    // One finger of several lifts: the others carry on, at
+                    // 1x once only one is left, from where the view is.
+                    d.fingers.remove(i);
+                    if d.fingers.len() == 1 {
+                        d.pair_lifted = Some(now);
+                    }
+                    return None;
+                }
+                let d = self.drag.take()?;
                 if d.moved {
                     // A finger that stopped before lifting does not fling.
                     let still = now.saturating_sub(d.last_t) > Duration::from_millis(100);
                     let mut velocity = fling_curve(release_speed(&d, s), s);
+                    // Two fingers lifted together fling at 5x.
+                    let pair = d
+                        .pair_lifted
+                        .is_some_and(|t| now.saturating_sub(t) <= SPEED_WINDOW);
+                    if pair {
+                        velocity *= TWO_FINGER;
+                    }
                     let quick = now.saturating_sub(d.down) <= FLING_BOOST_TOUCH;
                     if quick && velocity * d.carried > 0.0 {
                         velocity += d.carried;
@@ -2413,18 +2647,27 @@ impl AgentScreen {
                         self.fling = velocity;
                     }
                     log::info!(
-                        "agent view: drag ended at {:.0}, fling {:.0}",
+                        "agent view: drag ended at {:.0}, fling {:.0}{}",
                         self.offset,
-                        self.fling
+                        self.fling,
+                        if pair { " (two fingers)" } else { "" }
                     );
                     self.scroll_to(self.offset);
                     return None;
                 }
                 self.scroll_to(self.offset);
+                if d.multi {
+                    // Two fingers down is never a tap.
+                    return None;
+                }
                 self.hit(x, y)
             }
             TouchPhase::Cancelled => {
-                if self.drag.take().is_some() {
+                let thumb = self.thumb.take().is_some();
+                if self.drag.take().is_some() || thumb {
+                    if thumb {
+                        self.bar = Some(0.0);
+                    }
                     self.scroll_to(self.offset);
                 }
                 None
@@ -2432,9 +2675,32 @@ impl AgentScreen {
         }
     }
 
-    /// Carries a fling, or the jump scroll, on by `dt`. Returns whether
-    /// the view moved.
+    /// Carries a fling, or the jump scroll, on by `dt`, and the
+    /// scrollbar's showing and fading. Returns whether the view moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
+        let moved = self.step(dt);
+        self.step_bar(dt);
+        moved
+    }
+
+    /// The scrollbar: fully visible while scrolling and `BAR_HOLD` after,
+    /// then fading over `BAR_FADE`; frames are asked for while it shows or
+    /// fades, and once more as it goes, but not after.
+    fn step_bar(&mut self, dt: Duration) {
+        if self.scrolling() {
+            self.bar = Some(0.0);
+            self.dirty = true;
+            return;
+        }
+        let Some(t) = self.bar else {
+            return;
+        };
+        let t = t + dt.as_secs_f32();
+        self.bar = (t < (BAR_HOLD + BAR_FADE).as_secs_f32()).then_some(t);
+        self.dirty = true;
+    }
+
+    fn step(&mut self, dt: Duration) -> bool {
         if self.placeholders_shown {
             self.shimmer = (self.shimmer + dt.as_secs_f32()) % SHIMMER_PERIOD;
             self.dirty = true;
@@ -2540,6 +2806,11 @@ impl AgentScreen {
                 px,
                 DIM,
             );
+        }
+        // The scrollbar's thumb, while it shows.
+        if let Some(r) = self.thumb_rect() {
+            let color = [FG[0], FG[1], FG[2], self.bar_alpha()];
+            fill(list, r, color, r.w / 2.0);
         }
         list.push_clip_end();
 
@@ -4784,5 +5055,369 @@ mod tests {
         a.set_content("Claude".into(), "idle".into(), sections, None, &changed);
         assert_eq!(a.place().unwrap(), (serial, delta));
         assert!((on_screen(&a, serial) - at).abs() < 0.01);
+    }
+
+    /// Fingers `ids` down at `(x, from)` at `t`, then moved together by
+    /// `step` pixels each, `steps` times, 16 ms apart. Returns the time.
+    fn fingers_drag(
+        a: &mut AgentScreen,
+        ids: &[u64],
+        from: f32,
+        step: f32,
+        steps: u32,
+        t: Duration,
+    ) -> Duration {
+        for (k, &id) in ids.iter().enumerate() {
+            a.touch(id, TouchPhase::Started, 300.0 + 300.0 * k as f32, from, t);
+        }
+        fingers_move(a, ids, from, step, steps, t)
+    }
+
+    /// Moves fingers `ids`, now at `from`, by `step` each, `steps` times.
+    fn fingers_move(
+        a: &mut AgentScreen,
+        ids: &[u64],
+        from: f32,
+        step: f32,
+        steps: u32,
+        t: Duration,
+    ) -> Duration {
+        let mut now = t;
+        for i in 1..=steps {
+            now += MS;
+            for (k, &id) in ids.iter().enumerate() {
+                let y = from + step * i as f32;
+                a.touch(id, TouchPhase::Moved, 300.0 + 300.0 * k as f32, y, now);
+            }
+        }
+        now
+    }
+
+    /// An outline screen in the middle of its ribbon.
+    fn midway() -> AgentScreen {
+        let mut a = outline_screen(300, 290..300);
+        scrolled_back(&mut a);
+        a.scroll_to(a.max_offset() / 2.0);
+        a
+    }
+
+    #[test]
+    fn a_two_finger_drag_moves_5x_and_flings_at_5x_and_one_finger_goes_back_to_1x() {
+        // One finger: past the slop, the view follows it.
+        let mut one = midway();
+        let t = fingers_drag(&mut one, &[1], 1000.0, 10.0, 5, Duration::ZERO);
+        let at = one.offset();
+        let t = fingers_move(&mut one, &[1], 1050.0, 10.0, 15, t);
+        assert!((at - one.offset() - 150.0).abs() < 0.01);
+        one.touch(1, TouchPhase::Ended, 300.0, 1200.0, t + MS);
+        let one_fling = one.fling;
+        assert!(one_fling > 0.0);
+        // Two fingers moving together: 5x their mean movement.
+        let mut two = midway();
+        let t = fingers_drag(&mut two, &[1, 2], 1000.0, 10.0, 5, Duration::ZERO);
+        let at = two.offset();
+        let t = fingers_move(&mut two, &[1, 2], 1050.0, 10.0, 15, t);
+        assert!((at - two.offset() - 750.0).abs() < 0.01);
+        // Lifted together: the fling starts at 5x.
+        two.touch(2, TouchPhase::Ended, 600.0, 1200.0, t + MS);
+        two.touch(1, TouchPhase::Ended, 300.0, 1200.0, t + MS);
+        assert!(
+            (two.fling - TWO_FINGER * one_fling).abs() < 1.0,
+            "{} vs {}",
+            two.fling,
+            one_fling
+        );
+        assert!(two.fling <= MAX_FLING_OUT * PHONE.scale);
+        // Only one finger of two moving: 5x the mean, half its movement.
+        let mut half = midway();
+        let t = fingers_drag(&mut half, &[1, 2], 1000.0, 10.0, 5, Duration::ZERO);
+        let at = half.offset();
+        fingers_move(&mut half, &[1], 1050.0, 10.0, 10, t);
+        assert!((at - half.offset() - 250.0).abs() < 0.01);
+        // Lifting one finger mid-drag: no jump, then 1x from there.
+        let mut lift = midway();
+        let t = fingers_drag(&mut lift, &[1, 2], 1000.0, 10.0, 10, Duration::ZERO);
+        let at = lift.offset();
+        lift.touch(2, TouchPhase::Ended, 600.0, 1100.0, t + MS);
+        assert_eq!(lift.offset(), at, "no jump on the lift");
+        assert_eq!(lift.fling, 0.0, "and no fling yet");
+        let t = fingers_move(&mut lift, &[1], 1100.0, 10.0, 20, t + MS);
+        assert!((at - lift.offset() - 200.0).abs() < 0.01);
+        // Released well after the other finger lifted: a 1x fling.
+        lift.touch(1, TouchPhase::Ended, 300.0, 1300.0, t + MS);
+        assert!(
+            (lift.fling - one_fling).abs() < 1.0,
+            "{} vs {}",
+            lift.fling,
+            one_fling
+        );
+        // A second finger arriving mid-drag neither resets nor jumps it.
+        let mut join = midway();
+        let t = fingers_drag(&mut join, &[1], 1000.0, 10.0, 10, Duration::ZERO);
+        let at = join.offset();
+        join.touch(2, TouchPhase::Started, 700.0, 400.0, t + MS);
+        assert_eq!(join.offset(), at);
+        assert!(
+            join.drag
+                .as_ref()
+                .is_some_and(|d| d.moved && d.fingers.len() == 2)
+        );
+        // Finger 1 at 1100, finger 2 at 400: both move by 10 a step.
+        let mut now = t + MS;
+        for i in 1..=10 {
+            now += MS;
+            join.touch(1, TouchPhase::Moved, 300.0, 1100.0 + 10.0 * i as f32, now);
+            join.touch(2, TouchPhase::Moved, 700.0, 400.0 + 10.0 * i as f32, now);
+        }
+        assert!((at - join.offset() - 500.0).abs() < 0.01);
+        // Two fingers down is never a tap.
+        let mut tap = outline_screen(300, 290..300);
+        tap.touch(1, TouchPhase::Started, 300.0, 1000.0, Duration::ZERO);
+        tap.touch(2, TouchPhase::Started, 600.0, 1000.0, MS);
+        tap.touch(2, TouchPhase::Ended, 600.0, 1000.0, MS * 2);
+        assert_eq!(tap.touch(1, TouchPhase::Ended, 300.0, 1000.0, MS * 3), None);
+    }
+
+    #[test]
+    fn the_thumb_is_the_windows_share_and_runs_from_the_top_to_the_end() {
+        let s = PHONE.scale;
+        let mut a = midway();
+        let total = a.calculated_length();
+        assert!(
+            (total - a.ribbon_height()).abs() < 0.01,
+            "nothing held aside"
+        );
+        let range = total - a.frame().full_viewport_h;
+        let len = |a: &AgentScreen| {
+            let v = a.frame().viewport;
+            (v.h / total * v.h).max(BAR_MIN * s)
+        };
+        // At the top.
+        a.scroll_to(0.0);
+        let (v, r) = (a.frame().viewport, a.thumb_rect().unwrap());
+        assert!((r.y - v.y).abs() < 0.01);
+        assert!((r.h - len(&a)).abs() < 0.01);
+        assert!(r.h > BAR_MIN * s, "longer than the least here");
+        assert!((r.w - BAR_W * s).abs() < 0.01);
+        assert!(
+            (r.x + r.w - (v.x + v.w - BAR_SLOP * s)).abs() < 0.01,
+            "at the right"
+        );
+        // Midway.
+        a.scroll_to(range / 2.0);
+        let (v, r) = (a.frame().viewport, a.thumb_rect().unwrap());
+        assert!((r.y - (v.y + (v.h - r.h) / 2.0)).abs() < 0.01);
+        // At the end.
+        a.scroll_to(a.max_offset());
+        let (v, r) = (a.frame().viewport, a.thumb_rect().unwrap());
+        assert!((r.y + r.h - (v.y + v.h)).abs() < 0.01);
+        // A long session: the least length.
+        let mut long = outline_screen(8000, 7990..8000);
+        scrolled_back(&mut long);
+        let r = long.thumb_rect().unwrap();
+        assert!((r.h - BAR_MIN * s).abs() < 0.01);
+        // A session that fits its window has none.
+        let mut short = outline_screen(3, 0..3);
+        short.bar = Some(0.0);
+        assert_eq!(short.thumb_rect(), None);
+    }
+
+    #[test]
+    fn the_scrollbars_length_counts_a_held_aside_outlines_newer_sections() {
+        let s = PHONE.scale;
+        let mut a = midway();
+        let before = a.calculated_length();
+        let short_len = a.thumb_rect().unwrap().h;
+        a.set_new_content(true);
+        let newer: Vec<OutlineSlot> = (300..340u64)
+            .map(|i| OutlineSlot {
+                index: i,
+                serial: Serial::new(FILE, i as u32 + 1, 0),
+                kind: SectionKind::Text,
+                lines: 2,
+                chars: 40,
+                rev: 0,
+            })
+            .collect();
+        a.set_held_newer(newer);
+        let each = estimate_height(SectionKind::Text, 2, 40, PHONE.w, s);
+        assert!((a.calculated_length() - (before + 40.0 * each)).abs() < 0.5);
+        assert!(a.thumb_rect().unwrap().h < short_len, "a smaller share");
+        // At the old end the thumb stops short of the bottom.
+        a.scroll_to(a.max_offset() - 2.0);
+        let (v, r) = (a.frame().viewport, a.thumb_rect().unwrap());
+        assert!(r.y + r.h < v.y + v.h - 10.0, "short of the bottom");
+        // Once below the end, the client gives none: back to the ribbon.
+        a.set_held_newer(Vec::new());
+        assert!((a.calculated_length() - a.ribbon_height()).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_scrollbar_shows_on_scrolling_stays_2_s_after_lifting_then_fades() {
+        let mut a = outline_screen(300, 290..300);
+        assert_eq!(a.bar_alpha(), 0.0);
+        assert_eq!(a.thumb_rect(), None, "not before scrolling");
+        // A drag shows it, and held still it stays.
+        let t = drag(&mut a, 600.0, 1800.0, 10, Duration::ZERO);
+        assert_eq!(a.bar_alpha(), BAR_ALPHA);
+        assert!(a.thumb_rect().is_some());
+        for _ in 0..150 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.bar_alpha(), BAR_ALPHA, "the finger is still down");
+        // Lifted (stopped first: no fling): 2 s fully visible.
+        a.touch(
+            1,
+            TouchPhase::Ended,
+            540.0,
+            1800.0,
+            t + Duration::from_secs(3),
+        );
+        let frames = |ms: u64| ms / FRAME.as_millis() as u64;
+        for _ in 0..frames(1980) {
+            a.dirty = false;
+            a.tick(FRAME);
+            assert!(a.dirty, "frames while it shows");
+            assert_eq!(a.bar_alpha(), BAR_ALPHA);
+        }
+        // Then it fades over 0.3 s.
+        for _ in 0..frames(160) {
+            a.tick(FRAME);
+        }
+        let mid = a.bar_alpha();
+        assert!(mid > 0.0 && mid < BAR_ALPHA, "{mid}");
+        let mut fading = 0;
+        while a.bar.is_some() {
+            a.dirty = false;
+            a.tick(FRAME);
+            assert!(a.dirty, "frames while it fades, and as it goes");
+            fading += 1;
+            assert!(fading <= frames(200), "gone by 2.3 s");
+        }
+        assert_eq!(a.thumb_rect(), None);
+        // Gone: no frames asked for.
+        a.dirty = false;
+        a.tick(FRAME);
+        assert!(!a.dirty);
+        // A fling keeps it fully visible while it runs.
+        let t = drag(&mut a, 800.0, 1100.0, 5, Duration::from_secs(10));
+        a.touch(1, TouchPhase::Ended, 540.0, 1100.0, t + MS);
+        assert!(a.fling != 0.0);
+        let mut ran = 0;
+        while a.fling != 0.0 && ran < 1000 {
+            a.tick(FRAME);
+            assert_eq!(a.bar_alpha(), BAR_ALPHA);
+            ran += 1;
+        }
+        assert!(ran > frames(2000), "a fling that runs past 2 s: {ran}");
+        // And the jump scroll shows it.
+        let mut b = back_by(3.0);
+        for _ in 0..frames(2500) {
+            b.tick(FRAME);
+        }
+        assert_eq!(b.bar, None);
+        b.jump_to_end();
+        assert_eq!(b.bar_alpha(), BAR_ALPHA);
+        run_jump(&mut b);
+        assert_eq!(b.bar_alpha(), BAR_ALPHA, "2 s from the landing");
+    }
+
+    #[test]
+    fn a_touch_within_4_pt_of_the_thumb_drags_it_proportionally_with_no_fling() {
+        let s = PHONE.scale;
+        let mut a = midway();
+        a.take_window();
+        let r = a.thumb_rect().unwrap();
+        let v = a.frame().viewport;
+        let range = a.calculated_length() - a.frame().full_viewport_h;
+        let from = a.offset();
+        // 3.5 pt left of the thumb, in its strip.
+        let (x, y) = (r.x - 3.5 * s, r.y + r.h / 2.0);
+        assert_eq!(a.touch(1, TouchPhase::Started, x, y, Duration::ZERO), None);
+        assert!(a.thumb.is_some() && a.drag.is_none());
+        assert_eq!(a.offset(), from, "grabbing it does not move the view");
+        // A quick move down a quarter of the track.
+        let travel = v.h - r.h;
+        let mut now = Duration::ZERO;
+        for i in 1..=5 {
+            now += MS;
+            a.touch(
+                1,
+                TouchPhase::Moved,
+                x,
+                y + travel / 4.0 * i as f32 / 5.0,
+                now,
+            );
+        }
+        let want = ((r.y - v.y) / travel + 0.25) * range;
+        assert!((a.offset() - want).abs() < 0.5, "{} vs {want}", a.offset());
+        assert_eq!(a.take_window(), None, "contents load where it stops");
+        // Held: fully visible however long.
+        for _ in 0..200 {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.bar_alpha(), BAR_ALPHA);
+        // Let go: no fling, the view stays, the 2 s start.
+        let at = a.offset();
+        a.touch(1, TouchPhase::Ended, x, y + travel / 4.0, now + MS);
+        assert!(a.thumb.is_none());
+        assert_eq!(a.fling, 0.0);
+        assert!(a.take_window().is_some(), "reported where it stopped");
+        a.tick(FRAME);
+        assert_eq!(a.offset(), at);
+        assert_eq!(a.bar_alpha(), BAR_ALPHA);
+        // Past the bottom of the track: clamped to the end, following.
+        let r = a.thumb_rect().unwrap();
+        a.touch(1, TouchPhase::Started, r.x + r.w / 2.0, r.y + 1.0, now);
+        a.touch(1, TouchPhase::Moved, r.x, r.y + 2.0 * v.h, now + MS);
+        assert_eq!(a.offset(), a.max_offset());
+        // And past the top: the session's top.
+        a.touch(1, TouchPhase::Moved, r.x, -v.h, now + MS * 2);
+        assert_eq!(a.offset(), 0.0);
+        a.touch(1, TouchPhase::Ended, r.x, -v.h, now + MS * 3);
+        assert_eq!(a.fling, 0.0);
+    }
+
+    #[test]
+    fn a_touch_outside_the_thumbs_strip_scrolls_as_before() {
+        let s = PHONE.scale;
+        let mut a = midway();
+        let r = a.thumb_rect().unwrap();
+        // 5 pt left of the thumb: outside the strip.
+        let x = r.x - 5.0 * s;
+        let y = r.y + r.h / 2.0;
+        a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
+        assert!(a.thumb.is_none() && a.drag.is_some());
+        a.touch(1, TouchPhase::Moved, x, y + 30.0, MS);
+        let at = a.offset();
+        a.touch(1, TouchPhase::Moved, x, y + 130.0, MS * 2);
+        assert!((at - a.offset() - 100.0).abs() < 0.01, "a 1x drag");
+        a.touch(1, TouchPhase::Ended, x, y + 130.0, MS * 30);
+        // On the track, but above the thumb: a drag too.
+        let r = a.thumb_rect().unwrap();
+        a.touch(2, TouchPhase::Started, r.x, r.y - 100.0, MS * 40);
+        assert!(a.thumb.is_none() && a.drag.is_some());
+    }
+
+    #[test]
+    fn the_thumb_is_not_a_target_once_faded() {
+        let mut a = midway();
+        let r = a.thumb_rect().unwrap();
+        // Still a target while it fades.
+        for _ in 0..((BAR_HOLD + BAR_FADE / 2).as_millis() / FRAME.as_millis()) {
+            a.tick(FRAME);
+        }
+        assert!(a.bar_alpha() > 0.0 && a.bar_alpha() < BAR_ALPHA);
+        a.touch(1, TouchPhase::Started, r.x, r.y + r.h / 2.0, Duration::ZERO);
+        assert!(a.thumb.is_some());
+        a.touch(1, TouchPhase::Ended, r.x, r.y + r.h / 2.0, MS);
+        // Faded: the same place scrolls.
+        for _ in 0..((BAR_HOLD + BAR_FADE).as_millis() / FRAME.as_millis() + 1) {
+            a.tick(FRAME);
+        }
+        assert_eq!(a.bar, None);
+        let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        a.touch(1, TouchPhase::Started, x, y, Duration::from_secs(10));
+        assert!(a.thumb.is_none() && a.drag.is_some());
     }
 }

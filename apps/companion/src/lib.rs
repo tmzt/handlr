@@ -499,6 +499,7 @@ impl App {
                 terminal_on,
                 new_content,
                 held_end,
+                held_newer,
             } => {
                 if let Some(agent) = &mut self.agent {
                     agent.set_loading(loading);
@@ -508,6 +509,7 @@ impl App {
                     agent.set_history(loading_earlier, start);
                     agent.set_new_content(new_content);
                     agent.set_held_end(held_end);
+                    agent.set_held_newer(held_newer);
                 }
             }
             // herdr's focus shows on the cards, from the list it refreshes.
