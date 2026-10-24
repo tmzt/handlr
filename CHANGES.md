@@ -1226,3 +1226,19 @@ characters of a tool result anyway. The 32 MiB cap on what one read may
 cover stays. This is also the likely cause of the view going backwards:
 as screenshots arrived, a peek's window no longer overlapped what the
 phone held.
+
+## 2026-10-23 23:03 EDT — plan 20261023_03, step 1: the focus and pane events are modelled from herdr's schema, not a recording
+
+Step 1 says to record live `pane.focused`, `tab.focused`, `pane.updated`
+and `pane.closed` events read-only and model them from the recording.
+None was recorded: the fixture,
+`crates/libherdr/tests/fixtures/lifecycle_events_synthetic.jsonl`, is
+synthetic, written from herdr's own API schema (`herdr api schema
+--json`, protocol 19, schema_version 1, read on 2026-10-23), whose
+`EventData` gives `pane_focused {pane_id, workspace_id}`, `tab_focused
+{tab_id, workspace_id}`, `pane_updated {pane}` and `pane_closed
+{pane_id, workspace_id}`. The events are modelled as
+`HerdrEvent::PaneFocused`, `TabFocused`, `PaneUpdated` and `PaneClosed`
+from it. Step 1's other half of **Done when**, a subscription with all
+four types accepted by live herdr, is left to the owner's live check
+with step 5.
