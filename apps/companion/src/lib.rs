@@ -54,6 +54,7 @@ pub mod agent;
 pub mod controls;
 pub mod keys;
 pub mod markdown_view;
+pub mod memory;
 pub mod overview;
 pub mod settings;
 pub mod ui;
@@ -86,7 +87,7 @@ use crate::agent::{AgentHit, AgentScreen, Terminal};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
 use crate::overview::{Overview, OverviewHit, Panel};
-use crate::settings::battery::Unreleased;
+use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::ui::{
     CODE, Card, CardState, Hit, Layout, Line, MUTED, Screen, View, WARN, chunk, dictation_lines,
@@ -278,6 +279,22 @@ pub struct App {
     started: Instant,
     /// When the last frame was updated, for a fling's step.
     last_update: Instant,
+    /// Links tapped in the agent view, opened once the touch is handled.
+    links: Vec<String>,
+    /// The phone's vendor (libmorph 0.4.1's `build_info`), for the copy.
+    build_info: Option<BuildInfo>,
+}
+
+/// Opens `url` in the phone's browser (libmorph 0.4.0's `open_link`).
+/// Never logged past its kind: a query or fragment may be a secret.
+fn open_link(ctx: &MorphContext, url: &str) {
+    match ctx.open_link(url) {
+        Ok(()) => log::info!("link: opened"),
+        Err(libmorph::OpenLinkError::NotVisible) => {
+            log::warn!("link: not opened: handlr is not on screen (NotVisible)")
+        }
+        Err(e) => log::warn!("link: not opened: {e}"),
+    }
 }
 
 /// The models: `<data dir>/<name>` on Android, `--models <dir>` (default
@@ -597,11 +614,10 @@ impl App {
         self.viewed = true;
     }
 
-    /// The phone is short of memory (plan 20261022_03, the L3 amendment
-    /// of 2026-10-24 12:21 EDT): the client drops cached views and far
-    /// contents, and the agent view frees the rows of blocks off screen.
-    // TODO(libmorph 0.4.0): call from `on_trim_memory` (`UI_HIDDEN`,
-    // `BACKGROUND`) and `on_low_memory` once libmorph delivers them.
+    /// The phone is short of memory (plan 20261022_03, the L3 amendments
+    /// of 2026-10-24 12:21 and 13:45 EDT): the client drops cached views
+    /// and far contents, and the agent view frees the rows of blocks off
+    /// screen. From `on_trim_memory` and `on_low_memory` ([`memory`]).
     pub fn memory_pressure(&mut self, pressure: Pressure) {
         log::info!("memory: {pressure:?}");
         self.send(Input::Memory(pressure));
@@ -624,11 +640,11 @@ impl App {
         log::info!("settings: open");
         let mut screen = SettingsScreen::new(
             self.settings,
-            Box::new(Unreleased),
+            Box::new(settings::battery::Morph),
             cfg!(target_os = "android"),
         )
         .with_faces(Some(std::sync::Arc::clone(&self.faces)))
-        .with_build_info(settings::build_info::build_info());
+        .with_build_info(self.build_info.clone());
         screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
         screen.set_cache(self.cache);
         self.settings_screen = Some(screen);
@@ -807,17 +823,15 @@ impl App {
             }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
             AgentHit::Link(index) => {
-                let _url = self
+                // Opened at the end of the touch, with the context.
+                if let Some(url) = self
                     .agent
                     .as_ref()
                     .and_then(|a| a.link(index))
                     .map(|l| l.url.clone())
-                    .unwrap_or_default();
-                // TODO(libmorph): open `_url` in the phone's browser once
-                // libmorph (and libmobile) have an outbound "open this link"
-                // call; they only receive links today.
-                // Never the URL itself: a query or fragment may be a secret.
-                log::info!("link: opening is not available yet");
+                {
+                    self.links.push(url);
+                }
             }
             AgentHit::ReadAloud if self.read_aloud && self.speaking => {
                 log::info!("read aloud: skip");
@@ -922,6 +936,49 @@ impl App {
     /// device code to paste.
     fn pairing(&self) -> bool {
         self.code.is_some() || (!self.paired && !self.online)
+    }
+
+    /// A touch on the screen shown: on the overview and in the agent view,
+    /// every phase goes to the screen (a drag scrolls, a tap hits); on the
+    /// pairing screen, only a touch's end counts.
+    fn touch(&mut self, touch: Touch) {
+        let now = self.started.elapsed();
+        if let Some(screen) = &mut self.settings_screen {
+            if let Some(hit) = screen.touch(touch.id, touch.phase, touch.x, touch.y, now) {
+                self.settings_hit(hit);
+            }
+            return;
+        }
+        if let Some(agent) = &mut self.agent {
+            if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
+                self.agent_hit(hit);
+            }
+            return;
+        }
+        if !self.pairing() {
+            match self
+                .overview
+                .touch(touch.id, touch.phase, touch.x, touch.y, now)
+            {
+                Some(OverviewHit::Agent(pane_id)) => self.open_agent(pane_id),
+                Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
+                Some(OverviewHit::Tap) => self.send(Input::Tap),
+                Some(OverviewHit::Settings) => self.open_settings(),
+                None => {}
+            }
+            return;
+        }
+        if touch.phase != TouchPhase::Ended {
+            return;
+        }
+        match self.screen.hit(touch.x, touch.y) {
+            Some(Hit::Field) => self.field_focused = true,
+            Some(Hit::Pair) => self.pair(),
+            None => {
+                self.field_focused = false;
+                self.send(Input::Tap);
+            }
+        }
     }
 
     /// Gives the screen what it shows now; it changes only what differs.
@@ -1045,6 +1102,26 @@ impl MorphApp for App {
         if let Some(agent) = &mut self.agent {
             agent.set_pressure(None);
         }
+        // Back from Android's battery dialog or pages, perhaps.
+        if let Some(screen) = &mut self.settings_screen {
+            screen.refresh_battery();
+        }
+    }
+
+    /// Android asked the app to trim memory (libmorph 0.4.1): the level's
+    /// grade, as the 13:45 EDT L3 amendment maps it ([`memory`]).
+    fn on_trim_memory(&mut self, _ctx: &mut MorphContext, level: libmorph::TrimLevel) {
+        log::info!("memory: trim {level:?}");
+        if let Some(pressure) = memory::pressure_for(level) {
+            self.memory_pressure(pressure);
+        }
+    }
+
+    /// The system is low on memory: the full drop, so the app is not
+    /// killed.
+    fn on_low_memory(&mut self, _ctx: &mut MorphContext) {
+        log::info!("memory: low");
+        self.memory_pressure(memory::LOW_MEMORY);
     }
 
     /// A `handlr://` link opened the app (libmorph 0.3.2). Only a pairing
@@ -1176,6 +1253,8 @@ impl MorphApp for App {
             cache: 0,
             started: Instant::now(),
             last_update: Instant::now(),
+            links: Vec::new(),
+            build_info: settings::build_info::build_info(ctx),
         };
 
         match key_store(ctx, &args) {
@@ -1315,46 +1394,17 @@ impl MorphApp for App {
         }
     }
 
-    /// The controls, and a tap anywhere else. On the overview and in the
-    /// agent view, every phase goes to the screen: a drag scrolls, a tap
-    /// hits. On the pairing screen, only a touch's end counts.
-    fn on_touch(&mut self, _ctx: &mut MorphContext, touch: Touch) {
-        let now = self.started.elapsed();
+    /// The controls, and a tap anywhere else ([`App::touch`]); then any
+    /// link it tapped opens.
+    fn on_touch(&mut self, ctx: &mut MorphContext, touch: Touch) {
+        self.touch(touch);
+        // Links tapped in the settings' copy and the agent view.
+        let mut links = std::mem::take(&mut self.links);
         if let Some(screen) = &mut self.settings_screen {
-            if let Some(hit) = screen.touch(touch.id, touch.phase, touch.x, touch.y, now) {
-                self.settings_hit(hit);
-            }
-            return;
+            links.extend(screen.take_links());
         }
-        if let Some(agent) = &mut self.agent {
-            if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
-                self.agent_hit(hit);
-            }
-            return;
-        }
-        if !self.pairing() {
-            match self
-                .overview
-                .touch(touch.id, touch.phase, touch.x, touch.y, now)
-            {
-                Some(OverviewHit::Agent(pane_id)) => self.open_agent(pane_id),
-                Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
-                Some(OverviewHit::Tap) => self.send(Input::Tap),
-                Some(OverviewHit::Settings) => self.open_settings(),
-                None => {}
-            }
-            return;
-        }
-        if touch.phase != TouchPhase::Ended {
-            return;
-        }
-        match self.screen.hit(touch.x, touch.y) {
-            Some(Hit::Field) => self.field_focused = true,
-            Some(Hit::Pair) => self.pair(),
-            None => {
-                self.field_focused = false;
-                self.send(Input::Tap);
-            }
+        for url in links {
+            open_link(ctx, &url);
         }
     }
 

@@ -15,8 +15,9 @@
 //!   it on is the only place notifications are asked for;
 //! - **Battery**, on Android only: Android's battery optimization, the
 //!   vendor's battery page when the phone has one, and a note when battery
-//!   use is restricted; until libmorph's battery wrapper is released, one
-//!   note, "Battery settings need an app update";
+//!   use is restricted, from libmorph's battery pages (read again on
+//!   resume, [`SettingsScreen::refresh_battery`]); where the state cannot
+//!   be known, one note, "Battery settings need an app update";
 //! - **Device**, last: *Clear cache (n MB)* in the normal text colour,
 //!   with no confirmation (the 12:12 EDT amendment), then, in red, *Unpair
 //!   this device* and *Delete data*, each behind a confirming modal
@@ -26,8 +27,8 @@
 //! ([`InfoModal`]): *General agent*, the two above, *Battery optimization*
 //! and *Samsung battery (app sleeping)*. All the copy is in
 //! `SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
-//! label; a link in it is tappable, and inert until libmorph 0.4.0's
-//! `open_link`.
+//! label; a link in it is tappable, and the app opens it with libmorph's
+//! `ctx.open_link` ([`SettingsScreen::take_links`]).
 //!
 //! The screen is a libcontrols `Router`, rebuilt when the layout changes.
 //! Touches go to it as presses, drags and clicks: the pane tells a tap
@@ -248,8 +249,8 @@ pub struct SettingsScreen {
     asking: Option<(Asking, NodeId, NodeId)>,
     /// The open modal's Markdown, for its links.
     modal_text: Option<NodeId>,
-    /// The last link tapped: inert until libmorph 0.4.0's `open_link`.
-    tapped_link: Option<String>,
+    /// Links tapped, for the app to open with `ctx.open_link`.
+    links: Vec<String>,
     layout: Layout,
     /// The finger held: its id and where it came down.
     touch: Option<(u64, [f32; 2])>,
@@ -286,7 +287,7 @@ impl SettingsScreen {
             cache: 0,
             asking: None,
             modal_text: None,
-            tapped_link: None,
+            links: Vec::new(),
             layout: Layout::default(),
             touch: None,
             on_back: false,
@@ -321,9 +322,24 @@ impl SettingsScreen {
         self.settings
     }
 
-    /// The last link tapped, which opens nothing yet.
-    pub fn tapped_link(&self) -> Option<&str> {
-        self.tapped_link.as_deref()
+    /// The links tapped since the last call, oldest first, for the app to
+    /// open (`ctx.open_link`, which needs the context).
+    pub fn take_links(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.links)
+    }
+
+    /// Reads the battery state again, as on returning from its pages.
+    pub fn refresh_battery(&mut self) {
+        if !self.android {
+            return;
+        }
+        let state = self.battery.state();
+        if state != self.battery_state {
+            self.battery_state = state;
+            if self.nodes.is_some() {
+                self.place();
+            }
+        }
     }
 
     /// A note's Markdown view, laid out for the screen's width.
@@ -934,11 +950,10 @@ impl SettingsScreen {
         Some(SettingsHit::Changed(s))
     }
 
-    /// A link in the copy was tapped. It opens nothing until libmorph
-    /// 0.4.0's `ctx.open_link`.
+    /// A link in the copy was tapped: the app opens it.
     fn open_link(&mut self, url: String) {
-        log::info!("settings: link {url}: links open once libmorph 0.4.0's open_link is in");
-        self.tapped_link = Some(url);
+        log::info!("settings: a link was tapped");
+        self.links.push(url);
         self.dirty = true;
     }
 
@@ -1204,8 +1219,20 @@ mod tests {
         bottom: 40.0,
     };
 
-    /// A phone's battery, as the wrapper will report it, with what was
-    /// opened.
+    /// A host whose battery state cannot be known.
+    struct NoBattery;
+
+    impl Battery for NoBattery {
+        fn state(&self) -> Option<BatteryState> {
+            None
+        }
+        fn open_optimization(&self, _exempt: bool) {}
+        fn open_vendor(&self) -> VendorPage {
+            VendorPage::None
+        }
+    }
+
+    /// A phone's battery, as libmorph reports it, with what was opened.
     struct Phone {
         state: BatteryState,
         vendor: VendorPage,
@@ -1249,7 +1276,7 @@ mod tests {
     }
 
     fn plain() -> SettingsScreen {
-        screen(false, Box::new(super::super::battery::Unreleased))
+        screen(false, Box::new(NoBattery))
     }
 
     fn tap(s: &mut SettingsScreen, x: f32, y: f32) -> Option<SettingsHit> {
@@ -1280,10 +1307,10 @@ mod tests {
                 Section::Device
             ]
         );
-        let s = screen(true, Box::new(super::super::battery::Unreleased));
+        let s = screen(true, Box::new(NoBattery));
         let order: Vec<Section> = s.sections().into_iter().map(|(x, _)| x).collect();
         assert_eq!(order, Section::ALL);
-        // Until the wrapper is released, one note.
+        // With the state unknown, one note.
         assert_eq!(s.battery_notes(), [BATTERY_UPDATE]);
         assert!(s.row_rect("Battery optimization").is_none());
         // Rows are 52 pt, under the header, the danger rows last.
@@ -1439,11 +1466,7 @@ mod tests {
 
     #[test]
     fn a_drag_scrolls_and_is_not_a_tap() {
-        let mut s = SettingsScreen::new(
-            Settings::default(),
-            Box::new(super::super::battery::Unreleased),
-            false,
-        );
+        let mut s = SettingsScreen::new(Settings::default(), Box::new(NoBattery), false);
         // A short screen, so the sections scroll.
         s.set_layout(Layout { h: 900.0, ..PHONE });
         // A frame: the pane learns its range.
@@ -1504,7 +1527,7 @@ mod tests {
 
     #[test]
     fn background_and_notifications_sit_after_display_with_their_defaults() {
-        let s = screen(true, Box::new(super::super::battery::Unreleased));
+        let s = screen(true, Box::new(NoBattery));
         let order: Vec<Section> = s.sections().into_iter().map(|(x, _)| x).collect();
         let at = |x| order.iter().position(|&o| o == x).unwrap();
         assert_eq!(at(Section::Background), at(Section::Display) + 1);
@@ -1631,18 +1654,57 @@ mod tests {
     }
 
     #[test]
-    fn a_link_in_an_explanation_is_tappable_and_inert() {
+    fn a_link_in_an_explanation_is_handed_to_the_app_once() {
         let mut s = plain();
         let [x, y] = s.info_point(BACKGROUND).unwrap();
         tap(&mut s, x, y);
         s.tick(Duration::from_secs(1));
+        assert!(s.take_links().is_empty());
         let at = s.modal_link_point().expect("the explanation has a link");
         assert_eq!(tap(&mut s, at[0], at[1]), None);
         assert_eq!(
-            s.tapped_link(),
-            Some("https://developer.android.com/develop/background-work/services/fgs")
+            s.take_links(),
+            ["https://developer.android.com/develop/background-work/services/fgs"]
         );
+        assert!(s.take_links().is_empty(), "once");
         assert!(s.asking(), "the modal stays open");
+    }
+
+    #[test]
+    fn the_battery_rows_follow_the_state_when_it_is_read_again() {
+        let state = Rc::new(RefCell::new(BatteryState {
+            ignoring_optimizations: false,
+            background_restricted: true,
+            manufacturer: "samsung".into(),
+        }));
+        struct Changing(Rc<RefCell<BatteryState>>);
+        impl Battery for Changing {
+            fn state(&self) -> Option<BatteryState> {
+                Some(self.0.borrow().clone())
+            }
+            fn open_optimization(&self, _exempt: bool) {}
+            fn open_vendor(&self) -> VendorPage {
+                VendorPage::Opened
+            }
+        }
+        let mut s = screen(true, Box::new(Changing(Rc::clone(&state))));
+        assert_eq!(s.battery_notes(), [BATTERY_RESTRICTED]);
+        let subtitle = |s: &SettingsScreen| {
+            let n = s.nodes.as_ref().unwrap();
+            s.router
+                .get::<LinkRow>(n.optimization)
+                .and_then(|l| l.subtitle.clone())
+        };
+        assert_eq!(subtitle(&s).as_deref(), Some("Optimized"));
+        // Back from Android's dialog and the battery page.
+        *state.borrow_mut() = BatteryState {
+            ignoring_optimizations: true,
+            background_restricted: false,
+            manufacturer: "samsung".into(),
+        };
+        s.refresh_battery();
+        assert!(s.battery_notes().is_empty());
+        assert_eq!(subtitle(&s).as_deref(), Some("Exempt"));
     }
 
     #[test]
@@ -1662,12 +1724,8 @@ mod tests {
                 true,
             ),
         ] {
-            let mut s = SettingsScreen::new(
-                Settings::default(),
-                Box::new(super::super::battery::Unreleased),
-                false,
-            )
-            .with_build_info(info);
+            let mut s = SettingsScreen::new(Settings::default(), Box::new(NoBattery), false)
+                .with_build_info(info);
             s.set_layout(PHONE);
             let [x, y] = s.info_point(BACKGROUND).unwrap();
             tap(&mut s, x, y);

@@ -20,6 +20,9 @@ fn main() {
         // The launcher icon (icon/make_icon.py). Goes away once
         // libmobile/libmorph support icons (requested on 2026-10-24).
         .extra_script("icon/android/icon.gradle")
+        // *Battery optimization*'s Allow/Deny dialog (libmorph 0.4.0's
+        // `battery::request_ignore_optimizations`); not a Play build.
+        .request_ignore_battery_optimizations()
         .generate()
         .expect("libmorph-build: generating the Gradle project");
 }
