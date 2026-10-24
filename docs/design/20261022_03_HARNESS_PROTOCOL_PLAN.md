@@ -905,3 +905,10 @@ as buttons:
   suggestion row; Yes and No stay buttons;
 - a labelled button's text is 17 pt, or smaller to fit (down to 9 pt), so
   it never outgrows the button.
+
+## Amendment — 2026-10-23 23:00 EDT: "discuss", not "improve" (living section L3)
+
+The owner (2026-10-23): "improve was a typo, discuss would be better".
+This replaces "improve" in the 21:57 EDT amendment and in the amendment
+before this one: the plan question's middle word is **discuss**, and it
+takes a message starting "Discuss the <plan>: ".
