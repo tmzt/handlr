@@ -1369,3 +1369,33 @@ amendments, built in `420c8f9` (handlr-companion) and `cc5ba56` (companion).
 - **A block is also laid out again** when its pin changes, or when the
   neighbour of a leading compaction line changes (`NoticeLine::repeats` now
   takes a "previous entry is a compaction" flag).
+
+## 2026-10-24 00:30 EDT — plan 20261024_01, steps 1–3: departures
+
+Built in `e971a80` (libhandlr_proto 0.3.6), `e971a80` (handlr-companion, compile fix
+only) and `4185076` (handlr, steps 2 and 3 in one commit, because the crate does not
+build against 0.3.6 with the hub alone).
+1. **Step 1:** `SESSION_CHANGED` (-32014) already existed in 0.3.5, so it
+   was not added. `session.content` uses it, and only its doc comment
+   changed.
+2. **Step 2, decision 1, "stable after a restart": not fully met.**
+   Indexes are the same on every read of the same file in the same live
+   state. But a section that appeared and was removed before a fresh read
+   is not numbered by that read. And a card that appears behind sections
+   already numbered (a Finished card after context lines) takes the next
+   index, not its serial position. So after a daemon restart, indexes can
+   differ from the ones a client holds. Making them match would mean
+   persisting the numbering (plan 20261023_09's daemon cache). Raised with
+   the owner.
+3. **Step 2, "never reused":** a removed section whose own serial comes
+   back (a live Finished card that returns) gets its old index back, with
+   `rev` raised. No other section ever takes that index.
+4. **Step 3, decision 3:** a resumed outline (`after` plus `from`) also
+   resends the slots within 256 lines before `after`, and their contents
+   when they are among the newest 8, as the existing catch-up does.
+5. **Step 3, decision 3:** outline deliveries carry the old `removed`
+   serials as well as `removed_index`. `first` is always 0.
+6. **Step 3, decision 4:** `from` greater than `to` is invalid params. On
+   a `to`-only or no-bound request, `more` means there are more sections
+   before the first one returned. `limit` is capped at 200, including for
+   `slots_only`.
