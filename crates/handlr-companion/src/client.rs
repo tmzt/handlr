@@ -104,10 +104,10 @@ pub enum Suggestion {
     Compact,
     /// A plan question's answers (plan 20261022_03, the 21:57 EDT
     /// amendment): approve sends "Approve the <plan>", implement "Approve
-    /// the <plan> and start building it", and improve takes a message
-    /// starting "Improve the <plan>: ".
+    /// the <plan> and start building it", and discuss takes a message
+    /// starting "Discuss the <plan>: ".
     Approve,
-    Improve,
+    Discuss,
     Implement,
 }
 
@@ -120,7 +120,7 @@ impl Suggestion {
             Suggestion::Continue => "cont",
             Suggestion::Compact => "cmpct",
             Suggestion::Approve => "approve",
-            Suggestion::Improve => "improve",
+            Suggestion::Discuss => "discuss",
             Suggestion::Implement => "implement",
         }
     }
@@ -134,7 +134,7 @@ impl Suggestion {
             Suggestion::Continue => ("continue", common::SendKind::Command),
             Suggestion::Compact => ("/compact", common::SendKind::Command),
             Suggestion::Approve => ("Approve the plan", common::SendKind::Message),
-            Suggestion::Improve => ("Improve the plan:", common::SendKind::Message),
+            Suggestion::Discuss => ("Discuss the plan:", common::SendKind::Message),
             Suggestion::Implement => (
                 "Approve the plan and start building it",
                 common::SendKind::Message,
@@ -176,15 +176,15 @@ fn plan_name(plan: Option<&str>) -> String {
     }
 }
 
-/// What a tapped approve, improve or implement says (plan 20261022_03,
+/// What a tapped approve, discuss or implement says (plan 20261022_03,
 /// the 21:57 EDT amendment): "Approve the <plan>", the start of the
-/// message "Improve the <plan>:", or "Approve the <plan> and start
+/// message "Discuss the <plan>:", or "Approve the <plan> and start
 /// building it". At most 200 characters.
 pub fn plan_answer(response: Suggestion, plan: Option<&str>) -> Option<String> {
     let plan = plan_name(plan);
     let text = match response {
         Suggestion::Approve => format!("Approve {plan}"),
-        Suggestion::Improve => format!("Improve {plan}:"),
+        Suggestion::Discuss => format!("Discuss {plan}:"),
         Suggestion::Implement => format!("Approve {plan} and start building it"),
         _ => return None,
     };
@@ -1466,7 +1466,7 @@ impl State {
         let pending = self.view.as_ref().and_then(|v| v.pending_question.as_ref());
         let question = pending.map(|q| q.text.clone());
         let plan = pending.and_then(|q| q.plan.clone());
-        if response == Suggestion::Improve {
+        if response == Suggestion::Discuss {
             // A message in reply to the card, its start already in it, to
             // dictate the rest.
             let start = plan_answer(response, plan.as_deref()).unwrap_or_default();
@@ -4338,8 +4338,8 @@ mod tests {
             "Approve the overview screen plan and start building it"
         );
         assert_eq!(
-            plan_answer(Suggestion::Improve, plan).unwrap(),
-            "Improve the overview screen plan:"
+            plan_answer(Suggestion::Discuss, plan).unwrap(),
+            "Discuss the overview screen plan:"
         );
         assert_eq!(
             plan_answer(Suggestion::Approve, None).unwrap(),
@@ -4427,21 +4427,21 @@ mod tests {
     }
 
     #[test]
-    fn improve_takes_a_message_starting_with_the_plan() {
+    fn discuss_takes_a_message_starting_with_the_plan() {
         let mut s = viewing(
             "idle",
             asking_about_a_plan(Some("the overview screen plan")),
         );
-        let out = s.input(Input::Respond(Suggestion::Improve));
+        let out = s.input(Input::Respond(Suggestion::Discuss));
         assert!(requests(&out, "agents.send").is_empty(), "nothing sent yet");
         let d = dictation_of(&out).expect("taking a message");
         assert!(d.active);
-        assert_eq!(d.text, "Improve the overview screen plan:");
+        assert_eq!(d.text, "Discuss the overview screen plan:");
         assert_eq!(d.target.as_ref().unwrap().pane_id, "w2:pZ");
         // The rest is dictated after it.
         let out = s.input(Input::Utterance("split step two".into()));
         let d = dictation_of(&out).expect("the message");
-        assert_eq!(d.text, "Improve the overview screen plan: split step two");
+        assert_eq!(d.text, "Discuss the overview screen plan: split step two");
     }
 
     #[test]

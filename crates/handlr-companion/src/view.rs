@@ -48,7 +48,7 @@ pub struct AgentCard {
     /// The confirmation an Approval card answers.
     pub confirm_id: Option<u64>,
     /// A Question card's question is about a plan: it offers approve,
-    /// improve and implement in place of Yes and No (plan 20261022_03, the
+    /// discuss and implement in place of Yes and No (plan 20261022_03, the
     /// 21:57 EDT amendment).
     pub about_plan: bool,
     /// The repowiki links for the `docs/…` paths in `text`.
