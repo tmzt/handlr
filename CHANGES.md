@@ -1435,3 +1435,39 @@ decision 3's reset in outline mode and decisions 6 and 7.
    the swap is at once, at the bottom.
 4. **The same for a new session file** (`/clear`): while scrolled back, the
    old session stays until the tap.
+
+## 2026-10-24 01:02 EDT — plan 20261024_01, steps 4–5: departures
+
+Built in `f9c9e91` (handlr-companion, step 4), `3672a86` (apps/Cargo.lock) and
+`63b90fb` (companion, step 5), with the departure entry of 00:36 EDT.
+1. **Step 4, holes:** a hole is asked for only after the outline's first
+   hole has stayed unfilled for 1 s (`GAP_WAIT`). Read literally, decision
+   3's rule always holds while an outline is still arriving in chunks, and
+   a new slot at the end can arrive before them.
+2. **Step 4, rev:** contents are fetched again when the held rev *differs*
+   from the slot's, not only when it is higher. Revs count from 0 again
+   after a daemon restart, so "higher" would keep stale contents.
+3. **Step 4:** contents are recorded at the rev their slot had when they
+   were asked for, so a slot bumped while the request is in flight is
+   fetched again.
+4. **Step 4, old daemons:** a daemon that sends no `epoch` gets the old
+   view (sections, history pages, the client's positional index), so
+   "without outline, as before" holds. `view::section_index` stays for
+   that case only.
+5. **Step 4, while a new outline is held aside:** nothing is fetched for the
+   old ribbon, because `session.content` answers by the daemon's new
+   indexes. Live contents go to the outline held aside, and the old ribbon
+   stays unchanged. Contents are not fetched until the outline shown is
+   complete.
+6. **Step 4, never forgotten:** the contents of the newest `LIVE_INLINE`
+   indexes and of live cards, which the jump line and the pinned card
+   need.
+7. **Step 5:** contents filling a placeholder, or being forgotten, do not
+   reset the "continue" suggestion's 30 s quiet timer.
+
+Open: while scrolled back with a new outline held aside, replies that
+arrive are not read aloud until it is applied. Window reports during a
+drag are sent only when the window changed, with no other throttle.
+
+A correction to `f14c2e4`'s message, "apps: lock libhandlr_proto 0.3.7":
+it locked 0.3.6. `3672a86` locks 0.3.7.
