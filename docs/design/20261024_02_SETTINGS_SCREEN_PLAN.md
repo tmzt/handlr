@@ -235,3 +235,9 @@ owner says otherwise:
 Open question 3 was answered by the 11:3x EDT amendment. The battery rows
 are built behind the stub of step 5 until libmorph's battery wrapper is
 released. The status becomes `In implementation` with step 1's commit.
+
+## Amendment — 2026-10-24 11:47 EDT: a correction to the previous amendment's reference
+
+The previous amendment names "the 11:3x EDT amendment" for open question
+3. It means the amendment of 2026-10-24 11:37 EDT, "the general agent
+toggle stops user-directed Gemini turns only".
