@@ -1082,3 +1082,18 @@ smaller (a confirmation or message card appearing, the strip, a list
 answer while cards were re-laid out) moved the place up for good. It now
 keeps where the user left it, and the offset returns there as soon as
 there is room again. The agent view's own scrolling is unchanged.
+
+## 2026-10-23 21:29 EDT — plans 20261022_02 and 20261023_04: the link sleeps in the background
+
+The owner: "in any case it should be a single sleeping socket". When the
+app leaves the screen (libmorph's `on_suspend`) it sends
+`Input::Background(true)`, and the companion client stops everything it
+does on a timer: the agent view's peeks (5 s working, 15 s idle), the
+overview's `agents.list` refresh (15 s, plan 20261023_04 decision 6), and
+so the read-aloud summaries that follow peeks. The daemon still pushes
+confirmations, notices and focus over the same socket. The ping (plan
+20261022_02, as departed from at 17:58 EDT) waits 270 s of quiet
+(`PING_IDLE_BACKGROUND`), under the usual NAT and carrier idle timeouts,
+instead of 30 s. Back on screen (`on_resume`), one catch-up (a peek of the
+open view and a list), then the usual timers. Keeping the process and its
+socket alive while asleep is the foreground service's job (libmobile).
