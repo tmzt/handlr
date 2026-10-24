@@ -1,5 +1,9 @@
 #[path = "build/copy_gen.rs"]
 mod copy_gen;
+// The app includes it too (src/theme.rs), using what this script does not.
+#[allow(dead_code)]
+#[path = "build/themes_check.rs"]
+mod themes_check;
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +15,7 @@ const SERVICE_REASON: &str = "Keeps the encrypted link to the user's own handlr 
 
 fn main() {
     settings_copy();
+    themes();
     // Writes target/aarch64-linux-android/<profile>/gradle/companion/, the
     // whole Gradle project that scripts/android.sh packages.
     libmorph_build::gradle_project("dev.tmzt.handlr")
@@ -51,6 +56,7 @@ fn main() {
 fn settings_copy() {
     for path in [
         "SETTINGS_COPY.md",
+        "themes.toml",
         "src",
         "build.rs",
         "build",
@@ -71,6 +77,17 @@ fn settings_copy() {
     };
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("set by cargo"));
     std::fs::write(out.join("settings_copy.rs"), code).expect("writing settings_copy.rs");
+}
+
+/// `themes.toml`, checked as the app parses it (plan 20261024_05, the
+/// 15:33 EDT amendment): a bad file fails the build. Its
+/// `rerun-if-changed` line is with the others, in [`settings_copy`].
+fn themes() {
+    let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
+    let text = std::fs::read_to_string(dir.join("themes.toml")).expect("themes.toml: reading it");
+    if let Err(e) = themes_check::check(&text) {
+        panic!("themes.toml: {e}");
+    }
 }
 
 /// The text of every `.rs` file under `dir`.

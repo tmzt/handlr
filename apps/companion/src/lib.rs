@@ -58,6 +58,7 @@ pub mod memory;
 pub mod notify;
 pub mod overview;
 pub mod settings;
+pub mod theme;
 pub mod ui;
 
 use std::path::PathBuf;
