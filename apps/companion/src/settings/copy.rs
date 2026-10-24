@@ -14,12 +14,25 @@ pub struct CopyText {
     pub title: Option<&'static str>,
     /// Markdown, with its slots unfilled.
     pub text: &'static str,
+    /// A row's one-line status while its feature is on, and while it is
+    /// off (`enabled_text`, `disabled_text`).
+    pub enabled_text: Option<&'static str>,
+    pub disabled_text: Option<&'static str>,
     pub slots: &'static [&'static str],
     /// `(vendor, text)`: appended on that vendor's phones.
     pub vendors: &'static [(&'static str, &'static str)],
 }
 
 impl CopyText {
+    /// A row's status line for its feature being `on`, if it has one.
+    pub fn status(&self, on: bool) -> Option<&'static str> {
+        if on {
+            self.enabled_text
+        } else {
+            self.disabled_text
+        }
+    }
+
     /// A row's label or a modal's title: its title, else its text.
     pub fn label(&self) -> &'static str {
         self.title.unwrap_or(self.text)

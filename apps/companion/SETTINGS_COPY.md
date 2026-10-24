@@ -130,6 +130,8 @@ key's text on that vendor's phones.
 # [Copy] battery_optimization
 
 - title: Battery optimization
+- enabled_text: Exempt: Android doesn't hold back handlr's network
+- disabled_text: Optimized: Android may hold back handlr's network when idle
 - text: |
     Exempting handlr from battery optimization lifts **App Standby**'s
     limits and some of **Doze**'s network limits. It doesn't stop Doze:
@@ -138,13 +140,9 @@ key's text on that vendor's phones.
     which stops background work entirely.
     [Doze and App Standby](https://developer.android.com/training/monitoring-device-state/doze-standby)
 
-# [Copy] battery_exempt
+# [Copy] battery_enable
 
-- text: Exempt
-
-# [Copy] battery_optimized
-
-- text: Optimized
+- text: Enable
 
 # [Copy] samsung_battery
 

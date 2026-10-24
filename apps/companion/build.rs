@@ -40,10 +40,21 @@ fn main() {
 }
 
 /// `SETTINGS_COPY.md` into `$OUT_DIR/settings_copy.rs`, checked against the
-/// keys `src/` uses (plan 20261024_04, decision 6). No `rerun-if-changed`
-/// is printed, so the script runs again on any change in the package, as
-/// before.
+/// keys `src/` uses (plan 20261024_04, decision 6). libmorph-build prints
+/// `rerun-if-changed` lines of its own, which turns off cargo's "any change
+/// in the package" rule, so the copy, the sources it is checked against, and
+/// the rest of what this script reads are named here.
 fn settings_copy() {
+    for path in [
+        "SETTINGS_COPY.md",
+        "src",
+        "build.rs",
+        "build",
+        "Cargo.toml",
+        "icon",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let md = std::fs::read_to_string(dir.join("SETTINGS_COPY.md"))
         .expect("SETTINGS_COPY.md: reading it");

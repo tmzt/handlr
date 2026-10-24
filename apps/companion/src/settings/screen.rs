@@ -54,7 +54,7 @@ use super::confirm::Confirm;
 use super::copy::{self, CopyText};
 use super::danger_row::DangerRow;
 use super::info::{INFO_PART, InfoModal};
-use super::link_row::LinkRow;
+use super::link_row::{ACTION_PART, LinkRow};
 use super::option_row::OptionRow;
 use super::toggle_row::ToggleRow;
 use super::{Settings, scrollbar_label, step_scrollbar};
@@ -655,14 +655,12 @@ impl SettingsScreen {
                             let rect = row(&mut y);
                             if let Some(link) = router.get_mut::<LinkRow>(n.optimization) {
                                 link.rect = rect;
-                                link.subtitle = Some(
-                                    if b.ignoring_optimizations {
-                                        copy::BATTERY_EXEMPT.text
-                                    } else {
-                                        copy::BATTERY_OPTIMIZED.text
-                                    }
-                                    .to_string(),
-                                );
+                                link.subtitle = copy::BATTERY_OPTIMIZATION
+                                    .status(b.ignoring_optimizations)
+                                    .map(str::to_string);
+                                // Not yet exempt: *Enable* asks the system.
+                                link.action = (!b.ignoring_optimizations)
+                                    .then(|| copy::BATTERY_ENABLE.text.to_string());
                             }
                             if let Some(label) = vendor_label {
                                 let rect = row(&mut y);
@@ -932,11 +930,10 @@ impl SettingsScreen {
             };
             s.scrollbar = step_scrollbar(s.scrollbar, forward);
         } else if target == n.optimization {
-            let exempt = self
-                .battery_state
-                .as_ref()
-                .is_some_and(|b| b.ignoring_optimizations);
-            self.battery.open_optimization(exempt);
+            // *Enable* asks the system to exempt handlr; the row itself
+            // opens the list of every app's setting.
+            let enable = matches!(action, ControlAction::Activated { part } if part == ACTION_PART);
+            self.battery.open_optimization(!enable);
             return None;
         } else if target == n.vendor {
             if self.battery.open_vendor() == VendorPage::None {
@@ -1296,6 +1293,28 @@ mod tests {
         s.touch(1, TouchPhase::Ended, x, y, Duration::from_millis(16))
     }
 
+    impl SettingsScreen {
+        /// The *Enable* button's target in the row `label`, if it has one.
+        fn enable_rect(&self, label: &str) -> Option<Rect> {
+            let n = self.nodes.as_ref()?;
+            [n.optimization, n.vendor]
+                .into_iter()
+                .filter_map(|id| self.router.get::<LinkRow>(id))
+                .find(|l| l.label == label)
+                .and_then(|l| {
+                    // From the row's place in the pane to its place on screen.
+                    let a = l.action_target()?;
+                    let r = self.row_rect(label)?;
+                    Some(Rect::new(
+                        a.x - l.rect.x + r.x,
+                        a.y - l.rect.y + r.y,
+                        a.w,
+                        a.h,
+                    ))
+                })
+        }
+    }
+
     /// Taps the row `label`, scrolled to the top.
     fn tap_row(s: &mut SettingsScreen, label: &str) -> Option<SettingsHit> {
         let r = s
@@ -1463,8 +1482,22 @@ mod tests {
         let mut s = screen(true, Box::new(phone(false, true, VendorPage::None)));
         assert!(s.row_rect("Battery optimization").is_some());
         assert_eq!(s.battery_notes(), [BATTERY_RESTRICTED]);
+        // Optimized: an *Enable* button on the right asks the system; the
+        // row itself opens the list of every app's setting.
+        let enable = s
+            .enable_rect("Battery optimization")
+            .expect("an Enable button");
+        let row = s.row_rect("Battery optimization").unwrap();
+        assert!(enable.x > row.x + row.w * 0.6, "on the right");
+        assert_eq!(
+            tap(&mut s, enable.x + enable.w * 0.5, enable.y + enable.h * 0.5),
+            None
+        );
         assert_eq!(tap_row(&mut s, "Battery optimization"), None);
-        assert_eq!(opened.borrow().as_slice(), ["optimization false"]);
+        assert_eq!(
+            opened.borrow().as_slice(),
+            ["optimization false", "optimization true"]
+        );
         // No vendor page after all: the row goes, for good.
         assert!(s.row_rect("Samsung battery (app sleeping)").is_some());
         tap_row(&mut s, "Samsung battery (app sleeping)");
@@ -1474,6 +1507,8 @@ mod tests {
 
         let s = screen(true, Box::new(phone(true, false, VendorPage::Opened)));
         assert!(s.battery_notes().is_empty());
+        // Exempt: no button, the "›" as before.
+        assert!(s.enable_rect("Battery optimization").is_none());
     }
 
     #[test]
@@ -1734,7 +1769,10 @@ mod tests {
                 .get::<LinkRow>(n.optimization)
                 .and_then(|l| l.subtitle.clone())
         };
-        assert_eq!(subtitle(&s).as_deref(), Some("Optimized"));
+        assert_eq!(
+            subtitle(&s).as_deref(),
+            copy::BATTERY_OPTIMIZATION.status(false)
+        );
         // Back from Android's dialog and the battery page.
         *state.borrow_mut() = BatteryState {
             ignoring_optimizations: true,
@@ -1743,7 +1781,10 @@ mod tests {
         };
         s.refresh_battery();
         assert!(s.battery_notes().is_empty());
-        assert_eq!(subtitle(&s).as_deref(), Some("Exempt"));
+        assert_eq!(
+            subtitle(&s).as_deref(),
+            copy::BATTERY_OPTIMIZATION.status(true)
+        );
     }
 
     #[test]
