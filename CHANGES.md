@@ -1965,3 +1965,13 @@ Not possible yet in libmorph 0.4.1:
   posted.
 - **Knowing what was tapped:** a tap on the notification opens the app but
   doesn't say what was tapped, so it can't open that agent.
+
+## 2026-10-24 14:14 EDT — plan 20261024_02: settings dialogs are opaque, opening and closing at once
+
+The owner (2026-10-24), from the S23: "no transparency on settings dialogs".
+The screenshot showed the ⓘ dialog's panel half see-through, with the rows
+behind it showing. The modal stack faded in over 0.18 s, and the screen stopped
+redrawing before the fade finished, so the panel stayed part-transparent. The
+settings screen's modal stack now uses `ModalTransition::Instant`: dialogs open
+and close in one frame at full opacity, in place of the 2026-10-24 entry
+"confirming modals close at once" (Timed, 0.18 s in, 0 out).
