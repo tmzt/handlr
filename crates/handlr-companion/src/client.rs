@@ -1874,6 +1874,10 @@ impl State {
                 "awake"
             }
         );
+        // The daemon holds back all but what needs the user while asleep.
+        if self.online() {
+            self.send_options(out);
+        }
         if !on {
             if let Some(v) = self.view.as_mut() {
                 v.wanted = true;
@@ -1925,6 +1929,7 @@ impl State {
     fn send_options(&mut self, out: &mut Vec<Output>) {
         let params = common::ClientOptionsParams {
             spoken_output: self.read_aloud,
+            background: self.background,
         };
         out.push(self.request(methods::CLIENT_OPTIONS, params, Sent::Options));
     }
@@ -3934,14 +3939,23 @@ mod tests {
             id,
             json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
         ));
-        assert_eq!(options(&out), [json!({"spoken_output": false})]);
+        assert_eq!(
+            options(&out),
+            [json!({"spoken_output": false, "background": false})]
+        );
         // Toggled: sent each time.
         let out = s.input(Input::ReadAloud(true));
-        assert_eq!(options(&out), [json!({"spoken_output": true})]);
+        assert_eq!(
+            options(&out),
+            [json!({"spoken_output": true, "background": false})]
+        );
         let id = requests(&out, "client.options")[0].id.clone();
         assert!(s.incoming(response(id, json!({}))).is_empty());
         let out = s.input(Input::ReadAloud(false));
-        assert_eq!(options(&out), [json!({"spoken_output": false})]);
+        assert_eq!(
+            options(&out),
+            [json!({"spoken_output": false, "background": false})]
+        );
         // Offline, nothing is sent; after the reconnect's hello, the value
         // as it is now.
         s.disconnected(1000);
@@ -3953,7 +3967,10 @@ mod tests {
             id,
             json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
         ));
-        assert_eq!(options(&out), [json!({"spoken_output": true})]);
+        assert_eq!(
+            options(&out),
+            [json!({"spoken_output": true, "background": false})]
+        );
         // A refused option is only logged.
         let id = requests(&out, "client.options")[0].id.clone();
         let refused = Response::err(
@@ -4563,7 +4580,12 @@ mod tests {
     #[test]
     fn in_the_background_the_link_sleeps_and_wakes_with_one_catch_up() {
         let mut s = viewing("working", asking());
-        s.input(Input::Background(true));
+        let out = s.input(Input::Background(true));
+        // The daemon is told, so it holds back all but what needs the user.
+        assert_eq!(
+            requests(&out, "client.options")[0].params["background"],
+            true
+        );
         let mut sent = Vec::new();
         // Four minutes asleep: no peeks, no lists, no pings.
         for t in (110..=360).step_by(10) {
