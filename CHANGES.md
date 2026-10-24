@@ -2150,3 +2150,12 @@ item 1, "every role is present" for every theme:
   shipped one, and a user one is skipped and logged.
 - **The build still fails** for a value that isn't a colour, an unknown role
   name, or a repeated id.
+
+## 2026-10-24 15:44 EDT — plan 20261022_03 L3: an expanded pinned card stays expanded while scrolling
+
+The owner (2026-10-24): "scrolling with finish card expanded shouldn't collapse
+it". The pinned card used to fold to its bar whenever a finger scrolled or the
+view was scrolled back (`AgentScreen::compact`). It now folds only when it
+isn't expanded. An expanded card (a Finished card's reply, points and spoken
+text, or a cut question) stays as it is while the view scrolls behind it, until
+it is tapped to fold.
