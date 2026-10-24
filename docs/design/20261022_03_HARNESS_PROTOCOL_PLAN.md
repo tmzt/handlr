@@ -1269,3 +1269,13 @@ Tests:
 - with no points, there is no list;
 - tapping again folds it;
 - expanding does not move the view.
+
+## Amendment — 2026-10-24 12:06 EDT: the summary card's points and spoken text come on the card (living section L3)
+
+The owner (2026-10-24): the summary is a daemon option, under `[summary]`
+(CHANGES.md, the same time). This replaces the previous amendment's "The
+points come from `speech.summarize`": the expanded card's points are
+`CardBody.points`, and its spoken text is `CardBody.spoken`, which the
+daemon fills when `[summary] cards` is on and Gemini answers. When
+`spoken` is absent, the spoken text is the reply's own read-aloud text as
+before, and the points list is absent.
