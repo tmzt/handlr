@@ -1911,3 +1911,22 @@ Open:
 - wiring libmorph's memory events (0.4.0 has `on_low_memory`; the trim
   levels come in 0.4.1);
 - the daemon's `speech.summarize` checking the card store.
+
+## 2026-10-24 13:57 EDT — the companion's launcher icon: the magenta circuit dog
+
+The owner (2026-10-24): "use icon from ~/Projects/Handlr … adapt to magenta
+color scheme from the blue (just bump the hue number) and encode at proper
+Android resolutions". The icon and its generator are in `apps/companion/icon/`.
+- **The art:** the source's left icon, with its line art turned +110° in hue
+  (blue to magenta, green to violet). The background is `#0F0F26`.
+- **The sizes:** legacy and round mipmaps at 48–192 px; adaptive foregrounds
+  at 108–432 px, the dog inside the 66 dp circle, with a colour background
+  and a monochrome layer; masters at 512 and 1024.
+- **Regenerating:** `make_icon.py` rebuilds it all from the source image, which
+  stays in `~/Projects/Handlr`.
+- **Getting it into the APK:** libmobile's `Project::extra_script` applies
+  `icon/android/icon.gradle`. It adds the res directory, and points the debug
+  and release builds at a manifest overlay setting `android:icon` and
+  `android:roundIcon`. aapt shows `mipmap/ic_launcher`.
+- **Temporary:** this hook goes away once libmobile and libmorph's icon plans
+  (Drafts, awaiting the owner) give `Project::icon(..)`.
