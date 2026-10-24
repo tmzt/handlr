@@ -423,6 +423,7 @@ async fn subscribe(
                 after: None,
                 outline,
                 from: None,
+                epoch: None,
             },
         )
         .await?,
@@ -567,6 +568,7 @@ mod tests {
             removed_index: vec![],
             first: 0,
             last: None,
+            epoch: None,
         }
     }
 

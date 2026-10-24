@@ -1103,6 +1103,8 @@ async fn an_outline_resumes_from_an_index_and_content_answers_ranges() {
     let d = &r["delivery"];
     assert_eq!(slot_indexes(d), (0..9).collect::<Vec<u64>>());
     assert_eq!(d["last"], 8);
+    let epoch = d["epoch"].clone();
+    assert!(epoch.is_u64(), "an outline delivery carries its epoch: {d}");
     let finished = d["slots"][8]["serial"].as_str().unwrap().to_string();
     assert!(finished.ends_with(":6.194"), "{d}");
     assert_eq!(section_indexes(d), (1..9).collect::<Vec<u64>>());
@@ -1191,16 +1193,33 @@ async fn an_outline_resumes_from_an_index_and_content_answers_ranges() {
     // Resumed from the next index: only what follows, and the held one,
     // within reach of it, in case it changed.
     let r = c
-        .subscribe(json!({"pane_id": "p1", "outline": true, "after": held, "from": 11}))
+        .subscribe(
+            json!({"pane_id": "p1", "outline": true, "after": held, "from": 11, "epoch": epoch}),
+        )
         .await;
     let d = &r["delivery"];
     assert_eq!(d["reset"], false, "{d}");
     assert_eq!(slot_indexes(d), [10, 11, 12]);
     assert_eq!(d["last"], 12);
     assert_eq!(section_indexes(d), [10, 11, 12]);
+    assert_eq!(d["epoch"], epoch);
+    // Another epoch (a restarted daemon's indexes, or none given): the
+    // outline from 0, as a reset, in this run's epoch.
+    let other = epoch.as_u64().unwrap() ^ 1;
+    for asked in [json!(other), json!(null)] {
+        let r = c
+            .subscribe(json!({"pane_id": "p1", "outline": true, "after": held, "from": 11, "epoch": asked}))
+            .await;
+        assert_eq!(r["delivery"]["reset"], true, "{r}");
+        assert_eq!(slot_indexes(&r["delivery"]).first(), Some(&0));
+        assert_eq!(r["delivery"]["epoch"], epoch);
+        let sub = r["subscription_id"].as_u64().unwrap();
+        c.call("session.unsubscribe", json!({"subscription_id": sub}))
+            .await;
+    }
     // Another file's serial: the outline from 0, as a reset.
     let r = c
-        .subscribe(json!({"pane_id": "p1", "outline": true, "after": "00000001:3.0", "from": 10}))
+        .subscribe(json!({"pane_id": "p1", "outline": true, "after": "00000001:3.0", "from": 10, "epoch": epoch}))
         .await;
     assert_eq!(r["delivery"]["reset"], true);
     assert_eq!(slot_indexes(&r["delivery"]).first(), Some(&0));

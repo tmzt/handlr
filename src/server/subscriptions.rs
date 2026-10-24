@@ -57,6 +57,24 @@ pub const RESET_SECTIONS: usize = 50;
 /// How soon an outline's next chunk is tried once the last has left.
 pub const OUTLINE_PACE: Duration = Duration::from_millis(20);
 
+/// This daemon run's epoch for outlines, random, so a client that held
+/// another run's indexes starts its outline again (CHANGES.md, 2026-10-24,
+/// plan 20261024_01 steps 3–5).
+fn run_epoch() -> u64 {
+    static EPOCH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *EPOCH.get_or_init(|| {
+        let mut b = [0u8; 8];
+        getrandom::getrandom(&mut b).expect("the OS random source");
+        u64::from_le_bytes(b)
+    })
+}
+
+/// The wire epoch of a tailer's outline epoch: changes with the daemon run
+/// and with each rewrite of the session file.
+fn wire_epoch(outline_epoch: u64) -> u64 {
+    run_epoch() ^ outline_epoch.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+}
+
 /// One subscription, as its connection holds it.
 pub(super) struct Subscription {
     pub id: u64,
@@ -171,6 +189,8 @@ struct Task {
     opened: Option<(u32, u64)>,
     /// Outline mode: the highest index the client has been told of.
     outline_last: Option<u64>,
+    /// Outline mode: the epoch the client said it holds, for resuming.
+    client_epoch: Option<u64>,
 }
 
 /// `session.subscribe`: resolve the pane, check the principal, and answer
@@ -237,6 +257,7 @@ pub(super) async fn subscribe(
         outline_next: None,
         opened: None,
         outline_last: None,
+        client_epoch: p.epoch,
     };
     task.open(p.after, p.from).await;
     let delivery = task.take_delivery();
@@ -490,9 +511,10 @@ impl Task {
             return self.no_session(delivery_reasons::NO_SESSION);
         };
         self.opened = Some((tailer.file, epoch));
+        let same_epoch = self.client_epoch.take() == Some(wire_epoch(epoch));
         let resume = after
             .zip(from)
-            .filter(|(a, f)| a.file == tailer.file && *f <= outline.len());
+            .filter(|(a, f)| same_epoch && a.file == tailer.file && *f <= outline.len());
         self.waiting.reset = resume.is_none();
         if let Some((after, from)) = resume {
             let reach = after.line.saturating_sub(REACH);
@@ -625,6 +647,7 @@ impl Task {
             removed_index: w.removed_index.into_iter().collect(),
             first: 0,
             last: self.outline_last.filter(|_| outlined),
+            epoch: self.opened.filter(|_| outlined).map(|(_, e)| wire_epoch(e)),
         }
     }
 
