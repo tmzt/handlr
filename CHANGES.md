@@ -1124,3 +1124,17 @@ done or asking, and confirmations always go. libhandlr_proto 0.3.1, a
 patch by the owner's ruling: "I would consider it additive, just patch
 level", "appending to a struct is additive", "same with open enums, not
 closed".
+
+## 2026-10-23 21:42 EDT — plan 20261022_02: ping says whether the app is in front; a silent phone is taken as asleep
+
+The owner: "do we consider a daemon not getting a ping for 60s enough to
+background the link?", and "ping should have active flag (assuming it's
+json), and send it when user resumes app".
+- `ping` takes `{active}` (libhandlr_proto 0.3.2, `PingParams`): the
+  companion's background ping says `active: false`, and resuming the app
+  sends `ping {active: true}` at once. The daemon takes the flag as the
+  phone's state, as `client.options` `background` does.
+- A companion that has asked nothing but inactive pings for 60 s
+  (`ASLEEP_AFTER`) is taken as asleep even without being told, since an
+  awake phone always asks within about 30 s; any other request, or an
+  active ping, wakes it.
