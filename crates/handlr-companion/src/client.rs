@@ -1874,9 +1874,14 @@ impl State {
                 "awake"
             }
         );
-        // The daemon holds back all but what needs the user while asleep.
+        // The daemon holds back all but what needs the user while asleep;
+        // on resume a ping says at once that the user is back.
         if self.online() {
             self.send_options(out);
+            if !on {
+                let params = common::PingParams { active: Some(true) };
+                out.push(self.request(methods::PING, params, Sent::Ping));
+            }
         }
         if !on {
             if let Some(v) = self.view.as_mut() {
@@ -1918,7 +1923,10 @@ impl State {
                     } =>
             {
                 self.ping_sent = Some(self.now);
-                out.push(self.request(methods::PING, common::Empty {}, Sent::Ping));
+                let params = common::PingParams {
+                    active: Some(!self.background),
+                };
+                out.push(self.request(methods::PING, params, Sent::Ping));
             }
             None => {}
         }
@@ -4594,13 +4602,19 @@ mod tests {
         for method in ["session.peek", "agents.list", "ping"] {
             assert!(requests(&sent, method).is_empty(), "{method}: {sent:?}");
         }
-        // After 4.5 minutes of quiet, one ping keeps the socket.
+        // After 4.5 minutes of quiet, one ping keeps the socket, saying the
+        // app is not in front.
         let out = s.input(Input::Tick(secs(380.0)));
         assert_eq!(requests(&out, "ping").len(), 1);
+        assert_eq!(requests(&out, "ping")[0].params["active"], false);
         // Back in front: the view catches up at once.
         let ping = requests(&out, "ping")[0].clone();
         s.incoming(response(ping.id, json!({})));
         let out = s.input(Input::Background(false));
         assert_eq!(requests(&out, "session.peek").len(), 1, "{out:?}");
+        // Resumed: a ping says so at once.
+        let pings = requests(&out, "ping");
+        assert_eq!(pings.len(), 1, "{out:?}");
+        assert_eq!(pings[0].params["active"], true);
     }
 }
