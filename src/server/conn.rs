@@ -90,6 +90,8 @@ pub(super) struct Conn {
     /// gets only what needs the user (owner, 2026-10-23: "only blockages or
     /// done messages should be sent on a sleeping conn").
     pub(super) background: std::sync::atomic::AtomicBool,
+    /// When the client last asked anything but a ping.
+    last_request: Mutex<std::time::Instant>,
 }
 
 impl Conn {
@@ -99,9 +101,15 @@ impl Conn {
         }
     }
 
-    /// Whether the companion's link sleeps (see `background`).
+    /// Whether the companion's link sleeps: it said so (`background`), or
+    /// it has asked nothing but pings for [`ASLEEP_AFTER`]. An awake phone
+    /// always asks within about 30 s (a peek, a list or a ping), so a
+    /// minute of silence means it is not awake, though it may not have had
+    /// the chance to say so (owner, 2026-10-23: "do we consider a daemon not
+    /// getting a ping for 60s enough to background the link?").
     pub(super) fn asleep(&self) -> bool {
         self.background.load(std::sync::atomic::Ordering::Relaxed)
+            || (self.is_companion() && self.last_request.lock().unwrap().elapsed() >= ASLEEP_AFTER)
     }
 
     pub(super) fn spoken_output(&self) -> bool {
@@ -238,6 +246,7 @@ async fn serve<S>(
         speech: tokio::sync::Mutex::new(()),
         spoken_output: std::sync::atomic::AtomicBool::new(false),
         background: std::sync::atomic::AtomicBool::new(false),
+        last_request: Mutex::new(std::time::Instant::now()),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -549,6 +558,10 @@ pub(super) fn resolve_target(
         .map_err(resolve_error)
 }
 
+/// A companion that has asked nothing but pings for this long is taken as
+/// asleep (see `Conn::asleep`).
+pub(super) const ASLEEP_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+
 async fn call(
     conn: &Arc<Conn>,
     request_id: &Id,
@@ -556,6 +569,19 @@ async fn call(
     raw: Value,
 ) -> Result<Value, ErrorObject> {
     let daemon = &conn.daemon;
+    // Anything but a ping shows the phone is awake, and so does a ping
+    // that says it is active (see `asleep`).
+    let ping_active = (method == methods::PING)
+        .then(|| serde_json::from_value::<common::PingParams>(raw.clone()).ok())
+        .flatten()
+        .and_then(|p| p.active);
+    if method != methods::PING || ping_active == Some(true) {
+        *conn.last_request.lock().unwrap() = std::time::Instant::now();
+    }
+    if let Some(active) = ping_active {
+        conn.background
+            .store(!active, std::sync::atomic::Ordering::Relaxed);
+    }
     match method {
         companion::methods::TURN_START if conn.is_companion() => {
             let p: companion::TurnStartParams = params(raw)?;

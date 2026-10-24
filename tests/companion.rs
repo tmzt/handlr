@@ -727,6 +727,43 @@ async fn a_sleeping_phone_is_told_only_what_needs_it() {
 }
 
 #[tokio::test]
+async fn a_ping_says_whether_the_app_is_in_front() {
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    match env.daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let mut shell = state.snapshot.workspaces[0].tabs[0].panes[0].clone();
+            shell.pane_id = "p2".to_string();
+            shell.extra.clear();
+            shell.terminal_title = None;
+            shell.focused = false;
+            state.snapshot.workspaces[0].tabs[0].panes.push(shell);
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+    // Not active: asleep, so the focus moving is held.
+    let r = c.call("ping", json!({"active": false})).await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    c.seen.clear();
+    c.call("agents.focus", json!({"target_id": "p2"})).await;
+    c.drain(Duration::from_millis(300)).await;
+    assert!(
+        c.position(|m| m["method"] == "focus.changed").is_none(),
+        "{:?}",
+        c.seen
+    );
+    // Resumed: active, and told.
+    c.call("ping", json!({"active": true})).await;
+    c.call("agents.focus", json!({"target_id": "p2"})).await;
+    let moved = c.note("focus.changed").await;
+    assert_eq!(moved["params"]["focus"]["pane_id"], "p2", "{moved}");
+    // A plain ping says nothing either way.
+    let r = c.call("ping", json!({})).await;
+    assert_eq!(r["result"], json!({}), "{r}");
+}
+
+#[tokio::test]
 async fn a_notice_waits_for_a_pending_confirmation() {
     let env = start(confirming()).await;
     env.daemon.watches.watch("p1");
