@@ -53,7 +53,7 @@ use handlr_audio::libvoicexn::config::SttQuant;
 use handlr_audio::libvoicexn::vad::GateState;
 use handlr_audio::{AudioConfig, AudioEvent, AudioSession};
 use handlr_companion::{
-    Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore,
+    Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore, Suggestion,
 };
 use libcontrols::DrawContext;
 use libhandlr_proto::common::AgentInfo;
@@ -566,7 +566,27 @@ impl App {
                     agent.jump_to_pin();
                 }
             }
+            AgentHit::Suggest(Suggestion::Improve) => {
+                // A message in reply to the plan's card, its start already
+                // in it.
+                if let Some(agent) = &mut self.agent {
+                    agent.begin_reply();
+                }
+                self.send(Input::Respond(Suggestion::Improve));
+            }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
+            AgentHit::Link(index) => {
+                let url = self
+                    .agent
+                    .as_ref()
+                    .and_then(|a| a.link(index))
+                    .map(|l| l.url.clone())
+                    .unwrap_or_default();
+                // TODO(libmorph): open `url` in the phone's browser once
+                // libmorph (and libmobile) have an outbound "open this link"
+                // call; they only receive links today.
+                log::info!("link: opening is not available yet ({url})");
+            }
             AgentHit::ReadAloud if self.read_aloud && self.speaking => {
                 log::info!("read aloud: skip");
                 self.send(Input::Skip);

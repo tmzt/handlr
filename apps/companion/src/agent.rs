@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use handlr_companion::{AgentCard, CardKind, Suggestion};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
-use libhandlr_proto::common::{Entry, EntryKind, Role};
+use libhandlr_proto::common::{Entry, EntryKind, Link, Role};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 #[cfg(test)]
@@ -40,8 +40,10 @@ use crate::ui::{Layout, Line};
 
 mod dictation_card;
 mod input_box;
+pub mod link_spans;
 use dictation_card::DictationCard;
 use input_box::InputBox;
+use link_spans::LinkSpan;
 
 pub const BG: [f32; 4] = [0.03, 0.03, 0.04, 1.0];
 pub const FG: [f32; 4] = [0.94, 0.95, 0.96, 1.0];
@@ -57,6 +59,8 @@ pub(crate) const APPROVE_BG: [f32; 4] = [0.16, 0.45, 0.25, 1.0];
 pub(crate) const DENY_BG: [f32; 4] = [0.55, 0.18, 0.18, 1.0];
 pub(crate) const MESSAGE_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
 pub(crate) const BACK_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
+/// A plan question's implement button: approve and build.
+pub(crate) const IMPLEMENT_BG: [f32; 4] = [0.13, 0.38, 0.45, 1.0];
 const DICTATION_BG: [f32; 4] = [0.09, 0.10, 0.13, 1.0];
 
 /// A card kind's accent colour.
@@ -235,6 +239,9 @@ pub enum AgentHit {
     Submit,
     Scratch,
     Clear,
+    /// A link's text: its index in the screen's links
+    /// ([`AgentScreen::link`]).
+    Link(usize),
 }
 
 /// A button, in the flow or on the screen.
@@ -257,6 +264,10 @@ pub struct Flow {
     /// The top of each card.
     pub card_y: Vec<f32>,
     pub height: f32,
+    /// The links' text in the rows.
+    pub links: Vec<LinkSpan>,
+    /// The links the spans index: every entry's and card's, once.
+    pub targets: Vec<Link>,
 }
 
 /// How an entry is drawn: its lines, their size and colours, and whether
@@ -358,6 +369,26 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
             (AgentHit::Approve(id), "Approve", APPROVE_BG),
             (AgentHit::Deny(id), "Deny", DENY_BG),
         ],
+        // A question about a plan (plan 20261022_03, the 21:57 EDT
+        // amendment): just the three words.
+        (CardKind::Question, _) if card.about_plan => vec![
+            (
+                AgentHit::Suggest(Suggestion::Approve),
+                "Approve",
+                APPROVE_BG,
+            ),
+            (
+                AgentHit::Suggest(Suggestion::Improve),
+                "Improve",
+                MESSAGE_BG,
+            ),
+            (
+                AgentHit::Suggest(Suggestion::Implement),
+                "Implement",
+                IMPLEMENT_BG,
+            ),
+            (AgentHit::Reply, "", MESSAGE_BG),
+        ],
         (CardKind::Question, _) => vec![
             (AgentHit::Suggest(Suggestion::Yes), "Yes", APPROVE_BG),
             (AgentHit::Suggest(Suggestion::No), "No", DENY_BG),
@@ -368,7 +399,9 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
 }
 
 /// A live card's block at `y`, `w` wide from `x`: its fills, rows and
-/// buttons, and its height. At most `max_lines` lines of its text.
+/// buttons, and its height. At most `max_lines` lines of its text. Its
+/// links are marked by their index in `targets`.
+#[allow(clippy::too_many_arguments)]
 fn card_block(
     card: &AgentCard,
     x: f32,
@@ -376,6 +409,7 @@ fn card_block(
     w: f32,
     s: f32,
     max_lines: usize,
+    targets: &[Link],
     flow: &mut Flow,
 ) -> f32 {
     let pad = CARD_PAD * s;
@@ -420,6 +454,7 @@ fn card_block(
         mono: false,
     });
     ty += line_h(title_px) + 4.0 * s;
+    let first_text = flow.rows.len();
     for l in lines {
         flow.rows.push(Row {
             text: l,
@@ -431,6 +466,7 @@ fn card_block(
         });
         ty += line_h(text_px);
     }
+    link_spans::mark(flow, first_text, &card.links, targets);
     if !acts.is_empty() {
         let gap = 12.0 * s;
         let n = acts.len().max(2) as f32;
@@ -464,6 +500,12 @@ pub fn lay_out_flow(
     s: f32,
 ) -> Flow {
     let mut flow = Flow::default();
+    let targets = link_spans::targets(
+        entries
+            .iter()
+            .map(|e| &e.links[..])
+            .chain(cards.iter().map(|c| &c.links[..])),
+    );
     let pad = PAD * s;
     let text_w = width - 2.0 * pad;
     let cols = |pt: f32| term_columns(text_w - 8.0 * s, pt * s);
@@ -477,7 +519,8 @@ pub fn lay_out_flow(
             } else if card.live {
                 y += 8.0 * s;
                 *flow.card_y.last_mut().expect("pushed") = y;
-                y += card_block(card, pad, y, text_w, s, usize::MAX, &mut flow) + 12.0 * s;
+                y +=
+                    card_block(card, pad, y, text_w, s, usize::MAX, &targets, &mut flow) + 12.0 * s;
             } else {
                 // Resolved: ordinary scrollback, one dim line.
                 let text = format!("-- {}: {}", card.title, card.text.replace('\n', " "));
@@ -516,6 +559,7 @@ pub fn lay_out_flow(
             });
         }
         let mut ly = y;
+        let first_row = flow.rows.len();
         for (text, pt, color) in lines {
             let px = pt * s;
             let lh = term_h(px);
@@ -533,9 +577,11 @@ pub fn lay_out_flow(
             });
             ly += lh;
         }
+        link_spans::mark(&mut flow, first_row, &e.links, &targets);
         y = ly + if band { 8.0 * s } else { 0.0 };
     }
     flow.height = y + 16.0 * s;
+    flow.targets = targets;
     flow
 }
 
@@ -599,6 +645,8 @@ pub fn suggestion_colour(s: Suggestion) -> [f32; 4] {
         Suggestion::Yes => GREEN,
         Suggestion::No => RED,
         Suggestion::Continue | Suggestion::Compact => YELLOW,
+        Suggestion::Approve | Suggestion::Implement => GREEN,
+        Suggestion::Improve => link_spans::LINK,
     }
 }
 
@@ -1006,7 +1054,17 @@ impl AgentScreen {
             };
             // The full card, laid out once to know its height.
             let mut full = Flow::default();
-            let h = card_block(card, pad, 0.0, l.w - 2.0 * pad, s, max_lines, &mut full);
+            let targets = &self.flow.targets;
+            let h = card_block(
+                card,
+                pad,
+                0.0,
+                l.w - 2.0 * pad,
+                s,
+                max_lines,
+                targets,
+                &mut full,
+            );
             full_top = above - h;
             if compact {
                 let bar = Rect::new(pad, above - BAR_H * s, l.w - 2.0 * pad, BAR_H * s);
@@ -1045,6 +1103,7 @@ impl AgentScreen {
                     l.w - 2.0 * pad,
                     s,
                     max_lines,
+                    targets,
                     &mut flow,
                 );
                 pin = Some(Pinned {
@@ -1120,6 +1179,10 @@ impl AgentScreen {
                 for b in &p.flow.buttons {
                     self.hits.push((b.hit, b.rect));
                 }
+                for span in &p.flow.links {
+                    let rect = link_spans::rect(&p.flow.rows[span.row], span, 0.0);
+                    self.hits.push((AgentHit::Link(span.link), rect));
+                }
                 // The rest of the card, when its text is cut or shown all.
                 if self.pin_expanded || self.pin_is_cut() {
                     self.hits.push((AgentHit::Expand, p.rect));
@@ -1133,6 +1196,17 @@ impl AgentScreen {
                 self.hits.push((b.hit, rect));
             }
         }
+        for span in &self.flow.links {
+            let rect = link_spans::rect(&self.flow.rows[span.row], span, v.y - self.offset);
+            if rect.y + rect.h * 0.5 >= v.y && rect.y + rect.h * 0.5 <= v.y + v.h {
+                self.hits.push((AgentHit::Link(span.link), rect));
+            }
+        }
+    }
+
+    /// The link a [`AgentHit::Link`] names.
+    pub fn link(&self, index: usize) -> Option<&Link> {
+        self.flow.targets.get(index)
     }
 
     /// The control at `(x, y)`, if any.
@@ -1303,10 +1377,11 @@ impl AgentScreen {
                 fill(list, r, f.color, f.radius);
             }
         }
-        for r in &self.flow.rows {
+        for (i, r) in self.flow.rows.iter().enumerate() {
             let h = if r.mono { term_h(r.px) } else { line_h(r.px) };
             if visible(r.y, h) {
-                draw_row(list, ctx, term, r, [r.x, r.y + dy]);
+                let spans = link_spans::of_row(&self.flow, i);
+                link_spans::draw(list, ctx, term, r, &spans, [r.x, r.y + dy]);
             }
         }
         for b in &self.flow.buttons {
@@ -1399,8 +1474,9 @@ impl AgentScreen {
             for f in &p.flow.fills {
                 fill(list, f.rect, f.color, f.radius);
             }
-            for r in &p.flow.rows {
-                ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+            for (i, r) in p.flow.rows.iter().enumerate() {
+                let spans = link_spans::of_row(&p.flow, i);
+                link_spans::draw(list, ctx, term, r, &spans, [r.x, r.y]);
             }
             for b in &p.flow.buttons {
                 SquareButton::draw(
@@ -1494,6 +1570,7 @@ mod tests {
             kind,
             tool: None,
             summary: summary.to_string(),
+            links: Vec::new(),
         }
     }
 
@@ -1522,6 +1599,8 @@ mod tests {
             title: "Claude is asking".to_string(),
             text: "Shall I go on?".to_string(),
             confirm_id: (kind == CardKind::Approval).then_some(7),
+            about_plan: false,
+            links: Vec::new(),
         }
     }
 
@@ -1530,6 +1609,117 @@ mod tests {
         a.set_layout(PHONE);
         a.set_content("Claude".into(), "idle".into(), entries, cards, pinned);
         a
+    }
+
+    const PLAN: &str = "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md";
+
+    fn plan_link() -> Link {
+        Link {
+            text: PLAN.to_string(),
+            url: "http://w/#/src--handlr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN".to_string(),
+        }
+    }
+
+    /// A live question about the plan, at `at`, with its link.
+    fn plan_card(at: usize) -> AgentCard {
+        AgentCard {
+            about_plan: true,
+            text: format!("Shall I build {PLAN}?"),
+            links: vec![plan_link()],
+            ..card(CardKind::Question, at, true)
+        }
+    }
+
+    #[test]
+    fn a_plan_question_offers_approve_improve_and_implement() {
+        let entries = conversation(1);
+        let flow = lay_out_flow(&entries, &[plan_card(4)], None, 1080.0, 2.0);
+        let buttons: Vec<(AgentHit, &str)> =
+            flow.buttons.iter().map(|b| (b.hit, b.label)).collect();
+        assert_eq!(
+            buttons,
+            [
+                (AgentHit::Suggest(Suggestion::Approve), "Approve"),
+                (AgentHit::Suggest(Suggestion::Improve), "Improve"),
+                (AgentHit::Suggest(Suggestion::Implement), "Implement"),
+                (AgentHit::Reply, ""),
+            ]
+        );
+        // Pinned, the same buttons, and they can be tapped.
+        let a = screen(entries, vec![plan_card(4)], Some(0));
+        for hit in [
+            AgentHit::Suggest(Suggestion::Approve),
+            AgentHit::Suggest(Suggestion::Improve),
+            AgentHit::Suggest(Suggestion::Implement),
+        ] {
+            let r = a.rect_of(hit).expect("on the pinned card");
+            assert_eq!(a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5), Some(hit));
+        }
+    }
+
+    #[test]
+    fn a_link_in_the_scrollback_is_marked_and_tapped() {
+        let mut entries = conversation(1);
+        entries.push(Entry {
+            summary: format!("Wrote {PLAN}; see https://example.com/x."),
+            links: vec![
+                plan_link(),
+                Link {
+                    text: "https://example.com/x".to_string(),
+                    url: "https://example.com/x".to_string(),
+                },
+            ],
+            ..entry(Role::Assistant, EntryKind::Text, "linked")
+        });
+        let a = screen(entries, vec![], None);
+        let flow = a.flow();
+        assert_eq!(flow.targets.len(), 2);
+        // Each link's text is spanned, the path perhaps over two rows.
+        let spanned = |link: usize| -> String {
+            flow.links
+                .iter()
+                .filter(|s| s.link == link)
+                .map(|s| {
+                    flow.rows[s.row]
+                        .text
+                        .chars()
+                        .skip(s.start)
+                        .take(s.end - s.start)
+                        .collect::<String>()
+                })
+                .collect()
+        };
+        assert_eq!(spanned(0), PLAN);
+        assert_eq!(spanned(1), "https://example.com/x");
+        // A tap on it is the link.
+        let span = flow.links.iter().find(|s| s.link == 1).unwrap();
+        let row = &flow.rows[span.row];
+        let v = a.frame().viewport;
+        let r = link_spans::rect(row, span, v.y - a.offset());
+        let hit = a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5);
+        assert_eq!(hit, Some(AgentHit::Link(1)));
+        assert_eq!(a.link(1).unwrap().url, "https://example.com/x");
+        // Text with no link is not one.
+        assert!(
+            flow.rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.text.starts_with("question"))
+                .all(|(i, _)| link_spans::of_row(flow, i).is_empty())
+        );
+    }
+
+    #[test]
+    fn a_link_on_the_pinned_card_is_tapped_before_the_card() {
+        let a = screen(conversation(1), vec![plan_card(4)], Some(0));
+        let pin = a.frame().pin.as_ref().expect("pinned");
+        let span = pin.flow.links.first().expect("the plan path is spanned");
+        let r = link_spans::rect(&pin.flow.rows[span.row], span, 0.0);
+        assert_eq!(
+            a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5),
+            Some(AgentHit::Link(span.link))
+        );
+        assert_eq!(a.link(span.link), Some(&plan_link()));
     }
 
     const MS: Duration = Duration::from_millis(16);
