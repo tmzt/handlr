@@ -5,8 +5,9 @@
 default_route = "/README"
 
 # Symlinked as static files, not listed in navigation. out/ is gitignored
-# render output; its images resolve as ./out/... and stay unlisted.
-static_dirs = ["out"]
+# render output; its images resolve as ./out/... and stay unlisted. The
+# companion's icon images are committed, and docs/APP_ICON.md shows them.
+static_dirs = ["out", "apps/companion/icon"]
 
 [crate_resolution]
 # Only these folders become navigation groups; docs/design/*.md is grouped
