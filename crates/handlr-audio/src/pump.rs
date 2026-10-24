@@ -2,7 +2,8 @@
 //! pure: no threads, devices or models, so it is tested on its own.
 //!
 //! - [`Event::Say`], [`Event::StopSpeaking`], [`Event::Arm`] and
-//!   [`Event::Vocabulary`] become an [`Action`] for the workers.
+//!   [`Event::Vocabulary`] become an [`Action`] for the workers, and
+//!   [`Event::Ding`] one for the speaker.
 //! - [`SttEvent`]s and [`TtsEvent`]s become [`AudioEvent`]s, among them
 //!   [`Input::Utterance`], [`Input::Listening`] and [`Input::Speaking`] for
 //!   [`Companion::send`](handlr_companion::Companion::send).
@@ -23,6 +24,8 @@ pub enum Action {
     Arm,
     /// Write `vocab.txt`, read when the STT model next loads.
     Vocabulary(Vec<String>),
+    /// Play the chime: an agent is done (plan 20261024_02, the ding).
+    Chime,
 }
 
 /// The [`Action`] for `event`, if it is one of the audio's.
@@ -32,6 +35,7 @@ pub fn action(event: &Event) -> Option<Action> {
         Event::StopSpeaking => Some(Action::Stop),
         Event::Arm => Some(Action::Arm),
         Event::Vocabulary(words) => Some(Action::Vocabulary(words.clone())),
+        Event::Ding => Some(Action::Chime),
         _ => None,
     }
 }
@@ -44,7 +48,7 @@ pub fn tts_request(action: &Action, voice: Option<&str>) -> Option<TtsRequest> {
             voice: voice.map(str::to_string),
         }),
         Action::Stop => Some(TtsRequest::Stop),
-        Action::Arm | Action::Vocabulary(_) => None,
+        Action::Arm | Action::Vocabulary(_) | Action::Chime => None,
     }
 }
 
@@ -139,7 +143,8 @@ impl Pump {
                 self.queued = 0;
                 None
             }
-            Action::Arm | Action::Vocabulary(_) => None,
+            // The chime is not speech: it holds no notice back.
+            Action::Arm | Action::Vocabulary(_) | Action::Chime => None,
         }
     }
 
@@ -285,6 +290,7 @@ mod tests {
         );
         assert_eq!(action(&Event::StopSpeaking), Some(Action::Stop));
         assert_eq!(action(&Event::Arm), Some(Action::Arm));
+        assert_eq!(action(&Event::Ding), Some(Action::Chime));
         assert_eq!(
             action(&Event::Vocabulary(vec!["claude".into()])),
             Some(Action::Vocabulary(vec!["claude".into()]))
@@ -313,6 +319,8 @@ mod tests {
         assert!(matches!(stt_request(&Action::Arm), Some(SttRequest::Arm)));
         assert!(stt_request(&Action::Stop).is_none());
         assert!(stt_request(&Action::Vocabulary(vec![])).is_none());
+        assert!(tts_request(&Action::Chime, None).is_none());
+        assert!(stt_request(&Action::Chime).is_none());
     }
 
     #[test]

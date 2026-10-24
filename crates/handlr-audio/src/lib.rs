@@ -7,8 +7,9 @@
 //!
 //! - [`AudioSession::handle`] takes the companion's [`Event`]s: `Say` is
 //!   spoken, `StopSpeaking` stops Phonon and flushes the ring, `Arm` arms
-//!   the gate, and `Vocabulary` writes `vocab.txt`, read when the STT model
-//!   next loads.
+//!   the gate, `Vocabulary` writes `vocab.txt`, read when the STT model
+//!   next loads, and `Ding` plays a short built-in chime over whatever the
+//!   speaker plays (plan 20261024_02, as approved at 11:46 EDT).
 //! - [`AudioSession::poll`] gives [`AudioEvent`]s. Those in
 //!   [`AudioEvent::Input`] (`Utterance`, `Listening`, `Speaking`) go to
 //!   [`Companion::send`](handlr_companion::Companion::send); the others are
@@ -105,6 +106,8 @@ pub struct AudioSession {
     vocab_file: Option<PathBuf>,
     /// Moved on every `Stop`; [`Playback`] drains the ring when it moves.
     flush: Arc<AtomicU32>,
+    /// Moved on every `Chime`; [`Playback`] starts the chime when it moves.
+    chimes: Arc<AtomicU32>,
     /// Set while the speaker's last buffer played something.
     playing: Arc<AtomicBool>,
     /// Events made by [`handle`](Self::handle), given by the next poll.
@@ -127,11 +130,13 @@ impl AudioSession {
         // Muted while the speaker plays, so STT does not hear Phonon.
         let (mic, capture) = Mic::new(input.rate, input.channels, playing.clone(), CAPTURE_SECONDS);
         let flush = Arc::new(AtomicU32::new(0));
+        let chimes = Arc::new(AtomicU32::new(0));
         let playback = Playback::new(
             consumer,
             capacity * usize::from(output.channels.max(1)),
             flush.clone(),
-        );
+        )
+        .with_chime(output, chimes.clone());
 
         let mut stt_config = config.stt;
         if let Some(path) = config.vocab_file.as_ref().filter(|p| p.is_file()) {
@@ -153,6 +158,7 @@ impl AudioSession {
             voice: config.voice,
             vocab_file: config.vocab_file,
             flush,
+            chimes,
             playing,
             pending: Vec::new(),
             #[cfg(feature = "cpal")]
@@ -229,6 +235,9 @@ impl AudioSession {
                 self.flush.fetch_add(1, Ordering::Release);
             }
             Action::Vocabulary(words) => self.pending.push(self.save_vocabulary(&words)),
+            Action::Chime => {
+                self.chimes.fetch_add(1, Ordering::Release);
+            }
             Action::Speak(_) | Action::Arm => {}
         }
     }
