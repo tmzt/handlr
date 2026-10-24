@@ -592,7 +592,13 @@ async fn call(
                         name: Some(named.shown),
                         spoken: Some(named.spoken),
                         agent: a.agent,
-                        project: a.project,
+                        // The project as named (`[naming] project_from`:
+                        // the directory by default), not herdr's raw label.
+                        project: named
+                            .project
+                            .as_ref()
+                            .map(|p| p.shown.clone())
+                            .or(a.project),
                         cwd: a.cwd,
                         workspace_id: a.workspace_id,
                         tab_id: a.tab_id,

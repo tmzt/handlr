@@ -1223,6 +1223,8 @@ async fn agents_list_carries_each_agents_session() {
         "Should the notices wait for the phone to finish speaking, or interrupt it?"
     );
     assert!(session.get("entries").is_none(), "{r}");
+    // The project is the directory, as named, not herdr's workspace label.
+    assert_eq!(r["result"]["agents"][0]["project"], "example", "{r}");
 }
 
 /// Write p1's session (see `give_session`) under `home`: a user line, then
