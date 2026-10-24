@@ -100,7 +100,20 @@ impl DrawControl for OptionRow {
             px,
             TEXT,
         );
-        self.arrows.draw(list, ctx);
+        // A long value (a voice such as "Captain Silas Blackwater") is drawn
+        // smaller to fit between the arrows, down to 9 pt; widths are
+        // estimated at 0.5 em a character.
+        let s = self.scale;
+        let room = (self.arrows.rect.w - 2.0 * self.arrows.arrow_width - 8.0 * s).max(1.0);
+        let chars = self.arrows.text().chars().count().max(1) as f32;
+        let fit = (room / (0.5 * chars)).clamp(9.0 * s, px);
+        if fit < px {
+            let mut arrows = self.arrows.clone();
+            arrows.font_size = Some(fit);
+            arrows.draw(list, ctx);
+        } else {
+            self.arrows.draw(list, ctx);
+        }
         if !self.enabled {
             dim_since(list, start);
         }

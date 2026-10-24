@@ -18,7 +18,12 @@ use super::copy;
 
 /// The voices to step through: *Default*, then `names` sorted, each once.
 pub fn choices(names: &[String]) -> Vec<Option<String>> {
-    let mut sorted: Vec<&String> = names.iter().filter(|n| !n.is_empty()).collect();
+    // Phonon may name its own voice "default": that is *Default*, listed
+    // once, first.
+    let mut sorted: Vec<&String> = names
+        .iter()
+        .filter(|n| !n.is_empty() && !n.eq_ignore_ascii_case("default"))
+        .collect();
     sorted.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()).then(a.cmp(b)));
     sorted.dedup();
     std::iter::once(None)
@@ -99,6 +104,11 @@ mod tests {
             ]
         );
         assert_eq!(choices(&[]), [None], "no voices: Default alone");
+        assert_eq!(
+            choices(&["default".into(), "Freya".into()]),
+            [None, Some("Freya".to_string())],
+            "Phonon's own \"default\" is Default, once"
+        );
     }
 
     #[test]
