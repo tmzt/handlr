@@ -401,6 +401,12 @@ pub enum Event {
         /// line's state (plan 20261022_03, the 01:07 EDT amendment). Empty
         /// when none is held aside, or once its newer sections are below.
         held_end: Vec<ViewSection>,
+        /// The slots of the new outline held aside that come after the
+        /// shown ribbon's newest, in index order, with their kinds and
+        /// sizes: the scrollbar counts their estimated heights in its
+        /// length (plan 20261022_03, the 11:09 EDT amendment, item 2).
+        /// Empty when none is held aside, or once they are below the end.
+        held_newer: Vec<crate::view::Slot>,
     },
     Error(String),
 }
@@ -1095,6 +1101,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 terminal_on,
                 new_content,
                 held_end,
+                held_newer,
             },
             Event::AgentView {
                 name: name_b,
@@ -1109,6 +1116,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 terminal_on: terminal_on_b,
                 new_content: new_content_b,
                 held_end: held_end_b,
+                held_newer: held_newer_b,
             },
         ) => {
             name == name_b
@@ -1121,6 +1129,7 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 && terminal_on == terminal_on_b
                 && new_content == new_content_b
                 && held_end == held_end_b
+                && held_newer == held_newer_b
                 && sections == sections_b
         }
         _ => a == b,
@@ -1435,6 +1444,17 @@ impl State {
                 .as_ref()
                 .filter(|_| !v.appending)
                 .map(|i| crate::view::held_end(&i.outline, &i.sections, hide))
+                .unwrap_or_default(),
+            held_newer: v
+                .incoming
+                .as_ref()
+                .filter(|_| v.outline_mode && !v.appending)
+                .map(|i| {
+                    crate::view::newer_slots(&v.outline, &i.outline)
+                        .into_iter()
+                        .copied()
+                        .collect()
+                })
                 .unwrap_or_default(),
         })
     }
@@ -6600,6 +6620,44 @@ mod tests {
         s.input(Input::ApplyOutline);
         assert!(held_end_of(&s).is_empty());
         assert_eq!(ribbon(&s).len(), 32);
+    }
+
+    fn held_newer_of(s: &State) -> Vec<crate::view::Slot> {
+        match s.agent_view() {
+            Some(Event::AgentView { held_newer, .. }) => held_newer,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_newer_slots_of_an_outline_held_aside_are_given_for_the_scrollbar() {
+        let (mut s, out) = outline_of(30);
+        answer_content(&mut s, requests(&out, "session.content")[0]);
+        assert!(held_newer_of(&s).is_empty(), "none held aside");
+        s.input(window((5, 10), (0, 29), (0, 29), true));
+        let mut fresh = slots(0..33);
+        fresh[31] = json!({"index": 31, "serial": serial_in(FILE, 31), "kind": "tool",
+                           "lines": 7, "chars": 300, "rev": 0});
+        deliver_outline(
+            &mut s,
+            outline_delivery(true, fresh, vec![content(32)], Some(32), 78),
+        );
+        let newer = held_newer_of(&s);
+        // Only those after the shown ribbon's newest, with their sizes,
+        // whether or not their contents are held.
+        assert_eq!(
+            newer.iter().map(|slot| slot.index).collect::<Vec<_>>(),
+            [30, 31, 32]
+        );
+        assert_eq!(
+            (newer[1].kind, newer[1].lines, newer[1].chars),
+            (crate::view::SectionKind::Tool, 7, 300)
+        );
+        assert_eq!(ribbon(&s).len(), 30, "the ribbon itself unchanged");
+        // Once they are below the end, they are in the ribbon instead.
+        s.input(Input::ApplyOutline);
+        assert!(held_newer_of(&s).is_empty());
+        assert_eq!(ribbon(&s).len(), 33);
     }
 
     #[test]

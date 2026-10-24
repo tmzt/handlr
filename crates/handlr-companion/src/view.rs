@@ -310,15 +310,7 @@ pub fn outline_view_appending(
         push(slot, slot.index, sections.get(slot.serial));
     }
     if let Some((new, new_sections)) = newer {
-        let newest = outline.slots().map(|s| s.serial.to_u64()).max();
-        let other_file = matches!(
-            (new.file(), outline.file()),
-            (Some(a), Some(b)) if a != b
-        );
-        let added: Vec<&Slot> = new
-            .slots()
-            .filter(|s| other_file || newest.is_none_or(|n| s.serial.to_u64() > n))
-            .collect();
+        let added = newer_slots(outline, new);
         let last = outline.slots().next_back().map(|s| s.index);
         let keep_own = match (last, added.first()) {
             (Some(last), Some(first)) => first.index > last,
@@ -336,6 +328,22 @@ pub fn outline_view_appending(
         }
     }
     (out, pinned.map(|(_, serial)| serial))
+}
+
+/// The slots of `new`, an outline held aside, that come after `outline`'s
+/// newest (all of them when they are of another session file), in index
+/// order: those [`outline_view_appending`] adds below the end, and whose
+/// estimated sizes count in the scrollbar's length while held aside (plan
+/// 20261022_03, the 11:09 EDT amendment, item 2).
+pub fn newer_slots<'a>(outline: &Outline, new: &'a Outline) -> Vec<&'a Slot> {
+    let newest = outline.slots().map(|s| s.serial.to_u64()).max();
+    let other_file = matches!(
+        (new.file(), outline.file()),
+        (Some(a), Some(b)) if a != b
+    );
+    new.slots()
+        .filter(|s| other_file || newest.is_none_or(|n| s.serial.to_u64() > n))
+        .collect()
 }
 
 /// The end of an outline held aside, for the jump line's state (plan
