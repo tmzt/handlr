@@ -2062,3 +2062,22 @@ have. A link row's chevron is now drawn as two short strokes. Once handlr is
 exempt, the *Battery optimization* row shows nothing on its right: no button
 and no chevron (`LinkRow.chevron`). The row still opens the list of every
 app's setting.
+
+## 2026-10-24 14:58 EDT — plan 20261024_02: a Voice row in the Sound section
+
+Agreed with the owner (2026-10-24): "does libvoicexn expose supported voices,
+can we use arrow label to select in settings?"; then "yes". libvoicexn reports
+Phonon's voices on load (`TtsEvent::Loaded { voices }`), and a speech request
+can name one. The S23 has 30 or more voices in `phonon-31m-en/voices/`.
+- ***Voice*** (Sound section, after *Ding when an agent is done*): libcontrols'
+  `ArrowLabel`, stepping through *Default* (Phonon's own) and then the voices in
+  alphabetical order, wrapping at both ends. It is disabled until Phonon has
+  loaded, and while *All sound* is off.
+- **Preview:** stepping says "This is <voice>." in that voice. A further step
+  cuts the preview off.
+- **Saved** as `voice` in `settings.toml`. A saved voice that is no longer
+  installed falls back to *Default*.
+- **handlr-audio:** `AudioEvent::TtsLoaded` carries the voice names, and an input
+  sets the voice while the app runs. Both are additions.
+- **The copy** is in `SETTINGS_COPY.md`. An ⓘ says the voices are Phonon's
+  checkpoints, pushed by `scripts/push-model.sh`.
