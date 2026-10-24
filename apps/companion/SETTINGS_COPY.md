@@ -201,9 +201,9 @@ key's text on that vendor's phones.
 - text: OK
 
 The foreground service's notification (CHANGES.md, 2026-10-24 12:59 EDT,
-item 3). TODO(libmorph 0.4.0): these are filled and shown once libmorph
-0.4.0's foreground service and `NotificationContent` are wired in; until
-then nothing reads them. The app's label stays "handlr".
+item 3), filled in `src/notify.rs` and shown with libmorph's
+`NotificationContent`. With one agent, the title is the agent's own name;
+with none to name, "handlr". The app's label stays "handlr".
 
 # [Copy] notification_title_several
 

@@ -108,7 +108,7 @@ mod tests {
         let md = include_str!("../../SETTINGS_COPY.md");
         let entries = copy_gen::parse(md).expect("it parses");
         assert!(entries.iter().any(|e| e.key == "background"));
-        // The notification's templates are there for libmorph 0.4.0.
+        // The notification's templates, which notify.rs fills.
         assert!(entries.iter().any(|e| e.key.starts_with("notification_")));
     }
 }

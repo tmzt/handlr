@@ -55,6 +55,7 @@ pub mod controls;
 pub mod keys;
 pub mod markdown_view;
 pub mod memory;
+pub mod notify;
 pub mod overview;
 pub mod settings;
 pub mod ui;
@@ -86,7 +87,9 @@ use libmsdf::font::{
 use crate::agent::{AgentHit, AgentScreen, Terminal};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
+use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
+use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
 use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::ui::{
@@ -283,6 +286,60 @@ pub struct App {
     links: Vec<String>,
     /// The phone's vendor (libmorph 0.4.1's `build_info`), for the copy.
     build_info: Option<BuildInfo>,
+    /// The foreground service's notification and the alerts (`notify.rs`).
+    notifier: Notifier,
+    /// Where the service is, as the main thread sees it.
+    service: Service,
+    /// handlr is on screen.
+    visible: bool,
+    /// Set by the settings screen when the alerts are turned on: the
+    /// permission is asked on the next frame, with the context.
+    notify_ask: std::rc::Rc<std::cell::Cell<bool>>,
+    /// `POST_NOTIFICATIONS` is granted, as last read: at start, on resume
+    /// and in its answer. Always on the desktop.
+    notifications_granted: bool,
+    /// A request for it is out: the toggle waits for the answer.
+    asking_permission: bool,
+}
+
+/// The foreground service, as the app knows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Service {
+    /// Not running: started on the next frame on screen if it is wanted.
+    Off,
+    /// `start` returned; `ServiceEvent::Started` is awaited.
+    Starting,
+    Running,
+    /// It could not start (no service on this host, or Android refused
+    /// it): not tried again until the setting changes or handlr is back on
+    /// screen.
+    Unavailable,
+}
+
+/// The context's permission calls, for [`background::turn_on`].
+struct ContextPermissions<'a>(&'a mut MorphContext);
+
+impl PermissionOs for ContextPermissions<'_> {
+    fn granted(&self) -> bool {
+        self.0.permission_granted(POST_NOTIFICATIONS)
+    }
+
+    fn rationale(&self) -> bool {
+        self.0.should_show_rationale(POST_NOTIFICATIONS)
+    }
+
+    fn request(&mut self) {
+        if self.0.request_permissions(&[POST_NOTIFICATIONS]).is_none() {
+            log::info!("notifications: no runtime permissions on this host");
+        }
+    }
+
+    /// The app's settings page, one tap from its notifications.
+    fn open_settings(&mut self) {
+        if let Err(e) = libmorph::battery::open_app_details() {
+            log::warn!("notifications: opening the app's settings: {e}");
+        }
+    }
 }
 
 /// Opens `url` in the phone's browser (libmorph 0.4.0's `open_link`).
@@ -638,13 +695,17 @@ impl App {
     /// Opens the settings screen, from the overview's gear.
     fn open_settings(&mut self) {
         log::info!("settings: open");
+        self.follow_permission();
         let mut screen = SettingsScreen::new(
             self.settings,
             Box::new(settings::battery::Morph),
             cfg!(target_os = "android"),
         )
         .with_faces(Some(std::sync::Arc::clone(&self.faces)))
-        .with_build_info(self.build_info.clone());
+        .with_build_info(self.build_info.clone())
+        .with_background(Box::new(background::Morph(std::rc::Rc::clone(
+            &self.notify_ask,
+        ))));
         screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
         screen.set_cache(self.cache);
         self.settings_screen = Some(screen);
@@ -675,8 +736,13 @@ impl App {
     /// The settings changed: saved, given to the client, and shown by every
     /// control they turn off.
     fn apply_settings(&mut self, settings: Settings) {
+        if settings.background != self.settings.background && self.service == Service::Unavailable {
+            self.service = Service::Off;
+        }
         self.settings = settings;
         settings::set_current(settings);
+        self.notifier
+            .set_alerts(settings.alerts && settings.background);
         if let Some(dir) = &self.data_dir
             && let Err(e) = settings.save(dir)
         {
@@ -851,6 +917,77 @@ impl App {
             AgentHit::Submit => self.send(Input::Submit),
             AgentHit::Scratch => self.send(Input::Scratch),
             AgentHit::Clear => self.send(Input::Clear),
+        }
+    }
+
+    /// Starts the foreground service when it is wanted (*Stay connected in
+    /// the background* on, and paired) and stops it when not. Called on
+    /// each frame, so only while handlr is on screen, as Android requires
+    /// of a start.
+    fn sync_service(&mut self) {
+        let wanted = self.settings.background && self.paired && self.companion.is_some();
+        match (wanted, self.service) {
+            (true, Service::Off) if self.visible => match self.notifier.start() {
+                Ok(()) => {
+                    log::info!("service: starting");
+                    self.service = Service::Starting;
+                }
+                Err(e) => {
+                    log::info!("service: not started: {e}");
+                    self.service = Service::Unavailable;
+                }
+            },
+            (false, Service::Starting | Service::Running) => {
+                log::info!("service: stopping");
+                self.notifier.stop();
+                self.service = Service::Off;
+            }
+            _ => {}
+        }
+    }
+
+    /// *Alert when an agent needs you* was turned on: the one place
+    /// `POST_NOTIFICATIONS` is asked for.
+    fn alerts_turned_on(&mut self, ctx: &mut MorphContext) {
+        let asked = self
+            .data_dir
+            .as_deref()
+            .is_some_and(background::asked_before);
+        match background::turn_on(&mut ContextPermissions(ctx), asked) {
+            TurnedOn::Granted => {
+                self.notifications_granted = true;
+                log::info!("notifications: already granted");
+            }
+            TurnedOn::Requested => {
+                log::info!("notifications: asking");
+                self.asking_permission = true;
+                if let Some(dir) = &self.data_dir {
+                    background::mark_asked(dir);
+                }
+            }
+            TurnedOn::OpenedSettings => {
+                log::info!("notifications: Android won't ask again; the app's settings opened")
+            }
+        }
+    }
+
+    /// The alerts toggle shows the real permission: off without it. Not
+    /// while a request is out.
+    fn follow_permission(&mut self) {
+        if self.asking_permission {
+            return;
+        }
+        let alerts = background::follow(self.settings.alerts, self.notifications_granted);
+        if alerts != self.settings.alerts {
+            log::info!("notifications: not granted; the alerts are off");
+            let settings = Settings {
+                alerts,
+                ..self.settings
+            };
+            self.apply_settings(settings);
+            if let Some(screen) = &mut self.settings_screen {
+                screen.set_settings(settings);
+            }
         }
     }
 
@@ -1093,18 +1230,84 @@ impl MorphApp for App {
     /// The app left the screen: the link sleeps (one socket, no polling).
     fn on_suspend(&mut self, _ctx: &mut MorphContext) {
         self.send(Input::Background(true));
+        self.visible = false;
+        self.notifier.visible(false);
     }
 
     /// Back on screen: the link wakes and catches up, and memory pressure
     /// is over.
-    fn on_resume(&mut self, _ctx: &mut MorphContext) {
+    fn on_resume(&mut self, ctx: &mut MorphContext) {
         self.send(Input::Background(false));
+        self.visible = true;
+        self.notifier.visible(true);
+        if self.service == Service::Unavailable {
+            self.service = Service::Off;
+        }
+        // The permission may have changed in Android's settings.
+        self.notifications_granted = ctx.permission_granted(POST_NOTIFICATIONS);
+        self.follow_permission();
         if let Some(agent) = &mut self.agent {
             agent.set_pressure(None);
         }
         // Back from Android's battery dialog or pages, perhaps.
         if let Some(screen) = &mut self.settings_screen {
             screen.refresh_battery();
+        }
+    }
+
+    /// The answer to the `POST_NOTIFICATIONS` request: refused, the alerts
+    /// go off.
+    fn on_permissions(&mut self, _ctx: &mut MorphContext, answer: &libmorph::Permissions) {
+        self.asking_permission = false;
+        self.notifications_granted = answer.granted(POST_NOTIFICATIONS);
+        log::info!(
+            "notifications: {}",
+            if self.notifications_granted {
+                "granted"
+            } else {
+                "refused"
+            }
+        );
+        self.follow_permission();
+    }
+
+    /// The foreground service (libmorph 0.4.0), whether or not handlr is on
+    /// screen. Exit stops it and closes the app, as libmorph's `Exited`
+    /// says.
+    fn on_service(&mut self, ctx: &mut MorphContext, event: &libmorph::service::ServiceEvent) {
+        use libmorph::service::ServiceEvent as E;
+        match event {
+            E::Started => {
+                log::info!("service: running");
+                self.service = Service::Running;
+                self.notifier.running(true);
+            }
+            E::Stopped | E::TimedOut => {
+                log::info!("service: stopped ({event:?})");
+                self.service = Service::Off;
+                self.notifier.running(false);
+            }
+            E::Failed(why) => {
+                log::warn!("service: failed: {why}");
+                self.service = Service::Unavailable;
+                self.notifier.running(false);
+            }
+            E::NotificationHidden => log::info!(
+                "service: running; without POST_NOTIFICATIONS its notification shows only in the running apps list"
+            ),
+            E::Exited => {
+                log::info!("service: Exit: closing handlr");
+                self.service = Service::Off;
+                self.notifier.running(false);
+                ctx.exit();
+            }
+            E::WakeLock(held) => log::info!(
+                "service: wake lock {}",
+                if *held { "held" } else { "released" }
+            ),
+            E::TaskRemoved => log::info!("service: swiped from Recents; still running"),
+            E::Action(id) => log::info!("service: action {id:?}"),
+            other => log::debug!("service: {other:?}"),
         }
     }
 
@@ -1255,7 +1458,17 @@ impl MorphApp for App {
             last_update: Instant::now(),
             links: Vec::new(),
             build_info: settings::build_info::build_info(ctx),
+            notifier: Notifier::spawn(std::sync::Arc::new(notify::MorphHost), notify::MIN_GAP),
+            service: Service::Off,
+            visible: true,
+            notify_ask: Default::default(),
+            notifications_granted: ctx.permission_granted(POST_NOTIFICATIONS),
+            asking_permission: false,
         };
+        app.notifier
+            .set_alerts(app.settings.alerts && app.settings.background);
+        // The toggle shows the real permission; nothing is asked at start.
+        app.follow_permission();
 
         match key_store(ctx, &args) {
             Ok((keys, server)) => {
@@ -1279,7 +1492,7 @@ impl MorphApp for App {
                         .max(handlr_companion::DICTATION_SILENCE)
                         .as_secs_f64()
                 );
-                let companion = Companion::spawn(config, keys);
+                let companion = Companion::spawn_tapped(config, keys, app.notifier.tap());
                 companion.send(Input::Settings(app.settings.to_client()));
                 app.companion = Some(companion);
             }
@@ -1345,6 +1558,10 @@ impl MorphApp for App {
     }
 
     fn update(&mut self, ctx: &mut MorphContext, _dt: Duration) {
+        if self.notify_ask.take() {
+            self.alerts_turned_on(ctx);
+        }
+        self.sync_service();
         // Hold the frame: libmorph renders as fast as presentation allows,
         // and the CPU and GPU heat the phone.
         let now = Instant::now();

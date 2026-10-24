@@ -3,6 +3,12 @@ mod copy_gen;
 
 use std::path::{Path, PathBuf};
 
+/// The `specialUse` reason in the manifest, for Play review: the same text
+/// as `notify::SERVICE_REASON` (a test in src/notify.rs holds them to it).
+const SERVICE_REASON: &str = "Keeps the encrypted link to the user's own handlr daemon open \
+     while the app is in the background, so that coding agents' questions, approvals and \
+     finished turns reach the phone.";
+
 fn main() {
     settings_copy();
     // Writes target/aarch64-linux-android/<profile>/gradle/companion/, the
@@ -20,6 +26,12 @@ fn main() {
         // The launcher icon (icon/make_icon.py). Goes away once
         // libmobile/libmorph support icons (requested on 2026-10-24).
         .extra_script("icon/android/icon.gradle")
+        // *Stay connected in the background*: libmorph 0.4.0's foreground
+        // service, `specialUse`, with POST_NOTIFICATIONS and WAKE_LOCK
+        // (src/notify.rs, whose SERVICE_REASON is the same text).
+        .foreground_service(&[libmorph_build::gradle::ServiceType::SpecialUse(
+            SERVICE_REASON,
+        )])
         // *Battery optimization*'s Allow/Deny dialog (libmorph 0.4.0's
         // `battery::request_ignore_optimizations`); not a Play build.
         .request_ignore_battery_optimizations()

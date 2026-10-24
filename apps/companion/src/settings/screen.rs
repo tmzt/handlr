@@ -7,9 +7,9 @@
 //!   while all sound is off;
 //! - **Voice**: *Microphone* and *General agent (Gemini)*;
 //! - **Display**: *Scrollbar*, "‹ Hidden ›";
-//! - **Background**: *Stay connected in the background* (on), and, until
-//!   libmorph 0.4.0's service is in, "Needs an app update" while it is on
-//!   (CHANGES.md 2026-10-24 12:38 EDT);
+//! - **Background**: *Stay connected in the background* (on), which runs
+//!   libmorph's foreground service (CHANGES.md 2026-10-24 12:38 EDT), and
+//!   "Needs an app update" while it is on where there is no service;
 //! - **Notifications**: *Alert when an agent needs you* (off), dim with
 //!   "Needs *Stay connected in the background*" while that is off; turning
 //!   it on is the only place notifications are asked for;
@@ -229,7 +229,7 @@ pub struct SettingsScreen {
     settings: Settings,
     battery: Box<dyn Battery>,
     battery_state: Option<BatteryState>,
-    /// The service and the notification permission (libmorph 0.4.0).
+    /// The service and the notification permission (libmorph 0.4.0's).
     service: Box<dyn Background>,
     /// Roboto Bold and Italic and the terminal face, for the Markdown.
     faces: Option<Arc<Faces>>,
@@ -277,7 +277,9 @@ impl SettingsScreen {
             settings,
             battery,
             battery_state,
-            service: Box::new(background::Unreleased),
+            // Ready, with a request no one reads, until the app gives its
+            // own (`with_background`).
+            service: Box::new(background::Morph(Default::default())),
             faces: None,
             vendor: None,
             android,
@@ -295,8 +297,8 @@ impl SettingsScreen {
         }
     }
 
-    /// The Background and Notifications sections' source, in place of
-    /// [`background::Unreleased`].
+    /// The Background and Notifications sections' source: the app's
+    /// [`background::Morph`], whose requests it reads.
     pub fn with_background(mut self, service: Box<dyn Background>) -> Self {
         self.service = service;
         self.nodes = None;
@@ -311,7 +313,7 @@ impl SettingsScreen {
     }
 
     /// The phone's build info, for the copy's vendor additions (`None`
-    /// until libmorph 0.4.0's `ctx.build_info()`).
+    /// off Android: libmorph 0.4.1's `ctx.build_info()`).
     pub fn with_build_info(mut self, info: Option<BuildInfo>) -> Self {
         self.vendor = info.map(|i| i.vendor.to_ascii_lowercase());
         self.nodes = None;
@@ -320,6 +322,17 @@ impl SettingsScreen {
 
     pub fn settings(&self) -> Settings {
         self.settings
+    }
+
+    /// The settings changed elsewhere, as when the alerts toggle follows
+    /// the permission: shown as they are now.
+    pub fn set_settings(&mut self, settings: Settings) {
+        if settings != self.settings {
+            self.settings = settings;
+            if self.nodes.is_some() {
+                self.place();
+            }
+        }
     }
 
     /// The links tapped since the last call, oldest first, for the app to
@@ -521,8 +534,8 @@ impl SettingsScreen {
         let mut y = viewport.y + 8.0 * s;
         let settings = self.settings;
         let ready = self.service.ready();
-        // The notes: the background's while it waits on libmorph 0.4.0, and
-        // the alerts' while background is off or it waits.
+        // The notes: the background's where there is no service, and the
+        // alerts' while background is off or there is no service.
         let background_note = (settings.background && !ready).then_some(copy::NEEDS_UPDATE.text);
         let alerts_note = if !settings.background {
             Some(copy::ALERTS_NEEDS_BACKGROUND.text)
@@ -1254,7 +1267,7 @@ mod tests {
         }
     }
 
-    /// libmorph 0.4.0's service, as it will be, counting what is asked.
+    /// A Background, counting what is asked.
     struct Service {
         ready: bool,
         asked: Rc<RefCell<usize>>,
@@ -1538,8 +1551,35 @@ mod tests {
         assert!(background.on && background.enabled && background.info);
         assert!(!alerts.on && alerts.enabled && alerts.info);
         assert!(s.row_rect(BACKGROUND).unwrap().y < s.row_rect(ALERTS).unwrap().y);
-        // On, and waiting on libmorph 0.4.0's service.
+        // On, with the service there: no note.
+        assert!(s.background_notes().is_empty());
+    }
+
+    #[test]
+    fn without_the_service_the_sections_say_they_need_an_update() {
+        let mut s = SettingsScreen::new(Settings::default(), Box::new(NoBattery), true)
+            .with_background(Box::new(Service {
+                ready: false,
+                asked: Rc::new(RefCell::new(0)),
+            }));
+        s.set_layout(PHONE);
         assert_eq!(s.background_notes(), [copy::NEEDS_UPDATE.text]);
+        tap_row(&mut s, ALERTS);
+        assert_eq!(
+            s.background_notes(),
+            [copy::NEEDS_UPDATE.text, copy::NEEDS_UPDATE.text]
+        );
+    }
+
+    #[test]
+    fn the_alerts_toggle_follows_settings_given_to_it() {
+        let mut s = plain();
+        tap_row(&mut s, ALERTS);
+        assert!(s.toggle(ALERTS).unwrap().on);
+        // Refused, or revoked while away: the app turns it off.
+        s.set_settings(Settings::default());
+        assert!(!s.toggle(ALERTS).unwrap().on);
+        assert_eq!(s.settings(), Settings::default());
     }
 
     #[test]
@@ -1558,10 +1598,10 @@ mod tests {
         assert_eq!(tap(&mut s, x, y), None);
         assert!(s.asking());
         assert!(s.back());
-        // Background on again: the row is live, and says nothing while off.
+        // Background on again: the row is live, with no note.
         tap_row(&mut s, BACKGROUND);
         assert!(s.toggle(ALERTS).unwrap().enabled);
-        assert_eq!(s.background_notes(), [copy::NEEDS_UPDATE.text]);
+        assert!(s.background_notes().is_empty());
     }
 
     #[test]
