@@ -1639,3 +1639,9 @@ The owner (2026-10-24): "smaller gear, Hidden should be On Scroll".
   amendment: the middle visibility, *Hidden*, is shown as *On Scroll*. It is
   still `hidden` in `settings.toml`, and `ScrollbarVisibility::Hidden` in
   code, so saved settings read as before.
+
+## 2026-10-24 12:31 EDT — plan 20261024_02 and plan 20261022_03 L3: "None"
+
+The owner (2026-10-24): "change Disabled to None". The first visibility,
+*Disabled*, is shown as *None*. It is still `disabled` in `settings.toml`,
+and `ScrollbarVisibility::Disabled` in code.
