@@ -15,6 +15,7 @@
 #   states    accent question green red yellow warn recording
 #   buttons   approve deny message back button toggle
 #   chrome    scrollbar placeholder shimmer shadow
+#   sessions  session_1 … session_16 (8 hues, light and dark)
 #
 # Buttons are drawn with `fg` labels, so on a light theme they are light.
 
@@ -54,6 +55,26 @@ scrollbar = [0.55, 0.62, 0.70, 0.5]
 placeholder = [0.94, 0.95, 0.96, 0.06]
 shimmer = [0.94, 0.95, 0.96, 0.013333333]
 shadow = [0.0, 0.0, 0.0, 0.55]
+# Session colours (plan 20261022_03, the L3 amendment of 2026-10-24
+# 15:56 EDT): 8 hues, each light and dark, all reading on bg and card.
+# A session takes session_<n> by a hash of its id; a band's text is
+# black or white, whichever contrasts more.
+session_1 = "#FF8A8A"   # red, light
+session_2 = "#C0404A"   # red, dark
+session_3 = "#FFB370"   # orange, light
+session_4 = "#C8682A"   # orange, dark
+session_5 = "#F5DC6A"   # yellow, light
+session_6 = "#A88A1E"   # yellow, dark
+session_7 = "#8EE29A"   # green, light
+session_8 = "#3A9A4E"   # green, dark
+session_9 = "#6FDCD0"   # teal, light
+session_10 = "#2A8F88"  # teal, dark
+session_11 = "#8AB8FF"  # blue, light
+session_12 = "#3A6FD0"  # blue, dark
+session_13 = "#C3A2FF"  # violet, light
+session_14 = "#7A52C8"  # violet, dark
+session_15 = "#FF9AD5"  # pink, light
+session_16 = "#B8448A"  # pink, dark
 
 # Dark (gray) on true black, for OLED screens; its text and accents.
 [theme.dark_black]
@@ -135,6 +156,23 @@ scrollbar = "#57606A80"
 placeholder = "#0000000F"
 shimmer = "#00000005"
 shadow = "#00000033"
+# Session colours: the light variants are deep enough to show on white.
+session_1 = "#EE7A7A"   # red, light
+session_2 = "#B3261E"   # red, dark
+session_3 = "#EE9A4C"   # orange, light
+session_4 = "#B85A12"   # orange, dark
+session_5 = "#D4AE2A"   # yellow, light
+session_6 = "#8A6A00"   # yellow, dark
+session_7 = "#5DB874"   # green, light
+session_8 = "#1E7A36"   # green, dark
+session_9 = "#4DB5AA"   # teal, light
+session_10 = "#0F766E"  # teal, dark
+session_11 = "#6A9BE8"  # blue, light
+session_12 = "#1F5FBF"  # blue, dark
+session_13 = "#A585EA"  # violet, light
+session_14 = "#6A3FB5"  # violet, dark
+session_15 = "#E878B5"  # pink, light
+session_16 = "#A3306F"  # pink, dark
 
 # Warm off-white, dark brown-gray text.
 [theme.light_paper]
@@ -208,6 +246,24 @@ toggle = "#859900"
 scrollbar = "#83949680"
 placeholder = "#93A1A10F"
 shimmer = "#93A1A103"
+# Session colours: the 8 accents (dark), and each a third toward white
+# (light).
+session_1 = "#E6706D"   # red, light
+session_2 = "#DC322F"   # red, dark
+session_3 = "#DB815C"   # orange, light
+session_4 = "#CB4B16"   # orange, dark
+session_5 = "#CBAC4C"   # yellow, light
+session_6 = "#B58900"   # yellow, dark
+session_7 = "#AAB84C"   # green, light
+session_8 = "#859900"   # green, dark
+session_9 = "#6ABDB7"   # cyan, light
+session_10 = "#2AA198"  # cyan, dark
+session_11 = "#67AEE0"  # blue, light
+session_12 = "#268BD2"  # blue, dark
+session_13 = "#989CD6"  # violet, light
+session_14 = "#6C71C4"  # violet, dark
+session_15 = "#E072A8"  # magenta, light
+session_16 = "#D33682"  # magenta, dark
 
 [theme.solarized_light]
 name = "Solarized Light"
@@ -241,6 +297,24 @@ scrollbar = "#657B8380"
 placeholder = "#0736420F"
 shimmer = "#07364205"
 shadow = "#00000033"
+# Session colours: the 8 accents (dark), and each a quarter toward white
+# (light).
+session_1 = "#E56563"   # red, light
+session_2 = "#DC322F"   # red, dark
+session_3 = "#D87850"   # orange, light
+session_4 = "#CB4B16"   # orange, dark
+session_5 = "#C8A640"   # yellow, light
+session_6 = "#B58900"   # yellow, dark
+session_7 = "#A4B240"   # green, light
+session_8 = "#859900"   # green, dark
+session_9 = "#5FB8B2"   # cyan, light
+session_10 = "#2AA198"  # cyan, dark
+session_11 = "#5CA8DD"  # blue, light
+session_12 = "#268BD2"  # blue, dark
+session_13 = "#9194D3"  # violet, light
+session_14 = "#6C71C4"  # violet, dark
+session_15 = "#DE68A1"  # magenta, light
+session_16 = "#D33682"  # magenta, dark
 
 # Gruvbox, by morhetz (https://github.com/morhetz/gruvbox), dark: bg0_h
 # #1d2021, bg0 #282828, bg0_s #32302f, bg1 #3c3836, bg2 #504945, bg3
@@ -277,6 +351,24 @@ toggle = "#98971A"      # green
 scrollbar = "#A8998480"
 placeholder = "#FBF1C70F"
 shimmer = "#FBF1C703"
+# Session colours: the 7 accents, bright (light) and neutral (dark), and
+# fg4 and gray.
+session_1 = "#FB4934"   # red, light
+session_2 = "#CC241D"   # red, dark
+session_3 = "#FE8019"   # orange, light
+session_4 = "#D65D0E"   # orange, dark
+session_5 = "#FABD2F"   # yellow, light
+session_6 = "#D79921"   # yellow, dark
+session_7 = "#B8BB26"   # green, light
+session_8 = "#98971A"   # green, dark
+session_9 = "#8EC07C"   # aqua, light
+session_10 = "#689D6A"  # aqua, dark
+session_11 = "#83A598"  # blue, light
+session_12 = "#458588"  # blue, dark
+session_13 = "#D3869B"  # purple, light
+session_14 = "#B16286"  # purple, dark
+session_15 = "#A89984"  # gray, light
+session_16 = "#928374"  # gray, dark
 
 # Nord, by Arctic Ice Studio (https://www.nordtheme.com/): Polar Night
 # nord0 #2e3440 … nord3 #4c566a, Snow Storm nord4 #d8dee9 … nord6
@@ -314,6 +406,24 @@ toggle = "#A3BE8C"
 scrollbar = "#D8DEE960"
 placeholder = "#ECEFF40F"
 shimmer = "#ECEFF403"
+# Session colours: Aurora and Frost, a quarter toward white (light) and
+# a little deeper (dark); nord10 is its own dark.
+session_1 = "#CF888F"   # nord11, light
+session_2 = "#A2525A"   # nord11, dark
+session_3 = "#DCA594"   # nord12, light
+session_4 = "#B1735F"   # nord12, dark
+session_5 = "#F0D8A8"   # nord13, light
+session_6 = "#C8AD76"   # nord13, dark
+session_7 = "#BACEA9"   # nord14, light
+session_8 = "#8BA277"   # nord14, dark
+session_9 = "#ABCDCC"   # nord7, light
+session_10 = "#7AA09F"  # nord7, dark
+session_11 = "#A6D0DC"  # nord8, light
+session_12 = "#74A3B1"  # nord8, dark
+session_13 = "#86A0C1"  # nord10, light
+session_14 = "#5E81AC"  # nord10, dark
+session_15 = "#C7AAC2"  # nord15, light
+session_16 = "#997993"  # nord15, dark
 
 # Dracula (https://draculatheme.com/contribute): background #282a36,
 # current line #44475a, foreground #f8f8f2, comment #6272a4, cyan #8be9fd,
@@ -350,6 +460,24 @@ toggle = "#50FA7B"
 scrollbar = "#6272A480"
 placeholder = "#F8F8F20F"
 shimmer = "#F8F8F203"
+# Session colours: the accents (light) and each 30% darker (dark); the
+# comment colour is its own dark.
+session_1 = "#FF5555"   # red, light
+session_2 = "#B23C3C"   # red, dark
+session_3 = "#FFB86C"   # orange, light
+session_4 = "#B2814C"   # orange, dark
+session_5 = "#F1FA8C"   # yellow, light
+session_6 = "#A9AF62"   # yellow, dark
+session_7 = "#50FA7B"   # green, light
+session_8 = "#38AF56"   # green, dark
+session_9 = "#8BE9FD"   # cyan, light
+session_10 = "#61A3B1"  # cyan, dark
+session_11 = "#99A3C4"  # comment, light
+session_12 = "#6272A4"  # comment, dark
+session_13 = "#BD93F9"  # purple, light
+session_14 = "#8467AE"  # purple, dark
+session_15 = "#FF79C6"  # pink, light
+session_16 = "#B2558B"  # pink, dark
 
 # Tokyo Night, by enkia (https://github.com/enkia/tokyo-night-vscode-theme;
 # the night palette as folke's tokyonight.nvim lists it): bg_dark #16161e,
@@ -388,6 +516,23 @@ toggle = "#9ECE6A"
 scrollbar = "#737AA280"
 placeholder = "#C0CAF50F"
 shimmer = "#C0CAF503"
+# Session colours: the accents (light) and each 30% darker (dark).
+session_1 = "#F7768E"   # red, light
+session_2 = "#AD5363"   # red, dark
+session_3 = "#FF9E64"   # orange, light
+session_4 = "#B26F46"   # orange, dark
+session_5 = "#E0AF68"   # yellow, light
+session_6 = "#9D7A49"   # yellow, dark
+session_7 = "#9ECE6A"   # green, light
+session_8 = "#6F904A"   # green, dark
+session_9 = "#73DACA"   # teal, light
+session_10 = "#50998D"  # teal, dark
+session_11 = "#7DCFFF"  # cyan, light
+session_12 = "#5891B2"  # cyan, dark
+session_13 = "#7AA2F7"  # blue, light
+session_14 = "#5571AD"  # blue, dark
+session_15 = "#BB9AF7"  # magenta, light
+session_16 = "#836CAD"  # magenta, dark
 
 # Black and white, with saturated accents.
 [theme.high_contrast]

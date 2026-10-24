@@ -57,6 +57,7 @@ pub mod markdown_view;
 pub mod memory;
 pub mod notify;
 pub mod overview;
+pub mod session_cards;
 pub mod settings;
 pub mod theme;
 pub mod ui;
@@ -90,6 +91,7 @@ use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
 use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
+use crate::session_cards::{SessionCards, SessionHit, Touched};
 use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
 use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
@@ -306,6 +308,13 @@ pub struct App {
     notifications_granted: bool,
     /// A request for it is out: the toggle waits for the answer.
     asking_permission: bool,
+    /// Other sessions' cards at the bottom (plan 20261022_03, the L3
+    /// amendments of 2026-10-24 15:56, 16:00 and 16:01 EDT).
+    session_cards: SessionCards,
+    /// The agent view's pane, while it is open: its session's colour.
+    agent_pane: Option<String>,
+    /// The display's scale, as last laid out.
+    scale: f32,
 }
 
 /// The foreground service, as the app knows it.
@@ -666,6 +675,16 @@ impl App {
                 }
             }
             Event::Unpaired { daemon } => self.unpaired(daemon),
+            Event::SessionCards(cards) => {
+                if let Some(c) = cards.first() {
+                    log::info!(
+                        "cards: {:?} from another session, {} in all",
+                        c.kind,
+                        cards.len()
+                    );
+                }
+                self.session_cards.set(cards);
+            }
             // herdr's focus shows on the cards, from the list it refreshes.
             Event::Say(_)
             | Event::Focus(_)
@@ -684,6 +703,7 @@ impl App {
             .find(|a| a.pane_id == pane_id)
             .and_then(|a| a.name.clone())
             .unwrap_or_else(|| "the agent".to_string());
+        self.agent_pane = Some(pane_id.clone());
         self.send(Input::OpenAgent(pane_id));
         let mut agent = AgentScreen::new();
         agent.name = name;
@@ -709,6 +729,7 @@ impl App {
 
     /// Closes the agent view, back to the overview.
     fn close_agent(&mut self) {
+        self.agent_pane = None;
         if self.agent.take().is_some() {
             log::info!("agent view: closed");
             self.send(Input::CloseAgent);
@@ -1165,6 +1186,15 @@ impl App {
     /// pairing screen, only a touch's end counts.
     fn touch(&mut self, touch: Touch) {
         let now = self.started.elapsed();
+        // Another session's card, over whichever screen is shown.
+        let s = self.scale();
+        match self
+            .session_cards
+            .touch(touch.id, touch.phase, touch.x, touch.y, s)
+        {
+            Touched::Yes(hit) => return self.session_hit(hit),
+            Touched::No => {}
+        }
         if let Some(screen) = &mut self.settings_screen {
             if let Some(hit) = screen.touch(touch.id, touch.phase, touch.x, touch.y, now) {
                 self.settings_hit(hit);
@@ -1203,6 +1233,59 @@ impl App {
         }
     }
 
+    /// The display's scale, as the screens were last laid out at.
+    fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// A tap on another session's card opens it; a swipe dismisses it.
+    fn session_hit(&mut self, hit: Option<SessionHit>) {
+        match hit {
+            Some(SessionHit::Open(pane_id)) => {
+                log::info!("cards: opening another session");
+                self.close_settings();
+                if self.agent_pane.as_deref() != Some(pane_id.as_str()) {
+                    self.open_agent(pane_id);
+                }
+            }
+            Some(SessionHit::Dismiss(pane_id)) => {
+                log::info!("cards: dismissed");
+                self.send(Input::DismissCard(pane_id));
+            }
+            None => {}
+        }
+    }
+
+    /// Lays other sessions' cards out at the bottom of the screen shown:
+    /// the screen makes room for them, except the settings, which they sit
+    /// over.
+    fn lay_out_session_cards(&mut self, layout: Layout) {
+        let s = if layout.scale > 0.0 {
+            layout.scale
+        } else {
+            1.0
+        };
+        self.scale = s;
+        let pad = crate::agent::PAD * s;
+        let w = layout.w - 2.0 * pad;
+        let h = self.session_cards.height(w, s);
+        let bottom = if self.settings_screen.is_some() {
+            Some(layout.h - layout.bottom - 16.0 * s)
+        } else if let Some(agent) = &mut self.agent {
+            agent.set_cross_height(h);
+            Some(agent.cross_bottom())
+        } else if !self.pairing() {
+            self.overview.set_cross_height(h);
+            Some(self.overview.cross_bottom())
+        } else {
+            None
+        };
+        match bottom {
+            Some(bottom) => self.session_cards.place(pad, bottom, w, s),
+            None => self.session_cards.place(pad, 0.0, w, s),
+        }
+    }
+
     /// Gives the screen what it shows now; it changes only what differs.
     fn lay_out(&mut self, ctx: &MorphContext) {
         let (w, h) = ctx.surface_size();
@@ -1217,6 +1300,13 @@ impl App {
         if let Some(agent) = &mut self.agent {
             agent.set_layout(layout);
             agent.set_dictation(self.dictation.as_ref().map(dictation_lines));
+            // The band in its session's colour.
+            let colour = self
+                .agent_pane
+                .as_deref()
+                .and_then(|p| self.agents.iter().find(|a| a.pane_id == p))
+                .map(handlr_companion::cross::colour_of);
+            agent.set_session_colour(colour);
         }
         if let Some(screen) = &mut self.settings_screen {
             screen.set_layout(layout);
@@ -1242,8 +1332,10 @@ impl App {
             }));
             o.set_dictation(self.dictation.as_ref().map(|d| message_lines(d, &layout)));
             o.set_play(self.read_aloud, self.speaking, self.viewed);
+            self.lay_out_session_cards(layout);
             return;
         }
+        self.lay_out_session_cards(layout);
 
         let line = |text: String, size: f32, color, gap| Line {
             text,
@@ -1564,6 +1656,9 @@ impl MorphApp for App {
             notify_ask: Default::default(),
             notifications_granted: ctx.permission_granted(POST_NOTIFICATIONS),
             asking_permission: false,
+            session_cards: SessionCards::new(),
+            agent_pane: None,
+            scale: 1.0,
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
@@ -1793,8 +1888,10 @@ impl MorphApp for App {
             (None, true) => Shown::Pairing,
             (None, false) => Shown::Overview,
         };
+        // Another session's card changed: the screen under it draws again.
+        let cards_changed = self.session_cards.take_dirty();
         // Another screen drew over the list: the one shown now draws it all.
-        if self.shown != Some(shown) {
+        if self.shown != Some(shown) || cards_changed {
             self.shown = Some(shown);
             self.screen.invalidate();
             self.overview.invalidate();
@@ -1805,12 +1902,17 @@ impl MorphApp for App {
                 screen.invalidate();
             }
         }
-        match (&mut self.settings_screen, &mut self.agent) {
+        let drew = match (&mut self.settings_screen, &mut self.agent) {
             (Some(screen), _) => screen.draw(&mut self.list, &draw, Some(&term)),
             (None, Some(agent)) => agent.draw(&mut self.list, &draw, Some(&term)),
             (None, None) if shown == Shown::Pairing => self.screen.draw(&mut self.list, &draw),
             (None, None) => self.overview.draw(&mut self.list, &draw, Some(&term)),
         };
+        // The card goes over what the screen drew.
+        if drew && shown != Shown::Pairing {
+            let s = ctx.scale_factor();
+            self.session_cards.draw(&mut self.list, &draw, s);
+        }
         let (w, h) = frame.size;
         self.sdf.render_draw_list_in(
             ctx.device(),

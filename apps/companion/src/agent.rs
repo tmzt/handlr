@@ -92,6 +92,8 @@ const TERMINAL_ON_H: f32 = 18.0;
 /// their place but not their laid-out rows (the 22:55 EDT amendment).
 pub const KEEP_SCREENS: f32 = 5.0;
 const BAR_H: f32 = 40.0;
+/// The session colour's band under the header, in points.
+pub(crate) const SESSION_BAND: f32 = 4.0;
 /// The suggestion row's height and type size, and the back glyph's tap
 /// width at the header's left.
 const SUGGEST_H: f32 = 36.0;
@@ -1524,6 +1526,9 @@ pub struct Frame {
     pub typed: Option<Flow>,
     /// The jump line, while scrolled back.
     pub jump: Option<JumpLine>,
+    /// Where other sessions' cards end, above the pinned card (plan
+    /// 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT, item 2).
+    pub cross_bottom: f32,
 }
 
 /// The one-line "jump to end" message below the scrollback, while
@@ -1909,6 +1914,11 @@ pub struct AgentScreen {
     labels: Option<f32>,
     /// Memory pressure, until the app is back in front.
     pressure: Option<Pressure>,
+    /// The session's colour, 0 to 15, for the header's band (plan
+    /// 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT, item 1).
+    session_colour: Option<u8>,
+    /// The height other sessions' cards take above the pinned card.
+    cross_h: f32,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -1924,6 +1934,41 @@ impl AgentScreen {
             sound: true,
             ..Default::default()
         }
+    }
+
+    /// The session's colour (0 to 15), drawn as a band under the header.
+    pub fn set_session_colour(&mut self, colour: Option<u8>) {
+        if colour != self.session_colour {
+            self.session_colour = colour;
+            self.dirty = true;
+        }
+    }
+
+    /// The band under the header in the session's colour, while it has
+    /// one, and its colour.
+    pub fn session_band(&self) -> Option<(Rect, [f32; 4])> {
+        let colour = self.session_colour?;
+        let h = self.frame.header;
+        let band = SESSION_BAND * self.scale();
+        Some((
+            Rect::new(h.x, h.y + h.h - band, h.w, band),
+            theme().session(colour),
+        ))
+    }
+
+    /// The height other sessions' cards need above the pinned card: the
+    /// flow makes room for them.
+    pub fn set_cross_height(&mut self, h: f32) {
+        if (h - self.cross_h).abs() > 0.01 {
+            self.cross_h = h;
+            self.settle();
+        }
+    }
+
+    /// Where other sessions' cards end: above the pinned card, or above
+    /// what is under the flow.
+    pub fn cross_bottom(&self) -> f32 {
+        self.frame.cross_bottom
     }
 
     /// *All sound* on or off: summary cards' replay buttons show or go.
@@ -2792,6 +2837,15 @@ impl AgentScreen {
         } else {
             above
         };
+        // Other sessions' cards, above the pinned card: the flow ends
+        // above them.
+        let cross_bottom = view_bottom;
+        let cross = if self.cross_h > 0.0 {
+            self.cross_h + 8.0 * s
+        } else {
+            0.0
+        };
+        let (view_bottom, full_bottom) = (view_bottom - cross, full_bottom - cross);
         // The jump line's height is kept below the scrollback whether or
         // not it shows, so it never moves the scrollback (the 00:05 EDT
         // amendment, item 4).
@@ -2817,6 +2871,7 @@ impl AgentScreen {
             suggestions,
             typed,
             jump,
+            cross_bottom,
         }
     }
 
@@ -3866,8 +3921,12 @@ impl AgentScreen {
         }
         list.push_clip_end();
 
-        // The header: the agent and its status.
+        // The header: the agent and its status, over a band in its
+        // session's colour.
         fill(list, self.frame.header, theme().header, 0.0);
+        if let Some((band, colour)) = self.session_band() {
+            fill(list, band, colour, 0.0);
+        }
         let name_px = NAME_PT * s;
         let top = l.top + 8.0 * s;
         let back = Row {
@@ -5359,6 +5418,51 @@ mod tests {
                 .any(|r| r.text.contains("question 149"))
         );
         assert_eq!(a.flow().entry_y, full.entry_y);
+    }
+
+    #[test]
+    fn the_header_has_a_band_in_the_sessions_colour() {
+        crate::theme::testing::use_theme("dark_gray");
+        let mut a = screen(conversation(3), vec![], None);
+        assert!(a.session_band().is_none(), "none until its colour is known");
+        a.set_session_colour(Some(9));
+        let (band, colour) = a.session_band().expect("a band");
+        assert_eq!(colour, theme().session(9));
+        let h = a.frame().header;
+        assert_eq!((band.x, band.w), (h.x, h.w));
+        assert_eq!(band.y + band.h, h.y + h.h, "at the header's foot");
+        // Drawn.
+        let mut list = DrawList::new();
+        a.draw(&mut list, &crate::theme::testing::draw_context(), None);
+        assert!(list.instances.iter().any(|i| i.color == colour));
+    }
+
+    #[test]
+    fn other_sessions_cards_sit_above_the_pinned_card_and_the_flow_makes_room() {
+        let entries = conversation(20);
+        let n = entries.len();
+        let mut a = screen(entries, vec![card(CardKind::Approval, n, true)], Some(0));
+        let before = a.frame().clone();
+        let pin = before.pin.clone().expect("pinned");
+        assert_eq!(a.cross_bottom(), pin.rect.y - 8.0 * 2.0);
+        a.set_cross_height(120.0);
+        let after = a.frame().clone();
+        assert_eq!(after.pin.as_ref().unwrap().rect, pin.rect, "the pin stays");
+        assert_eq!(a.cross_bottom(), pin.rect.y - 8.0 * 2.0);
+        assert!(
+            after.viewport.y + after.viewport.h <= a.cross_bottom() - 120.0,
+            "the flow ends above the card"
+        );
+        assert!(
+            (before.viewport.h - after.viewport.h - (120.0 + 16.0)).abs() < 0.5,
+            "by its height and a gap"
+        );
+        // Without a pinned card, above what is under the flow.
+        let mut b = screen(conversation(3), vec![], None);
+        b.set_cross_height(80.0);
+        let f = b.frame();
+        assert!(b.cross_bottom() <= f.buttons[0].rect.y);
+        assert!(f.viewport.y + f.viewport.h <= b.cross_bottom() - 80.0);
     }
 
     #[test]

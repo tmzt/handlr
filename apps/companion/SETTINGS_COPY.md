@@ -297,3 +297,33 @@ with none to name, "handlr". The app's label stays "handlr".
 - [#] megabytes: the link's traffic since connecting, in MB
 - text: |
     All agents idle · {{ [#] megabytes }} MB this session
+
+Other sessions' cards at the bottom of the screen (plan 20261022_03, the
+L3 amendments of 2026-10-24 15:56, 16:00 and 16:01 EDT), drawn in
+`src/session_cards.rs`: the header is in the session's colour and names
+its agent; several collapse to the newest, with "+N" for the rest.
+
+# [Copy] session_asking
+
+- [abc] agent: the agent's shown name
+- text: |
+    {{ [abc] agent }} is asking
+
+# [Copy] session_approval
+
+- [abc] agent: the agent's shown name
+- text: |
+    {{ [abc] agent }} needs approval
+
+# [Copy] session_finished
+
+- [abc] agent: the agent's shown name
+- [abc] line: the last reply's first line
+- text: |
+    {{ [abc] agent }} finished: {{ [abc] line }}
+
+# [Copy] session_more
+
+- [#] count: the cards collapsed under the newest
+- text: |
+    +{{ [#] count }}

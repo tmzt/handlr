@@ -69,13 +69,16 @@ pub struct CardLayout {
     pub outline: Option<([f32; 4], Rect)>,
     /// A question's Yes and No, inactive.
     pub buttons: Vec<OutlineButton>,
+    /// The band in the session's colour at the top (plan 20261022_03, the
+    /// L3 amendment of 2026-10-24 15:56 EDT, item 1).
+    pub band: Option<Fill>,
 }
 
 impl CardLayout {
     /// Draws the card moved down by `dy`, at scale `s`.
     pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext, dy: f32, s: f32) {
         let moved = |r: Rect| Rect::new(r.x, r.y + dy, r.w, r.h);
-        for f in &self.flow.fills {
+        for f in self.flow.fills.iter().chain(&self.band) {
             fill(list, moved(f.rect), f.color, f.radius);
         }
         if let Some((color, rect)) = self.outline {
@@ -126,6 +129,16 @@ impl AgentCard<'_> {
     /// Lines of a question shown at most, and of any other line.
     pub const QUESTION_LINES: usize = 3;
     pub const LINE_LINES: usize = 2;
+    /// The session colour's band at the card's top, in points: its height
+    /// and its gap from the top edge.
+    pub const BAND: f32 = 4.0;
+    pub const BAND_TOP: f32 = 6.0;
+
+    /// The session's colour: the band's (plan 20261022_03, the L3
+    /// amendment of 2026-10-24 15:56 EDT, item 1).
+    pub fn session_colour(&self) -> [f32; 4] {
+        theme().session(handlr_companion::cross::colour_of(self.agent))
+    }
 
     /// What the card needs from the user, if anything: an approval first.
     pub fn needs_input(&self) -> Option<NeedsInput> {
@@ -185,7 +198,9 @@ impl AgentCard<'_> {
         let inner_w = w - Self::BAR * s - 2.0 * pad;
         let (head_px, text_px) = (Self::HEADING_PT * s, Self::TEXT_PT * s);
         let mut rows = Vec::new();
-        let mut ty = y + pad;
+        // Under the band in the session's colour.
+        let band = Rect::new(inner_x, y + Self::BAND_TOP * s, inner_w, Self::BAND * s);
+        let mut ty = band.y + band.h + pad * 0.6;
         let mut row = |text: String, px: f32, color, ty: &mut f32| {
             rows.push(Row {
                 text,
@@ -246,6 +261,7 @@ impl AgentCard<'_> {
                 radius: 2.0 * s,
             });
         }
+
         CardLayout {
             rect,
             flow: Flow {
@@ -256,6 +272,11 @@ impl AgentCard<'_> {
             },
             outline: self.needs_input().map(|n| (n.colour(), rect)),
             buttons,
+            band: Some(Fill {
+                rect: band,
+                color: self.session_colour(),
+                radius: band.h / 2.0,
+            }),
         }
     }
 }
@@ -430,6 +451,37 @@ pub(crate) mod tests {
         assert_eq!(colour_of(&c, "idle"), theme().dim);
         // At least 112 pt high.
         assert_eq!(c.rect.h, AgentCard::MIN_HEIGHT * 2.0);
+    }
+
+    #[test]
+    fn the_band_is_in_the_sessions_colour_whatever_the_theme() {
+        use libhandlr_proto::common::{AgentSessionInfo, SessionMatched};
+        let mut a = agent("p1", "w1", 17, None);
+        a.session = Some(AgentSessionInfo {
+            session_id: Some("0b8e-session".into()),
+            matched: SessionMatched::Id,
+            pending_question: None,
+        });
+        let index = handlr_companion::cross::session_colour("0b8e-session");
+        for id in ["dark_gray", "light_black", "nord"] {
+            crate::theme::testing::use_theme(id);
+            let c = lay(AgentCard {
+                agent: &a,
+                approval: false,
+            });
+            let band = c.band.expect("a band");
+            assert_eq!(band.color, theme().session(index), "{id}");
+            // At the top, inside the card, above the heading.
+            assert!(band.rect.y > c.rect.y && band.rect.y < c.flow.rows[0].y);
+            assert!(band.rect.x >= c.rect.x && band.rect.x + band.rect.w <= c.rect.x + c.rect.w);
+        }
+        // The same session again: the same colour.
+        let again = lay(AgentCard {
+            agent: &a.clone(),
+            approval: false,
+        });
+        assert_eq!(again.band.unwrap().color, theme().session(index));
+        crate::theme::testing::use_theme("dark_gray");
     }
 
     #[test]

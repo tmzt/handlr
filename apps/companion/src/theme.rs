@@ -369,8 +369,12 @@ mod tests {
         for &(name, value, role) in OLD {
             assert_eq!(gray.colors.get(role), value, "{name} as {role:?}");
         }
-        // Every role holds one of them.
-        for &role in Role::ALL {
+        // Every role holds one of them, but the session colours, which are
+        // new (plan 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT).
+        for &role in Role::ALL
+            .iter()
+            .filter(|r| !check::SESSION_ROLES.contains(r))
+        {
             assert!(OLD.iter().any(|o| o.2 == role), "{role:?}");
         }
         assert_eq!(theme(), gray.colors, "in force at start");
@@ -459,6 +463,79 @@ mod tests {
             assert_eq!(bars.status_dark_icons, !t.dark, "{}", t.name);
         }
         assert!(wants_dark_icons([0.5, 0.5, 0.5, 1.0]) && !wants_dark_icons([0.4, 0.4, 0.4, 1.0]));
+    }
+
+    #[test]
+    fn session_colours_are_inherited_unless_a_theme_sets_its_own() {
+        let themes = Themes::shipped();
+        let gray = themes.find("dark_gray").unwrap().colors;
+        let light = themes.find("light_black").unwrap().colors;
+        // Both defaults set all 16, each its own.
+        for i in 0..16 {
+            assert_ne!(gray.session(i), light.session(i), "session_{}", i + 1);
+        }
+        // Themes without their own take their kind's default's.
+        for (id, default) in [
+            ("dark_black", gray),
+            ("dark_navy", gray),
+            ("high_contrast", gray),
+            ("light_paper", light),
+        ] {
+            let c = themes.find(id).unwrap().colors;
+            for i in 0..16 {
+                assert_eq!(c.session(i), default.session(i), "{id} session_{}", i + 1);
+            }
+        }
+        // The palette themes set their own.
+        for id in [
+            "solarized_dark",
+            "solarized_light",
+            "gruvbox_dark",
+            "nord",
+            "dracula",
+            "tokyo_night",
+        ] {
+            let t = themes.find(id).unwrap();
+            let default = if t.dark { gray } else { light };
+            assert!(
+                (0..16).all(|i| t.colors.session(i) != default.session(i)),
+                "{id}"
+            );
+        }
+        // A user's theme that leaves them out inherits them.
+        let mut mine = themes.clone();
+        mine.add(
+            "[theme.mine]\nname = \"Mine\"\ndark = false\nsession_3 = \"#123456\"\n",
+            "test",
+        );
+        let m = mine.find("mine").unwrap().colors;
+        assert_eq!(
+            m.session(2),
+            [
+                0x12 as f32 / 255.0,
+                0x34 as f32 / 255.0,
+                0x56 as f32 / 255.0,
+                1.0
+            ]
+        );
+        assert_eq!(m.session(0), light.session(0));
+    }
+
+    #[test]
+    fn every_session_colour_shows_on_its_themes_background_and_cards() {
+        let contrast = |a: [f32; 4], b: [f32; 4]| {
+            let (x, y) = (luminance(a), luminance(b));
+            (x.max(y) + 0.05) / (x.min(y) + 0.05)
+        };
+        for t in &Themes::shipped().list {
+            for i in 0..16 {
+                let c = t.colors.session(i);
+                for (what, under) in [("bg", t.colors.bg), ("card", t.colors.card)] {
+                    let r = contrast(c, under);
+                    assert!(r >= 1.5, "{} session_{} on {what}: {r:.2}", t.name, i + 1);
+                }
+            }
+        }
     }
 
     #[test]

@@ -129,6 +129,11 @@ pub struct Overview {
     touch: Option<(u64, Target)>,
     loaded: bool,
     dirty: bool,
+    /// The height other sessions' cards take above the panels, and where
+    /// they end (plan 20261022_03, the L3 amendment of 2026-10-24 15:56
+    /// EDT, item 2).
+    cross_h: f32,
+    cross_bottom: f32,
 }
 
 impl Default for Overview {
@@ -162,6 +167,8 @@ impl Overview {
             touch: None,
             loaded: false,
             dirty: true,
+            cross_h: 0.0,
+            cross_bottom: 0.0,
         }
     }
 
@@ -201,6 +208,21 @@ impl Overview {
             self.card = card;
             self.settle();
         }
+    }
+
+    /// The height other sessions' cards need: the cards make room for
+    /// them above the panels.
+    pub fn set_cross_height(&mut self, h: f32) {
+        if (h - self.cross_h).abs() > 0.01 {
+            self.cross_h = h;
+            self.settle();
+        }
+    }
+
+    /// Where other sessions' cards end: above the panels and the bottom
+    /// row.
+    pub fn cross_bottom(&self) -> f32 {
+        self.cross_bottom
     }
 
     /// The dictation card's lines, while a message is taken.
@@ -367,6 +389,12 @@ impl Overview {
             panels.push(p);
         }
         self.panels = panels;
+        // Other sessions' cards above them, at the bottom of the cards'
+        // room.
+        self.cross_bottom = above;
+        if self.cross_h > 0.0 {
+            above -= self.cross_h + 8.0 * s;
+        }
 
         // The strip above them while it shows, and the cards on the rest.
         let bottom = above.max(top);
@@ -747,6 +775,20 @@ mod tests {
         assert!(o.draw(&mut list, &ctx, None), "drawn again");
         assert_eq!(dark_gray_only(&list), Vec::<[f32; 4]>::new());
         use_theme("dark_gray");
+    }
+
+    #[test]
+    fn other_sessions_cards_take_room_under_the_cards_above_the_panels() {
+        let mut o = overview(6);
+        let grid = o.grid().viewport();
+        let bottom = o.cross_bottom();
+        assert!(bottom >= grid.y + grid.h, "under the cards");
+        o.set_cross_height(100.0);
+        assert_eq!(o.cross_bottom(), bottom, "the panels stay");
+        let after = o.grid().viewport();
+        assert!(after.y + after.h <= bottom - 100.0, "the cards make room");
+        o.set_cross_height(0.0);
+        assert_eq!(o.grid().viewport(), grid);
     }
 
     #[test]

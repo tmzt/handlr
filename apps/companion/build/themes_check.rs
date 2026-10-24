@@ -98,6 +98,51 @@ roles! {
     placeholder => Placeholder: "A placeholder's bars.",
     shimmer => Shimmer: "The shimmer over the placeholders.",
     shadow => Shadow: "Cards' shadows.",
+    session_1 => Session1: "Session colour 1: the first hue, light.",
+    session_2 => Session2: "Session colour 2: the first hue, dark.",
+    session_3 => Session3: "Session colour 3: the second hue, light.",
+    session_4 => Session4: "Session colour 4: the second hue, dark.",
+    session_5 => Session5: "Session colour 5: the third hue, light.",
+    session_6 => Session6: "Session colour 6: the third hue, dark.",
+    session_7 => Session7: "Session colour 7: the fourth hue, light.",
+    session_8 => Session8: "Session colour 8: the fourth hue, dark.",
+    session_9 => Session9: "Session colour 9: the fifth hue, light.",
+    session_10 => Session10: "Session colour 10: the fifth hue, dark.",
+    session_11 => Session11: "Session colour 11: the sixth hue, light.",
+    session_12 => Session12: "Session colour 12: the sixth hue, dark.",
+    session_13 => Session13: "Session colour 13: the seventh hue, light.",
+    session_14 => Session14: "Session colour 14: the seventh hue, dark.",
+    session_15 => Session15: "Session colour 15: the eighth hue, light.",
+    session_16 => Session16: "Session colour 16: the eighth hue, dark.",
+}
+
+/// The session colours' roles, `session_1` to `session_16`, in order
+/// (plan 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT).
+pub const SESSION_ROLES: [Role; 16] = [
+    Role::Session1,
+    Role::Session2,
+    Role::Session3,
+    Role::Session4,
+    Role::Session5,
+    Role::Session6,
+    Role::Session7,
+    Role::Session8,
+    Role::Session9,
+    Role::Session10,
+    Role::Session11,
+    Role::Session12,
+    Role::Session13,
+    Role::Session14,
+    Role::Session15,
+    Role::Session16,
+];
+
+impl Colors {
+    /// Session colour `index` (0 to 15, as the client's hash gives it):
+    /// the role `session_<index + 1>`.
+    pub fn session(&self, index: u8) -> [f32; 4] {
+        self.get(SESSION_ROLES[usize::from(index) % SESSION_ROLES.len()])
+    }
 }
 
 /// A complete theme.
