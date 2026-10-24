@@ -1593,3 +1593,38 @@ card" (2026-10-24 11:59 EDT). The points no longer come back from
 
 The previous entry says it replaces "points for the expanded card
 (2026-10-24 11:59 EDT)". That entry is dated 2026-10-24 12:03 EDT.
+
+## 2026-10-24 12:26 EDT — plan 20261024_02, steps 1–5: departures
+
+The steps are built in the commits on main, from `7716930` to the companion commit
+after the handlr-audio one.
+1. **An extra handlr-audio commit for the chime.** The speaker's ring
+   buffer belongs to the TTS worker, so `Event::Ding` becomes
+   `Action::Chime`, a 0.35 s two-tone chime mixed over the speaker output.
+2. **"A Finished card" on the overview:** the overview has no cards, so it
+   dings when an agent's turn in `agents.list` changes to stopped. In the
+   agent view, it dings on a new live Finished card after the agent has
+   worked. Both are deduplicated per pane.
+3. **Microphone off doesn't stop capture:** libvoicexn's STT takes only
+   `Arm` and `Close`. The gate is never armed, utterances are ignored, and
+   the status line reads "microphone off".
+4. **Also disabled with the microphone off:** the dictation controls, and
+   *discuss*, which starts a dictation.
+5. **The desktop data directory** is `~/.config/handlr-companion`, until
+   libmorph 0.4.0's `data_dir()` on every host.
+6. **No version bump** for handlr-companion's new `Input::Settings`,
+   `Input::Unpair`, `Event::Ding`, `Event::Unpaired`, `Output::Forget`,
+   `Settings` and `KeyStore::forget`, or handlr-audio's `Action::Chime`, as
+   with earlier entries.
+7. **Two intermediate commits don't build** on their own, because of
+   exhaustive struct literals and matches. The protocol commit needs the
+   handlr-companion commit, and that one needs the companion commit.
+8. **`VaultKeyStore::forget` has no unit test:** libmorph's in-memory
+   `SecureStore` constructor is crate-private. `FileKeyStore::forget` is
+   tested.
+9. **The plan's amendments are in time order.** The immutable marker
+   (11:49 EDT, written in the worktree) sits before the Clear cache
+   amendment (12:12 EDT), which was written on main meanwhile.
+
+Open: the S23 checks of step 5. The battery rows wait on libmorph 0.4.0's
+battery wrapper, behind the `Unreleased` stub.
