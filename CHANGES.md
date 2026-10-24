@@ -1283,3 +1283,42 @@ Small departures needed to make A2 and A3 work, built in `src/sessions/`
   scan found.
 - **The journal also keeps the question's text** (`text`, redacted),
   which the Approval card shows, beside A4's `command`.
+
+## 2026-10-23 23:35 EDT — plan 20261023_03, step 4: subscriptions on a sleeping link, coalescing, and where the tests are
+
+Small departures needed to make step 4 work (`src/server/subscriptions.rs`,
+`src/server/conn.rs`):
+- **A connection with a session subscription is not taken as asleep for
+  being quiet.** `Conn::asleep` (the 21:42 EDT entry) took a companion
+  that had asked nothing but pings for 60 s as asleep, since an awake
+  phone polled within 30 s. With the view pushed to, an awake phone may
+  ask nothing for minutes, and the phone pings only after 30 s with
+  nothing heard, so a busy subscription would have stalled every
+  minute. The inference now applies only to a companion holding no
+  subscription; `client.options` `background` and `ping {active:
+  false}` still put any link to sleep.
+- **The daemon catches a woken subscription up itself.** The 22:55 EDT
+  amendment's item 4 has the subscription catch up with `after` on
+  waking. Instead, while the link sleeps the subscription keeps adding
+  to its one waiting delivery (decision 9, so a long sleep becomes a
+  reset with the newest 50) and writes it at the first check after
+  waking; the client sends nothing for it. `after` is still how a client
+  that reconnects catches up.
+- **"Waiting to be written" is counted at the writer.** Each connection's
+  writer counts the lines it has written; a delivery is the waiting one
+  until the count passes its place in the queue, so a phone that stops
+  reading holds one delivery in the queue and the rest coalesce.
+- **A catch-up resends the 256 lines before `after`.** A section at or
+  just below the client's newest serial may have changed (a text block
+  that grew, a tool that got its result, a card resolved), so `after`
+  gives the sections from 256 lines before it on, not only those above
+  it.
+- **The tests are in `tests/subscriptions.rs`** (sections 10.3 and 10.4
+  name `tests/daemon.rs` and `tests/link.rs`), with a stand-in herdr
+  event socket for `pane_focused`, `pane_updated` and `pane_closed`, and
+  link clients paired by writing `auth.toml` (an entry's `agents` narrows
+  its reach). `tests/daemon.rs` and `tests/link.rs` now read sessions
+  under a temporary home, so the journal is never written to this
+  machine's `~/.local/state`.
+- **A closed pane's subscription ends by itself**: after the
+  `pane_closed` delivery its id is unknown (`SUBSCRIPTION_NOT_FOUND`).
