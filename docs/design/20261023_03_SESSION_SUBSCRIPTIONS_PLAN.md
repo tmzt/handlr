@@ -855,3 +855,49 @@ carrying the newest 50 sections.
 Scrolling back past the current session file into the pane's earlier
 sessions (before a `/clear`). The prefix already tells sessions apart;
 reaching an earlier file needs a way to find it and is not in this plan.
+
+## Amendment — 2026-10-23 22:55 EDT: sections kept in memory for full scrollback; what changed since the draft
+
+Agreed with the owner on 2026-10-23: "should we use redb?", then "right,
+if in memory but we should still store sections by serial and have a full
+scrollback", then "Approve the plan". This replaces the 14:54 EDT
+amendment's A7 bullet "Up to 1000 sections are held while scrolled back.
+When the view is pinned to the bottom again, it trims to the newest 200",
+and brings the plan in line with what was built since it was drafted.
+
+1. **The phone keeps every section it has loaded,** in memory, for the
+   life of the agent view: a map sorted by serial (`BTreeMap<u64,
+   Section>` on the packed serial), with no cap and no trimming at the
+   bottom. Scrolling back pages in with `session.history` until a page
+   says `start`, so the whole session file is reachable. Nothing persists
+   across app restarts (no redb or other store); reopening backfills from
+   the daemon.
+2. **Memory guard:** sections far from the window (more than five screens
+   away) keep their data but drop their laid-out rows; they are laid out
+   again when scrolled near.
+3. **The interim merge goes.** The client's `merge_entries` and
+   `VIEW_KEEP` (the 22:53 EDT CHANGES.md entry) are replaced by the
+   section map when step 6 lands.
+4. **What exists since the draft, which the steps build on:**
+   - entries carry `links` and `origin` (libhandlr_proto 0.3.3, 0.3.4);
+     a section keeps its entries' links, and a context entry (with an
+     origin) is its own section of kind `context`, never part of a turn
+     and never a card;
+   - the overview's `Turn` and the pending question (with `about_plan`)
+     are computed above the readers; the hub reuses them;
+   - the reader's read budget skips bookkeeping lines
+     (`SessionReader::is_bookkeeping`); the line index counts every line,
+     bookkeeping included, so serials do not depend on what is skipped;
+   - the link's sleep (`client.options` `background`, `ping {active}`,
+     the 60 s inference): a sleeping connection gets no
+     `session.delivery`; on waking, a subscription catches up with `after`
+     set to its newest serial;
+   - the session readers plan (20261023_06) will make the trait record
+     based; this plan's hub reads through the trait as it is, and moves
+     with it.
+5. **Versions,** by the owner's rulings ("appending to a struct is
+   additive"; "same with open enums, not closed"): new methods, new
+   structs and fields appended to structs are patch releases of
+   libhandlr_proto; a variant added to a closed enum is a minor release.
+   libherdr's `Subscription` is closed, so step 1 is libherdr 0.3.0, as
+   planned.
