@@ -652,15 +652,17 @@ impl SettingsScreen {
                     match battery {
                         None => note(router, n.battery_note, &mut y),
                         Some(b) => {
-                            let rect = row(&mut y);
                             if let Some(link) = router.get_mut::<LinkRow>(n.optimization) {
-                                link.rect = rect;
+                                link.rect = Rect::new(0.0, y, w, row_h);
                                 link.subtitle = copy::BATTERY_OPTIMIZATION
                                     .status(b.ignoring_optimizations)
                                     .map(str::to_string);
                                 // Not yet exempt: *Enable* asks the system.
                                 link.action = (!b.ignoring_optimizations)
                                     .then(|| copy::BATTERY_ENABLE.text.to_string());
+                                // Taller when its status wraps, beside the button.
+                                link.rect.h = link.height(row_h);
+                                y += link.rect.h;
                             }
                             if let Some(label) = vendor_label {
                                 let rect = row(&mut y);

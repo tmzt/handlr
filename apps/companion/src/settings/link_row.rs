@@ -92,16 +92,55 @@ impl LinkRow {
         self.action_target().is_some_and(|r| r.contains(pos))
     }
 
-    /// The label's top, with the subtitle under it when there is one.
+    /// The subtitle's lines: broken at each "\n", and wrapped at spaces to
+    /// the room left of the "›" or the action button (owner, 2026-10-24:
+    /// "wide labels should wrap"). Widths are estimated at 0.5 em a
+    /// character, as layout runs without a font.
+    pub fn subtitle_lines(&self) -> Vec<String> {
+        let Some(subtitle) = &self.subtitle else {
+            return Vec::new();
+        };
+        let s = self.scale;
+        let px = SUBTITLE_PT * s;
+        let right = match self.action_target() {
+            Some(a) => self.rect.x + self.rect.w - a.x + 8.0 * s,
+            None => PAD * s + 2.0 * LABEL_PT * s,
+        };
+        let room = (self.rect.w - PAD * s - right).max(px * 6.0);
+        let cols = ((room / (0.5 * px)) as usize).max(8);
+        let mut lines = Vec::new();
+        for part in subtitle.split('\n') {
+            let mut line = String::new();
+            for word in part.split_whitespace() {
+                if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > cols {
+                    lines.push(std::mem::take(&mut line));
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(word);
+            }
+            lines.push(line);
+        }
+        lines
+    }
+
+    /// The row's height at its width: one row, and a line more for each
+    /// subtitle line past the first.
+    pub fn height(&self, row_h: f32) -> f32 {
+        let extra = self.subtitle_lines().len().saturating_sub(1) as f32;
+        row_h + extra * line_h(SUBTITLE_PT * self.scale)
+    }
+
+    /// The label's top, with the subtitle's lines under it.
     fn label_top(&self) -> f32 {
         let px = LABEL_PT * self.scale;
-        match &self.subtitle {
-            Some(_) => {
-                let h = line_h(px) + line_h(SUBTITLE_PT * self.scale);
-                self.rect.y + (self.rect.h - h) * 0.5
-            }
-            None => label_y(self.rect, px),
+        let lines = self.subtitle_lines().len();
+        if lines == 0 {
+            return label_y(self.rect, px);
         }
+        let h = line_h(px) + lines as f32 * line_h(SUBTITLE_PT * self.scale);
+        self.rect.y + (self.rect.h - h) * 0.5
     }
 
     /// The ⓘ's target, after the label.
@@ -126,8 +165,10 @@ impl DrawControl for LinkRow {
         let x = self.rect.x + PAD * s;
         let y = self.label_top();
         ctx.draw_text(list, &self.label, [x, y], px, TEXT);
-        if let Some(subtitle) = &self.subtitle {
-            ctx.draw_text(list, subtitle, [x, y + line_h(px)], SUBTITLE_PT * s, DIM);
+        let sub_px = SUBTITLE_PT * s;
+        for (i, line) in self.subtitle_lines().iter().enumerate() {
+            let ly = y + line_h(px) + i as f32 * line_h(sub_px);
+            ctx.draw_text(list, line, [x, ly], sub_px, DIM);
         }
         if self.info {
             info::draw(list, ctx, self.info_rect(), s);
@@ -203,5 +244,31 @@ impl HostedControl for LinkRow {
         _ctx: &EventContext,
     ) -> Option<ControlAction> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_long_status_wraps_short_of_the_button_and_the_row_grows() {
+        let mut row = LinkRow::new("Battery optimization", 2.625);
+        row.rect = Rect::new(0.0, 0.0, 1080.0, 52.0 * 2.625);
+        row.subtitle = Some("Optimized: Android may hold back handlr's network when idle".into());
+        row.action = Some("Enable".into());
+        let lines = row.subtitle_lines();
+        assert!(lines.len() >= 2, "{lines:?}");
+        let s = row.scale;
+        let button = row.action_target().unwrap();
+        for line in &lines {
+            let end = PAD * s + line.chars().count() as f32 * 0.5 * SUBTITLE_PT * s;
+            assert!(end < button.x, "{line:?} reaches the button");
+        }
+        assert!(row.height(row.rect.h) > row.rect.h);
+        // An explicit break is kept; without a button a short one stays whole.
+        row.action = None;
+        row.subtitle = Some("one\ntwo".into());
+        assert_eq!(row.subtitle_lines(), ["one", "two"]);
     }
 }
