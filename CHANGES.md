@@ -2053,3 +2053,12 @@ Allow dialog sits over the app without taking its surface, so libmorph's
 settings screen now reads the state once a second for up to 60 s, and stops
 once handlr is exempt (`BATTERY_WATCH`, `BATTERY_LOOK`). `on_resume` still reads it
 after the battery pages, which do take the surface.
+
+## 2026-10-24 14:44 EDT — plan 20261024_02: nothing on the right of a granted row, and the "›" drawn as strokes
+
+The owner (2026-10-24): "remove the Enable button if enabled, don't leave the
+empty box". The "box" was the "›" (U+203A), which the settings face doesn't
+have. A link row's chevron is now drawn as two short strokes. Once handlr is
+exempt, the *Battery optimization* row shows nothing on its right: no button
+and no chevron (`LinkRow.chevron`). The row still opens the list of every
+app's setting.
