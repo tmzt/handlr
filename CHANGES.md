@@ -1201,3 +1201,15 @@ peek's first stay, the peek replaces the rest (so a changed entry is
 updated), up to 1000 kept (`VIEW_KEEP`); a different session file, or a
 peek that does not overlap, starts fresh. History paging (plan
 20261023_03) replaces this when it is built.
+
+## 2026-10-23 23:16 EDT — plan 20261022_03, L3: after a gap the view starts fresh
+
+Checking the scrollback over adb (the owner: "scrolling down (finger drag
+down) not scrolling back"), the view's newest entries went backwards
+after the app had been in the background and its link reconnected (at
+11:08 local the bottom was the 03:07 UTC reply, at 11:14 the 03:02 one).
+The 22:51 EDT merge kept what the view held across the gap. After a
+disconnect, or the app coming back to the front, the next peek now
+replaces the entries instead of merging onto them, so the newest are
+certain; and each peek's result is logged (the count and the newest
+entry's time, no text) to find the cause if it recurs.
