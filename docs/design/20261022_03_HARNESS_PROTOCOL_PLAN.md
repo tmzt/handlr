@@ -1486,3 +1486,9 @@ to the grades of the 12:2x EDT amendment ("memory pressure in grades"):
 | `RunningCritical`, `Complete`, `on_low_memory` | the full drop |
 
 Tests: each level gives its grade.
+
+## Amendment — 2026-10-24 13:46 EDT: a correction to the previous amendment's reference (living section L3)
+
+The previous amendment names "the 12:2x EDT amendment". It is the amendment
+of 2026-10-24 12:21 EDT, "memory pressure in grades, least recently used
+first, with a full drop on low memory".
