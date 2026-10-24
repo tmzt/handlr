@@ -1555,3 +1555,13 @@ overview's plan is frozen, so its part is recorded here.
   as it is heard or spoken, and the overlay (A5) shows the whole
   transcript live: partial words dim, then final; the reply as it
   streams; action lines in the accent.
+
+## 2026-10-24 12:03 EDT — plan 20261023_05 (spoken summaries), departure: points for the expanded card
+
+Agreed with the owner (2026-10-24); see plan 20261022_03's L3 amendment of
+the same time. `speech.summarize` also asks Gemini for `points`: at most 6
+short lines summarising the reply point by point, returned in an appended
+`SpeechSummarizeResult.points: Vec<String>` (serde-defaulted; a
+libhandlr_proto patch release by the owner's rulings). Without Gemini, or
+when it gives none, `points` is empty. `read`, `summary` and `complex` are
+unchanged.
