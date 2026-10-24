@@ -1628,3 +1628,14 @@ after the handlr-audio one.
 
 Open: the S23 checks of step 5. The battery rows wait on libmorph 0.4.0's
 battery wrapper, behind the `Unreleased` stub.
+
+## 2026-10-24 12:29 EDT — plan 20261024_02 and plan 20261022_03 L3: a smaller gear, and "On Scroll"
+
+The owner (2026-10-24): "smaller gear, Hidden should be On Scroll".
+- **Plan 20261024_02, decision 1:** the gear is drawn at about a third of its
+  touch target (16% of the side as its wheel's radius, from 25%). The
+  target stays 44 pt.
+- **Plan 20261022_03 L3** (the band amendment) and plan 20261024_02's Display
+  amendment: the middle visibility, *Hidden*, is shown as *On Scroll*. It is
+  still `hidden` in `settings.toml`, and `ScrollbarVisibility::Hidden` in
+  code, so saved settings read as before.
