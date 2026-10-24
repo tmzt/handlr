@@ -860,6 +860,16 @@ fn release_speed(d: &Drag, s: f32) -> f32 {
     v.clamp(-MAX_FLING * s, MAX_FLING * s)
 }
 
+/// A finger speed to a fling's: the same up to `FLING_KNEE`, growing as
+/// its power `FLING_POWER` above it.
+fn fling_curve(v: f32, s: f32) -> f32 {
+    let knee = FLING_KNEE * s;
+    if v.abs() <= knee {
+        return v;
+    }
+    v.signum() * knee * (v.abs() / knee).powf(FLING_POWER)
+}
+
 /// A movement under this many points is a tap.
 pub(crate) const SLOP: f32 = 10.0;
 /// The longest frame a fling advances by, in seconds.
@@ -869,8 +879,18 @@ pub(crate) const FLING_DT_MAX: f32 = 1.0 / 30.0;
 pub(crate) const DECAY: f32 = 2.0;
 /// Slower than this (points per second), a fling stops.
 pub(crate) const MIN_FLING: f32 = 30.0;
-/// The fastest fling (points per second), as libcontrols' scroll pane.
+/// The fastest finger speed measured (points per second), as libcontrols'
+/// scroll pane.
 pub(crate) const MAX_FLING: f32 = 8000.0;
+/// Above this finger speed (points per second), a flick's force counts
+/// for more than its speed: the fling grows as the speed to the power
+/// `FLING_POWER`, so a harder flick goes disproportionately further, as on
+/// Android, where a fling's distance grows as about speed^1.7. Below it, a
+/// gentle flick is followed exactly.
+const FLING_KNEE: f32 = 1000.0;
+const FLING_POWER: f32 = 1.5;
+/// The fastest fling after that curve, and after flicks add up.
+pub(crate) const MAX_FLING_OUT: f32 = 16000.0;
 /// The span the release speed is measured over, back from the last move.
 const SPEED_WINDOW: Duration = Duration::from_millis(100);
 /// A flick within this long of touching a running fling, the same way,
@@ -2074,12 +2094,12 @@ impl AgentScreen {
                 if d.moved {
                     // A finger that stopped before lifting does not fling.
                     let still = now.saturating_sub(d.last_t) > Duration::from_millis(100);
-                    let mut velocity = release_speed(&d, s);
+                    let mut velocity = fling_curve(release_speed(&d, s), s);
                     let quick = now.saturating_sub(d.down) <= FLING_BOOST_TOUCH;
                     if quick && velocity * d.carried > 0.0 {
                         velocity += d.carried;
                     }
-                    let velocity = velocity.clamp(-MAX_FLING * s, MAX_FLING * s);
+                    let velocity = velocity.clamp(-MAX_FLING_OUT * s, MAX_FLING_OUT * s);
                     if !still && velocity.abs() > MIN_FLING * s {
                         self.fling = velocity;
                     }
@@ -2873,13 +2893,13 @@ mod tests {
         a.touch(1, TouchPhase::Moved, 540.0, 1140.0, t + us);
         a.touch(1, TouchPhase::Ended, 540.0, 1140.0, t + 2 * us);
         let s = a.scale();
-        assert!(a.fling.abs() <= MAX_FLING * s, "{}", a.fling);
+        assert!(a.fling.abs() <= MAX_FLING_OUT * s, "{}", a.fling);
         assert!(a.fling > 0.0, "still a fling, the finger's own speed");
         let lifted = a.offset();
         for _ in 0..200 {
             a.tick(MS);
         }
-        let far = MAX_FLING * s / DECAY;
+        let far = MAX_FLING_OUT * s / DECAY;
         assert!(
             lifted - a.offset() <= far + 1.0,
             "{} > {far}",
@@ -2891,6 +2911,23 @@ mod tests {
         b.touch(1, TouchPhase::Moved, 540.0, 900.0, us);
         b.touch(1, TouchPhase::Ended, 540.0, 900.0, 2 * us);
         assert_eq!(b.fling, 0.0);
+    }
+
+    #[test]
+    fn a_harder_flick_goes_disproportionately_further() {
+        let s = 2.5;
+        assert_eq!(
+            fling_curve(500.0 * s, s),
+            500.0 * s,
+            "gentle: as the finger"
+        );
+        assert_eq!(fling_curve(-500.0 * s, s), -500.0 * s);
+        let (two, four) = (fling_curve(2000.0 * s, s), fling_curve(4000.0 * s, s));
+        assert!(
+            four > 2.5 * two,
+            "twice the speed, more than twice: {two} {four}"
+        );
+        assert!(fling_curve(-4000.0 * s, s) == -four);
     }
 
     #[test]
