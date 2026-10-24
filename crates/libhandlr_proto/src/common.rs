@@ -52,6 +52,10 @@ pub mod methods {
     /// Notification, to the connection that added the device: its first
     /// `hello` was answered.
     pub const LINK_PAIR_DONE: &str = "link.pair_done";
+    /// Over a paired link only: the daemon forgets the calling device,
+    /// removing it from `auth.toml`, and closes the link (plan 20261024_02,
+    /// decision 6). No params; answered `{}`.
+    pub const LINK_UNPAIR: &str = "link.unpair";
 
     /// Subscribe to one pane's session: a backfill of sections, then each
     /// new or changed one pushed as `session.delivery` (plan 20261023_03,
@@ -252,9 +256,10 @@ pub struct SpeechSummarizeResult {
 }
 
 /// `client.options`: a companion's options for its connection (plan
-/// 20261023_05, A4). Each starts off when the connection opens. Unknown
-/// options are ignored, so more can be added.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// 20261023_05, A4). Each starts as its default when the connection opens:
+/// off, except `general_agent`. Unknown options are ignored, so more can be
+/// added.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientOptionsParams {
     /// Read aloud is on: `speech.summarize` may ask Gemini for a summary
     /// of a complex reply.
@@ -265,6 +270,26 @@ pub struct ClientOptionsParams {
     /// or done), and holds the rest until it is off again.
     #[serde(default)]
     pub background: bool,
+    /// The general agent (Gemini) is on (plan 20261024_02, decision 7, as
+    /// amended at 11:37 EDT). While false, the daemon starts no Gemini turn
+    /// for this client; spoken summaries go on as the daemon decides. On
+    /// when left out.
+    #[serde(default = "general_agent_default")]
+    pub general_agent: bool,
+}
+
+fn general_agent_default() -> bool {
+    true
+}
+
+impl Default for ClientOptionsParams {
+    fn default() -> Self {
+        Self {
+            spoken_output: false,
+            background: false,
+            general_agent: true,
+        }
+    }
 }
 
 /// The pane herdr reports as focused, named as `AgentInfo` names it
@@ -1144,6 +1169,15 @@ pub struct LinkPairAddResult {
     pub protocols: Vec<String>,
 }
 
+/// `link.unpair` takes no parameters; it serialises as `{}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LinkUnpairParams {}
+
+/// `link.unpair`'s result, `{}`: the device is forgotten, and the link
+/// closes after it is sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct LinkUnpairResult {}
+
 /// `link.pair_done`: the device added by `link.pair_add` said `hello`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkPairDone {
@@ -1739,7 +1773,10 @@ mod tests {
         round_trip(ClientOptionsParams {
             spoken_output: true,
             background: true,
+            general_agent: false,
         });
+        round_trip(LinkUnpairParams {});
+        round_trip(LinkUnpairResult {});
         round_trip(AgentsReadResult {
             text: "ok".to_string(),
         });
@@ -2012,6 +2049,23 @@ mod tests {
         assert!(options.spoken_output);
         let options: ClientOptionsParams = serde_json::from_value(json!({})).unwrap();
         assert!(!options.spoken_output);
+        // The general agent is on unless it is said to be off.
+        assert!(options.general_agent);
+        assert_eq!(options, ClientOptionsParams::default());
+        let options: ClientOptionsParams =
+            serde_json::from_value(json!({"general_agent": false})).unwrap();
+        assert!(!options.general_agent);
+
+        // link.unpair takes nothing and answers nothing.
+        assert_eq!(
+            serde_json::to_value(LinkUnpairParams {}).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            serde_json::to_value(LinkUnpairResult {}).unwrap(),
+            json!({})
+        );
+        let _: LinkUnpairParams = serde_json::from_value(json!({})).unwrap();
 
         // link.pair_begin takes nothing; link.pair_add needs only the code.
         assert_eq!(

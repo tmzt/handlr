@@ -211,3 +211,19 @@ departure of 2026-10-24 on the daemon epoch):
 - **Changed meaning, in outline mode only:** `SessionDelivery::reset`
   drops only the outline; contents stay valid by serial. Outline mode
   came in 0.3.6 and has no client yet.
+
+## libhandlr_proto 0.3.8 — 2026-10-24 (the commit tagged `libhandlr_proto-v0.3.8`)
+
+Additive, by the owner's rulings ("appending to a struct is additive", and
+plan 20261024_02, decisions 6 and 7: "a patch release"): a new method and
+an appended, serde-defaulted field (plan 20261024_02, step 2):
+
+- **Added:**
+  - `common::methods::LINK_UNPAIR` (`link.unpair`), with
+    `common::LinkUnpairParams` and `common::LinkUnpairResult`, both `{}`:
+    over a paired link, the daemon forgets the calling device and closes
+    the link;
+  - `common::ClientOptionsParams::general_agent`, true when left out:
+    while false, the daemon starts no Gemini turn for the client.
+- **Changed:** `ClientOptionsParams::default()` has `general_agent: true`;
+  the other options still default to off.
