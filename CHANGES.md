@@ -2205,3 +2205,33 @@ at the bottom included. It now folds only while the view is scrolled back or
 the scrollbar is held (`AgentScreen::compact`), so a pull past the end, which
 keeps the view at the bottom, leaves it whole. An expanded card still never
 folds (the entry before).
+
+## 2026-10-24 16:19 EDT — session colours and other sessions' cards (plan 20261022_03 L3): departures
+
+Built in the handlr-companion and companion commits before this entry,
+rebased over the pull-to-refresh change.
+1. **Turn length:** `agents.list`'s `Turn` has no times. When a used, unviewed
+   session stops, the client peeks it (200 entries) and measures from the
+   user's last prompt to the last entry. With no prompt among those entries,
+   it measures from the oldest, a lower bound.
+2. **The list is polled while an agent view is open,** every 15 s, but only
+   while another session used within the hour is watched. This departs from
+   plan 20261023_04's decision 6, which listed only on the overview.
+3. **A ding fix:** a list taken while a view is open doesn't ding that view's
+   own agent, which dings its own Finished card.
+4. **Finished cards use the overview's turn line** (`Turn::Stopped.line`), not
+   the daemon's summary, which isn't sent for a session the phone isn't
+   subscribed to.
+5. **"Approval"** is a handlr confirmation waiting for that pane, and its text
+   is the command.
+6. **Opening a session clears its cards.** A swiped question or approval stays
+   away until what is asked changes.
+7. **In Settings,** the card sits over the bottom of the screen; the content
+   doesn't make room for it.
+8. **Interactions are keyed by pane.** Another session id in the pane doesn't
+   count as used. A shell with no session takes its colour from its pane id.
+9. **No version bump** for handlr-companion's new `Event::SessionCards` and
+   `Input::DismissCard`, as with earlier additions.
+10. **Session colours:** an FNV-1a hash of the session id picks one of 16
+    colours, 8 hues each with a light and a dark variant. Each theme tunes its
+    own, and band text is black or white by contrast (tested at 3:1 or more).
