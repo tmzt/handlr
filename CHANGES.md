@@ -2135,3 +2135,18 @@ libmorph offers a way":
 libmorph is asked to include this with its dark mode plans rather than later.
 Until it has the call, handlr builds the colours behind a seam that does
 nothing, with a TODO naming that request.
+
+## 2026-10-24 15:37 EDT — plan 20261024_05: a theme's missing roles come from the light or dark default
+
+The owner (2026-10-24): "a specific theme should fall back to light/dark
+defaults for missing keys". This replaces, in decision 2 and the amendment's
+item 1, "every role is present" for every theme:
+- **The defaults:** the first `dark = true` theme in the shipped file
+  (*Dark (gray)*) and the first `dark = false` one (*Light (black text)*). These
+  two must define every role, and `build.rs` checks that.
+- **Every other theme,** shipped or in the user's `themes.toml`, may leave roles
+  out. Each missing role takes the value from the default of its own kind, by
+  its `dark` flag. A theme without `dark` is an error: the build fails for a
+  shipped one, and a user one is skipped and logged.
+- **The build still fails** for a value that isn't a colour, an unknown role
+  name, or a repeated id.
