@@ -23,13 +23,18 @@ pub const TOTAL_MAX: usize = 12 * 1024;
 /// The section's heading and what it is.
 pub const HEADING: &str = "### Agent sessions\n\
 From each agent's own transcript, oldest first; secrets are redacted. \
-A pending question is what the agent is waiting for the user to answer.\n";
+A pending question is what the agent is waiting for the user to answer. \
+Lines marked task, peer:<name>, agent:<id>, recap or compact are context \
+the agent was given (a finished task, another session's or a subagent's \
+message, a recap, a compaction), not the user speaking.\n";
 
 /// One text entry, redacted and cut.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Line {
     ts: String,
     role: Role,
+    /// The entry's origin, for context (`Item::origin`).
+    origin: Option<String>,
     text: String,
 }
 
@@ -73,6 +78,7 @@ impl AgentContext {
             .map(|&n| Line {
                 ts: items[n].ts.clone(),
                 role: items[n].role,
+                origin: items[n].origin.clone(),
                 text: cut(&redact(&items[n].text), ENTRY_MAX),
             })
             .collect();
@@ -105,10 +111,11 @@ impl AgentContext {
             out.push_str("(no recent messages)\n");
         }
         for line in &self.lines {
-            let who = match line.role {
-                Role::User => "user",
-                Role::Assistant => "agent",
-                Role::Tool => "tool",
+            let who = match (&line.origin, line.role) {
+                (Some(origin), _) => origin.as_str(),
+                (None, Role::User) => "user",
+                (None, Role::Assistant) => "agent",
+                (None, Role::Tool) => "tool",
             };
             let text = line.text.replace('\n', "\n  ");
             out.push_str(&format!("- {who} [{}]: {text}\n", line.ts));
@@ -171,6 +178,7 @@ mod tests {
             tool: (kind != EntryKind::Text).then(|| "Bash".to_string()),
             text: text.to_string(),
             call_id: None,
+            origin: None,
         }
     }
 
@@ -204,6 +212,23 @@ mod tests {
         assert!(text.contains("- user [2026-01-01T00:002:00Z]: ask 2"));
         assert!(text.contains("(3 tool calls in between)"));
         assert!(text.contains("- agent [2026-01-01T00:004:00Z]: reply 4 yyyyyyyyyy\n"));
+    }
+
+    #[test]
+    fn context_entries_are_marked_by_their_origin_not_as_the_user() {
+        let mut task = item(Role::User, EntryKind::Text, "t1", "Build finished");
+        task.origin = Some("task".to_string());
+        let mut peer = item(Role::User, EntryKind::Text, "t2", "Rebased on main");
+        peer.origin = Some("peer:alpha".to_string());
+        let items = vec![item(Role::User, EntryKind::Text, "t0", "go"), task, peer];
+        let text = AgentContext::new("Claude", "p1", "idle", &items, None).render();
+        assert!(text.contains("- user [t0]: go\n"), "{text}");
+        assert!(text.contains("- task [t1]: Build finished\n"), "{text}");
+        assert!(
+            text.contains("- peer:alpha [t2]: Rebased on main\n"),
+            "{text}"
+        );
+        assert!(HEADING.contains("not the user speaking"));
     }
 
     #[test]

@@ -179,6 +179,7 @@ impl SessionReader for Codex {
                     tool: None,
                     text: cut(&text, TEXT_MAX),
                     call_id: None,
+                    origin: None,
                 }
             }
             Some("function_call") | Some("custom_tool_call") | Some("local_shell_call") => {
@@ -198,6 +199,7 @@ impl SessionReader for Codex {
                     tool: Some(name.clone()),
                     text: cut(&format!("{name} {input}"), TOOL_TEXT_MAX),
                     call_id,
+                    origin: None,
                 }
             }
             Some("function_call_output") | Some("custom_tool_call_output") => {
@@ -219,6 +221,7 @@ impl SessionReader for Codex {
                     tool: None,
                     text: cut(&text, TOOL_TEXT_MAX),
                     call_id,
+                    origin: None,
                 }
             }
             // reasoning, and anything new.

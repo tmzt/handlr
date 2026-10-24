@@ -3,11 +3,19 @@
 //!
 //! One JSON object per line. `user` and `assistant` lines carry
 //! `message.content`, a string or a list of `text`, `thinking`,
-//! `tool_use` and `tool_result` blocks; every other `type` is bookkeeping.
-//! Lines from subagents (`isSidechain`), injected context (`isMeta`),
-//! compaction summaries and task notifications are not the conversation
-//! and are skipped, as is user text that is only a harness tag such as
-//! `<command-name>…</command-name>`.
+//! `tool_use` and `tool_result` blocks. What the user types while the
+//! agent works is an `attachment` of type `queued_command`. Lines from
+//! subagents (`isSidechain`), injected context (`isMeta`) and compaction
+//! summaries are not the conversation and are skipped, as is user text
+//! that is only a harness tag such as `<command-name>…</command-name>`.
+//!
+//! What the terminal shows as context is read as user text entries with
+//! an `origin` (the 2026-10-23 22:31 EDT addendum to `CHANGES.md`): task
+//! notifications (`task`), other sessions' messages (`peer:<name>`),
+//! subagents' hand-backs (`agent:<id>`), recaps (`system` `away_summary`,
+//! `recap`) and compactions (`compact_boundary`, `compact`). Every other
+//! `type` is bookkeeping, and [`is_bookkeeping`] knows most of it from a
+//! line's first bytes.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -137,24 +145,16 @@ impl SessionReader for ClaudeCode {
         })
     }
 
+    fn is_bookkeeping(&self, line: &[u8]) -> bool {
+        is_bookkeeping(line)
+    }
+
     fn parse_line(&self, line: &str) -> Vec<Item> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
-        let role = match v.get("type").and_then(|t| t.as_str()) {
-            Some("user") => Role::User,
-            Some("assistant") => Role::Assistant,
-            _ => return Vec::new(),
-        };
         let flag = |k: &str| v.get(k).and_then(|f| f.as_bool()) == Some(true);
-        if flag("isSidechain") || flag("isMeta") || flag("isCompactSummary") {
-            return Vec::new();
-        }
-        let origin = v
-            .get("origin")
-            .and_then(|o| o.get("kind"))
-            .and_then(|k| k.as_str());
-        if origin == Some("task-notification") {
+        if flag("isSidechain") {
             return Vec::new();
         }
         let ts = v
@@ -162,9 +162,32 @@ impl SessionReader for ClaudeCode {
             .and_then(|t| t.as_str())
             .unwrap_or_default()
             .to_string();
+        let role = match v.get("type").and_then(|t| t.as_str()) {
+            Some("user") => Role::User,
+            Some("assistant") => Role::Assistant,
+            Some("attachment") => return queued_item(&v, &ts).into_iter().collect(),
+            Some("system") => return system_item(&v, &ts).into_iter().collect(),
+            _ => return Vec::new(),
+        };
         let Some(content) = v.get("message").and_then(|m| m.get("content")) else {
             return Vec::new();
         };
+        // A task notification or a peer's message delivered as a user line
+        // (a peer's is also `isMeta`): context, not the user.
+        let origin = v.get("origin");
+        if role == Role::User
+            && let Some(kind) = origin
+                .and_then(|o| o.get("kind"))
+                .and_then(|k| k.as_str())
+                .filter(|k| matches!(*k, "task-notification" | "peer"))
+        {
+            return context_item(kind, origin, &content_text(content), &ts)
+                .into_iter()
+                .collect();
+        }
+        if flag("isMeta") || flag("isCompactSummary") {
+            return Vec::new();
+        }
         let text_item = |text: &str| -> Option<Item> {
             let text = text.trim();
             if text.is_empty() || (role == Role::User && is_harness_text(text)) {
@@ -177,6 +200,7 @@ impl SessionReader for ClaudeCode {
                 tool: None,
                 text: cut(text, TEXT_MAX),
                 call_id: None,
+                origin: None,
             })
         };
         match content {
@@ -195,6 +219,7 @@ impl SessionReader for ClaudeCode {
                             tool: Some(name.to_string()),
                             text: cut(&format!("{name} {input}"), TOOL_TEXT_MAX),
                             call_id: b.get("id").and_then(|i| i.as_str()).map(str::to_string),
+                            origin: None,
                         })
                     }
                     Some("tool_result") => {
@@ -215,6 +240,7 @@ impl SessionReader for ClaudeCode {
                                 .get("tool_use_id")
                                 .and_then(|i| i.as_str())
                                 .map(str::to_string),
+                            origin: None,
                         })
                     }
                     // thinking, redacted_thinking, images and anything new.
@@ -224,6 +250,207 @@ impl SessionReader for ClaudeCode {
             _ => Vec::new(),
         }
     }
+}
+
+/// The longest text of an entry that is context (a notification, a
+/// peer's message, a recap), in characters.
+pub(crate) const NOTICE_MAX: usize = 300;
+
+/// How much of a line's start [`is_bookkeeping`] looks at.
+const BOOKKEEPING_HEAD: usize = 256;
+
+/// The lines no entry comes from, known from their first bytes: a line
+/// that starts with a `type` other than the conversation's
+/// (`api-request-blob`, `file-history-snapshot`, `mode`, `ai-title` and
+/// the like are written with `type` first; the conversation's lines start
+/// with `parentUuid`), and an attachment other than a queued command
+/// (`"attachment":{"type":"…"` comes before the line's own `type`).
+pub(crate) fn is_bookkeeping(line: &[u8]) -> bool {
+    const TYPE_FIRST: &[u8] = b"{\"type\":\"";
+    const ATTACHMENT: &[u8] = b"\"attachment\":{\"type\":\"";
+    let head = &line[..line.len().min(BOOKKEEPING_HEAD)];
+    if let Some(rest) = head.strip_prefix(TYPE_FIRST) {
+        return !["user\"", "assistant\"", "system\"", "attachment\""]
+            .iter()
+            .any(|t| rest.starts_with(t.as_bytes()));
+    }
+    head.windows(ATTACHMENT.len())
+        .position(|w| w == ATTACHMENT)
+        .is_some_and(|at| !head[at + ATTACHMENT.len()..].starts_with(b"queued_command\""))
+}
+
+/// A message `content`'s text: a string, or its text blocks joined.
+fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// A command queued while the agent worked (an `attachment` of type
+/// `queued_command`): what the user typed, a task notification, or a
+/// peer's message. Other attachments give nothing.
+fn queued_item(v: &Value, line_ts: &str) -> Option<Item> {
+    let a = v.get("attachment")?;
+    if a.get("type").and_then(|t| t.as_str()) != Some("queued_command") {
+        return None;
+    }
+    let ts = a
+        .get("timestamp")
+        .and_then(|t| t.as_str())
+        .unwrap_or(line_ts);
+    let text = a.get("prompt").map(content_text).unwrap_or_default();
+    let origin = a.get("origin");
+    let kind = origin
+        .and_then(|o| o.get("kind"))
+        .and_then(|k| k.as_str())
+        .unwrap_or("human");
+    if a.get("commandMode").and_then(|m| m.as_str()) == Some("task-notification") {
+        return context_item("task-notification", origin, &text, ts);
+    }
+    if kind != "human" {
+        return context_item(kind, origin, &text, ts);
+    }
+    let text = text.trim();
+    if text.is_empty() || is_harness_text(text) {
+        return None;
+    }
+    Some(Item {
+        ts: ts.to_string(),
+        role: Role::User,
+        kind: EntryKind::Text,
+        tool: None,
+        text: cut(text, TEXT_MAX),
+        call_id: None,
+        origin: None,
+    })
+}
+
+/// A `system` line the terminal shows: a recap (`away_summary`) or a
+/// compaction (`compact_boundary`, and the `informational` notice about
+/// one). Others (`turn_duration` and the like) give nothing.
+fn system_item(v: &Value, ts: &str) -> Option<Item> {
+    let content = v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .trim();
+    let origin = match v.get("subtype").and_then(|s| s.as_str())? {
+        "away_summary" if !content.is_empty() => "recap",
+        "compact_boundary" => "compact",
+        "informational" if content.to_lowercase().contains("compact") => "compact",
+        _ => return None,
+    };
+    let text = match (origin, content) {
+        ("compact", "") => "Conversation compacted",
+        (_, text) => text,
+    };
+    notice(ts, origin.to_string(), text)
+}
+
+/// The entry for context the harness gave the agent, by its origin's
+/// `kind`: a task notification (`task-notification`), or a subagent's
+/// hand-back or another session's message (`peer`). `None` for any other
+/// kind.
+fn context_item(kind: &str, origin: Option<&Value>, text: &str, ts: &str) -> Option<Item> {
+    match kind {
+        "task-notification" => notice(ts, "task".to_string(), &task_summary(text)),
+        "peer" => {
+            let field = |k: &str| {
+                origin
+                    .and_then(|o| o.get(k))
+                    .and_then(|f| f.as_str())
+                    .filter(|f| !f.is_empty())
+            };
+            if let Some((attrs, body)) = element(text, "agent-message") {
+                let id = attr(attrs, "from").or_else(|| field("from")).unwrap_or("?");
+                let body = match body.split_once("The report follows:") {
+                    Some((_, report)) => report,
+                    None => body.trim_start().trim_start_matches("[Subagent hand-back]"),
+                };
+                return notice(ts, format!("agent:{id}"), body);
+            }
+            let (from, body) = match element(text, "cross-session-message") {
+                Some((attrs, body)) => (
+                    attr(attrs, "from-name")
+                        .or_else(|| attr(attrs, "from"))
+                        .or_else(|| field("name"))
+                        .or_else(|| field("from")),
+                    body,
+                ),
+                None => (field("name").or_else(|| field("from")), text),
+            };
+            notice(ts, format!("peer:{}", from.unwrap_or("?")), body)
+        }
+        _ => None,
+    }
+}
+
+/// A user text entry that is context from `origin`: `text` from its first
+/// line that is not blank, cut to [`NOTICE_MAX`]. `None` when it is blank.
+fn notice(ts: &str, origin: String, text: &str) -> Option<Item> {
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(Item {
+        ts: ts.to_string(),
+        role: Role::User,
+        kind: EntryKind::Text,
+        tool: None,
+        text: cut(text, NOTICE_MAX),
+        call_id: None,
+        origin: Some(origin),
+    })
+}
+
+/// A task notification's `<summary>`, else its first line that is not a
+/// tag.
+fn task_summary(text: &str) -> String {
+    if let Some((_, summary)) = element(text, "summary")
+        && !summary.trim().is_empty()
+    {
+        return summary.trim().to_string();
+    }
+    text.lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with('<'))
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The first `<name …>…</name>` element in `text`: its attributes and its
+/// body. An element left open runs to the end of `text`.
+fn element<'a>(text: &'a str, name: &str) -> Option<(&'a str, &'a str)> {
+    let open = format!("<{name}");
+    let mut from = 0;
+    let start = loop {
+        let at = from + text[from..].find(&open)?;
+        from = at + open.len();
+        if text[from..].starts_with(['>', ' ', '\n', '\t']) {
+            break from;
+        }
+    };
+    let tag_end = start + text[start..].find('>')?;
+    let attrs = &text[start..tag_end];
+    let body = &text[tag_end + 1..];
+    let close = format!("</{name}>");
+    let body = body.find(&close).map_or(body, |end| &body[..end]);
+    Some((attrs, body))
+}
+
+/// An attribute's value in `attrs` (`name="value"`), when not empty.
+fn attr<'a>(attrs: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!(" {name}=\"");
+    let at = attrs.find(&key)? + key.len();
+    let end = attrs[at..].find('"')?;
+    Some(&attrs[at..at + end]).filter(|v| !v.is_empty())
 }
 
 /// A tool result's text: a string, or its text blocks joined, with other
@@ -358,6 +585,167 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    fn with_origin(items: &[Item]) -> Vec<(Option<&str>, &str, &str)> {
+        items
+            .iter()
+            .map(|i| (i.origin.as_deref(), i.ts.as_str(), i.text.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn queued_messages_notifications_peers_recaps_and_compactions_are_read() {
+        let path = fixture("claude_context.jsonl");
+        let items = reader().tail(&path, 50).unwrap();
+        assert!(items.iter().all(|i| i.kind == EntryKind::Text));
+        assert_eq!(
+            with_origin(&items),
+            vec![
+                (None, "2026-01-05T09:00:00.000Z", "Start the example build."),
+                (
+                    None,
+                    "2026-01-05T09:00:01.000Z",
+                    "Starting the build in the background."
+                ),
+                // Typed while the agent worked, at the attachment's time.
+                (
+                    None,
+                    "2026-01-05T09:00:02.000Z",
+                    "Also update the changelog, please."
+                ),
+                (
+                    Some("task"),
+                    "2026-01-05T09:00:04.000Z",
+                    "Background command \"Build the example\" completed (exit code 0)"
+                ),
+                (
+                    Some("task"),
+                    "2026-01-05T09:00:05.000Z",
+                    "Agent \"Check the example docs\" finished"
+                ),
+                (
+                    Some("peer:docs-writer"),
+                    "2026-01-05T09:00:06.000Z",
+                    "The example guide is rebased on main.\n\nNothing else changed."
+                ),
+                (
+                    Some("agent:a0123456789abcdef"),
+                    "2026-01-05T09:00:07.000Z",
+                    "Added the greeting and its test.\n  Both pass."
+                ),
+                (
+                    Some("recap"),
+                    "2026-01-05T09:00:09.000Z",
+                    "You asked for the example build; it passed and the changelog is next."
+                ),
+                (
+                    Some("compact"),
+                    "2026-01-05T09:00:10.000Z",
+                    "Conversation compacted"
+                ),
+                (None, "2026-01-05T09:00:14.000Z", "Done. Shall I push?"),
+            ]
+        );
+        let roles: Vec<Role> = items.iter().map(|i| i.role).collect();
+        assert_eq!(roles[1], Role::Assistant);
+        assert_eq!(roles[9], Role::Assistant);
+        assert!(
+            roles[2..9].iter().all(|r| *r == Role::User),
+            "context entries are user entries"
+        );
+        // The origin reaches the client.
+        assert_eq!(items[5].entry().origin.as_deref(), Some("peer:docs-writer"));
+        assert_eq!(items[2].entry().origin, None);
+    }
+
+    #[test]
+    fn context_text_is_cut_and_redacted() {
+        let key = "AIzaSyD0nTuSeTh1sFakeKeyAbCdEfGhIjKlMn";
+        let prompt = format!(
+            "<cross-session-message from=\"x\">\n\nUse {key} now. {}\n</cross-session-message>",
+            "w".repeat(400)
+        );
+        let line = serde_json::json!({
+            "parentUuid": "u",
+            "isSidechain": false,
+            "attachment": {
+                "type": "queued_command",
+                "prompt": prompt,
+                "commandMode": "prompt",
+                "origin": {"kind": "peer"},
+                "timestamp": "t"
+            },
+            "type": "attachment"
+        });
+        let items = reader().parse_line(&line.to_string());
+        assert_eq!(items.len(), 1);
+        // No from-name: the from id names the peer.
+        assert_eq!(items[0].origin.as_deref(), Some("peer:x"));
+        assert!(items[0].text.starts_with("Use "));
+        assert_eq!(items[0].text.chars().count(), NOTICE_MAX);
+        let entry = items[0].entry();
+        assert!(!entry.summary.contains(key), "{}", entry.summary);
+        // A notification with no summary falls back to its first plain line.
+        assert_eq!(
+            task_summary("<task-notification>\n<status>x</status>\nIt ended.\n"),
+            "It ended."
+        );
+        assert_eq!(task_summary("<task-notification></task-notification>"), "");
+    }
+
+    #[test]
+    fn bookkeeping_is_known_from_the_first_bytes() {
+        for line in [
+            r#"{"type":"api-request-blob","sessionId":"s","hash":"h"}"#,
+            r#"{"type":"file-history-snapshot","messageId":"m"}"#,
+            r#"{"type":"mode","mode":"normal"}"#,
+            r#"{"type":"queue-operation","operation":"enqueue"}"#,
+            r#"{"type":"ai-title","aiTitle":"x"}"#,
+            r#"{"parentUuid":"u","isSidechain":false,"attachment":{"type":"total_tokens_reminder"},"type":"attachment"}"#,
+        ] {
+            assert!(is_bookkeeping(line.as_bytes()), "{line}");
+        }
+        for line in [
+            r#"{"parentUuid":"u","isSidechain":false,"promptId":"p","type":"user"}"#,
+            r#"{"parentUuid":"u","isSidechain":false,"attachment":{"type":"queued_command","prompt":"x"},"type":"attachment"}"#,
+            r#"{"parentUuid":"u","isSidechain":false,"type":"system","subtype":"away_summary"}"#,
+            r#"{"type":"user","message":{"content":"older files start with type"}}"#,
+            r#"{"type":"assistant","message":{"content":"x"}}"#,
+            "not json",
+        ] {
+            assert!(!is_bookkeeping(line.as_bytes()), "{line}");
+        }
+    }
+
+    #[test]
+    fn padding_with_large_bookkeeping_lines_changes_nothing() {
+        // The context fixture with 1.5 MiB of blob and attachment lines after
+        // each of its lines (27 MiB): far past the 2 MiB budget if they counted.
+        let plain = std::fs::read_to_string(fixture("claude_context.jsonl")).unwrap();
+        let blob = format!(
+            "{{\"type\":\"api-request-blob\",\"sessionId\":\"s\",\"hash\":\"h\",\"message\":{{\"content\":\"{}\"}}}}\n",
+            "b".repeat(1024 * 1024)
+        );
+        let reminder = format!(
+            "{{\"parentUuid\":\"u\",\"isSidechain\":false,\"attachment\":{{\"type\":\"deferred_tools_record\",\"text\":\"{}\"}},\"type\":\"attachment\"}}\n",
+            "r".repeat(512 * 1024)
+        );
+        let mut padded = String::new();
+        for line in plain.lines() {
+            padded.push_str(line);
+            padded.push('\n');
+            padded.push_str(&blob);
+            padded.push_str(&reminder);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("padded.jsonl");
+        std::fs::write(&path, &padded).unwrap();
+        assert!(padded.len() > 16 * 1024 * 1024);
+        let r = reader();
+        let want = r.tail(&fixture("claude_context.jsonl"), 200).unwrap();
+        assert_eq!(want.len(), 10);
+        assert_eq!(r.tail(&path, 200).unwrap(), want);
     }
 
     #[test]

@@ -3,13 +3,15 @@
 //! The final paragraph of the agent's last assistant `Text` entry is its
 //! pending question when:
 //! - the paragraph ends with `?`, or has a line that does;
-//! - no user entry follows that entry; and
+//! - no user entry follows that entry (an entry with an `origin`, such as
+//!   a task notification or a recap, is context, not the user answering);
+//!   and
 //! - the pane's `agent_status` is `idle`, `blocked` or `done` (herdr marks a
 //!   pane `done` when its agent has finished a turn the user has not yet
 //!   looked at, which is when a question asked at the end of a task waits);
 //!   or, whatever herdr says, the turn has visibly ended: that reply is the
-//!   session's last entry and the file has been quiet for [`TURN_QUIET`]
-//!   (herdr reports a Claude Code pane `working` while a background agent
+//!   session's last entry but for context and the file has been quiet for
+//!   [`TURN_QUIET`] (herdr reports a Claude Code pane `working` while a background agent
 //!   of its runs, after its turn has ended).
 //!
 //! The question is redacted, then cut to `PENDING_QUESTION_MAX`
@@ -40,11 +42,14 @@ pub fn pending_question(
         status,
         AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Done
     );
-    let ended = quiet && last + 1 == items.len();
+    // Context (a notification, a recap) after the reply neither answers
+    // it nor means the agent went on.
+    let after = &items[last + 1..];
+    let ended = quiet && after.iter().all(|i| i.origin.is_some());
     if !waiting && !ended {
         return None;
     }
-    if items[last + 1..].iter().any(|i| i.role == Role::User) {
+    if after.iter().any(Item::is_user_said) {
         return None;
     }
     let paragraph = final_paragraph(&items[last].text)?;
@@ -106,6 +111,7 @@ mod tests {
             tool: None,
             text: text.to_string(),
             call_id: None,
+            origin: None,
         }
     }
 
@@ -117,6 +123,7 @@ mod tests {
             tool: Some("Bash".to_string()),
             text: "Bash {}".to_string(),
             call_id: None,
+            origin: None,
         }
     }
 
@@ -152,6 +159,51 @@ mod tests {
         assert!(pending_question(&items, &AgentStatus::Idle, false).is_some());
         items.push(text(Role::User, "t3", "yes"));
         assert_eq!(pending_question(&items, &AgentStatus::Idle, false), None);
+    }
+
+    #[test]
+    fn context_after_the_question_does_not_answer_it() {
+        let mut items = vec![
+            text(Role::User, "t1", "do it"),
+            text(Role::Assistant, "t2", "Done.\n\nShall I push?"),
+        ];
+        for origin in ["task", "peer:docs-writer", "agent:a1", "recap", "compact"] {
+            let mut notice = text(Role::User, "t3", "Build finished?");
+            notice.origin = Some(origin.to_string());
+            items.push(notice);
+        }
+        assert_eq!(
+            pending_question(&items, &AgentStatus::Idle, false)
+                .unwrap()
+                .text,
+            "Shall I push?"
+        );
+        // Quiet with only context after the reply: the turn has ended.
+        assert!(pending_question(&items, &AgentStatus::Working, true).is_some());
+        // The user's own words answer it.
+        items.push(text(Role::User, "t4", "yes"));
+        assert_eq!(pending_question(&items, &AgentStatus::Idle, false), None);
+    }
+
+    #[test]
+    fn a_task_notification_read_from_the_file_leaves_the_question_pending() {
+        // The context fixture ends on a question; put a queued notification
+        // after it.
+        let mut body = std::fs::read_to_string(fixture("claude_context.jsonl")).unwrap();
+        body.push_str(concat!(
+            r#"{"parentUuid":"u","isSidechain":false,"attachment":{"type":"queued_command","#,
+            r#""prompt":"<task-notification>\n<summary>Tests passed</summary>\n</task-notification>","#,
+            r#""commandMode":"task-notification","origin":{"kind":"task-notification"},"#,
+            r#""timestamp":"2026-01-05T09:00:20.000Z"},"type":"attachment"}"#,
+            "\n"
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.jsonl");
+        std::fs::write(&path, body).unwrap();
+        let items = ClaudeCode::new(fixture("x")).tail(&path, 50).unwrap();
+        assert_eq!(items.last().unwrap().origin.as_deref(), Some("task"));
+        let q = pending_question(&items, &AgentStatus::Idle, false).unwrap();
+        assert_eq!(q.text, "Done. Shall I push?");
     }
 
     #[test]

@@ -32,8 +32,11 @@ use crate::core::agents::AgentRef;
 
 /// How much of a file `tail` reads at a time, from the end.
 pub const TAIL_CHUNK: u64 = 256 * 1024;
-/// The most of a file `tail` reads.
+/// The most conversation `tail` reads: the bytes of the lines that are
+/// not bookkeeping ([`SessionReader::is_bookkeeping`]).
 pub const TAIL_MAX: u64 = 2 * 1024 * 1024;
+/// The most of a file `tail` reads, bookkeeping and all.
+pub const TAIL_READ_MAX: u64 = 32 * 1024 * 1024;
 /// A tool call's or result's text is kept to this many characters as it is
 /// read; summaries are cut further after redaction.
 pub(crate) const TOOL_TEXT_MAX: usize = 4000;
@@ -53,6 +56,11 @@ pub struct Item {
     pub text: String,
     /// The id linking a tool call and its result.
     pub call_id: Option<String>,
+    /// Where an entry that is context, not the user's own words nor the
+    /// agent's, comes from (`Entry::origin`): `task`, `peer:<name>`,
+    /// `agent:<id>`, `recap` or `compact`. Such an entry is never the
+    /// user speaking.
+    pub origin: Option<String>,
 }
 
 impl Item {
@@ -65,7 +73,14 @@ impl Item {
             tool: self.tool.clone(),
             summary: cut(&redact::redact(&self.text), ENTRY_SUMMARY_MAX),
             links: Vec::new(),
+            origin: self.origin.clone(),
         }
+    }
+
+    /// Whether this is the user's own words: a user text entry with no
+    /// origin.
+    pub fn is_user_said(&self) -> bool {
+        self.role == Role::User && self.kind == EntryKind::Text && self.origin.is_none()
     }
 
     pub fn is_text(&self) -> bool {
@@ -131,6 +146,13 @@ pub trait SessionReader: Send + Sync {
     /// The entries one line holds. Unknown and malformed lines give none.
     fn parse_line(&self, line: &str) -> Vec<Item>;
 
+    /// Whether a line is bookkeeping that holds no entry, known cheaply
+    /// from its first bytes: such a line is neither parsed nor counted
+    /// toward `TAIL_MAX`. `false` unless the reader knows its format's.
+    fn is_bookkeeping(&self, _line: &[u8]) -> bool {
+        false
+    }
+
     /// The last `n` entries of the file at `path`.
     fn tail(&self, path: &Path, n: usize) -> Result<Vec<Item>, String> {
         let mut items = read_tail(self, path, |items| items.len() >= n)?.items;
@@ -151,8 +173,10 @@ pub struct Tail {
 
 /// Read entries from the end of the file at `path`: its last `TAIL_CHUNK`
 /// bytes, then `TAIL_CHUNK` more at a time until `enough` holds, the file's
-/// start is reached, or `TAIL_MAX` bytes have been read. Only whole lines
-/// are parsed.
+/// start is reached, `TAIL_MAX` bytes of conversation have been read, or
+/// `TAIL_READ_MAX` bytes in all. Lines the reader knows as bookkeeping are
+/// neither parsed nor counted as conversation. Only whole lines are
+/// parsed, each once.
 pub fn read_tail<R: SessionReader + ?Sized>(
     reader: &R,
     path: &Path,
@@ -164,20 +188,40 @@ pub fn read_tail<R: SessionReader + ?Sized>(
         .map_err(|e| format!("stat {}: {e}", path.display()))?
         .len();
     let mut start = len;
-    let mut window: Vec<u8> = Vec::new();
+    // The start of a line cut at `start`, not yet parsed.
+    let mut carry: Vec<u8> = Vec::new();
+    let mut items: Vec<Item> = Vec::new();
+    let mut conversation: u64 = 0;
     loop {
         let next = start
             .saturating_sub(TAIL_CHUNK)
-            .max(len.saturating_sub(TAIL_MAX));
+            .max(len.saturating_sub(TAIL_READ_MAX));
         let mut chunk = vec![0u8; (start - next) as usize];
         file.seek(SeekFrom::Start(next))
             .and_then(|_| file.read_exact(&mut chunk))
             .map_err(|e| format!("read {}: {e}", path.display()))?;
-        chunk.extend_from_slice(&window);
-        window = chunk;
+        chunk.extend_from_slice(&carry);
         start = next;
-        let items = parse_window(reader, &window, start > 0);
-        let at_limit = start == 0 || len - start >= TAIL_MAX;
+        // Whole lines: all of it at the file's start, else what follows
+        // its first line break.
+        let whole = if start == 0 {
+            0
+        } else {
+            chunk
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(chunk.len(), |i| i + 1)
+        };
+        let (mut fresh, bytes) = parse_lines(reader, &chunk[whole..]);
+        chunk.truncate(whole);
+        carry = chunk;
+        conversation += bytes;
+        if !fresh.is_empty() {
+            fresh.append(&mut items);
+            items = fresh;
+            link_results(&mut items);
+        }
+        let at_limit = start == 0 || conversation >= TAIL_MAX || len - start >= TAIL_READ_MAX;
         if at_limit || enough(&items) {
             return Ok(Tail {
                 items,
@@ -187,25 +231,20 @@ pub fn read_tail<R: SessionReader + ?Sized>(
     }
 }
 
-/// The entries in `window`'s whole lines. When `partial_first`, the first
-/// line was cut by the window and is skipped.
-fn parse_window<R: SessionReader + ?Sized>(
-    reader: &R,
-    window: &[u8],
-    partial_first: bool,
-) -> Vec<Item> {
-    let text = String::from_utf8_lossy(window);
-    let mut lines = text.split('\n');
-    if partial_first {
-        lines.next();
-    }
-    let mut items: Vec<Item> = lines
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .flat_map(|l| reader.parse_line(l))
+/// The entries in `bytes`' lines, and how many bytes of them are
+/// conversation (not bookkeeping).
+fn parse_lines<R: SessionReader + ?Sized>(reader: &R, bytes: &[u8]) -> (Vec<Item>, u64) {
+    let mut conversation = 0u64;
+    let items = bytes
+        .split(|&b| b == b'\n')
+        .map(<[u8]>::trim_ascii)
+        .filter(|l| !l.is_empty() && !reader.is_bookkeeping(l))
+        .flat_map(|l| {
+            conversation += l.len() as u64 + 1;
+            reader.parse_line(&String::from_utf8_lossy(l))
+        })
         .collect();
-    link_results(&mut items);
-    items
+    (items, conversation)
 }
 
 /// Give each tool result its call's tool name, and redact a result whose
@@ -511,12 +550,12 @@ mod tests {
     }
 
     #[test]
-    fn reading_back_stops_at_two_mebibytes() {
-        // Lines no reader knows: nothing is ever enough.
+    fn reading_back_stops_at_two_mebibytes_of_conversation() {
+        // Conversation lines that give no entry: nothing is ever enough.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("noise.jsonl");
         let line = format!(
-            "{{\"type\":\"progress\",\"data\":\"{}\"}}\n",
+            "{{\"parentUuid\":\"u\",\"isSidechain\":false,\"type\":\"user\",\"isMeta\":true,\"message\":{{\"content\":\"{}\"}}}}\n",
             "z".repeat(1000)
         );
         let body = line.repeat(5 * 1024);
@@ -524,6 +563,50 @@ mod tests {
         let reader = claude::ClaudeCode::new(dir.path().to_path_buf());
         let tail = read_tail(&reader, &path, |_| false).unwrap();
         assert!(tail.items.is_empty());
-        assert_eq!(tail.bytes_read, TAIL_MAX);
+        assert!(
+            (TAIL_MAX..=TAIL_MAX + TAIL_CHUNK).contains(&tail.bytes_read),
+            "read {}",
+            tail.bytes_read
+        );
+    }
+
+    #[test]
+    fn bookkeeping_does_not_count_but_reading_stops_at_thirty_two_mebibytes() {
+        // Two replies, then 40 MiB of blob lines.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blobs.jsonl");
+        let mut file = std::io::BufWriter::new(File::create(&path).unwrap());
+        for i in 0..2 {
+            writeln!(
+                file,
+                "{{\"parentUuid\":\"u\",\"isSidechain\":false,\"message\":{{\"content\":\"reply {i}\"}},\"type\":\"assistant\",\"timestamp\":\"t{i}\"}}"
+            )
+            .unwrap();
+        }
+        let blob = format!(
+            "{{\"type\":\"api-request-blob\",\"hash\":\"h\",\"message\":\"{}\"}}\n",
+            "b".repeat(64 * 1024)
+        );
+        let mut written = 0usize;
+        while written < 40 * 1024 * 1024 {
+            file.write_all(blob.as_bytes()).unwrap();
+            written += blob.len();
+        }
+        drop(file);
+        let reader = claude::ClaudeCode::new(dir.path().to_path_buf());
+        let tail = read_tail(&reader, &path, |_| false).unwrap();
+        assert!(tail.items.is_empty(), "the replies are past the cap");
+        assert_eq!(tail.bytes_read, TAIL_READ_MAX);
+        // 20 MiB of blobs: read through to the replies.
+        let short = dir.path().join("short.jsonl");
+        let body = std::fs::read(&path).unwrap();
+        std::fs::write(&short, &body[..20 * 1024 * 1024 + 300]).unwrap();
+        let texts: Vec<String> = reader
+            .tail(&short, 5)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.text)
+            .collect();
+        assert_eq!(texts, ["reply 0", "reply 1"]);
     }
 }

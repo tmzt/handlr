@@ -7,9 +7,10 @@
 //! - **asking** when the session has a pending question
 //!   ([`pending::pending_question`]);
 //! - **stopped** when the turn has visibly ended (the last entry is the
-//!   agent's reply and the file has been quiet for [`pending::TURN_QUIET`])
+//!   agent's reply, but for context such as a notification or a recap, and
+//!   the file has been quiet for [`pending::TURN_QUIET`])
 //!   or herdr says `idle`, `blocked` or `done`;
-//! - **working** otherwise.
+//! - **working** otherwise, on the newest entry that is not context.
 //!
 //! Each text is redacted, then cut to `TURN_TEXT_MAX` characters.
 
@@ -32,7 +33,9 @@ pub fn turn(items: &[Item], status: &AgentStatus, quiet: bool) -> Turn {
     let reply = items
         .iter()
         .rposition(|i| i.role == Role::Assistant && i.kind == EntryKind::Text);
-    let ended = quiet && reply.is_some_and(|r| r + 1 == items.len());
+    // Context after the reply (a notification, a recap) is not the agent
+    // going on.
+    let ended = quiet && reply.is_some_and(|r| items[r + 1..].iter().all(|i| i.origin.is_some()));
     let waiting = matches!(
         status,
         AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Done
@@ -41,7 +44,10 @@ pub fn turn(items: &[Item], status: &AgentStatus, quiet: bool) -> Turn {
         let line = reply.map_or("", |r| first_line(&items[r].text));
         return Turn::Stopped { line: shown(line) };
     }
-    let line = items.last().map_or("", |i| last_line(&i.text));
+    let line = items
+        .iter()
+        .rfind(|i| i.origin.is_none())
+        .map_or("", |i| last_line(&i.text));
     Turn::Working { line: shown(line) }
 }
 
@@ -78,6 +84,7 @@ mod tests {
             tool: None,
             text: text.to_string(),
             call_id: None,
+            origin: None,
         }
     }
 
@@ -89,6 +96,7 @@ mod tests {
             tool: Some("Bash".to_string()),
             text: text.to_string(),
             call_id: None,
+            origin: None,
         }
     }
 
@@ -134,6 +142,48 @@ mod tests {
             turn(&items, &AgentStatus::Working, false),
             Turn::Working {
                 line: "Committed as `abc`.".to_string()
+            }
+        );
+    }
+
+    fn context(origin: &str, body: &str) -> Item {
+        Item {
+            origin: Some(origin.to_string()),
+            ..text(Role::User, body)
+        }
+    }
+
+    #[test]
+    fn context_after_the_reply_is_not_the_agent_going_on() {
+        let items = [
+            text(Role::User, "go"),
+            text(Role::Assistant, "All 12 tests pass."),
+            context("recap", "You asked for the tests; they pass."),
+            context("task", "Background command finished"),
+        ];
+        assert_eq!(
+            turn(&items, &AgentStatus::Working, true),
+            Turn::Stopped {
+                line: "All 12 tests pass.".to_string()
+            }
+        );
+        // Still working (not quiet): the line is the agent's, not the
+        // notification's.
+        assert_eq!(
+            turn(&items, &AgentStatus::Working, false),
+            Turn::Working {
+                line: "All 12 tests pass.".to_string()
+            }
+        );
+        // A question stays asked past a peer's message.
+        let asked = [
+            text(Role::Assistant, "Built it.\n\nInstall it on the S23?"),
+            context("peer:docs-writer", "Rebased."),
+        ];
+        assert_eq!(
+            turn(&asked, &AgentStatus::Idle, false),
+            Turn::Asking {
+                question: "Install it on the S23?".to_string()
             }
         );
     }

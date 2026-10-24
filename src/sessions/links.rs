@@ -348,6 +348,7 @@ mod tests {
             tool: None,
             summary: format!("Wrote {PLAN}"),
             links: vec![],
+            origin: None,
         };
         linker.link_entry(&mut entry);
         assert_eq!(entry.links.len(), 1);
