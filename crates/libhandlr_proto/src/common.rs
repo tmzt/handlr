@@ -1080,7 +1080,10 @@ mod tests {
         assert!(a.to_u64() < b.to_u64() && b.to_u64() < c.to_u64());
         let other = Serial::new(10, 1, 0);
         assert_eq!(a.partial_cmp(&other), None);
-        assert!(a.lt(&other) == a.ge(&other) && a != other, "neither below nor above");
+        assert!(
+            a.lt(&other) == a.ge(&other) && a != other,
+            "neither below nor above"
+        );
         assert!(a.same_file(c) && !a.same_file(other));
     }
 
