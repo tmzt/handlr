@@ -225,6 +225,24 @@ pub fn add(path: &Path, entry: AuthEntry, replace: bool) -> Result<Option<AuthEn
     Ok(Some(old))
 }
 
+/// Remove the entry whose key is `key` from the file at `path` (plan
+/// 20261024_02, decision 6: `link.unpair`). The file is rewritten, as by a
+/// replace. Returns the entry removed, or `None` when no entry has the key
+/// (the file is then left as it is).
+pub fn remove(path: &Path, key: &[u8; KEY_LEN]) -> Result<Option<AuthEntry>, String> {
+    let mut file = AuthFile::load(path)?;
+    let Some(index) = file
+        .clients
+        .iter()
+        .position(|c| c.public_key().as_ref() == Some(key))
+    else {
+        return Ok(None);
+    };
+    let old = file.clients.remove(index);
+    rewrite(path, &file)?;
+    Ok(Some(old))
+}
+
 fn open_private(path: &Path, append: bool) -> std::io::Result<std::fs::File> {
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create(true).mode(0o600);
@@ -419,6 +437,33 @@ mod tests {
             None
         );
         assert_eq!(AuthFile::load(&path).unwrap().clients.len(), 3);
+    }
+
+    #[test]
+    fn remove_takes_out_one_entry_by_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.toml");
+        for (name, n) in [("s23", 1), ("t3", 2)] {
+            add(
+                &path,
+                AuthEntry::new(name, &key(n), vec![COMPANION.into()]),
+                false,
+            )
+            .unwrap();
+        }
+        let removed = remove(&path, &key(1)).unwrap().unwrap();
+        assert_eq!(removed.name, "s23");
+        let file = AuthFile::load(&path).unwrap();
+        assert_eq!(file.clients.len(), 1);
+        assert!(file.find_key(&key(1)).is_none());
+        assert_eq!(file.find_name("t3").unwrap().public_key(), Some(key(2)));
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // A key not in the file changes nothing.
+        let before = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(remove(&path, &key(9)).unwrap(), None);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
     }
 
     #[test]

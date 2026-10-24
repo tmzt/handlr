@@ -558,3 +558,49 @@ async fn hello_is_limited_to_the_entrys_protocols() {
     let done = local.note("link.pair_done").await;
     assert_eq!(done["params"], json!({"name": "phone", "paired": true}));
 }
+
+// link.unpair (plan 20261024_02, decision 6 and step 3).
+
+#[tokio::test]
+async fn a_paired_device_unpairs_itself_and_its_key_no_longer_connects() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = start().await;
+    let mut local = Local::connect(&env.socket).await;
+    let (mut s23, keypair) = pair_device(&env, &mut local, "s23", &["harness"]).await;
+    let (_t3, _) = pair_device(&env, &mut local, "t3", &["harness"]).await;
+    assert_eq!(env.auth().clients.len(), 2);
+
+    // Answered `{}`, then the link closes.
+    let r = call(&mut s23, 1, "link.unpair").await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    assert!(closes(&mut s23, Duration::from_secs(3)).await);
+
+    // auth.toml no longer lists it; the other device stays.
+    let file = env.auth();
+    assert!(file.find_name("s23").is_none());
+    assert!(file.find_key(&keypair.public).is_none());
+    assert!(file.find_name("t3").is_some());
+    let mode = std::fs::metadata(env.auth_path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+
+    // Its key gets no reply.
+    assert!(
+        reconnect_with(&env, &keypair.private, &hello_bytes())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn link_unpair_is_refused_on_the_daemon_socket() {
+    let env = start().await;
+    let mut local = Local::connect(&env.socket).await;
+    let (_s23, _) = pair_device(&env, &mut local, "s23", &["harness"]).await;
+    let r = local.call("link.unpair", json!({})).await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+    assert_eq!(env.auth().clients.len(), 1);
+}

@@ -13,6 +13,9 @@
 //!   appends the device to `auth.toml`. The device's first `hello` after
 //!   that is answered with `paired: true`, and `link.pair_done` goes to the
 //!   connection that added it.
+//! * `link.unpair`, over a paired link only, removes the calling device's
+//!   entry from `auth.toml` and closes its connections once the answer is
+//!   queued (plan 20261024_02, decision 6).
 //! * A handshake's first message may only be `hello`; anything else closes
 //!   the connection without a reply.
 //! * `auth.toml` is read for every new connection, and every
@@ -344,6 +347,27 @@ impl Link {
             error: None,
         });
         true
+    }
+
+    /// `link.unpair` (plan 20261024_02, decision 6): removes the entry with
+    /// `key` from `auth.toml`, so the key no longer connects. Its open
+    /// connections are closed by [`Link::close_key`], once the answer is on
+    /// its way. Returns the name it was paired as.
+    pub fn unpair(&self, key: &[u8; KEY_LEN]) -> Result<Option<String>, String> {
+        let removed = {
+            let _guard = self.auth_lock.lock().unwrap();
+            auth::remove(&self.settings.auth_path, key)?
+        };
+        self.awaiting.lock().unwrap().remove(key);
+        if let Some(entry) = &removed {
+            log::info!("Removed '{}' from auth.toml: it unpaired", entry.name);
+        }
+        Ok(removed.map(|e| e.name))
+    }
+
+    /// Close every open connection with `key`.
+    pub fn close_key(&self, key: &[u8; KEY_LEN], why: &str) {
+        self.close_where(|c| &c.key == key, why);
     }
 
     fn register(&self, key: [u8; KEY_LEN], name: &str) -> (u64, CancellationToken) {

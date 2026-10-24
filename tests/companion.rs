@@ -1873,3 +1873,55 @@ async fn a_second_summary_on_a_connection_waits_for_the_first() {
     assert_eq!(b["result"], a["result"]);
     assert_eq!(mock.recorded_transcripts().len(), 1);
 }
+
+// client.options general_agent (plan 20261024_02, decision 7 and step 3,
+// as amended at 11:37 EDT: only the turns the user starts stop).
+
+#[tokio::test]
+async fn with_the_general_agent_off_no_gemini_turn_starts() {
+    let mock = Arc::new(MockReasoningEngine::with_response("Hello."));
+    let env = start_with(confirming(), mock.clone(), false).await;
+    let (mut c, _) = Client::companion(&env).await;
+
+    let r = c
+        .call("client.options", json!({"general_agent": false}))
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    let r = c.call("turn.start", turn(1, "hello")).await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+    assert!(mock.recorded_transcripts().is_empty());
+
+    // Options without the field leave it on, as a new connection has it.
+    c.call("client.options", json!({"spoken_output": false}))
+        .await;
+    let r = c.call("turn.start", turn(2, "hello")).await;
+    assert!(r["result"]["outcome"].is_string(), "{r}");
+    assert_eq!(mock.recorded_transcripts().len(), 1);
+
+    // Off on one connection is off for that one only.
+    c.call("client.options", json!({"general_agent": false}))
+        .await;
+    let (mut other, _) = Client::companion(&env).await;
+    let r = other.call("turn.start", turn(3, "hello")).await;
+    assert!(r["result"]["outcome"].is_string(), "{r}");
+}
+
+#[tokio::test]
+async fn with_the_general_agent_off_spoken_summaries_go_on() {
+    let home = speech_home(COMPLEX);
+    let mock = Arc::new(MockReasoningEngine::with_response("Three files changed."));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c
+        .call(
+            "client.options",
+            json!({"spoken_output": true, "general_agent": false}),
+        )
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(r["result"]["summary"], "Three files changed.", "{r}");
+    assert_eq!(mock.recorded_transcripts().len(), 1);
+}

@@ -91,6 +91,11 @@ pub(super) struct Conn {
     /// gets only what needs the user (owner, 2026-10-23: "only blockages or
     /// done messages should be sent on a sleeping conn").
     pub(super) background: std::sync::atomic::AtomicBool,
+    /// A companion's `client.options` `general_agent`: while false, its
+    /// `turn.start` is refused, so no Gemini turn starts for it; spoken
+    /// summaries go on (plan 20261024_02, decision 7, as amended at
+    /// 11:37 EDT). On when the connection opens.
+    general_agent: std::sync::atomic::AtomicBool,
     /// When the client last asked anything but a ping.
     last_request: Mutex<std::time::Instant>,
     /// Session subscriptions, by id (plan 20261023_03).
@@ -325,6 +330,7 @@ async fn serve<S>(
         speech: tokio::sync::Mutex::new(()),
         spoken_output: std::sync::atomic::AtomicBool::new(false),
         background: std::sync::atomic::AtomicBool::new(false),
+        general_agent: std::sync::atomic::AtomicBool::new(true),
         last_request: Mutex::new(std::time::Instant::now()),
         subscriptions: Mutex::new(HashMap::new()),
         next_subscription: std::sync::atomic::AtomicU64::new(0),
@@ -685,6 +691,15 @@ async fn call(
     match method {
         companion::methods::TURN_START if conn.is_companion() => {
             let p: companion::TurnStartParams = params(raw)?;
+            if !conn
+                .general_agent
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "the general agent is off for this client",
+                ));
+            }
             turns::turn_start(conn, request_id, p).await
         }
         companion::methods::TURN_INTERRUPT if conn.is_companion() => {
@@ -856,6 +871,8 @@ async fn call(
                 .store(p.spoken_output, std::sync::atomic::Ordering::Relaxed);
             conn.background
                 .store(p.background, std::sync::atomic::Ordering::Relaxed);
+            conn.general_agent
+                .store(p.general_agent, std::sync::atomic::Ordering::Relaxed);
             ok(common::Empty {})
         }
         methods::AGENTS_SEND => {
@@ -1059,6 +1076,38 @@ async fn call(
                 }
             });
             ok(added.result)
+        }
+        methods::LINK_UNPAIR => {
+            // Plan 20261024_02, decision 6: a paired device forgets itself.
+            // Not on the daemon socket, which has no device to forget.
+            let Origin::Link { key, .. } = &conn.origin else {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "link.unpair is served only over a paired link",
+                ));
+            };
+            let _: common::LinkUnpairParams = params(raw)?;
+            let Some(link) = &daemon.link else {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "the link is off ([link] listen = [])",
+                ));
+            };
+            link.unpair(key)
+                .map_err(|e| ErrorObject::new(codes::INTERNAL_ERROR, e))?;
+            // The link closes once the answer is queued: its writer sends
+            // what is queued before it shuts down.
+            let (answered, after) = tokio::sync::oneshot::channel();
+            conn.after_answer
+                .lock()
+                .unwrap()
+                .insert(request_id.clone(), answered);
+            let (link, key) = (Arc::clone(link), *key);
+            tokio::spawn(async move {
+                let _ = after.await;
+                link.close_key(&key, "it unpaired");
+            });
+            ok(common::LinkUnpairResult {})
         }
         other => Err(ErrorObject::new(
             codes::METHOD_NOT_FOUND,
