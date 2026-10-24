@@ -1645,3 +1645,11 @@ The owner (2026-10-24): "smaller gear, Hidden should be On Scroll".
 The owner (2026-10-24): "change Disabled to None". The first visibility,
 *Disabled*, is shown as *None*. It is still `disabled` in `settings.toml`,
 and `ScrollbarVisibility::Disabled` in code.
+
+## 2026-10-24 12:33 EDT — plan 20261024_02, decision 3: confirming modals close at once
+
+The owner (2026-10-24): "closing a confirm modal shouldn't have a delay,
+no fade out". The settings screen's modal stack uses libcontrols'
+`ModalTransition::Timed { open_secs: 0.18, close_secs: 0.0 }`, in place of
+the default 0.12 s close. A zero close is instant, so the choice acts in
+the same frame and nothing fades. Opening keeps its 0.18 s.
