@@ -222,3 +222,16 @@ It also answers open question 3: with the general agent off, the record
 button sends to the agent in view as a message, and on the overview it is
 disabled, drawn dim (decision 4). Once plan 20261024_03 is built, the same
 toggle hides its centre button and refuses `chat.open`.
+
+## Amendment — 2026-10-24 11:46 EDT: approved, to be built now
+
+The owner approved building the plan on 2026-10-24 ("Do the basic
+settings screen"). Open questions 1 and 2 take these values until the
+owner says otherwise:
+- *Delete data* keeps the voice models;
+- the ding is a short built-in chime, made by the app's own audio
+  output, not the system notification sound.
+
+Open question 3 was answered by the 11:3x EDT amendment. The battery rows
+are built behind the stub of step 5 until libmorph's battery wrapper is
+released. The status becomes `In implementation` with step 1's commit.
