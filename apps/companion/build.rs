@@ -17,6 +17,9 @@ fn main() {
         .permission("android.permission.RECORD_AUDIO")
         // The link to handlr, over Tailscale or the LAN.
         .permission("android.permission.INTERNET")
+        // The launcher icon (icon/make_icon.py). Goes away once
+        // libmobile/libmorph support icons (requested on 2026-10-24).
+        .extra_script("icon/android/icon.gradle")
         .generate()
         .expect("libmorph-build: generating the Gradle project");
 }
