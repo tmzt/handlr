@@ -877,6 +877,10 @@ async fn work(
 /// (plan 20261023_02, decision 4), both from one snapshot (on each turn,
 /// after `agents.focus`, and every `VOCABULARY_INTERVAL`).
 pub(super) async fn check_vocabulary(conn: Arc<Conn>) {
+    // A sleeping phone gets neither; the next check after it wakes does.
+    if conn.asleep() {
+        return;
+    }
     let Ok(Ok(snap)) =
         tokio::time::timeout(super::NAME_LOOKUP_TIMEOUT, conn.daemon.client.list_panes()).await
     else {

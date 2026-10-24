@@ -86,6 +86,10 @@ pub(super) struct Conn {
     /// so `speech.summarize` may call Gemini (plan 20261023_05, A4). Off
     /// when the connection opens.
     spoken_output: std::sync::atomic::AtomicBool,
+    /// A companion's `client.options` `background`: its link sleeps, so it
+    /// gets only what needs the user (owner, 2026-10-23: "only blockages or
+    /// done messages should be sent on a sleeping conn").
+    pub(super) background: std::sync::atomic::AtomicBool,
 }
 
 impl Conn {
@@ -93,6 +97,11 @@ impl Conn {
         if let Ok(line) = serde_json::to_string(value) {
             let _ = self.out.send(line);
         }
+    }
+
+    /// Whether the companion's link sleeps (see `background`).
+    pub(super) fn asleep(&self) -> bool {
+        self.background.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn spoken_output(&self) -> bool {
@@ -228,6 +237,7 @@ async fn serve<S>(
         next_notice: std::sync::atomic::AtomicU64::new(0),
         speech: tokio::sync::Mutex::new(()),
         spoken_output: std::sync::atomic::AtomicBool::new(false),
+        background: std::sync::atomic::AtomicBool::new(false),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -698,6 +708,8 @@ async fn call(
             let p: common::ClientOptionsParams = params(raw)?;
             conn.spoken_output
                 .store(p.spoken_output, std::sync::atomic::Ordering::Relaxed);
+            conn.background
+                .store(p.background, std::sync::atomic::Ordering::Relaxed);
             ok(common::Empty {})
         }
         methods::AGENTS_SEND => {

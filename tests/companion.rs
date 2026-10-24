@@ -683,6 +683,50 @@ async fn agents_interrupt_from_a_harness_sends_the_key() {
 }
 
 #[tokio::test]
+async fn a_sleeping_phone_is_told_only_what_needs_it() {
+    let env = start(confirming()).await;
+    env.daemon.watches.watch("p1");
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("client.options", json!({"background": true})).await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    // Asleep: herdr's focus moving (to a second pane) is held back...
+    match env.daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let mut shell = state.snapshot.workspaces[0].tabs[0].panes[0].clone();
+            shell.pane_id = "p2".to_string();
+            shell.extra.clear();
+            shell.terminal_title = None;
+            shell.focused = false;
+            state.snapshot.workspaces[0].tabs[0].panes.push(shell);
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+    c.seen.clear();
+    let r = c.call("agents.focus", json!({"target_id": "p2"})).await;
+    assert!(r.get("error").is_none(), "{r}");
+    c.drain(Duration::from_millis(300)).await;
+    assert!(
+        c.position(|m| m["method"] == "focus.changed").is_none(),
+        "focus is held while asleep: {:?}",
+        c.seen
+    );
+    // ...but an agent that is done or blocked is told.
+    let _ = env.daemon.events.send(CoreEvent::AgentStatus {
+        pane_id: "p1".to_string(),
+        agent: "claude".to_string(),
+        status: AgentStatus::Done,
+    });
+    let n = c.note("notice").await;
+    assert_eq!(n["params"]["text"], "Claude finished.", "{n}");
+    // Awake again: the next focus check tells it where the focus went.
+    c.call("client.options", json!({"background": false})).await;
+    c.call("agents.focus", json!({"target_id": "p2"})).await;
+    let moved = c.note("focus.changed").await;
+    assert_eq!(moved["params"]["focus"]["pane_id"], "p2", "{moved}");
+}
+
+#[tokio::test]
 async fn a_notice_waits_for_a_pending_confirmation() {
     let env = start(confirming()).await;
     env.daemon.watches.watch("p1");
