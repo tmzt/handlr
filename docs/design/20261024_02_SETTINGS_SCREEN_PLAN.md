@@ -207,3 +207,18 @@ between Voice and Battery:
 It is saved in `settings.toml` (decision 5) and its control lives in
 `settings/option_row.rs`. Step 5's tests also step the arrows both ways
 and keep the value.
+
+## Amendment — 2026-10-24 11:37 EDT: the general agent toggle stops user-directed Gemini turns only
+
+The owner (2026-10-24): "for now, turning off general agent stops all
+user-directed Gemini turns (summaries are the daemon's concern)", with the
+agent split planned in plan 20261024_03 (the general agent as a realtime
+chat). This replaces, in decision 3, "so it also stops spoken summaries",
+and in decision 7, "and makes no spoken summary for this client":
+`general_agent: false` stops only the Gemini turns the user starts. Spoken
+summaries go on as the daemon decides.
+
+It also answers open question 3: with the general agent off, the record
+button sends to the agent in view as a message, and on the overview it is
+disabled, drawn dim (decision 4). Once plan 20261024_03 is built, the same
+toggle hides its centre button and refuses `chat.open`.
