@@ -28,7 +28,11 @@ libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a7369882523
 # 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
 # Code's interface glyphs.
-libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "4de319ce57aea99297de0a805b899276dd90b411", features = ["font-apache-roboto-regular", "fonts-ofl-terminal"] }
+libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "4de319ce57aea99297de0a805b899276dd90b411", features = ["font-apache-roboto-regular", "font-apache-roboto-bold", "font-apache-roboto-italic", "fonts-ofl-terminal"] }
+# Basic Markdown, laid out as wrapped styled runs, for the settings copy
+# (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, step 2), drawn in
+# Roboto Regular, Bold and Italic (above) and the terminal face.
+handlr-markdown = { path = "../../crates/handlr-markdown" }
 # 0.8.0: the scroll pane and `ArrowLabel` for the settings screen (plan
 # 20261024_02, step 1), on the same libmsdf.
 libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "a7d0fd9c7a42576f474488889d70eb491efa1107" }
@@ -57,6 +61,9 @@ android_logger = "0.14"
 # Generates the Gradle project when building for Android; a no-op on the host.
 [build-dependencies]
 libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a73698825239d7c611e1a2aedc2e6d862" }
+# SETTINGS_COPY.md, read into settings_copy.rs (plan 20261024_04, decision
+# 6), at the revision the root crate pins for ADDITIONAL_PROMPTS.md.
+libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
 
 # The key tests use libdevice's memory vault, through libmorph's `script`.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
@@ -65,3 +72,6 @@ libmorph = { git = "https://github.com/tmzt/libmorph", rev = "cda1be7a7369882523
 # The settings tests write settings.toml and delete data in a scratch directory.
 [dev-dependencies]
 tempfile = "3"
+# The copy generator's own tests (build/copy_gen.rs, also compiled into the
+# library's tests).
+libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }

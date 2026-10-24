@@ -1,7 +1,8 @@
 //! A settings row with a toggle (decision 2): its label on the left and a
 //! switch on the right. A tap anywhere on the row flips it. Inactive, as
 //! *Ding when an agent is done* is while *All sound* is off, it is drawn
-//! dim and takes no taps.
+//! dim and takes no taps. A row with a long explanation has an ⓘ after its
+//! label ([`super::info`]), which takes taps even while the row is dim.
 
 use libcontrols::{
     ControlAction, ControlPart, DrawContext, DrawControl, EventContext, HostedControl,
@@ -9,6 +10,7 @@ use libcontrols::{
 };
 use libmsdf::drawlist::DrawList;
 
+use super::info::{self, INFO_PART};
 use super::screen::{LABEL_PT, label_y};
 use crate::agent::{BAND, BG, FG, PAD, fill};
 use crate::settings::dim_since;
@@ -25,6 +27,9 @@ pub struct ToggleRow {
     /// Taps flip it; otherwise it is drawn dim.
     pub enabled: bool,
     pub scale: f32,
+    /// It has an ⓘ, after its label, which is `label_w` wide.
+    pub info: bool,
+    pub label_w: f32,
 }
 
 impl ToggleRow {
@@ -39,7 +44,23 @@ impl ToggleRow {
             on: true,
             enabled: true,
             scale,
+            info: false,
+            label_w: 0.0,
         }
+    }
+
+    /// The ⓘ's target, after the label.
+    pub fn info_rect(&self) -> Rect {
+        let s = self.scale;
+        info::target(
+            self.rect.x + PAD * s + self.label_w,
+            self.rect.y + self.rect.h * 0.5,
+            s,
+        )
+    }
+
+    fn on_info(&self, pos: [f32; 2]) -> bool {
+        self.info && self.info_rect().contains(pos)
     }
 
     /// Where the switch is, at the row's right.
@@ -90,6 +111,9 @@ impl DrawControl for ToggleRow {
         if !self.enabled {
             dim_since(list, start);
         }
+        if self.info {
+            info::draw(list, ctx, self.info_rect(), s);
+        }
     }
 }
 
@@ -99,14 +123,22 @@ impl HostedControl for ToggleRow {
     }
 
     fn hit_test(&self, pos: [f32; 2]) -> Option<(ControlPart, f32)> {
+        if self.on_info(pos) {
+            return Some((INFO_PART, self.rect.normalized_x(pos[0])));
+        }
         self.rect
             .contains(pos)
             .then(|| (ControlPart::Body, self.rect.normalized_x(pos[0])))
     }
 
-    /// A tap, not the press that may become a scroll.
+    /// A tap, not the press that may become a scroll: on the ⓘ, its
+    /// explanation; elsewhere, the toggle.
     fn handle_mouse(&self, event: &MouseEvent, _ctx: &EventContext) -> Option<ControlAction> {
         match event {
+            MouseEvent::Click {
+                pos,
+                button: MouseButton::Left,
+            } if self.on_info(*pos) => Some(ControlAction::Activated { part: INFO_PART }),
             MouseEvent::Click {
                 button: MouseButton::Left,
                 ..

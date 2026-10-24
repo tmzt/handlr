@@ -52,6 +52,7 @@
 pub mod agent;
 pub mod controls;
 pub mod keys;
+pub mod markdown_view;
 pub mod overview;
 pub mod settings;
 pub mod ui;
@@ -74,12 +75,14 @@ use libmorph::{
 use libmsdf::GpuSdfRenderer;
 use libmsdf::drawlist::{AtlasId, AtlasSet, DrawList};
 use libmsdf::font::{
-    BUNDLED_ATLAS_PX_RANGE, FontAtlas, NOTO_SANS_MONO_ATLAS, ROBOTO_REGULAR_ASCII,
-    ROBOTO_REGULAR_ATLAS, TERMINAL_SYMBOLS_ATLAS, TerminalShaper, TextShaper,
+    BUNDLED_ATLAS_PX_RANGE, FontAtlas, NOTO_SANS_MONO_ATLAS, ROBOTO_BOLD_ASCII, ROBOTO_BOLD_ATLAS,
+    ROBOTO_ITALIC_ASCII, ROBOTO_ITALIC_ATLAS, ROBOTO_REGULAR_ASCII, ROBOTO_REGULAR_ATLAS,
+    TERMINAL_SYMBOLS_ATLAS, TerminalShaper, TextShaper,
 };
 
 use crate::agent::{AgentHit, AgentScreen, Terminal};
 use crate::keys::VaultKeyStore;
+use crate::markdown_view::{CodeFace, Face, Faces};
 use crate::overview::{Overview, OverviewHit, Panel};
 use crate::settings::battery::Unreleased;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
@@ -200,6 +203,8 @@ pub struct App {
     symbols: AtlasId,
     shaper: TextShaper,
     terminal: TerminalShaper,
+    /// The faces the settings' Markdown is drawn in (plan 20261024_04).
+    faces: std::sync::Arc<Faces>,
     sdf: GpuSdfRenderer,
     list: DrawList,
     /// The pairing screen.
@@ -584,7 +589,9 @@ impl App {
             self.settings,
             Box::new(Unreleased),
             cfg!(target_os = "android"),
-        );
+        )
+        .with_faces(Some(std::sync::Arc::clone(&self.faces)))
+        .with_build_info(settings::build_info::build_info());
         screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
         self.settings_screen = Some(screen);
     }
@@ -1000,7 +1007,35 @@ impl MorphApp for App {
         let mut fonts = AtlasSet::new();
         let mut add = |atlas| fonts.register(atlas).expect("bundled atlases fit one set");
         let (roboto, mono, symbols) = (add(parse(ROBOTO_REGULAR_ATLAS)), add(text), add(page));
+        let (bold, italic) = (
+            add(parse(ROBOTO_BOLD_ATLAS)),
+            add(parse(ROBOTO_ITALIC_ATLAS)),
+        );
         let shaper = TextShaper::new(ROBOTO_REGULAR_ASCII.to_vec()).expect("bundled face parses");
+        // The Markdown's faces keep the atlases' metrics; their texels are
+        // in the set above.
+        let metrics = |bytes: &'static [u8]| Faces::metrics(parse(bytes));
+        let face = |id, atlas: &'static [u8], ttf: &[u8]| Face {
+            id,
+            atlas: metrics(atlas),
+            shaper: TextShaper::new(ttf.to_vec()).expect("bundled face parses"),
+        };
+        let (code_text, code_page) = (
+            metrics(NOTO_SANS_MONO_ATLAS),
+            metrics(TERMINAL_SYMBOLS_ATLAS),
+        );
+        let faces = std::sync::Arc::new(Faces {
+            regular: face(roboto, ROBOTO_REGULAR_ATLAS, ROBOTO_REGULAR_ASCII),
+            bold: face(bold, ROBOTO_BOLD_ATLAS, ROBOTO_BOLD_ASCII),
+            italic: face(italic, ROBOTO_ITALIC_ATLAS, ROBOTO_ITALIC_ASCII),
+            code: CodeFace {
+                shaper: TerminalShaper::new(&code_text, &code_page)
+                    .expect("bundled terminal atlases agree"),
+                text: (mono, code_text),
+                symbols: (symbols, code_page),
+            },
+            px_range: BUNDLED_ATLAS_PX_RANGE,
+        });
         let sdf = GpuSdfRenderer::new_with_atlas_set(ctx.device(), ctx.surface_format(), &fonts);
         sdf.upload_atlas_set(ctx.queue(), &fonts);
 
@@ -1031,6 +1066,7 @@ impl MorphApp for App {
             symbols,
             shaper,
             terminal,
+            faces,
             sdf,
             list: DrawList::new(),
             screen: Screen::new(),

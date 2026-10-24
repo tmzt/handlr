@@ -29,7 +29,7 @@ impl BatteryState {
     /// knows of.
     pub fn vendor_label(&self) -> Option<&'static str> {
         self.is_samsung()
-            .then_some("Samsung battery (app sleeping)")
+            .then_some(super::copy::SAMSUNG_BATTERY.label())
     }
 }
 

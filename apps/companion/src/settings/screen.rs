@@ -7,12 +7,25 @@
 //!   while all sound is off;
 //! - **Voice**: *Microphone* and *General agent (Gemini)*;
 //! - **Display**: *Scrollbar*, "‹ Hidden ›";
+//! - **Background**: *Stay connected in the background* (on), and, until
+//!   libmorph 0.4.0's service is in, "Needs an app update" while it is on
+//!   (CHANGES.md 2026-10-24 12:38 EDT);
+//! - **Notifications**: *Alert when an agent needs you* (off), dim with
+//!   "Needs *Stay connected in the background*" while that is off; turning
+//!   it on is the only place notifications are asked for;
 //! - **Battery**, on Android only: Android's battery optimization, the
 //!   vendor's battery page when the phone has one, and a note when battery
 //!   use is restricted; until libmorph's battery wrapper is released, one
 //!   note, "Battery settings need an app update";
 //! - **Device**, last, in red: *Unpair this device* and *Delete data*,
 //!   each behind a confirming modal ([`Confirm`]).
+//!
+//! Rows with a long explanation have an ⓘ that opens it in a modal
+//! ([`InfoModal`]): *General agent*, the two above, *Battery optimization*
+//! and *Samsung battery (app sleeping)*. All the copy is in
+//! `SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
+//! label; a link in it is tappable, and inert until libmorph 0.4.0's
+//! `open_link`.
 //!
 //! The screen is a libcontrols `Router`, rebuilt when the layout changes.
 //! Touches go to it as presses, drags and clicks: the pane tells a tap
@@ -22,21 +35,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use libcontrols::{
-    ControlAction, DismissReason, DrawContext, EventResponse, Label, ModalEvent, ModalStack,
-    ModalState, ModalTransition, MouseButton, MouseEvent, NodeFlags, NodeId, Rect, Router,
-    ScrollAxis, ScrollPane, ScrollState, TextAlign,
+    ControlAction, ControlPart, DismissReason, DrawContext, EventResponse, Label, ModalDialog,
+    ModalEvent, ModalStack, ModalState, ModalTransition, MouseButton, MouseEvent, NodeFlags,
+    NodeId, Rect, Router, ScrollAxis, ScrollPane, ScrollState, TextAlign,
 };
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
+use handlr_markdown::Style;
+
+use super::background::{self, Background};
 use super::battery::{Battery, BatteryState, VendorPage};
+use super::build_info::BuildInfo;
 use super::confirm::Confirm;
+use super::copy::{self, CopyText};
 use super::danger_row::DangerRow;
+use super::info::{INFO_PART, InfoModal};
 use super::link_row::LinkRow;
 use super::option_row::OptionRow;
 use super::toggle_row::ToggleRow;
 use super::{Settings, scrollbar_label, step_scrollbar};
 use crate::agent::{BG, DIM, FG, PAD, Row, Terminal, draw_row, fill, line_h, term_h};
+use crate::markdown_view::{self, Faces, MarkdownView};
 use crate::ui::Layout;
 
 /// A row's height, in points (decision 2).
@@ -57,9 +77,8 @@ const BACK_W: f32 = 56.0;
 const BACK_GLYPH: &str = "\u{2039}";
 
 /// The battery notes (decision 3, and step 5 until the wrapper is out).
-pub const BATTERY_UPDATE: &str = "Battery settings need an app update";
-pub const BATTERY_RESTRICTED: &str =
-    "Battery use is Restricted: handlr can't stay connected in the background";
+pub const BATTERY_UPDATE: &str = copy::BATTERY_UPDATE.text;
+pub const BATTERY_RESTRICTED: &str = copy::BATTERY_RESTRICTED.text;
 
 /// `px` text centred down `rect`.
 pub fn label_y(rect: Rect, px: f32) -> f32 {
@@ -72,26 +91,54 @@ pub enum Section {
     Sound,
     Voice,
     Display,
+    Background,
+    Notifications,
     Battery,
     Device,
 }
 
 impl Section {
-    const ALL: [Section; 5] = [
+    const ALL: [Section; 7] = [
         Section::Sound,
         Section::Voice,
         Section::Display,
+        Section::Background,
+        Section::Notifications,
         Section::Battery,
         Section::Device,
     ];
 
     fn title(self) -> &'static str {
         match self {
-            Section::Sound => "SOUND",
-            Section::Voice => "VOICE",
-            Section::Display => "DISPLAY",
-            Section::Battery => "BATTERY",
-            Section::Device => "DEVICE",
+            Section::Sound => copy::SECTION_SOUND.text,
+            Section::Voice => copy::SECTION_VOICE.text,
+            Section::Display => copy::SECTION_DISPLAY.text,
+            Section::Background => copy::SECTION_BACKGROUND.text,
+            Section::Notifications => copy::SECTION_NOTIFICATIONS.text,
+            Section::Battery => copy::SECTION_BATTERY.text,
+            Section::Device => copy::SECTION_DEVICE.text,
+        }
+    }
+}
+
+/// The rows with an ⓘ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Info {
+    GeneralAgent,
+    Background,
+    Alerts,
+    Optimization,
+    Vendor,
+}
+
+impl Info {
+    fn copy(self) -> CopyText {
+        match self {
+            Info::GeneralAgent => copy::GENERAL_AGENT,
+            Info::Background => copy::BACKGROUND,
+            Info::Alerts => copy::ALERTS,
+            Info::Optimization => copy::BATTERY_OPTIMIZATION,
+            Info::Vendor => copy::SAMSUNG_BATTERY,
         }
     }
 }
@@ -114,6 +161,8 @@ pub enum SettingsHit {
 enum Asking {
     Unpair,
     Delete,
+    /// An ⓘ's explanation.
+    Info(Info),
 }
 
 impl Asking {
@@ -122,6 +171,11 @@ impl Asking {
         match self {
             Asking::Unpair => "unpair",
             Asking::Delete => "delete",
+            Asking::Info(Info::GeneralAgent) => "info_general_agent",
+            Asking::Info(Info::Background) => "info_background",
+            Asking::Info(Info::Alerts) => "info_alerts",
+            Asking::Info(Info::Optimization) => "info_optimization",
+            Asking::Info(Info::Vendor) => "info_vendor",
         }
     }
 }
@@ -135,6 +189,10 @@ struct Nodes {
     microphone: NodeId,
     general_agent: NodeId,
     scrollbar: NodeId,
+    background: NodeId,
+    background_note: NodeId,
+    alerts: NodeId,
+    alerts_note: NodeId,
     battery_note: NodeId,
     optimization: NodeId,
     vendor: NodeId,
@@ -151,6 +209,12 @@ pub struct SettingsScreen {
     settings: Settings,
     battery: Box<dyn Battery>,
     battery_state: Option<BatteryState>,
+    /// The service and the notification permission (libmorph 0.4.0).
+    service: Box<dyn Background>,
+    /// Roboto Bold and Italic and the terminal face, for the Markdown.
+    faces: Option<Arc<Faces>>,
+    /// The phone's vendor, for the copy's vendor additions.
+    vendor: Option<String>,
     /// Android: the Battery section shows.
     android: bool,
     /// The vendor's page answered that it does not exist.
@@ -158,8 +222,13 @@ pub struct SettingsScreen {
     /// The daemon's name, and whether it is online, for the unpair modal.
     daemon: String,
     online: bool,
-    /// The open modal, and its Cancel and action buttons.
+    /// The open modal, and its Cancel and action buttons (an ⓘ's: OK
+    /// twice).
     asking: Option<(Asking, NodeId, NodeId)>,
+    /// The open modal's Markdown, for its links.
+    modal_text: Option<NodeId>,
+    /// The last link tapped: inert until libmorph 0.4.0's `open_link`.
+    tapped_link: Option<String>,
     layout: Layout,
     /// The finger held: its id and where it came down.
     touch: Option<(u64, [f32; 2])>,
@@ -186,11 +255,16 @@ impl SettingsScreen {
             settings,
             battery,
             battery_state,
+            service: Box::new(background::Unreleased),
+            faces: None,
+            vendor: None,
             android,
             no_vendor: false,
             daemon: "handlr".to_string(),
             online: false,
             asking: None,
+            modal_text: None,
+            tapped_link: None,
             layout: Layout::default(),
             touch: None,
             on_back: false,
@@ -198,8 +272,60 @@ impl SettingsScreen {
         }
     }
 
+    /// The Background and Notifications sections' source, in place of
+    /// [`background::Unreleased`].
+    pub fn with_background(mut self, service: Box<dyn Background>) -> Self {
+        self.service = service;
+        self.nodes = None;
+        self
+    }
+
+    /// The faces the Markdown is drawn in.
+    pub fn with_faces(mut self, faces: Option<Arc<Faces>>) -> Self {
+        self.faces = faces;
+        self.nodes = None;
+        self
+    }
+
+    /// The phone's build info, for the copy's vendor additions (`None`
+    /// until libmorph 0.4.0's `ctx.build_info()`).
+    pub fn with_build_info(mut self, info: Option<BuildInfo>) -> Self {
+        self.vendor = info.map(|i| i.vendor.to_ascii_lowercase());
+        self.nodes = None;
+        self
+    }
+
     pub fn settings(&self) -> Settings {
         self.settings
+    }
+
+    /// The last link tapped, which opens nothing yet.
+    pub fn tapped_link(&self) -> Option<&str> {
+        self.tapped_link.as_deref()
+    }
+
+    /// A note's Markdown view, laid out for the screen's width.
+    fn note(&self, text: &str) -> MarkdownView {
+        let s = self.scale();
+        MarkdownView::new(
+            text,
+            PAD * s,
+            0.0,
+            (self.layout.w - 2.0 * PAD * s).max(1.0),
+            SUBTITLE_PT * s,
+            DIM,
+            self.faces.clone(),
+        )
+    }
+
+    /// `label`'s width as a row draws it.
+    fn label_w(&self, label: &str) -> f32 {
+        markdown_view::measure(
+            self.faces.as_deref(),
+            label,
+            Style::Regular,
+            LABEL_PT * self.scale(),
+        )
     }
 
     /// The paired daemon's name, and whether it is online now.
@@ -266,30 +392,40 @@ impl SettingsScreen {
                 (section, router.add(under, label))
             })
             .collect();
-        let toggle = |router: &mut Router, label| router.add(under, ToggleRow::new(label, s));
-        let sound = toggle(&mut router, "All sound");
-        let ding = toggle(&mut router, "Ding when an agent is done");
-        let microphone = toggle(&mut router, "Microphone");
-        let general_agent = toggle(&mut router, "General agent (Gemini)");
+        let toggle = |router: &mut Router, label: &str, info: bool| {
+            let mut row = ToggleRow::new(label, s);
+            row.info = info;
+            row.label_w = self.label_w(label);
+            router.add(under, row)
+        };
+        let sound = toggle(&mut router, copy::SOUND.label(), false);
+        let ding = toggle(&mut router, copy::DING.label(), false);
+        let microphone = toggle(&mut router, copy::MICROPHONE.label(), false);
+        let general_agent = toggle(&mut router, copy::GENERAL_AGENT.label(), true);
         let scrollbar = router.add(
             under,
-            OptionRow::new("Scrollbar", scrollbar_label(self.settings.scrollbar), s),
+            OptionRow::new(
+                copy::SCROLLBAR.label(),
+                scrollbar_label(self.settings.scrollbar),
+                s,
+            ),
         );
-        let note = |router: &mut Router, text: &str| {
-            router.add(
-                under,
-                Label::new(text, Rect::new(0.0, 0.0, 1.0, 1.0))
-                    .with_font_size(SUBTITLE_PT * s)
-                    .with_color(DIM)
-                    .with_align(TextAlign::Left),
-            )
+        let background = toggle(&mut router, copy::BACKGROUND.label(), true);
+        let alerts = toggle(&mut router, copy::ALERTS.label(), true);
+        let background_note = router.add(under, self.note(copy::NEEDS_UPDATE.text));
+        let alerts_note = router.add(under, self.note(copy::ALERTS_NEEDS_BACKGROUND.text));
+        let battery_note = router.add(under, self.note(BATTERY_UPDATE));
+        let restricted = router.add(under, self.note(BATTERY_RESTRICTED));
+        let link = |router: &mut Router, label: &str| {
+            let mut row = LinkRow::new(label, s);
+            row.info = true;
+            row.label_w = self.label_w(label);
+            router.add(under, row)
         };
-        let battery_note = note(&mut router, BATTERY_UPDATE);
-        let restricted = note(&mut router, BATTERY_RESTRICTED);
-        let optimization = router.add(under, LinkRow::new("Battery optimization", s));
-        let vendor = router.add(under, LinkRow::new("Vendor battery", s));
-        let unpair = router.add(under, DangerRow::new("Unpair this device", s));
-        let delete = router.add(under, DangerRow::new("Delete data", s));
+        let optimization = link(&mut router, copy::BATTERY_OPTIMIZATION.label());
+        let vendor = link(&mut router, copy::SAMSUNG_BATTERY.label());
+        let unpair = router.add(under, DangerRow::new(copy::UNPAIR.label(), s));
+        let delete = router.add(under, DangerRow::new(copy::DELETE_DATA.label(), s));
         let _ = ModalStack::install(
             &mut router,
             Arc::clone(&self.modals),
@@ -297,6 +433,7 @@ impl SettingsScreen {
         );
         self.router = router;
         self.asking = None;
+        self.modal_text = None;
         self.nodes = Some(Nodes {
             pane,
             titles,
@@ -305,6 +442,10 @@ impl SettingsScreen {
             microphone,
             general_agent,
             scrollbar,
+            background,
+            background_note,
+            alerts,
+            alerts_note,
             battery_note,
             optimization,
             vendor,
@@ -326,6 +467,19 @@ impl SettingsScreen {
         let row_h = ROW_H * s;
         let mut y = viewport.y + 8.0 * s;
         let settings = self.settings;
+        let ready = self.service.ready();
+        // The notes: the background's while it waits on libmorph 0.4.0, and
+        // the alerts' while background is off or it waits.
+        let background_note = (settings.background && !ready).then_some(copy::NEEDS_UPDATE.text);
+        let alerts_note = if !settings.background {
+            Some(copy::ALERTS_NEEDS_BACKGROUND.text)
+        } else {
+            (settings.alerts && !ready).then_some(copy::NEEDS_UPDATE.text)
+        };
+        let mut notes = [
+            (n.background_note, background_note.map(|t| self.note(t))),
+            (n.alerts_note, alerts_note.map(|t| self.note(t))),
+        ];
         let router = &mut self.router;
         let show = |router: &mut Router, id: NodeId, on: bool| {
             router.set_flags(id, NodeFlags::HIDDEN, !on);
@@ -356,6 +510,13 @@ impl SettingsScreen {
                 let r = Rect::new(0.0, *y, w, row_h);
                 *y += row_h;
                 r
+            };
+            // A note under the rows, placed.
+            let note = |router: &mut Router, id: NodeId, y: &mut f32| {
+                if let Some(view) = router.get_mut::<MarkdownView>(id) {
+                    view.move_to(PAD * s, *y + 4.0 * s);
+                    *y += view.height() + 14.0 * s;
+                }
             };
             match section {
                 Section::Sound => {
@@ -390,6 +551,30 @@ impl SettingsScreen {
                         o.set_value(scrollbar_label(settings.scrollbar));
                     }
                 }
+                Section::Background | Section::Notifications => {
+                    let background = section == Section::Background;
+                    let (id, on, enabled) = if background {
+                        (n.background, settings.background, true)
+                    } else {
+                        (n.alerts, settings.alerts, settings.background)
+                    };
+                    let rect = row(&mut y);
+                    if let Some(t) = router.get_mut::<ToggleRow>(id) {
+                        t.rect = rect;
+                        t.on = on;
+                        t.enabled = enabled;
+                    }
+                    let (note_id, view) = &mut notes[usize::from(!background)];
+                    let note_id = *note_id;
+                    let view = view.take();
+                    show(router, note_id, view.is_some());
+                    if let Some(view) = view {
+                        if let Some(old) = router.get_mut::<MarkdownView>(note_id) {
+                            *old = view;
+                        }
+                        note(router, note_id, &mut y);
+                    }
+                }
                 Section::Battery => {
                     show(router, n.battery_note, battery.is_none());
                     show(router, n.optimization, battery.is_some());
@@ -399,12 +584,6 @@ impl SettingsScreen {
                         n.restricted,
                         battery.is_some_and(|b| b.background_restricted),
                     );
-                    let note = |router: &mut Router, id: NodeId, y: &mut f32| {
-                        if let Some(label) = router.get_mut::<Label>(id) {
-                            label.rect = Rect::new(PAD * s, *y, w - 2.0 * PAD * s, row_h);
-                        }
-                        *y += row_h;
-                    };
                     match battery {
                         None => note(router, n.battery_note, &mut y),
                         Some(b) => {
@@ -413,9 +592,9 @@ impl SettingsScreen {
                                 link.rect = rect;
                                 link.subtitle = Some(
                                     if b.ignoring_optimizations {
-                                        "Exempt"
+                                        copy::BATTERY_EXEMPT.text
                                     } else {
-                                        "Optimized"
+                                        copy::BATTERY_OPTIMIZED.text
                                     }
                                     .to_string(),
                                 );
@@ -456,29 +635,36 @@ impl SettingsScreen {
         let n = self.nodes.as_ref()?;
         let r = &self.router;
         let shown = |id| !r.flags(id).contains(NodeFlags::HIDDEN);
-        [n.sound, n.ding, n.microphone, n.general_agent]
-            .into_iter()
-            .filter_map(|id| {
-                r.get::<ToggleRow>(id)
-                    .filter(|_| shown(id))
-                    .map(|t| (t.label.clone(), t.rect))
-            })
-            .chain(
-                r.get::<OptionRow>(n.scrollbar)
-                    .map(|o| (o.label.clone(), o.rect)),
-            )
-            .chain([n.optimization, n.vendor].into_iter().filter_map(|id| {
-                r.get::<LinkRow>(id)
-                    .filter(|_| shown(id))
-                    .map(|l| (l.label.clone(), l.rect))
-            }))
-            .chain(
-                [n.unpair, n.delete]
-                    .into_iter()
-                    .filter_map(|id| r.get::<DangerRow>(id).map(|d| (d.label.clone(), d.rect))),
-            )
-            .find(|(l, _)| l == label)
-            .map(|(_, rect)| rect)
+        [
+            n.sound,
+            n.ding,
+            n.microphone,
+            n.general_agent,
+            n.background,
+            n.alerts,
+        ]
+        .into_iter()
+        .filter_map(|id| {
+            r.get::<ToggleRow>(id)
+                .filter(|_| shown(id))
+                .map(|t| (t.label.clone(), t.rect))
+        })
+        .chain(
+            r.get::<OptionRow>(n.scrollbar)
+                .map(|o| (o.label.clone(), o.rect)),
+        )
+        .chain([n.optimization, n.vendor].into_iter().filter_map(|id| {
+            r.get::<LinkRow>(id)
+                .filter(|_| shown(id))
+                .map(|l| (l.label.clone(), l.rect))
+        }))
+        .chain(
+            [n.unpair, n.delete]
+                .into_iter()
+                .filter_map(|id| r.get::<DangerRow>(id).map(|d| (d.label.clone(), d.rect))),
+        )
+        .find(|(l, _)| l == label)
+        .map(|(_, rect)| rect)
     }
 
     /// The sections shown, in order from the top, with their titles' tops.
@@ -496,16 +682,32 @@ impl SettingsScreen {
         shown
     }
 
+    /// The Markdown of the notes `ids` that are shown.
+    fn shown_notes(&self, ids: &[NodeId]) -> Vec<String> {
+        ids.iter()
+            .filter(|&&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
+            .filter_map(|&id| {
+                self.router
+                    .get::<MarkdownView>(id)
+                    .map(|v| v.source().to_string())
+            })
+            .collect()
+    }
+
     /// The notes shown under the Battery title.
     pub fn battery_notes(&self) -> Vec<String> {
         let Some(n) = &self.nodes else {
             return Vec::new();
         };
-        [n.battery_note, n.restricted]
-            .into_iter()
-            .filter(|&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
-            .filter_map(|id| self.router.get::<Label>(id).map(|l| l.state.text()))
-            .collect()
+        self.shown_notes(&[n.battery_note, n.restricted])
+    }
+
+    /// The notes shown under the Background and Notifications titles.
+    pub fn background_notes(&self) -> Vec<String> {
+        let Some(n) = &self.nodes else {
+            return Vec::new();
+        };
+        self.shown_notes(&[n.background_note, n.alerts_note])
     }
 
     /// The scrollbar row's value as shown.
@@ -516,7 +718,7 @@ impl SettingsScreen {
             .map(OptionRow::value)
     }
 
-    /// Whether a confirming modal is open.
+    /// Whether a modal is open.
     pub fn asking(&self) -> bool {
         self.asking.is_some()
     }
@@ -596,19 +798,47 @@ impl SettingsScreen {
                 let response = self
                     .router
                     .deliver_mouse(MouseEvent::Click { pos, button: left });
-                self.clicked(response)
+                self.clicked(response, pos)
             }
         }
     }
 
-    /// A tap the router gave to `response.target`.
-    fn clicked(&mut self, response: EventResponse) -> Option<SettingsHit> {
+    /// A tap at `pos` the router gave to `response.target`.
+    fn clicked(&mut self, response: EventResponse, pos: [f32; 2]) -> Option<SettingsHit> {
         if self.asking.is_some() {
+            if let Some(url) = self.modal_link(pos) {
+                self.open_link(url);
+            }
             return self.settle_modal();
         }
         let n = self.nodes.as_ref()?;
         let target = response.target?;
         let action = response.action?;
+        if action == (ControlAction::Activated { part: INFO_PART }) {
+            let info = [
+                (n.general_agent, Info::GeneralAgent),
+                (n.background, Info::Background),
+                (n.alerts, Info::Alerts),
+                (n.optimization, Info::Optimization),
+                (n.vendor, Info::Vendor),
+            ]
+            .into_iter()
+            .find(|(id, _)| *id == target)
+            .map(|(_, info)| info)?;
+            self.explain(info);
+            return None;
+        }
+        if let ControlAction::Activated {
+            part: ControlPart::Custom(i),
+        } = action
+        {
+            let url = self
+                .router
+                .get::<MarkdownView>(target)
+                .and_then(|v| v.links().get(i as usize).cloned())?;
+            self.open_link(url);
+            return None;
+        }
         let mut s = self.settings;
         if target == n.sound {
             s.sound = !s.sound;
@@ -618,6 +848,14 @@ impl SettingsScreen {
             s.microphone = !s.microphone;
         } else if target == n.general_agent {
             s.general_agent = !s.general_agent;
+        } else if target == n.background {
+            s.background = !s.background;
+        } else if target == n.alerts {
+            s.alerts = !s.alerts;
+            // The only place notifications are asked for.
+            if s.alerts {
+                self.service.request_notifications();
+            }
         } else if target == n.scrollbar {
             let forward = match action {
                 ControlAction::StepRight => true,
@@ -653,39 +891,88 @@ impl SettingsScreen {
         Some(SettingsHit::Changed(s))
     }
 
+    /// A link in the copy was tapped. It opens nothing until libmorph
+    /// 0.4.0's `ctx.open_link`.
+    fn open_link(&mut self, url: String) {
+        log::info!("settings: link {url}: links open once libmorph 0.4.0's open_link is in");
+        self.tapped_link = Some(url);
+        self.dirty = true;
+    }
+
+    /// The link at `pos` in the open modal's Markdown, if any.
+    fn modal_link(&self, pos: [f32; 2]) -> Option<String> {
+        let (what, ..) = self.asking?;
+        let text = self.modal_text?;
+        let stack = self.router.find(ModalStack::NAME)?;
+        let stack = self.router.get::<ModalStack>(stack)?;
+        let dialog = stack.modal::<ModalDialog>(what.id())?;
+        let view = dialog.content().get::<MarkdownView>(text)?;
+        let i = view.link_at(pos)?;
+        view.links().get(i).cloned()
+    }
+
+    /// The modals' viewport: the screen between its bars.
+    fn modal_viewport(&self) -> Rect {
+        let l = self.layout;
+        Rect::new(0.0, l.top, l.w, l.h - l.top - l.bottom)
+    }
+
     /// Opens the confirming modal for `what`.
     fn ask(&mut self, what: Asking) {
         let s = self.scale();
-        let l = self.layout;
-        let viewport = Rect::new(0.0, l.top, l.w, l.h - l.top - l.bottom);
+        let viewport = self.modal_viewport();
+        let vendor = self.vendor.as_deref();
         let (question, action) = match what {
             Asking::Unpair => {
-                let mut q = vec![format!(
-                    "Unpair this phone from {}? You will need to pair again to use handlr.",
-                    self.daemon
-                )];
+                let mut q = copy::UNPAIR.fill(vendor, &[("daemon", &self.daemon)]);
                 if !self.online {
-                    q.insert(
-                        0,
-                        "handlr is offline: it will still list this phone until it is removed from auth.toml."
-                            .to_string(),
-                    );
+                    q = format!("{}\n\n{q}", copy::UNPAIR_OFFLINE.body(vendor));
                 }
-                (q, "Unpair")
+                (q, copy::UNPAIR_ACTION.text)
             }
-            Asking::Delete => (
-                vec![
-                    "Delete handlr's data on this phone? Settings, stored scrollback and pairing are removed. Voice models stay."
-                        .to_string(),
-                ],
-                "Delete",
-            ),
+            Asking::Delete => (copy::DELETE_DATA.body(vendor), copy::DELETE_ACTION.text),
+            Asking::Info(info) => return self.explain(info),
         };
-        let confirm = Confirm::new(viewport, &question, action, s);
+        let confirm = Confirm::new(viewport, &question, action, s, self.faces.clone());
+        self.push(
+            what,
+            confirm.dialog,
+            (confirm.cancel, confirm.action),
+            confirm.text,
+        );
+    }
+
+    /// Opens `info`'s explanation.
+    fn explain(&mut self, info: Info) {
+        let copy = info.copy();
+        let modal = InfoModal::new(
+            self.modal_viewport(),
+            copy.label(),
+            &copy.body(self.vendor.as_deref()),
+            self.scale(),
+            self.faces.clone(),
+        );
+        self.push(
+            Asking::Info(info),
+            modal.dialog,
+            (modal.ok, modal.ok),
+            modal.text,
+        );
+    }
+
+    /// Pushes `dialog` as `what`'s modal.
+    fn push(
+        &mut self,
+        what: Asking,
+        dialog: ModalDialog,
+        (cancel, action): (NodeId, NodeId),
+        text: NodeId,
+    ) {
         let id = what.id();
-        match self.router.push_modal(id, confirm.dialog) {
+        match self.router.push_modal(id, dialog) {
             Ok(()) => {
-                self.asking = Some((what, confirm.cancel, confirm.action));
+                self.asking = Some((what, cancel, action));
+                self.modal_text = Some(text);
                 self.dirty = true;
             }
             Err(e) => log::warn!("settings: the {id} modal: {e:?}"),
@@ -700,12 +987,14 @@ impl SettingsScreen {
         for event in self.modals.take_events() {
             if let ModalEvent::Dismissed { by, .. } = event {
                 self.asking = None;
+                self.modal_text = None;
                 self.dirty = true;
                 if by == DismissReason::Control(action) {
-                    hit = Some(match what {
-                        Asking::Unpair => SettingsHit::Unpair,
-                        Asking::Delete => SettingsHit::DeleteData,
-                    });
+                    hit = match what {
+                        Asking::Unpair => Some(SettingsHit::Unpair),
+                        Asking::Delete => Some(SettingsHit::DeleteData),
+                        Asking::Info(_) => None,
+                    };
                 }
             }
         }
@@ -729,7 +1018,7 @@ impl SettingsScreen {
         let (what, ..) = self.asking?;
         let stack = self.router.find(ModalStack::NAME)?;
         let stack = self.router.get::<ModalStack>(stack)?;
-        let dialog = stack.modal::<libcontrols::ModalDialog>(what.id())?;
+        let dialog = stack.modal::<ModalDialog>(what.id())?;
         Some(read(dialog.content()))
     }
 
@@ -754,11 +1043,57 @@ impl SettingsScreen {
     fn modal_text(&self) -> String {
         self.dialog(|c| {
             c.children(None)
-                .filter_map(|id| c.get::<Label>(id).map(|l| l.state.text()))
+                .filter_map(|id| c.get::<MarkdownView>(id).map(|v| v.text()))
                 .collect::<Vec<_>>()
                 .join(" ")
+                .replace('\n', " ")
         })
         .unwrap_or_default()
+    }
+
+    /// The toggle row `label`, as it is now.
+    #[cfg(test)]
+    fn toggle(&self, label: &str) -> Option<ToggleRow> {
+        let n = self.nodes.as_ref()?;
+        [
+            n.sound,
+            n.ding,
+            n.microphone,
+            n.general_agent,
+            n.background,
+            n.alerts,
+        ]
+        .into_iter()
+        .filter_map(|id| self.router.get::<ToggleRow>(id))
+        .find(|t| t.label == label)
+        .cloned()
+    }
+
+    /// The centre of row `label`'s ⓘ, if it has one.
+    #[cfg(test)]
+    fn info_point(&self, label: &str) -> Option<[f32; 2]> {
+        let n = self.nodes.as_ref()?;
+        if let Some(t) = self.toggle(label) {
+            return t.info.then(|| t.info_rect().center());
+        }
+        [n.optimization, n.vendor]
+            .into_iter()
+            .filter(|&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
+            .filter_map(|id| self.router.get::<LinkRow>(id))
+            .find(|l| l.label == label && l.info)
+            .map(|l| l.info_rect().center())
+    }
+
+    /// Where the open modal's first link is.
+    #[cfg(test)]
+    fn modal_link_point(&self) -> Option<[f32; 2]> {
+        let text = self.modal_text?;
+        self.dialog(|c| {
+            c.get::<MarkdownView>(text)
+                .and_then(|v| v.link_rect(0))
+                .map(|r| r.center())
+        })
+        .flatten()
     }
 
     /// Marks the screen to be drawn again.
@@ -800,7 +1135,7 @@ impl SettingsScreen {
         draw_row(list, ctx, term, &back, [PAD * s, back_y]);
         ctx.draw_text(
             list,
-            "Settings",
+            copy::SETTINGS_TITLE.text,
             [BACK_W * s, l.top + (HEADER_H * s - line_h(px)) * 0.5],
             px,
             FG,
@@ -849,6 +1184,21 @@ mod tests {
         }
     }
 
+    /// libmorph 0.4.0's service, as it will be, counting what is asked.
+    struct Service {
+        ready: bool,
+        asked: Rc<RefCell<usize>>,
+    }
+
+    impl Background for Service {
+        fn ready(&self) -> bool {
+            self.ready
+        }
+        fn request_notifications(&self) {
+            *self.asked.borrow_mut() += 1;
+        }
+    }
+
     fn screen(android: bool, battery: Box<dyn Battery>) -> SettingsScreen {
         let mut s = SettingsScreen::new(Settings::default(), battery, android);
         s.set_layout(PHONE);
@@ -882,6 +1232,8 @@ mod tests {
                 Section::Sound,
                 Section::Voice,
                 Section::Display,
+                Section::Background,
+                Section::Notifications,
                 Section::Device
             ]
         );
@@ -978,9 +1330,10 @@ mod tests {
             assert_eq!(tap_row(&mut s, row), None);
             assert!(s.asking(), "{row} asks first");
             s.tick(Duration::from_secs(1));
-            let r = s.row_rect(row).unwrap();
-            // Under the modal, the rows take no taps.
-            assert_eq!(tap(&mut s, r.x + 40.0, r.y + r.h * 0.5), None);
+            // Under the modal (its text, at its centre), the rows take no
+            // taps.
+            let [cx, cy] = s.modal_viewport().center();
+            assert_eq!(tap(&mut s, cx, cy), None);
             assert!(s.asking());
             let (cancel, action) = s.modal_points();
             assert_eq!(tap(&mut s, cancel[0], cancel[1]), None);
@@ -1077,5 +1430,205 @@ mod tests {
         let mut list = DrawList::new();
         assert!(s.draw(&mut list, &DrawContext::default(), None));
         assert!(!s.draw(&mut list, &DrawContext::default(), None));
+    }
+
+    const BACKGROUND: &str = "Stay connected in the background";
+    const ALERTS: &str = "Alert when an agent needs you";
+
+    #[test]
+    fn background_and_notifications_sit_after_display_with_their_defaults() {
+        let s = screen(true, Box::new(super::super::battery::Unreleased));
+        let order: Vec<Section> = s.sections().into_iter().map(|(x, _)| x).collect();
+        let at = |x| order.iter().position(|&o| o == x).unwrap();
+        assert_eq!(at(Section::Background), at(Section::Display) + 1);
+        assert_eq!(at(Section::Notifications), at(Section::Background) + 1);
+        assert_eq!(at(Section::Battery), at(Section::Notifications) + 1);
+        let background = s.toggle(BACKGROUND).expect("the background row");
+        let alerts = s.toggle(ALERTS).expect("the alerts row");
+        assert!(background.on && background.enabled && background.info);
+        assert!(!alerts.on && alerts.enabled && alerts.info);
+        assert!(s.row_rect(BACKGROUND).unwrap().y < s.row_rect(ALERTS).unwrap().y);
+        // On, and waiting on libmorph 0.4.0's service.
+        assert_eq!(s.background_notes(), [copy::NEEDS_UPDATE.text]);
+    }
+
+    #[test]
+    fn the_alerts_row_is_dim_while_background_is_off() {
+        let mut s = plain();
+        let Some(SettingsHit::Changed(now)) = tap_row(&mut s, BACKGROUND) else {
+            panic!("background toggles");
+        };
+        assert!(!now.background && !now.alerts);
+        let alerts = s.toggle(ALERTS).unwrap();
+        assert!(!alerts.enabled, "dim");
+        assert_eq!(s.background_notes(), [copy::ALERTS_NEEDS_BACKGROUND.text]);
+        assert_eq!(tap_row(&mut s, ALERTS), None, "it takes no taps");
+        // Its ⓘ still opens.
+        let [x, y] = s.info_point(ALERTS).unwrap();
+        assert_eq!(tap(&mut s, x, y), None);
+        assert!(s.asking());
+        assert!(s.back());
+        // Background on again: the row is live, and says nothing while off.
+        tap_row(&mut s, BACKGROUND);
+        assert!(s.toggle(ALERTS).unwrap().enabled);
+        assert_eq!(s.background_notes(), [copy::NEEDS_UPDATE.text]);
+    }
+
+    #[test]
+    fn nothing_is_asked_at_start_and_alerts_ask_once_when_turned_on() {
+        let asked = Rc::new(RefCell::new(0));
+        let opened = Rc::new(RefCell::new(Vec::new()));
+        let phone = Phone {
+            state: BatteryState {
+                ignoring_optimizations: false,
+                background_restricted: false,
+                manufacturer: "samsung".into(),
+            },
+            vendor: VendorPage::Opened,
+            opened: Rc::clone(&opened),
+        };
+        let mut s = SettingsScreen::new(Settings::default(), Box::new(phone), true)
+            .with_background(Box::new(Service {
+                ready: true,
+                asked: Rc::clone(&asked),
+            }));
+        s.set_layout(PHONE);
+        s.tick(Duration::from_millis(16));
+        let mut list = DrawList::new();
+        s.draw(&mut list, &DrawContext::default(), None);
+        assert_eq!(*asked.borrow(), 0, "no permission is asked at start");
+        assert!(opened.borrow().is_empty(), "no battery page opens at start");
+        // Ready: no notes.
+        assert!(s.background_notes().is_empty());
+        let Some(SettingsHit::Changed(now)) = tap_row(&mut s, ALERTS) else {
+            panic!("alerts toggle");
+        };
+        assert!(now.alerts);
+        assert_eq!(*asked.borrow(), 1, "asked once, on turning it on");
+        tap_row(&mut s, ALERTS);
+        assert_eq!(*asked.borrow(), 1, "not on turning it off");
+        // An ⓘ opens nothing but its modal.
+        let [x, y] = s.info_point("Battery optimization").unwrap();
+        tap(&mut s, x, y);
+        assert!(s.asking());
+        assert!(opened.borrow().is_empty());
+    }
+
+    #[test]
+    fn each_info_opens_its_modal_which_closes_at_once() {
+        let phone = || Phone {
+            state: BatteryState {
+                ignoring_optimizations: true,
+                background_restricted: false,
+                manufacturer: "samsung".into(),
+            },
+            vendor: VendorPage::Opened,
+            opened: Rc::new(RefCell::new(Vec::new())),
+        };
+        for (label, info) in [
+            ("General agent (Gemini)", Info::GeneralAgent),
+            (BACKGROUND, Info::Background),
+            (ALERTS, Info::Alerts),
+            ("Battery optimization", Info::Optimization),
+            ("Samsung battery (app sleeping)", Info::Vendor),
+        ] {
+            let mut s = screen(true, Box::new(phone()));
+            let before = s.settings();
+            let [x, y] = s.info_point(label).unwrap_or_else(|| panic!("{label}'s ⓘ"));
+            assert_eq!(tap(&mut s, x, y), None);
+            assert!(s.asking(), "{label}'s ⓘ opens its modal");
+            // Its 0.18 s opening.
+            s.tick(Duration::from_secs(1));
+            assert_eq!(s.settings(), before, "{label}: the ⓘ is not the toggle");
+            let text = s.modal_text();
+            assert!(text.starts_with(label), "{text}");
+            let first = info.copy().text.split_whitespace().next().unwrap();
+            assert!(text.contains(first), "{text}");
+            // OK closes it at once: the same frame, with no fade.
+            let (ok, _) = s.modal_points();
+            assert_eq!(tap(&mut s, ok[0], ok[1]), None);
+            assert!(!s.asking(), "{label}: OK closes it");
+            assert!(
+                !s.modals.contains(Asking::Info(info).id()),
+                "{label}: at once"
+            );
+            // A tap outside it closes it too.
+            tap(&mut s, x, y);
+            assert!(s.asking());
+            s.tick(Duration::from_secs(1));
+            let top = s.viewport().y + 5.0;
+            tap(&mut s, 5.0, top);
+            assert!(!s.asking(), "{label}: a tap outside closes it");
+            assert!(!s.modals.contains(Asking::Info(info).id()));
+        }
+    }
+
+    #[test]
+    fn a_link_in_an_explanation_is_tappable_and_inert() {
+        let mut s = plain();
+        let [x, y] = s.info_point(BACKGROUND).unwrap();
+        tap(&mut s, x, y);
+        s.tick(Duration::from_secs(1));
+        let at = s.modal_link_point().expect("the explanation has a link");
+        assert_eq!(tap(&mut s, at[0], at[1]), None);
+        assert_eq!(
+            s.tapped_link(),
+            Some("https://developer.android.com/develop/background-work/services/fgs")
+        );
+        assert!(s.asking(), "the modal stays open");
+    }
+
+    #[test]
+    fn the_vendor_addition_shows_on_that_vendors_phones_only() {
+        for (info, freecess) in [
+            (None, false),
+            (
+                Some(BuildInfo {
+                    vendor: "google".into(),
+                }),
+                false,
+            ),
+            (
+                Some(BuildInfo {
+                    vendor: "samsung".into(),
+                }),
+                true,
+            ),
+        ] {
+            let mut s = SettingsScreen::new(
+                Settings::default(),
+                Box::new(super::super::battery::Unreleased),
+                false,
+            )
+            .with_build_info(info);
+            s.set_layout(PHONE);
+            let [x, y] = s.info_point(BACKGROUND).unwrap();
+            tap(&mut s, x, y);
+            let text = s.modal_text();
+            assert!(
+                text.contains("cached apps freezer"),
+                "the base text: {text}"
+            );
+            assert_eq!(text.contains("Freecess"), freecess, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_copy_comes_from_settings_copy_md() {
+        let s = plain();
+        for label in [
+            "All sound",
+            "Ding when an agent is done",
+            "Microphone",
+            "General agent (Gemini)",
+            "Scrollbar",
+            "Unpair this device",
+            "Delete data",
+        ] {
+            assert!(s.row_rect(label).is_some(), "{label}");
+        }
+        assert_eq!(copy::SOUND.label(), "All sound");
+        assert_eq!(Section::Sound.title(), "SOUND");
+        assert_eq!(BATTERY_UPDATE, "Battery settings need an app update");
     }
 }

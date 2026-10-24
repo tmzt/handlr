@@ -15,9 +15,13 @@
 //! - [`delete_data`] is *Delete data*'s part on disk: everything in the
 //!   data directory but the voice models.
 
+pub mod background;
 pub mod battery;
+pub mod build_info;
 pub mod confirm;
+pub mod copy;
 pub mod danger_row;
+pub mod info;
 pub mod link_row;
 pub mod option_row;
 pub mod screen;
@@ -39,8 +43,8 @@ pub const FILE: &str = "settings.toml";
 /// How opaque a disabled control is drawn (decision 4).
 pub const DISABLED_ALPHA: f32 = 0.35;
 
-/// The settings screen's values. Each toggle is on by default, and the
-/// scrollbar *Hidden*.
+/// The settings screen's values. Each toggle is on by default but
+/// *Alert when an agent needs you*, and the scrollbar *Hidden*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// *All sound*.
@@ -53,6 +57,11 @@ pub struct Settings {
     pub general_agent: bool,
     /// *Scrollbar*, the agent view's.
     pub scrollbar: ScrollbarVisibility,
+    /// *Stay connected in the background* (CHANGES.md 2026-10-24 12:38
+    /// EDT): the foreground service, once libmorph 0.4.0 is in.
+    pub background: bool,
+    /// *Alert when an agent needs you*: off until turned on.
+    pub alerts: bool,
 }
 
 impl Default for Settings {
@@ -63,6 +72,8 @@ impl Default for Settings {
             microphone: true,
             general_agent: true,
             scrollbar: ScrollbarVisibility::Hidden,
+            background: true,
+            alerts: false,
         }
     }
 }
@@ -81,6 +92,10 @@ struct SettingsFile {
     /// `disabled`, `hidden` or `always`.
     #[serde(default = "hidden")]
     scrollbar: String,
+    #[serde(default = "on")]
+    background: bool,
+    #[serde(default)]
+    alerts: bool,
 }
 
 fn on() -> bool {
@@ -103,9 +118,9 @@ pub fn scrollbar_name(mode: ScrollbarVisibility) -> &'static str {
 /// The scrollbar's visibility as the screen shows it.
 pub fn scrollbar_label(mode: ScrollbarVisibility) -> &'static str {
     match mode {
-        ScrollbarVisibility::Disabled => "None",
-        ScrollbarVisibility::Hidden => "On Scroll",
-        ScrollbarVisibility::Always => "Always",
+        ScrollbarVisibility::Disabled => copy::SCROLLBAR_NONE.text,
+        ScrollbarVisibility::Hidden => copy::SCROLLBAR_ON_SCROLL.text,
+        ScrollbarVisibility::Always => copy::SCROLLBAR_ALWAYS.text,
     }
 }
 
@@ -164,6 +179,8 @@ impl Settings {
             microphone: file.microphone,
             general_agent: file.general_agent,
             scrollbar,
+            background: file.background,
+            alerts: file.alerts,
         }
     }
 
@@ -176,6 +193,8 @@ impl Settings {
             microphone: self.microphone,
             general_agent: self.general_agent,
             scrollbar: scrollbar_name(self.scrollbar).to_string(),
+            background: self.background,
+            alerts: self.alerts,
         };
         let text = toml::to_string(&file).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -268,6 +287,9 @@ mod tests {
         assert_eq!(Settings::load(dir.path()), Settings::default());
         std::fs::write(dir.path().join(FILE), "sound = 3\n").unwrap();
         assert_eq!(Settings::load(dir.path()), Settings::default());
+        // Background on, alerts off, by default.
+        let d = Settings::default();
+        assert!(d.background && !d.alerts);
     }
 
     #[test]
@@ -279,12 +301,15 @@ mod tests {
             microphone: false,
             general_agent: false,
             scrollbar: ScrollbarVisibility::Always,
+            background: false,
+            alerts: true,
         };
         s.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), s);
         let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
         assert!(text.contains("scrollbar = \"always\""), "{text}");
         assert!(!dir.path().join(format!("{FILE}.tmp")).exists());
+        assert!(text.contains("background = false") && text.contains("alerts = true"));
 
         std::fs::write(
             dir.path().join(FILE),

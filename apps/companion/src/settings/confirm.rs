@@ -1,13 +1,17 @@
 //! The confirming modal of *Unpair this device* and *Delete data*
-//! (decision 3): its question, wrapped, and *Cancel* and the action (in
-//! red) under it. It is libcontrols' `ModalDialog`, centred, over a dimmed
+//! (decision 3): its question, in Markdown from `SETTINGS_COPY.md`, and
+//! *Cancel* and the action (in red) under it. It is libcontrols' `ModalDialog`, centred, over a dimmed
 //! screen; both buttons are its close controls, so the modal stack says
 //! which one closed it, and a tap outside it or Back is *Cancel*.
 
-use libcontrols::{Button, Label, ModalDialog, ModalOptions, NodeId, PanelFrame, Rect, TextAlign};
+use std::sync::Arc;
 
-use crate::agent::{BACK_BG, CARD_BG, DENY_BG, FG, PAD, line_h};
-use crate::ui::{TEXT, wrap};
+use libcontrols::{Button, ModalDialog, ModalOptions, NodeId, PanelFrame, Rect};
+
+use super::copy;
+use crate::agent::{BACK_BG, CARD_BG, DENY_BG, FG, PAD};
+use crate::markdown_view::{Faces, MarkdownView};
+use crate::ui::TEXT;
 
 /// The question's size, in points.
 const TEXT_PT: f32 = 17.0;
@@ -20,26 +24,26 @@ pub struct Confirm {
     pub dialog: ModalDialog,
     pub cancel: NodeId,
     pub action: NodeId,
+    /// The question.
+    pub text: NodeId,
 }
 
 impl Confirm {
-    /// A modal asking `question` over `viewport`, at scale `s`, `action`
-    /// on its red button.
-    pub fn new(viewport: Rect, question: &[String], action: &str, s: f32) -> Self {
+    /// A modal asking `question` (Markdown) over `viewport`, at scale `s`,
+    /// `action` on its red button.
+    pub fn new(
+        viewport: Rect,
+        question: &str,
+        action: &str,
+        s: f32,
+        faces: Option<Arc<Faces>>,
+    ) -> Self {
         let pad = 2.0 * PAD * s;
         let w = (viewport.w - 2.0 * PAD * s).min(560.0 * s);
         let inner_w = w - 2.0 * pad;
         let px = TEXT_PT * s;
-        // Roboto at half an em a character.
-        let columns = ((inner_w / (px * 0.5)) as usize).max(8);
-        let mut lines: Vec<(String, f32)> = Vec::new();
-        for (i, paragraph) in question.iter().enumerate() {
-            for (j, line) in wrap(paragraph, columns).into_iter().enumerate() {
-                let gap = if i > 0 && j == 0 { 10.0 * s } else { 0.0 };
-                lines.push((line, gap));
-            }
-        }
-        let text_h: f32 = lines.iter().map(|(_, gap)| gap + line_h(px)).sum();
+        let mut body = MarkdownView::new(question, 0.0, 0.0, inner_w, px, TEXT, faces);
+        let text_h = body.height();
         let h = pad + text_h + GAP * 2.0 * s + BUTTON_H * s + pad;
         let options = ModalOptions::default();
         let mut dialog = ModalDialog::centered(viewport, [w, h], pad)
@@ -54,18 +58,8 @@ impl Confirm {
         let frame_x = viewport.center()[0] - w * 0.5;
         let frame_y = viewport.center()[1] - h * 0.5;
         let x = frame_x + pad;
-        let mut y = frame_y + pad;
-        for (line, gap) in lines {
-            y += gap;
-            content.add(
-                None,
-                Label::new(line, Rect::new(x, y, inner_w, line_h(px)))
-                    .with_font_size(px)
-                    .with_color(TEXT)
-                    .with_align(TextAlign::Left),
-            );
-            y += line_h(px);
-        }
+        body.move_to(x, frame_y + pad);
+        let text = content.add(None, body);
         let by = frame_y + h - pad - BUTTON_H * s;
         let bw = (inner_w - GAP * s) / 2.0;
         let button = |label: &str, bx: f32, bg| {
@@ -75,13 +69,14 @@ impl Confirm {
                 .with_font_size(px)
                 .with_corner_radius(10.0 * s)
         };
-        let cancel = content.add(None, button("Cancel", x, BACK_BG));
+        let cancel = content.add(None, button(copy::CANCEL.text, x, BACK_BG));
         let action = content.add(None, button(action, x + bw + GAP * s, DENY_BG));
         let dialog = dialog.with_close_control(cancel).with_close_control(action);
         Confirm {
             dialog,
             cancel,
             action,
+            text,
         }
     }
 }
