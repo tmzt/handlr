@@ -113,3 +113,12 @@ Additive, by the owner's ruling ("appending to a struct is additive"):
     (`Vec<Link>`), each defaulted and left out of the wire when empty:
     the companion offers approve, improve and implement for a question
     about a plan (plan 20261022_03, the 21:57 EDT amendment).
+
+## libhandlr_proto 0.3.4 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.3.4`)
+
+Additive, by the owner's ruling ("appending to a struct is additive"):
+
+- **Added:** `common::Entry::origin` (`Option<String>`, defaulted and left
+  out of the wire when absent): an entry that is context rather than the
+  user's or the agent's own words, and where it is from: `"task"`,
+  `"peer:<name>"`, `"agent:<id>"`, `"recap"` or `"compact"`.

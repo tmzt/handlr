@@ -329,6 +329,15 @@ pub struct Entry {
     /// when there are none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// Where an entry that is context, not the user's own words nor the
+    /// agent's, comes from: `"task"` (a task, subagent or background
+    /// command finished), `"peer:<name>"` (a message from another session),
+    /// `"agent:<id>"` (a subagent's hand-back), `"recap"` (the harness's
+    /// recap of the session) or `"compact"` (the conversation was
+    /// compacted). Such an entry has `role: user` but is never the user
+    /// speaking. Left out of the wire when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// A link in an entry's or question's text: `text` is what is written
@@ -663,6 +672,32 @@ mod tests {
     }
 
     #[test]
+    fn entry_origin_is_left_out_when_absent_and_read_when_missing() {
+        let entry = Entry {
+            ts: "t".into(),
+            role: Role::User,
+            kind: EntryKind::Text,
+            tool: None,
+            summary: "hi".into(),
+            links: vec![],
+            origin: None,
+        };
+        let text = serde_json::to_string(&entry).unwrap();
+        assert!(!text.contains("origin"), "{text}");
+        let old: Entry = serde_json::from_value(
+            json!({"ts": "t", "role": "user", "kind": "text", "summary": "hi"}),
+        )
+        .unwrap();
+        assert_eq!(old, entry);
+        let peer: Entry = serde_json::from_value(json!({
+            "ts": "t", "role": "user", "kind": "text", "summary": "hi",
+            "origin": "peer:alpha"
+        }))
+        .unwrap();
+        assert_eq!(peer.origin.as_deref(), Some("peer:alpha"));
+    }
+
+    #[test]
     fn session_entries_round_trip() {
         round_trip(Entry {
             ts: "2026-10-23T06:00:00.000Z".into(),
@@ -671,6 +706,16 @@ mod tests {
             tool: Some("Bash".into()),
             summary: "Bash {\"command\":\"ls\"}".into(),
             links: vec![],
+            origin: None,
+        });
+        round_trip(Entry {
+            ts: "t".into(),
+            role: Role::User,
+            kind: EntryKind::Text,
+            tool: None,
+            summary: "Build finished".into(),
+            links: vec![],
+            origin: Some("task".into()),
         });
         round_trip(Entry {
             ts: "t".into(),
@@ -682,6 +727,7 @@ mod tests {
                 text: "docs/design/X_PLAN.md".into(),
                 url: "http://wiki/#/src--handlr/docs/design/X_PLAN".into(),
             }],
+            origin: None,
         });
         round_trip(PendingQuestion {
             text: "Shall I go on?".into(),
@@ -798,6 +844,7 @@ mod tests {
                     tool: None,
                     summary: "hi".to_string(),
                     links: vec![],
+                    origin: None,
                 }],
                 pending_question: None,
             }),

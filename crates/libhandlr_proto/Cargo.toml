@@ -1,6 +1,6 @@
 [package]
 name = "libhandlr_proto"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2024"
 description = "Wire types for handlr's protocols: handlr.harness, handlr.companion and handlr link"
 
