@@ -62,6 +62,11 @@ use crate::agent::{BG, DIM, FG, PAD, Row, Terminal, draw_row, fill, line_h, term
 use crate::markdown_view::{self, Faces, MarkdownView};
 use crate::ui::Layout;
 
+/// After *Enable*, how long to watch for the exemption, and how often to
+/// look, in seconds.
+const BATTERY_WATCH: f32 = 60.0;
+const BATTERY_LOOK: f32 = 1.0;
+
 /// A row's height, in points (decision 2).
 pub const ROW_H: f32 = 52.0;
 /// A row's label and subtitle, and a section's title, in points.
@@ -229,6 +234,10 @@ pub struct SettingsScreen {
     settings: Settings,
     battery: Box<dyn Battery>,
     battery_state: Option<BatteryState>,
+    /// After *Enable*, seconds left to watch for the exemption, and since
+    /// the last look. Android's Allow dialog sits over the app without
+    /// taking its surface, so no resume says it closed.
+    battery_watch: Option<(f32, f32)>,
     /// The service and the notification permission (libmorph 0.4.0's).
     service: Box<dyn Background>,
     /// Roboto Bold and Italic and the terminal face, for the Markdown.
@@ -276,6 +285,7 @@ impl SettingsScreen {
             settings,
             battery,
             battery_state,
+            battery_watch: None,
             // Ready, with a request no one reads, until the app gives its
             // own (`with_background`).
             service: Box::new(background::Morph(Default::default())),
@@ -341,6 +351,28 @@ impl SettingsScreen {
     }
 
     /// Reads the battery state again, as on returning from its pages.
+    /// After *Enable*: the state read again once a second, for a minute or
+    /// until handlr is exempt.
+    fn watch_battery(&mut self, dt: f32) {
+        let Some((left, since)) = self.battery_watch else {
+            return;
+        };
+        let (left, since) = (left - dt, since + dt);
+        if since < BATTERY_LOOK {
+            self.battery_watch = Some((left, since));
+            return;
+        }
+        self.refresh_battery();
+        let exempt = self
+            .battery_state
+            .as_ref()
+            .is_some_and(|b| b.ignoring_optimizations);
+        self.battery_watch = (!exempt && left > 0.0).then_some((left, 0.0));
+        if exempt {
+            log::info!("battery: exempt after Enable");
+        }
+    }
+
     pub fn refresh_battery(&mut self) {
         if !self.android {
             return;
@@ -936,6 +968,9 @@ impl SettingsScreen {
             // opens the list of every app's setting.
             let enable = matches!(action, ControlAction::Activated { part } if part == ACTION_PART);
             self.battery.open_optimization(!enable);
+            if enable {
+                self.battery_watch = Some((BATTERY_WATCH, 0.0));
+            }
             return None;
         } else if target == n.vendor {
             if self.battery.open_vendor() == VendorPage::None {
@@ -1074,6 +1109,7 @@ impl SettingsScreen {
     /// whether anything moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
         let dt = dt.as_secs_f32();
+        self.watch_battery(dt);
         let moved = self.router.advance(dt) | self.modals.advance(dt);
         if moved {
             self.dirty = true;
@@ -1787,6 +1823,41 @@ mod tests {
             subtitle(&s).as_deref(),
             copy::BATTERY_OPTIMIZATION.status(true)
         );
+    }
+
+    #[test]
+    fn after_enable_the_exemption_is_seen_without_a_resume() {
+        let state = Rc::new(RefCell::new(BatteryState {
+            ignoring_optimizations: false,
+            background_restricted: false,
+            manufacturer: "samsung".into(),
+        }));
+        struct Changing(Rc<RefCell<BatteryState>>);
+        impl Battery for Changing {
+            fn state(&self) -> Option<BatteryState> {
+                Some(self.0.borrow().clone())
+            }
+            fn open_optimization(&self, _exempt: bool) {}
+            fn open_vendor(&self) -> VendorPage {
+                VendorPage::Opened
+            }
+        }
+        let mut s = screen(true, Box::new(Changing(Rc::clone(&state))));
+        let enable = s.enable_rect("Battery optimization").unwrap();
+        tap(&mut s, enable.x + enable.w * 0.5, enable.y + enable.h * 0.5);
+        // The user allows it in Android's dialog, which takes no surface.
+        state.borrow_mut().ignoring_optimizations = true;
+        s.tick(Duration::from_millis(500));
+        assert!(
+            s.enable_rect("Battery optimization").is_some(),
+            "not looked yet"
+        );
+        s.tick(Duration::from_millis(600));
+        assert!(
+            s.enable_rect("Battery optimization").is_none(),
+            "seen, button gone"
+        );
+        assert!(s.battery_watch.is_none(), "and the watch ends");
     }
 
     #[test]
