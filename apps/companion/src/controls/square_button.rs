@@ -88,6 +88,17 @@ impl SquareButton {
                 fill(list, rect, b.bg, 10.0 * s);
                 draw_glyph(list, ctx, term, CANCEL_GLYPH, "x", rect, px, FG);
             }
+            // A plan question's words are plain text in their colour (the
+            // colour stands in `bg`), not buttons.
+            AgentHit::Suggest(
+                handlr_companion::Suggestion::Approve
+                | handlr_companion::Suggestion::Improve
+                | handlr_companion::Suggestion::Implement,
+            ) => {
+                let px = 19.0 * s;
+                let y = rect.y + (rect.h - crate::agent::line_h(px)) * 0.5;
+                ctx.draw_text(list, b.label, [rect.x + 4.0 * s, y], px, b.bg);
+            }
             _ => button(list, ctx, b.label, rect, b.bg, s),
         }
     }

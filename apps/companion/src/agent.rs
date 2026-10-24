@@ -64,7 +64,6 @@ pub(crate) const DENY_BG: [f32; 4] = [0.55, 0.18, 0.18, 1.0];
 pub(crate) const MESSAGE_BG: [f32; 4] = [0.20, 0.32, 0.55, 1.0];
 pub(crate) const BACK_BG: [f32; 4] = [0.30, 0.30, 0.36, 1.0];
 /// A plan question's implement button: approve and build.
-pub(crate) const IMPLEMENT_BG: [f32; 4] = [0.13, 0.38, 0.45, 1.0];
 const DICTATION_BG: [f32; 4] = [0.09, 0.10, 0.13, 1.0];
 
 /// A card kind's accent colour.
@@ -374,22 +373,21 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
             (AgentHit::Deny(id), "Deny", DENY_BG),
         ],
         // A question about a plan (plan 20261022_03, the 21:57 EDT
-        // amendment): just the three words.
+        // amendment): just the three words, as plain coloured text, not
+        // buttons (owner, 2026-10-23: "Yes/No are buttons but suggestions
+        // (approve, impl) can be plain text"). The colour stands in the
+        // background slot; `SquareButton::draw` draws these as text.
         (CardKind::Question, _) if card.about_plan => vec![
-            (
-                AgentHit::Suggest(Suggestion::Approve),
-                "Approve",
-                APPROVE_BG,
-            ),
+            (AgentHit::Suggest(Suggestion::Approve), "approve", GREEN),
             (
                 AgentHit::Suggest(Suggestion::Improve),
-                "Improve",
-                MESSAGE_BG,
+                "improve",
+                link_spans::LINK,
             ),
             (
                 AgentHit::Suggest(Suggestion::Implement),
-                "Implement",
-                IMPLEMENT_BG,
+                "implement",
+                YELLOW,
             ),
             (AgentHit::Reply, "", MESSAGE_BG),
         ],
@@ -1558,10 +1556,14 @@ pub(crate) fn button(
     bg: [f32; 4],
     s: f32,
 ) {
+    // The label never outgrows its button: 17 pt, or smaller to fit (a
+    // Roboto letter is about 0.55 em wide; 12 pt of padding each side).
+    let chars = label.chars().count().max(1) as f32;
+    let fits = (rect.w - 24.0 * s) / (0.55 * chars);
     let mut b = Button::new(label, rect)
         .with_bg(bg)
         .with_text_color(FG)
-        .with_font_size(17.0 * s);
+        .with_font_size((17.0 * s).min(fits).max(9.0 * s));
     b.corner_radius = Some(10.0 * s);
     b.draw(list, ctx);
 }
@@ -1655,9 +1657,9 @@ mod tests {
         assert_eq!(
             buttons,
             [
-                (AgentHit::Suggest(Suggestion::Approve), "Approve"),
-                (AgentHit::Suggest(Suggestion::Improve), "Improve"),
-                (AgentHit::Suggest(Suggestion::Implement), "Implement"),
+                (AgentHit::Suggest(Suggestion::Approve), "approve"),
+                (AgentHit::Suggest(Suggestion::Improve), "improve"),
+                (AgentHit::Suggest(Suggestion::Implement), "implement"),
                 (AgentHit::Reply, ""),
             ]
         );
@@ -2598,5 +2600,36 @@ mod tests {
         );
         let pin = a.frame().pin.as_ref().unwrap().rect;
         assert_ne!(a.hit(pin.x + 40.0, pin.y + 40.0), Some(AgentHit::Expand));
+    }
+
+    #[test]
+    fn a_label_never_outgrows_its_button() {
+        // A long label in a narrow button: drawn smaller, not spilling.
+        let mut list = DrawList::new();
+        let ctx = DrawContext::default();
+        button(
+            &mut list,
+            &ctx,
+            "Implement",
+            Rect::new(0.0, 0.0, 80.0, 40.0),
+            FG,
+            1.0,
+        );
+        button(
+            &mut list,
+            &ctx,
+            "Yes",
+            Rect::new(0.0, 0.0, 200.0, 40.0),
+            FG,
+            1.0,
+        );
+        // The size rule itself: 17 pt when it fits, smaller when not.
+        let size = |label: &str, w: f32| {
+            (17.0f32)
+                .min((w - 24.0) / (0.55 * label.len() as f32))
+                .max(9.0)
+        };
+        assert!(size("Implement", 80.0) < 17.0);
+        assert_eq!(size("Yes", 200.0), 17.0);
     }
 }
