@@ -167,3 +167,43 @@ setting.
    button stop going to Gemini entirely (messages to coding agents only),
    or keep a fallback when no coding agent is in view?
 4. **Model:** the configured `[gemini] model`, or a faster one for chat?
+
+## Amendment — 2026-10-24 11:40 EDT: tap for one exchange, long press for a continuous chat; the centre button on every screen, an X while voice input can be cancelled
+
+The owner (2026-10-24), answering open question 1: "both, long press
+toggle"; then "that should be its own plan, just the parts that affect
+settings and overview in theirs"; "right, but it's on all screens, only
+replaced with X when it means cancel voice input". This replaces decision
+1's "tapping it opens the chat; tapping it again, or saying 'that's all',
+closes it", and its placement "on the overview and in the agent view".
+
+1. **Tap: one exchange.** The chat opens and listens until the utterance
+   ends. The reply streams and is spoken, barge-in works, and the chat
+   closes after the reply.
+2. **Long press (500 ms or more): a continuous chat.** It stays open
+   across exchanges, and listening resumes after each reply. The centre
+   button shows a steady ring. A short haptic tick marks the long press.
+   Another long press, a tap, or "that's all" closes it.
+3. **On every screen.** The centre button is in the middle of every
+   screen's controls row: the overview, the agent view, and any later
+   screen with one.
+4. **An X while voice input can be cancelled.** While voice input is
+   being taken, the centre button is drawn as an X, and tapping it
+   cancels that input:
+   - while dictating a message to a coding agent, it discards the
+     dictation (in place of the dictation's own cancel button);
+   - while the chat hears an utterance, it discards the utterance. A
+     single exchange then closes; a continuous chat goes back to
+     listening.
+
+   At any other time it is the general agent's button.
+5. **Where each screen's part lives.** The overview's controls row and
+   its Gemini strip and overlay are plan 20261023_04's (frozen; recorded
+   as a departure in CHANGES.md). The agent view's controls row is plan
+   20261022_03's living section L3 (amended at the same time). The toggle
+   is the settings plan's. Decisions 1 and 6 here stand for the chat's
+   behaviour, and those documents hold each screen's layout.
+
+Step 4's tests also cover the tap's single exchange, the long press's
+continuous chat and its closing, the X during dictation and during an
+utterance, and the button on both screens.
