@@ -262,6 +262,12 @@ pub struct App {
     read_aloud: bool,
     /// Something is being said.
     speaking: bool,
+    /// Phonon's voices, once it has loaded (`AudioEvent::TtsLoaded`), for
+    /// the *Voice* row.
+    voices: Option<Vec<String>>,
+    /// A *Voice* preview was asked and is not yet over: the next step cuts
+    /// it off.
+    previewing: bool,
     /// An agent view has been opened: the overview's play has replies to
     /// read.
     viewed: bool,
@@ -697,12 +703,13 @@ impl App {
         log::info!("settings: open");
         self.follow_permission();
         let mut screen = SettingsScreen::new(
-            self.settings,
+            self.settings.clone(),
             Box::new(settings::battery::Morph),
             cfg!(target_os = "android"),
         )
         .with_faces(Some(std::sync::Arc::clone(&self.faces)))
         .with_build_info(self.build_info.clone())
+        .with_voices(self.voices.clone())
         .with_background(Box::new(background::Morph(std::rc::Rc::clone(
             &self.notify_ask,
         ))));
@@ -724,6 +731,10 @@ impl App {
         match hit {
             SettingsHit::Back => self.close_settings(),
             SettingsHit::Changed(settings) => self.apply_settings(settings),
+            SettingsHit::Voice(settings) => {
+                self.apply_settings(settings);
+                self.preview_voice();
+            }
             SettingsHit::Unpair => self.unpair(false),
             SettingsHit::DeleteData => self.unpair(true),
             SettingsHit::ClearCache => {
@@ -739,8 +750,12 @@ impl App {
         if settings.background != self.settings.background && self.service == Service::Unavailable {
             self.service = Service::Off;
         }
-        self.settings = settings;
-        settings::set_current(settings);
+        let voice_changed = settings.voice != self.settings.voice;
+        self.settings = settings.clone();
+        settings::set_current(settings.clone());
+        if voice_changed {
+            self.apply_voice();
+        }
         self.notifier
             .set_alerts(settings.alerts && settings.background);
         if let Some(dir) = &self.data_dir
@@ -755,6 +770,36 @@ impl App {
             agent.invalidate();
         }
         self.overview.settings_changed();
+    }
+
+    /// The session speaks in the saved voice, or *Default* when Phonon does
+    /// not have it. Before Phonon has loaded, nothing: it is set on load.
+    fn apply_voice(&mut self) {
+        let (Some(audio), Some(names)) = (&mut self.audio, &self.voices) else {
+            return;
+        };
+        let voice = settings::voice::effective(self.settings.voice.as_deref(), names);
+        if self.settings.voice.is_some() && voice.is_none() {
+            log::info!("settings: the saved voice is not installed; Default");
+        }
+        audio.set_voice(voice);
+    }
+
+    /// A *Voice* step's preview, "This is <voice>.", through the audio as
+    /// any `Say` is, and only while *All sound* is on. Anything being said,
+    /// as the last step's preview, is cut off first.
+    fn preview_voice(&mut self) {
+        if !self.settings.sound {
+            return;
+        }
+        let Some(audio) = &mut self.audio else {
+            return;
+        };
+        let voice = audio.voice().map(str::to_string);
+        for action in settings::voice::preview(voice.as_deref(), self.previewing || self.speaking) {
+            audio.act(action);
+        }
+        self.previewing = true;
     }
 
     /// *Unpair this device*, and *Delete data* (`delete`) after it.
@@ -825,7 +870,8 @@ impl App {
             }
         }
         self.settings = Settings::default();
-        settings::set_current(self.settings);
+        settings::set_current(self.settings.clone());
+        self.apply_voice();
         self.send(Input::Settings(self.settings.to_client()));
         self.overview.settings_changed();
     }
@@ -982,9 +1028,9 @@ impl App {
             log::info!("notifications: not granted; the alerts are off");
             let settings = Settings {
                 alerts,
-                ..self.settings
+                ..self.settings.clone()
             };
-            self.apply_settings(settings);
+            self.apply_settings(settings.clone());
             if let Some(screen) = &mut self.settings_screen {
                 screen.set_settings(settings);
             }
@@ -1003,6 +1049,9 @@ impl App {
             AudioEvent::Input(input) => {
                 if let Input::Speaking(on) = input {
                     self.speaking = on;
+                    if !on {
+                        self.previewing = false;
+                    }
                     if let Some(agent) = &mut self.agent {
                         agent.set_speaking(on);
                     }
@@ -1032,8 +1081,20 @@ impl App {
                 log::error!("audio: STT: {e}");
                 self.sound = format!("STT model missing: {e}");
             }
-            AudioEvent::TtsLoaded { load_ms, voices } => {
+            AudioEvent::TtsLoaded {
+                load_ms,
+                voices,
+                names,
+            } => {
                 log::info!("audio: TTS loaded in {load_ms} ms, {voices} voices");
+                self.voices = Some(names);
+                if let Some(screen) = &mut self.settings_screen {
+                    screen.set_voices(self.voices.clone());
+                }
+                // A saved voice is said from here; none leaves `--voice`.
+                if self.settings.voice.is_some() {
+                    self.apply_voice();
+                }
             }
             AudioEvent::TtsLoadFailed(e) => {
                 log::error!("audio: TTS: {e}");
@@ -1400,7 +1461,7 @@ impl MorphApp for App {
             settings::move_old(&FileKeyStore::default_dir(), dir);
         }
         let settings = data_dir.as_deref().map(Settings::load).unwrap_or_default();
-        settings::set_current(settings);
+        settings::set_current(settings.clone());
         log::info!("settings: {settings:?}");
         // The voice models, where they are in the data directory.
         let models = [&audio_config.stt.model_dir, &audio_config.tts.model_dir]
@@ -1446,6 +1507,8 @@ impl MorphApp for App {
             agent: None,
             read_aloud: false,
             speaking: false,
+            voices: None,
+            previewing: false,
             viewed: false,
             settings,
             data_dir,

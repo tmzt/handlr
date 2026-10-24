@@ -46,6 +46,25 @@ key's text on that vendor's phones.
 
 - text: Ding when an agent is done
 
+# [Copy] voice
+
+- title: Voice
+- text: |
+    The voices are **Phonon**'s: each is a checkpoint in the
+    `phonon-31m-en/voices/` folder of handlr's data directory, put on
+    the phone with `scripts/push-model.sh`. *Default* is Phonon's own
+    voice. Each step says a short sample in the voice chosen. A voice
+    that is no longer installed is spoken as *Default*.
+
+# [Copy] voice_default
+
+- text: Default
+
+# [Copy] voice_preview
+
+- [abc] voice: the voice's name, as the row shows it
+- text: This is {{ [abc] voice }}.
+
 # [Copy] microphone
 
 - text: Microphone

@@ -3,6 +3,11 @@
 //! `ArrowLabel`, "‹ Hidden ›", whose arrows step through the values. The
 //! row says which arrow was tapped (`StepLeft`, `StepRight`); the screen
 //! picks the value, wrapping at both ends, and sets the text.
+//!
+//! Inactive, as *Voice* is before Phonon has loaded and while *All sound*
+//! is off, it is drawn dim and its arrows take no taps. A row with a long
+//! explanation has an ⓘ after its label ([`super::info`]), which takes
+//! taps even while the row is dim, as a toggle row's does.
 
 use libcontrols::{
     ArrowLabel, ControlAction, ControlPart, DrawContext, DrawControl, EventContext, HostedControl,
@@ -10,8 +15,10 @@ use libcontrols::{
 };
 use libmsdf::drawlist::DrawList;
 
+use super::info::{self, INFO_PART};
 use super::screen::{LABEL_PT, label_y};
 use crate::agent::{DIM, PAD};
+use crate::settings::dim_since;
 use crate::ui::TEXT;
 
 #[derive(Clone, Debug)]
@@ -20,6 +27,11 @@ pub struct OptionRow {
     pub rect: Rect,
     pub arrows: ArrowLabel,
     pub scale: f32,
+    /// The arrows step; otherwise it is drawn dim.
+    pub enabled: bool,
+    /// It has an ⓘ, after its label, which is `label_w` wide.
+    pub info: bool,
+    pub label_w: f32,
 }
 
 impl OptionRow {
@@ -38,7 +50,24 @@ impl OptionRow {
             rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             arrows,
             scale,
+            enabled: true,
+            info: false,
+            label_w: 0.0,
         }
+    }
+
+    /// The ⓘ's target, after the label.
+    pub fn info_rect(&self) -> Rect {
+        let s = self.scale;
+        info::target(
+            self.rect.x + PAD * s + self.label_w,
+            self.rect.y + self.rect.h * 0.5,
+            s,
+        )
+    }
+
+    fn on_info(&self, pos: [f32; 2]) -> bool {
+        self.info && self.info_rect().contains(pos)
     }
 
     /// Moves the row to `rect`, the arrows at its right.
@@ -62,6 +91,7 @@ impl OptionRow {
 
 impl DrawControl for OptionRow {
     fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
+        let start = list.instances.len();
         let px = LABEL_PT * self.scale;
         ctx.draw_text(
             list,
@@ -71,6 +101,12 @@ impl DrawControl for OptionRow {
             TEXT,
         );
         self.arrows.draw(list, ctx);
+        if !self.enabled {
+            dim_since(list, start);
+        }
+        if self.info {
+            info::draw(list, ctx, self.info_rect(), self.scale);
+        }
     }
 }
 
@@ -81,6 +117,9 @@ impl HostedControl for OptionRow {
 
     /// The arrows' parts on the arrows, the body elsewhere.
     fn hit_test(&self, pos: [f32; 2]) -> Option<(ControlPart, f32)> {
+        if self.on_info(pos) {
+            return Some((INFO_PART, self.rect.normalized_x(pos[0])));
+        }
         if !self.rect.contains(pos) {
             return None;
         }
@@ -90,9 +129,15 @@ impl HostedControl for OptionRow {
     }
 
     /// A tap on an arrow steps; the press, which may become a scroll, does
-    /// not (the arrow label steps on both).
+    /// not (the arrow label steps on both). A tap on the ⓘ is its
+    /// explanation; inactive, the arrows do nothing.
     fn handle_mouse(&self, event: &MouseEvent, ctx: &EventContext) -> Option<ControlAction> {
         match event {
+            MouseEvent::Click {
+                pos,
+                button: MouseButton::Left,
+            } if self.on_info(*pos) => Some(ControlAction::Activated { part: INFO_PART }),
+            MouseEvent::Click { .. } if !self.enabled => None,
             MouseEvent::Click {
                 button: MouseButton::Left,
                 ..
@@ -107,6 +152,9 @@ impl HostedControl for OptionRow {
     }
 
     fn handle_keyboard(&self, event: &KeyboardEvent, ctx: &EventContext) -> Option<ControlAction> {
+        if !self.enabled {
+            return None;
+        }
         self.arrows.handle_keyboard(event, ctx)
     }
 }

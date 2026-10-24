@@ -4,7 +4,9 @@
 //! its rows, 52 pt high. In order:
 //!
 //! - **Sound**: *All sound*, and *Ding when an agent is done*, inactive
-//!   while all sound is off;
+//!   while all sound is off; then *Voice*, "‹ Default ›", stepping
+//!   through Phonon's voices with a spoken preview, inactive until Phonon
+//!   has loaded and while all sound is off ([`super::voice`]);
 //! - **Voice**: *Microphone* and *General agent (Gemini)*;
 //! - **Display**: *Scrollbar*, "‹ Hidden ›";
 //! - **Background**: *Stay connected in the background* (on), which runs
@@ -24,7 +26,7 @@
 //!   ([`Confirm`]).
 //!
 //! Rows with a long explanation have an ⓘ that opens it in a modal
-//! ([`InfoModal`]): *General agent*, the two above, *Battery optimization*
+//! ([`InfoModal`]): *Voice*, *General agent*, the two above, *Battery optimization*
 //! and *Samsung battery (app sleeping)*. All the copy is in
 //! `SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
 //! label; a link in it is tappable, and the app opens it with libmorph's
@@ -57,6 +59,7 @@ use super::info::{INFO_PART, InfoModal};
 use super::link_row::{ACTION_PART, LinkRow};
 use super::option_row::OptionRow;
 use super::toggle_row::ToggleRow;
+use super::voice;
 use super::{Settings, scrollbar_label, step_scrollbar};
 use crate::agent::{BG, DIM, FG, PAD, Row, Terminal, draw_row, fill, line_h, term_h};
 use crate::markdown_view::{self, Faces, MarkdownView};
@@ -132,6 +135,7 @@ impl Section {
 /// The rows with an ⓘ.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Info {
+    Voice,
     GeneralAgent,
     Background,
     Alerts,
@@ -142,6 +146,7 @@ enum Info {
 impl Info {
     fn copy(self) -> CopyText {
         match self {
+            Info::Voice => copy::VOICE,
             Info::GeneralAgent => copy::GENERAL_AGENT,
             Info::Background => copy::BACKGROUND,
             Info::Alerts => copy::ALERTS,
@@ -152,12 +157,15 @@ impl Info {
 }
 
 /// What a touch on the screen did.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SettingsHit {
     /// The header's "‹": back to the overview.
     Back,
     /// A toggle or the scrollbar changed: the settings as they are now.
     Changed(Settings),
+    /// The *Voice* arrows stepped: the settings as they are now, and the
+    /// new voice to preview.
+    Voice(Settings),
     /// *Unpair* in its modal.
     Unpair,
     /// *Delete* in its modal.
@@ -195,6 +203,7 @@ impl Asking {
         match self {
             Asking::Unpair => "unpair",
             Asking::Delete => "delete",
+            Asking::Info(Info::Voice) => "info_voice",
             Asking::Info(Info::GeneralAgent) => "info_general_agent",
             Asking::Info(Info::Background) => "info_background",
             Asking::Info(Info::Alerts) => "info_alerts",
@@ -210,6 +219,7 @@ struct Nodes {
     titles: Vec<(Section, NodeId)>,
     sound: NodeId,
     ding: NodeId,
+    voice: NodeId,
     microphone: NodeId,
     general_agent: NodeId,
     scrollbar: NodeId,
@@ -232,6 +242,8 @@ pub struct SettingsScreen {
     scroll: Arc<ScrollState>,
     modals: Arc<ModalState>,
     settings: Settings,
+    /// Phonon's voices, once it has loaded; until then *Voice* is inactive.
+    voices: Option<Vec<String>>,
     battery: Box<dyn Battery>,
     battery_state: Option<BatteryState>,
     /// After *Enable*, seconds left to watch for the exemption, and since
@@ -283,6 +295,7 @@ impl SettingsScreen {
             // "closing a confirm modal shouldn't have a delay, no fade out").
             modals: Arc::new(ModalState::new().with_transition(ModalTransition::Instant)),
             settings,
+            voices: None,
             battery,
             battery_state,
             battery_watch: None,
@@ -329,8 +342,32 @@ impl SettingsScreen {
         self
     }
 
+    /// Phonon's voices, as `AudioEvent::TtsLoaded` named them.
+    pub fn with_voices(mut self, voices: Option<Vec<String>>) -> Self {
+        self.voices = voices;
+        self.nodes = None;
+        self
+    }
+
+    /// Phonon has loaded with `voices`: *Voice* steps through them.
+    pub fn set_voices(&mut self, voices: Option<Vec<String>>) {
+        if voices != self.voices {
+            self.voices = voices;
+            if self.nodes.is_some() {
+                self.place();
+            }
+        }
+    }
+
     pub fn settings(&self) -> Settings {
-        self.settings
+        self.settings.clone()
+    }
+
+    /// The voice the *Voice* row shows: the saved one if Phonon has it,
+    /// else *Default*.
+    fn shown_voice(&self) -> Option<String> {
+        let names = self.voices.as_deref().unwrap_or_default();
+        voice::effective(self.settings.voice.as_deref(), names)
     }
 
     /// The settings changed elsewhere, as when the alerts toggle follows
@@ -492,6 +529,16 @@ impl SettingsScreen {
         };
         let sound = toggle(&mut router, copy::SOUND.label(), false);
         let ding = toggle(&mut router, copy::DING.label(), false);
+        let voice = {
+            let mut row = OptionRow::new(
+                copy::VOICE.label(),
+                voice::label(self.shown_voice().as_deref()),
+                s,
+            );
+            row.info = true;
+            row.label_w = self.label_w(copy::VOICE.label());
+            router.add(under, row)
+        };
         let microphone = toggle(&mut router, copy::MICROPHONE.label(), false);
         let general_agent = toggle(&mut router, copy::GENERAL_AGENT.label(), true);
         let scrollbar = router.add(
@@ -535,6 +582,7 @@ impl SettingsScreen {
             titles,
             sound,
             ding,
+            voice,
             microphone,
             general_agent,
             scrollbar,
@@ -563,7 +611,9 @@ impl SettingsScreen {
         let viewport = self.viewport();
         let row_h = ROW_H * s;
         let mut y = viewport.y + 8.0 * s;
-        let settings = self.settings;
+        let settings = self.settings.clone();
+        let shown_voice = self.shown_voice();
+        let voices_loaded = self.voices.is_some();
         let ready = self.service.ready();
         // The notes: the background's where there is no service, and the
         // alerts' while background is off or there is no service.
@@ -627,6 +677,12 @@ impl SettingsScreen {
                             t.on = on;
                             t.enabled = enabled;
                         }
+                    }
+                    let rect = row(&mut y);
+                    if let Some(o) = router.get_mut::<OptionRow>(n.voice) {
+                        o.set_rect(rect);
+                        o.set_value(voice::label(shown_voice.as_deref()));
+                        o.enabled = settings.sound && voices_loaded;
                     }
                 }
                 Section::Voice => {
@@ -752,8 +808,9 @@ impl SettingsScreen {
                 .map(|t| (t.label.clone(), t.rect))
         })
         .chain(
-            r.get::<OptionRow>(n.scrollbar)
-                .map(|o| (o.label.clone(), o.rect)),
+            [n.voice, n.scrollbar]
+                .into_iter()
+                .filter_map(|id| r.get::<OptionRow>(id).map(|o| (o.label.clone(), o.rect))),
         )
         .chain([n.optimization, n.vendor].into_iter().filter_map(|id| {
             r.get::<LinkRow>(id)
@@ -818,6 +875,12 @@ impl SettingsScreen {
         self.router
             .get::<OptionRow>(n.scrollbar)
             .map(OptionRow::value)
+    }
+
+    /// The *Voice* row's value as shown.
+    pub fn voice_shown(&self) -> Option<String> {
+        let n = self.nodes.as_ref()?;
+        self.router.get::<OptionRow>(n.voice).map(OptionRow::value)
     }
 
     /// Whether a modal is open.
@@ -918,6 +981,7 @@ impl SettingsScreen {
         let action = response.action?;
         if action == (ControlAction::Activated { part: INFO_PART }) {
             let info = [
+                (n.voice, Info::Voice),
                 (n.general_agent, Info::GeneralAgent),
                 (n.background, Info::Background),
                 (n.alerts, Info::Alerts),
@@ -941,7 +1005,7 @@ impl SettingsScreen {
             self.open_link(url);
             return None;
         }
-        let mut s = self.settings;
+        let mut s = self.settings.clone();
         if target == n.sound {
             s.sound = !s.sound;
         } else if target == n.ding {
@@ -965,6 +1029,17 @@ impl SettingsScreen {
                 _ => return None,
             };
             s.scrollbar = step_scrollbar(s.scrollbar, forward);
+        } else if target == n.voice {
+            let forward = match action {
+                ControlAction::StepRight => true,
+                ControlAction::StepLeft => false,
+                _ => return None,
+            };
+            let names = self.voices.as_deref()?;
+            s.voice = voice::step(s.voice.as_deref(), names, forward);
+            self.settings = s.clone();
+            self.place();
+            return Some(SettingsHit::Voice(s));
         } else if target == n.optimization {
             // *Enable* asks the system to exempt handlr; the row itself
             // opens the list of every app's setting.
@@ -993,7 +1068,7 @@ impl SettingsScreen {
         } else {
             return None;
         }
-        self.settings = s;
+        self.settings = s.clone();
         self.place();
         Some(SettingsHit::Changed(s))
     }
@@ -1182,6 +1257,13 @@ impl SettingsScreen {
         let n = self.nodes.as_ref()?;
         if let Some(t) = self.toggle(label) {
             return t.info.then(|| t.info_rect().center());
+        }
+        if let Some(o) = self
+            .router
+            .get::<OptionRow>(n.voice)
+            .filter(|o| o.label == label)
+        {
+            return o.info.then(|| o.info_rect().center());
         }
         [n.optimization, n.vendor]
             .into_iter()
@@ -1730,6 +1812,7 @@ mod tests {
             opened: Rc::new(RefCell::new(Vec::new())),
         };
         for (label, info) in [
+            ("Voice", Info::Voice),
             ("General agent (Gemini)", Info::GeneralAgent),
             (BACKGROUND, Info::Background),
             (ALERTS, Info::Alerts),
@@ -1893,12 +1976,130 @@ mod tests {
         }
     }
 
+    fn voices() -> Option<Vec<String>> {
+        Some(
+            ["marius", "alba", "cosette"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    }
+
+    /// The centres of row `label`'s right and left arrows.
+    fn arrows(s: &SettingsScreen, label: &str) -> ([f32; 2], [f32; 2]) {
+        let r = s.row_rect(label).unwrap();
+        (
+            [r.x + r.w - PAD * 2.0 - 20.0, r.y + r.h * 0.5],
+            [
+                r.x + r.w - PAD * 2.0 - OptionRow::ARROWS_W * 2.0 + 20.0,
+                r.y + r.h * 0.5,
+            ],
+        )
+    }
+
+    fn voice_row(s: &SettingsScreen) -> OptionRow {
+        let n = s.nodes.as_ref().unwrap();
+        s.router.get::<OptionRow>(n.voice).unwrap().clone()
+    }
+
+    #[test]
+    fn the_voice_row_follows_ding_and_is_inactive_before_load_and_without_sound() {
+        let mut s = plain();
+        let ding = s.row_rect("Ding when an agent is done").unwrap();
+        let row = s.row_rect("Voice").expect("a Voice row");
+        assert_eq!(row.y, ding.y + ding.h, "right after Ding, in Sound");
+        assert!(row.y < s.row_rect("Microphone").unwrap().y);
+        assert_eq!(s.voice_shown().as_deref(), Some("Default"));
+        // Phonon has not loaded: dim, and the arrows do nothing.
+        assert!(!voice_row(&s).enabled);
+        let (right, left) = arrows(&s, "Voice");
+        assert_eq!(tap(&mut s, right[0], right[1]), None);
+        assert_eq!(tap(&mut s, left[0], left[1]), None);
+        s.set_voices(voices());
+        assert!(voice_row(&s).enabled);
+        // All sound off: dim again, and no step.
+        tap_row(&mut s, "All sound");
+        assert!(!voice_row(&s).enabled);
+        assert_eq!(tap(&mut s, right[0], right[1]), None);
+        assert_eq!(s.voice_shown().as_deref(), Some("Default"));
+        // Its ⓘ still opens.
+        let [x, y] = s.info_point("Voice").unwrap();
+        tap(&mut s, x, y);
+        assert!(s.asking());
+        assert!(s.back());
+        tap_row(&mut s, "All sound");
+        assert!(voice_row(&s).enabled);
+    }
+
+    #[test]
+    fn the_voice_arrows_step_from_default_both_ways_and_wrap_each_asking_a_preview() {
+        let mut s = plain().with_voices(voices());
+        s.set_layout(PHONE);
+        let (right, left) = arrows(&s, "Voice");
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let Some(SettingsHit::Voice(now)) = tap(&mut s, right[0], right[1]) else {
+                panic!("each step is a preview");
+            };
+            seen.push(voice::label(now.voice.as_deref()).to_string());
+            assert_eq!(
+                s.voice_shown().as_deref(),
+                Some(seen.last().unwrap().as_str())
+            );
+        }
+        assert_eq!(
+            seen,
+            ["alba", "cosette", "marius", "Default"],
+            "Default first, wrapping"
+        );
+        let Some(SettingsHit::Voice(now)) = tap(&mut s, left[0], left[1]) else {
+            panic!("the left arrow steps");
+        };
+        assert_eq!(
+            now.voice.as_deref(),
+            Some("marius"),
+            "left from Default wraps"
+        );
+        assert_eq!(s.settings().voice.as_deref(), Some("marius"));
+        // A tap on the label is not an arrow.
+        let r = s.row_rect("Voice").unwrap();
+        assert_eq!(tap(&mut s, r.x + 200.0, r.y + r.h * 0.5), None);
+        // Kept across a new layout.
+        s.set_layout(Layout { w: 1200.0, ..PHONE });
+        assert_eq!(s.voice_shown().as_deref(), Some("marius"));
+    }
+
+    #[test]
+    fn a_saved_voice_no_longer_installed_shows_as_default_and_is_kept() {
+        let saved = Settings {
+            voice: Some("javert".into()),
+            ..Settings::default()
+        };
+        let mut s =
+            SettingsScreen::new(saved.clone(), Box::new(NoBattery), false).with_voices(voices());
+        s.set_layout(PHONE);
+        assert_eq!(s.voice_shown().as_deref(), Some("Default"));
+        assert_eq!(s.settings(), saved, "kept until another is chosen");
+        // Another toggle keeps it.
+        let Some(SettingsHit::Changed(now)) = tap_row(&mut s, "Microphone") else {
+            panic!("the microphone toggles");
+        };
+        assert_eq!(now.voice.as_deref(), Some("javert"));
+        // It steps as Default.
+        let (right, _) = arrows(&s, "Voice");
+        let Some(SettingsHit::Voice(now)) = tap(&mut s, right[0], right[1]) else {
+            panic!("a step");
+        };
+        assert_eq!(now.voice.as_deref(), Some("alba"));
+    }
+
     #[test]
     fn the_copy_comes_from_settings_copy_md() {
         let s = plain();
         for label in [
             "All sound",
             "Ding when an agent is done",
+            "Voice",
             "Microphone",
             "General agent (Gemini)",
             "Scrollbar",

@@ -6566,7 +6566,7 @@ mod tests {
                 let r = a.rect_of(hit).unwrap_or_else(|| panic!("{hit:?} shown"));
                 assert_eq!(tap(&mut a, r), Some(hit), "{hit:?} live");
             }
-            settings::set_current(off);
+            settings::set_current(off.clone());
             a.invalidate();
             let mut list = DrawList::new();
             a.draw(&mut list, &DrawContext::default(), None);

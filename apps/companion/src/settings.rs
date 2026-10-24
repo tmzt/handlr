@@ -28,8 +28,9 @@ pub mod link_row;
 pub mod option_row;
 pub mod screen;
 pub mod toggle_row;
+pub mod voice;
 
-use std::cell::Cell;
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
 use libmsdf::drawlist::DrawList;
@@ -46,8 +47,9 @@ pub const FILE: &str = "settings.toml";
 pub const DISABLED_ALPHA: f32 = 0.35;
 
 /// The settings screen's values. Each toggle is on by default but
-/// *Alert when an agent needs you*, and the scrollbar *Hidden*.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// *Alert when an agent needs you*, the scrollbar *Hidden*, and the voice
+/// *Default*.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// *All sound*.
     pub sound: bool,
@@ -64,6 +66,10 @@ pub struct Settings {
     pub background: bool,
     /// *Alert when an agent needs you*: off until turned on.
     pub alerts: bool,
+    /// *Voice* (CHANGES.md 2026-10-24 14:58 EDT): a Phonon voice's name,
+    /// or `None` for *Default*. Kept as saved when it is not installed;
+    /// [`voice::effective`] says what is spoken.
+    pub voice: Option<String>,
 }
 
 impl Default for Settings {
@@ -76,6 +82,7 @@ impl Default for Settings {
             scrollbar: ScrollbarVisibility::Hidden,
             background: true,
             alerts: false,
+            voice: None,
         }
     }
 }
@@ -98,6 +105,9 @@ struct SettingsFile {
     background: bool,
     #[serde(default)]
     alerts: bool,
+    /// Left out for *Default*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    voice: Option<String>,
 }
 
 fn on() -> bool {
@@ -139,7 +149,7 @@ pub fn step_scrollbar(mode: ScrollbarVisibility, forward: bool) -> ScrollbarVisi
 
 impl Settings {
     /// What the client acts on: everything but the scrollbar.
-    pub fn to_client(self) -> handlr_companion::Settings {
+    pub fn to_client(&self) -> handlr_companion::Settings {
         handlr_companion::Settings {
             sound: self.sound,
             ding: self.ding,
@@ -183,6 +193,7 @@ impl Settings {
             scrollbar,
             background: file.background,
             alerts: file.alerts,
+            voice: file.voice.filter(|v| !v.is_empty()),
         }
     }
 
@@ -197,6 +208,7 @@ impl Settings {
             scrollbar: scrollbar_name(self.scrollbar).to_string(),
             background: self.background,
             alerts: self.alerts,
+            voice: self.voice.clone(),
         };
         let text = toml::to_string(&file).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -210,17 +222,17 @@ impl Settings {
 
 thread_local! {
     /// The settings as the UI thread last set them.
-    static CURRENT: Cell<Settings> = Cell::new(Settings::default());
+    static CURRENT: RefCell<Settings> = RefCell::new(Settings::default());
 }
 
 /// The settings every control reads.
 pub fn current() -> Settings {
-    CURRENT.with(Cell::get)
+    CURRENT.with(|c| c.borrow().clone())
 }
 
 /// Sets what [`current`] gives on this thread.
 pub fn set_current(settings: Settings) {
-    CURRENT.with(|c| c.set(settings));
+    CURRENT.with(|c| *c.borrow_mut() = settings);
 }
 
 /// Whether the control `hit` is live with the settings as they are
@@ -349,6 +361,7 @@ mod tests {
             scrollbar: ScrollbarVisibility::Always,
             background: false,
             alerts: true,
+            voice: Some("alba".into()),
         };
         s.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), s);
@@ -356,6 +369,11 @@ mod tests {
         assert!(text.contains("scrollbar = \"always\""), "{text}");
         assert!(!dir.path().join(format!("{FILE}.tmp")).exists());
         assert!(text.contains("background = false") && text.contains("alerts = true"));
+        assert!(text.contains("voice = \"alba\""), "{text}");
+        // *Default* is left out of the file.
+        Settings::default().save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
+        assert!(!text.contains("voice"), "{text}");
 
         std::fs::write(
             dir.path().join(FILE),
