@@ -1482,3 +1482,29 @@ after the old ribbon's newest serial below its end, and scrolls there in
 2 s on an ease-in-out curve. The rest of the new outline is merged once
 the view is at the bottom and following. Holding the outline aside while
 scrolled back (item 3's first half, and item 4) stands.
+
+## 2026-10-24 01:19 EDT — plan 20261022_03 L3, the 01:06 and 01:07 EDT amendments: readings in implementing them
+
+Built in `efcf983` (handlr-companion) and `587550d` (companion).
+- **Indexes of sections added below:** they keep the new outline's indexes
+  when the first comes after the old ribbon's last. Otherwise each becomes
+  the old last index + 1 + its own index, so order holds and stays stable
+  as more arrive.
+- **A new session file:** every slot of the new file counts as newer
+  (serials of two files can't be compared), so the new session goes below
+  the old one until the merge.
+- **Window reports:** none is sent during the scroll. Landing reports
+  `scrolled_back: false`, which triggers the merge.
+- **The full 2 s:** the scroll follows only at the end of the 2 s, never
+  earlier, when within 1 px of the end.
+- **Content landing above during the scroll:** the start shifts by the
+  same amount, so the curve stays on the same content.
+- **State text:**
+  - New sections with none of states 1–5 holding (idle, no live card) show
+    `-- jump to end --`.
+  - "done" holds only while herdr's status is not `working`.
+  - "approval: …" shows the Approval card's first line; the card has no
+    separate command field.
+- **New event field:** `Event::AgentView.held_end`, the held-aside outline's
+  live cards and newest section, so the line can state the end it covers.
+  handlr-companion's version is not bumped, as with `new_content` before.
