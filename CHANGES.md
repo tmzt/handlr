@@ -1811,3 +1811,21 @@ entry "Background and Notifications as two sections, with ⓘ modals".
      count of bytes over the link since connecting.
    - **Updates:** at most every 2 s, by `update_text`, only on a change.
    - **Tap:** opens that agent.
+
+## 2026-10-24 13:02 EDT — plan 20261024_02 and plan 20261024_04: vendor additions to the settings copy
+
+Agreed with the owner (2026-10-24): "settings should have additional vendor
+subkey, appended to copy not replacing, needs libmorph support, does not
+expose private identifiers just vendor, make and model"; then "no, just
+vendor, I was describing the libmorph feature".
+- **Vendor subkeys** in `SETTINGS_COPY.md`: `# [Copy] <key>.<vendor>` (vendor
+  lower-cased: `samsung`, `google`, `xiaomi`). On a phone of that vendor,
+  its text is appended after the base key's text, never replacing it.
+  There are no model subkeys.
+- **`build.rs`** checks that each subkey has a base key, and that its slots
+  are declared, as for base keys.
+- **Where the vendor comes from:** libmorph's device identity (asked for in
+  a libmorph plan): vendor, make and model, from `Build.MANUFACTURER`,
+  `Build.BRAND` and `Build.MODEL` on Android, `None` elsewhere. It has no
+  serial, Android ID, IMEI or other private identifier. Only the vendor is
+  used here. Until libmorph has it, only base text shows.
