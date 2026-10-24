@@ -355,6 +355,8 @@ pub fn cards(
                 text: a.text.clone(),
                 confirm_id: Some(a.confirm_id),
                 about_plan: false,
+                points: Vec::new(),
+                spoken: None,
                 links: Vec::new(),
             },
         ));
@@ -424,6 +426,8 @@ pub fn cards(
                 text,
                 confirm_id: None,
                 about_plan: false,
+                points: Vec::new(),
+                spoken: None,
             },
         ));
     }
@@ -437,6 +441,8 @@ pub fn cards(
                 text: format!("{name} is blocked and needs your input."),
                 confirm_id: None,
                 about_plan: false,
+                points: Vec::new(),
+                spoken: None,
                 links: Vec::new(),
             },
         ));
@@ -482,6 +488,8 @@ fn question_card(
             text: q.text.clone(),
             confirm_id: None,
             about_plan: q.about_plan,
+            points: Vec::new(),
+            spoken: None,
             links: linker.links(&q.text),
         },
     )
@@ -500,6 +508,8 @@ fn finished_card(file: u32, reply: &Placed, live: bool, linker: &Linker) -> Sect
             text,
             confirm_id: None,
             about_plan: false,
+            points: Vec::new(),
+            spoken: None,
         },
     )
 }
@@ -561,7 +571,12 @@ pub fn size(section: &Section) -> (u32, u32) {
         }
     }
     for entry in &section.entries {
-        let (l, c) = count(&entry.summary);
+        // Text shows whole; a tool call folds, so its summary stands in.
+        let shown = match entry.kind {
+            EntryKind::Text => entry.text.as_deref().unwrap_or(&entry.summary),
+            _ => &entry.summary,
+        };
+        let (l, c) = count(shown);
         lines += l;
         chars += c;
     }

@@ -9,10 +9,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
-use handlr::config::AppConfig;
+use handlr::config::{AppConfig, SummaryConfig};
+use handlr::reasoning::MockReasoningEngine;
 use handlr::server::companion::TurnOptions;
 use handlr::server::link::auth::{self, AuthEntry};
 use handlr::server::link::{Link, LinkSettings};
+use handlr::server::speech::SpeechOptions;
 use handlr::server::{self, Daemon, ServeOptions};
 use handlr::sessions::Sessions;
 use handlr::transport::{AgentSession, HerdrClient, HerdrTransport, PaneInfo};
@@ -163,7 +165,21 @@ async fn herdr_events(path: &Path, lines: broadcast::Sender<String>) {
     });
 }
 
+/// No card summaries: the tests that want them say so, with a mock, so
+/// none reaches Gemini.
+fn no_card_summaries() -> AppConfig {
+    AppConfig {
+        summary: SummaryConfig { cards: false },
+        ..AppConfig::default()
+    }
+}
+
 async fn start(with_link: bool) -> Env {
+    start_with(with_link, no_card_summaries(), SpeechOptions::default()).await
+}
+
+/// As `start`, with `config` and the summaries set up by `speech`.
+async fn start_with(with_link: bool, config: AppConfig, speech: SpeechOptions) -> Env {
     let dir = tempfile::Builder::new()
         .prefix("hs")
         .tempdir_in("/tmp")
@@ -187,11 +203,12 @@ async fn start(with_link: bool) -> Env {
     };
     let daemon = Daemon::with_turns(
         HerdrClient::mock(),
-        &AppConfig::default(),
+        &config,
         link.as_ref().map(|(_, l)| Arc::clone(l)),
         TurnOptions {
             session_dir: Some(dir.path().join("history")),
             agent_sessions: Some(Arc::new(Sessions::with_home(&home))),
+            speech,
             ..TurnOptions::default()
         },
     );
@@ -1353,4 +1370,230 @@ async fn session_tail_prints_the_outline_and_a_content_range() {
         after[2].starts_with("#2 ") && after[2].contains(" card finished resolved"),
         "{out}"
     );
+}
+
+// Plan 20261022_03, the L3 amendments of 2026-10-24 11:54, 12:06 and 12:27
+// EDT, and plan 20261023_05's CHANGES.md departure of 12:06 EDT: the full
+// text, the Finished cards' summaries under `[summary] cards`, and the
+// outline's bookends.
+
+/// The finished cards among a delivery's sections.
+fn finished_cards(delivery: &Value) -> Vec<Value> {
+    delivery["sections"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| s["kind"] == "card" && s["card"]["card"] == "finished")
+        .cloned()
+        .collect()
+}
+
+/// Card summaries on, with `engine` as Gemini.
+async fn start_summarising(engine: Arc<MockReasoningEngine>, cards: bool) -> Env {
+    let config = AppConfig {
+        summary: SummaryConfig { cards },
+        ..AppConfig::default()
+    };
+    start_with(
+        false,
+        config,
+        SpeechOptions {
+            engine: Some(engine),
+            ..SpeechOptions::default()
+        },
+    )
+    .await
+}
+
+const CARD_ANSWER: &str = "Written and pushed.\nPOINTS:\n- Wrote the plan\n- Pushed it";
+
+#[tokio::test]
+async fn an_entry_carries_its_full_text_and_its_summary_stays_at_500() {
+    let env = start(false).await;
+    let long = format!("{} the end.", "All of this is the reply. ".repeat(80));
+    assert!(long.chars().count() > 2000);
+    append_lines(
+        &env.session(SESSION_A),
+        &[user(100, "go on"), reply(101, &long)],
+    );
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let r = c.subscribe(json!({"pane_id": "p1"})).await;
+    let first = &r["delivery"];
+    let text = first["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "text" && s["serial"].as_str().unwrap().contains(":8."))
+        .expect("the long reply's section");
+    let entry = &text["entries"][0];
+    assert_eq!(entry["summary"].as_str().unwrap().chars().count(), 500);
+    assert_eq!(entry["text"].as_str().unwrap(), long);
+    // A short reply's summary is its whole text.
+    let short = first["sections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "text")
+        .unwrap();
+    assert_eq!(short["entries"][0]["summary"], "Reply 0.");
+    assert!(short["entries"][0].get("text").is_none(), "{short}");
+}
+
+#[tokio::test]
+async fn a_finished_card_gets_its_points_and_spoken_text_and_is_replaced() {
+    let mock = Arc::new(MockReasoningEngine::with_response(CARD_ANSWER));
+    let env = start_summarising(Arc::clone(&mock), true).await;
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
+    let sub = r["subscription_id"].as_u64().unwrap();
+    let first = &r["delivery"];
+    // The outline marks every Finished card's slot, and only those.
+    let slots = first["slots"].as_array().unwrap();
+    let bookends: Vec<&Value> = slots.iter().filter(|s| s["bookend"] == true).collect();
+    assert!(!bookends.is_empty(), "{first}");
+    assert!(
+        bookends
+            .iter()
+            .all(|s| s["kind"] == "card" && s["serial"].as_str().unwrap().ends_with(".194"))
+    );
+    assert!(
+        slots
+            .iter()
+            .filter(|s| s["kind"] != "card")
+            .all(|s| s.get("bookend").is_none())
+    );
+    // The newest Finished card is summarised, and its section replaced.
+    let newest = bookends.last().unwrap()["serial"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let summarised = |d: &Value| {
+        finished_cards(d)
+            .into_iter()
+            .find(|s| s["serial"] == newest.as_str() && s["card"]["spoken"].is_string())
+    };
+    let card = match summarised(first) {
+        Some(card) => card,
+        None => {
+            let d = c
+                .delivery(WAIT, |d| {
+                    d["subscription_id"] == sub && summarised(d).is_some()
+                })
+                .await
+                .expect("the card replaced with its summary");
+            let slot = d["slots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["serial"] == newest.as_str())
+                .expect("its slot")
+                .clone();
+            assert!(slot["rev"].as_u64().unwrap() >= 1, "{slot}");
+            assert_eq!(slot["bookend"], true);
+            summarised(&d).unwrap()
+        }
+    };
+    assert_eq!(card["card"]["spoken"], "Written and pushed.");
+    assert_eq!(
+        card["card"]["points"],
+        json!(["Wrote the plan", "Pushed it"])
+    );
+    let sent = mock.recorded_transcripts();
+    assert_eq!(sent.len(), 1, "once, for the newest card: {sent:?}");
+    assert!(sent[0].contains("Reply "), "{}", sent[0]);
+    assert!(sent[0].contains("POINTS:"), "{}", sent[0]);
+    // A second subscriber gets the summary with the card, and nothing is
+    // asked again.
+    let mut d = Client::unix(&env.socket, "handlr.companion").await;
+    let again = d.subscribe(json!({"pane_id": "p1"})).await;
+    assert!(summarised(&again["delivery"]).is_some(), "{again}");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(mock.recorded_transcripts().len(), 1);
+    // A new Finished card is summarised in turn.
+    append_lines(
+        &env.session(SESSION_A),
+        &[
+            user(100, "and the next?"),
+            reply(101, "Next is done."),
+            user(102, "thanks"),
+        ],
+    );
+    let started = Instant::now();
+    let asked_for = |text: &str| {
+        mock.recorded_transcripts()
+            .iter()
+            .filter(|t| t.contains(text))
+            .count()
+    };
+    while asked_for("Next is done.") == 0 {
+        assert!(started.elapsed() < WAIT, "the new card was not summarised");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    c.drain(Duration::from_millis(500)).await;
+    // Each card once. (Reply 2's card is new too: it became one only when
+    // the user spoke after it.)
+    let sent = mock.recorded_transcripts();
+    for reply in ["Reply 1.", "Next is done."] {
+        assert_eq!(asked_for(reply), 1, "{sent:?}");
+    }
+    assert!(
+        sent[0].starts_with("The claude agent in example replied:"),
+        "{sent:?}"
+    );
+    assert!(sent.iter().all(|t| !t.contains("Reply 0.")), "{sent:?}");
+}
+
+#[tokio::test]
+async fn with_cards_off_no_summary_is_asked() {
+    let mock = Arc::new(MockReasoningEngine::with_response(CARD_ANSWER));
+    let env = start_summarising(Arc::clone(&mock), false).await;
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
+    append_lines(
+        &env.session(SESSION_A),
+        &[
+            user(100, "and the next?"),
+            reply(101, "Next is done."),
+            user(102, "thanks"),
+        ],
+    );
+    c.drain(Duration::from_millis(1500)).await;
+    assert!(mock.recorded_transcripts().is_empty());
+    let cards = finished_cards(&r["delivery"]);
+    assert!(
+        cards
+            .iter()
+            .all(|s| s["card"].get("spoken").is_none() && s["card"].get("points").is_none())
+    );
+    // The bookends are marked all the same.
+    assert!(
+        r["delivery"]["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["bookend"] == true)
+    );
+}
+
+#[tokio::test]
+async fn without_gemini_a_finished_card_keeps_its_fields_empty() {
+    let mock = Arc::new(MockReasoningEngine::with_error("GEMINI_API_KEY not set"));
+    let env = start_summarising(Arc::clone(&mock), true).await;
+    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let r = c.subscribe(json!({"pane_id": "p1"})).await;
+    let started = Instant::now();
+    while mock.recorded_transcripts().is_empty() {
+        assert!(started.elapsed() < WAIT, "the card was never asked");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    c.drain(Duration::from_millis(800)).await;
+    assert!(
+        c.seen
+            .iter()
+            .chain(std::iter::once(&r["delivery"]))
+            .flat_map(|m| finished_cards(m.get("params").unwrap_or(m)))
+            .all(|s| s["card"].get("spoken").is_none() && s["card"].get("points").is_none())
+    );
+    // Asked once, not again.
+    assert_eq!(mock.recorded_transcripts().len(), 1);
 }

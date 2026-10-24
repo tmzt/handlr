@@ -81,16 +81,21 @@ struct Env {
     link: Option<(String, Arc<Link>)>,
 }
 
+/// No card summaries (`[summary] cards`), so none reaches Gemini.
 fn config(agents: Vec<AgentConfig>) -> AppConfig {
     AppConfig {
         agents,
+        summary: handlr::config::SummaryConfig { cards: false },
         ..AppConfig::default()
     }
 }
 
 /// claude needs confirmation, as by default.
 fn confirming() -> AppConfig {
-    AppConfig::default()
+    AppConfig {
+        summary: handlr::config::SummaryConfig { cards: false },
+        ..AppConfig::default()
+    }
 }
 
 /// claude takes `continue` directly, with interrupt key `key`.

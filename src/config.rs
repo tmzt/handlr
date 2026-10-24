@@ -29,6 +29,26 @@ pub struct AppConfig {
     pub link: LinkConfig,
     #[serde(default)]
     pub urls: UrlsConfig,
+    #[serde(default)]
+    pub summary: SummaryConfig,
+}
+
+/// `[summary]`: what the daemon summarises with Gemini (plan 20261023_05,
+/// the CHANGES.md departure of 2026-10-24 12:06 EDT; owner: "should be
+/// daemon option, under summary tag").
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SummaryConfig {
+    /// Summarise every new Finished card once, whether or not a client
+    /// reads aloud: its points and spoken text go on the card. Off, replies
+    /// are summarised only while a client reads aloud (default: true).
+    pub cards: bool,
+}
+
+impl Default for SummaryConfig {
+    fn default() -> Self {
+        SummaryConfig { cards: true }
+    }
 }
 
 /// `[urls]`: addresses the agent view links to (plan 20261022_03, the
@@ -82,6 +102,7 @@ impl Default for AppConfig {
             naming: NamingConfig::default(),
             link: LinkConfig::default(),
             urls: UrlsConfig::default(),
+            summary: SummaryConfig::default(),
         }
     }
 }
@@ -627,6 +648,17 @@ revoke_check_secs = 5
         assert_eq!(cfg.link.key.as_deref(), Some("/tmp/k"));
         assert_eq!(cfg.link.auth.as_deref(), Some("/tmp/a.toml"));
         assert_eq!(cfg.link.revoke_check_secs, Some(5));
+    }
+
+    #[test]
+    fn card_summaries_are_on_unless_turned_off() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert!(cfg.summary.cards);
+        let cfg: AppConfig = toml::from_str("[summary]\n").unwrap();
+        assert!(cfg.summary.cards);
+        let cfg: AppConfig = toml::from_str("[summary]\ncards = false\n").unwrap();
+        assert!(!cfg.summary.cards);
+        assert!(AppConfig::default().summary.cards);
     }
 
     #[test]

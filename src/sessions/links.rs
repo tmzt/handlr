@@ -241,7 +241,7 @@ impl Linker {
 
     /// Give `entry` the links of its summary.
     pub fn link_entry(&self, entry: &mut Entry) {
-        entry.links = self.links(&entry.summary);
+        entry.links = self.links(entry.text.as_deref().unwrap_or(&entry.summary));
     }
 
     /// Give `question` the links of its text.
@@ -349,6 +349,7 @@ mod tests {
             summary: format!("Wrote {PLAN}"),
             links: vec![],
             origin: None,
+            text: None,
         };
         linker.link_entry(&mut entry);
         assert_eq!(entry.links.len(), 1);

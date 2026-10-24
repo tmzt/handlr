@@ -71,16 +71,24 @@ pub struct Item {
 }
 
 impl Item {
-    /// The entry a client sees: redacted, then cut to `ENTRY_SUMMARY_MAX`.
+    /// The entry a client sees: redacted, its `summary` cut to
+    /// `ENTRY_SUMMARY_MAX`, and its `text` the whole redacted text (up to
+    /// the reader's `TEXT_MAX` or `TOOL_TEXT_MAX`) when the summary is cut
+    /// (plan 20261022_03, the L3 amendment of 2026-10-24 11:54 EDT). Left
+    /// out when the summary is the whole text already.
     pub fn entry(&self) -> Entry {
+        let full = redact::redact(&self.text);
+        let summary = cut(&full, ENTRY_SUMMARY_MAX);
+        let text = (summary != full).then_some(full);
         Entry {
             ts: self.ts.clone(),
             role: self.role,
             kind: self.kind,
             tool: self.tool.clone(),
-            summary: cut(&redact::redact(&self.text), ENTRY_SUMMARY_MAX),
+            summary,
             links: Vec::new(),
             origin: self.origin.clone(),
+            text,
         }
     }
 
@@ -527,6 +535,38 @@ mod tests {
         assert_eq!(cut("", 3), "");
         let long = "x".repeat(600);
         assert_eq!(cut(&long, ENTRY_SUMMARY_MAX).chars().count(), 500);
+    }
+
+    #[test]
+    fn an_entry_carries_its_full_redacted_text_and_a_500_character_summary() {
+        let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
+        let long = format!("{} {secret} the end", "word ".repeat(400));
+        let item = Item {
+            ts: "t".into(),
+            role: Role::Assistant,
+            kind: EntryKind::Text,
+            tool: None,
+            text: long.clone(),
+            call_id: None,
+            origin: None,
+        };
+        let entry = item.entry();
+        assert_eq!(entry.summary.chars().count(), ENTRY_SUMMARY_MAX);
+        assert!(entry.summary.ends_with('…'));
+        let text = entry.text.expect("the full text");
+        assert_eq!(text, redact::redact(&long));
+        assert!(
+            text.ends_with("the end") && !text.contains(secret),
+            "{text}"
+        );
+        assert!(text.chars().count() > 2000);
+        // A short entry's summary is all of it: no `text`.
+        let short = Item {
+            text: "Done.".into(),
+            ..item
+        };
+        assert_eq!(short.entry().summary, "Done.");
+        assert_eq!(short.entry().text, None);
     }
 
     #[test]

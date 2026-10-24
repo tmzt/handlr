@@ -92,3 +92,11 @@ allow_arbitrary_commands = false
 # path is linked (web links always are).
 # [urls]
 # repowiki_url = "http://localhost:8088"
+
+# What the daemon summarises with Gemini. With `cards` on (the default),
+# every new Finished card is summarised once: a few points and the text to
+# read aloud go on the card, whether or not a client reads aloud. Off,
+# replies are summarised only while a client reads them aloud. Without a
+# Gemini key, nothing is summarised.
+# [summary]
+# cards = true

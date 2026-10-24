@@ -20,6 +20,13 @@ daemon fills, from its own values first and then from the settings.
     hashes, line numbers and error codes unless the reply is about
     them. Keep a number or a version as it is. If the reply asks the
     user something, end with that question.
+- [#] max_points: 6
+- points: |
+    Then, after the spoken text, write a line with only POINTS: on
+    it, and under it at most {{ [#] max_points }} short lines, each
+    starting with "- ", summarising the reply point by point. These
+    lines are read on screen, not aloud: they may name files and
+    identifiers as written.
 - user: |
     The {{ [abc] agent }} agent in {{ [abc] project }} replied:
 

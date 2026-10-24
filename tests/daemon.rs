@@ -110,7 +110,7 @@ async fn start() -> (tempfile::TempDir, std::path::PathBuf, Arc<Daemon>) {
     let socket = dir.path().join("h.sock");
     let daemon = Daemon::with_turns(
         HerdrClient::mock(),
-        &AppConfig::default(),
+        &test_config(),
         None,
         own_home(dir.path()),
     );
@@ -467,7 +467,7 @@ async fn start_tabbed() -> (
     let socket = dir.path().join("h.sock");
     let daemon = Daemon::with_turns(
         HerdrClient::local(dir.path().join("herdr.sock")),
-        &AppConfig::default(),
+        &test_config(),
         None,
         own_home(dir.path()),
     );
@@ -712,4 +712,13 @@ async fn status_by_handle_lists_pending_when_ambiguous() {
     );
     assert_eq!(r["result"]["matched"], "entropy");
     assert!(r["result"]["bits"].as_f64().unwrap() >= 6.0, "{r}");
+}
+
+/// The config the tests run with: no card summaries (`[summary] cards`),
+/// so none reaches Gemini.
+fn test_config() -> AppConfig {
+    AppConfig {
+        summary: handlr::config::SummaryConfig { cards: false },
+        ..AppConfig::default()
+    }
 }

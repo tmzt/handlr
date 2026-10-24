@@ -130,6 +130,7 @@ fn read_with(reader: &dyn SessionReader, path: &Path) -> Vec<Section> {
         approvals: &[],
         live: &live,
         secrets: &secrets,
+        summaries: None,
     };
     page(&src, None, 1_000_000).unwrap().sections
 }

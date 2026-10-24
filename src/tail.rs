@@ -546,6 +546,7 @@ mod tests {
             summary: summary.into(),
             links: vec![],
             origin: None,
+            text: None,
         }
     }
 
@@ -600,6 +601,8 @@ mod tests {
                 confirm_id: None,
                 about_plan: false,
                 links: vec![],
+                points: vec![],
+                spoken: None,
             }),
             index: 0,
         };
@@ -666,6 +669,7 @@ mod tests {
             lines: 3,
             chars: 90,
             rev: 1,
+            bookend: false,
         }];
         d.removed_index = vec![2];
         d.last = Some(4);

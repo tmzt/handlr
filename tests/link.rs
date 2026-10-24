@@ -62,7 +62,7 @@ async fn start() -> Env {
     // never this machine's own.
     let daemon = Daemon::with_turns(
         HerdrClient::mock(),
-        &AppConfig::default(),
+        &test_config(),
         Some(Arc::clone(&link)),
         TurnOptions {
             session_dir: Some(dir.path().join("history")),
@@ -603,4 +603,13 @@ async fn link_unpair_is_refused_on_the_daemon_socket() {
     let r = local.call("link.unpair", json!({})).await;
     assert_eq!(r["error"]["code"], -32001, "{r}");
     assert_eq!(env.auth().clients.len(), 1);
+}
+
+/// The config the tests run with: no card summaries (`[summary] cards`),
+/// so none reaches Gemini.
+fn test_config() -> AppConfig {
+    AppConfig {
+        summary: handlr::config::SummaryConfig { cards: false },
+        ..AppConfig::default()
+    }
 }

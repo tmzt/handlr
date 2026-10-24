@@ -12,16 +12,21 @@
 //! tools and no history. Every other reply is answered with
 //! [`handlr_speech::read_aloud`] at the daemon's local time. Summaries are
 //! kept by `(pane_id, ts)`, so the same reply is never summarised twice.
+//!
+//! With `[summary] cards` (the CHANGES.md departure of 2026-10-24 12:06
+//! EDT), the same prompt also summarises each new Finished card, asked for
+//! points as well by its `points` member: [`DaemonCards`] is the hub's
+//! [`CardSummarizer`].
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use handlr_speech::LocalTime;
 use libhandlr_proto::ErrorObject;
-use libhandlr_proto::common::{SpeechSummarizeParams, SpeechSummarizeResult};
+use libhandlr_proto::common::{CARD_POINTS_MAX, SpeechSummarizeParams, SpeechSummarizeResult};
 use libhandlr_proto::envelope::codes;
 use serde_json::Value;
 
@@ -29,6 +34,7 @@ use super::conn::{self, Conn};
 use crate::config::AppConfig;
 use crate::prompts::{Prompt, Prompts, SPOKEN_SUMMARY};
 use crate::reasoning::{GeminiReasoningEngine, Message, ReasoningEngine, ToolExecutor};
+use crate::sessions::hub::{CardSummarizer, CardSummary};
 
 /// How long a summary may take before it is given up and the reply is
 /// read through the rules (decision 5, as amended at 16:56 EDT).
@@ -37,6 +43,51 @@ pub const SUMMARY_TIMEOUT: Duration = Duration::from_secs(10);
 pub const CACHE_SIZE: usize = 64;
 /// The words of a summary when the prompt has no `max_words`.
 pub const MAX_WORDS_DEFAULT: usize = 60;
+/// The longest point of a card's summary, in characters.
+pub const POINT_MAX: usize = 160;
+/// The line that starts a card summary's points.
+pub const POINTS_MARK: &str = "POINTS:";
+
+/// A card summary's answer split into its spoken text, cut to `max_words`,
+/// and its points: the lines after a `POINTS:` line, their list marks
+/// taken off, at most `CARD_POINTS_MAX` of them, each at most `POINT_MAX`
+/// characters. An answer without the line is all spoken text.
+pub fn split_card_answer(answer: &str, max_words: usize) -> CardSummary {
+    let lines: Vec<&str> = answer.lines().collect();
+    let mark = lines
+        .iter()
+        .position(|l| l.trim().trim_matches('*').eq_ignore_ascii_case(POINTS_MARK))
+        .unwrap_or(lines.len());
+    let spoken = cut_at_sentence(&lines[..mark].join("\n"), max_words);
+    let points = lines
+        .iter()
+        .skip(mark + 1)
+        .map(|l| list_item(l.trim()))
+        .filter(|l| !l.is_empty())
+        .take(CARD_POINTS_MAX)
+        .map(|l| crate::sessions::cut(l, POINT_MAX))
+        .collect();
+    CardSummary {
+        points,
+        spoken: (!spoken.is_empty()).then_some(spoken),
+    }
+}
+
+/// `line` without its list mark: `- `, `* `, `• ` or `1. `.
+fn list_item(line: &str) -> &str {
+    for mark in ["- ", "* ", "• "] {
+        if let Some(rest) = line.strip_prefix(mark) {
+            return rest.trim();
+        }
+    }
+    let digits = line.chars().take_while(char::is_ascii_digit).count();
+    if digits > 0
+        && let Some(rest) = line[digits..].strip_prefix(". ")
+    {
+        return rest.trim();
+    }
+    line
+}
 
 /// `text` cut to at most `max` words, at the end of a sentence where one
 /// is within them (decision 5).
@@ -180,6 +231,39 @@ impl SpeechService {
         project: &str,
         reply: &str,
     ) -> Result<String, ErrorObject> {
+        let answer = self.ask(agent, project, reply, false).await?;
+        Ok(cut_at_sentence(&answer, self.max_words()))
+    }
+
+    /// A Finished card's summary of `reply`: the spoken text and its points,
+    /// asked for by the prompt's `points` member after its user message.
+    pub async fn card_summary(
+        &self,
+        agent: &str,
+        project: &str,
+        reply: &str,
+    ) -> Result<CardSummary, ErrorObject> {
+        let answer = self.ask(agent, project, reply, true).await?;
+        Ok(split_card_answer(&answer, self.max_words()))
+    }
+
+    fn max_words(&self) -> usize {
+        self.prompt
+            .as_ref()
+            .ok()
+            .and_then(|(p, _)| p.number("max_words"))
+            .map_or(MAX_WORDS_DEFAULT, |n| n as usize)
+    }
+
+    /// Gemini's answer to the prompt for `reply`, with the `points` request
+    /// after the user message when `points`.
+    async fn ask(
+        &self,
+        agent: &str,
+        project: &str,
+        reply: &str,
+        points: bool,
+    ) -> Result<String, ErrorObject> {
         let (prompt, system) = self.prompt.as_ref().map_err(unavailable)?;
         let values: BTreeMap<&str, String> = [
             ("agent", agent.to_string()),
@@ -188,7 +272,15 @@ impl SpeechService {
         ]
         .into_iter()
         .collect();
-        let user = prompt.fill(&prompt.user, &values).map_err(unavailable)?;
+        let mut user = prompt.fill(&prompt.user, &values).map_err(unavailable)?;
+        if points {
+            let request = prompt
+                .settings
+                .get("points")
+                .ok_or_else(|| unavailable("the prompt has no `points`"))?;
+            let request = prompt.fill(request, &values).map_err(unavailable)?;
+            user = format!("{}\n\n{}", user.trim_end(), request.trim());
+        }
         let engine = self.engine(system).map_err(unavailable)?;
         let turns = [Message {
             role: "user".to_string(),
@@ -202,10 +294,26 @@ impl SpeechService {
             .map_err(unavailable)?
             .filter(|a| !a.trim().is_empty())
             .ok_or_else(|| unavailable("the summary was empty"))?;
-        let max = prompt
-            .number("max_words")
-            .map_or(MAX_WORDS_DEFAULT, |n| n as usize);
-        Ok(cut_at_sentence(&answer, max))
+        Ok(answer)
+    }
+}
+
+/// The hub's card summariser (`[summary] cards`): the daemon's
+/// [`SpeechService::card_summary`]. No answer, no Gemini key or an error
+/// leaves the card's fields empty.
+pub struct DaemonCards(pub Weak<super::Daemon>);
+
+#[async_trait]
+impl CardSummarizer for DaemonCards {
+    async fn summarize_card(&self, agent: &str, project: &str, reply: &str) -> Option<CardSummary> {
+        let daemon = self.0.upgrade()?;
+        match daemon.speech.card_summary(agent, project, reply).await {
+            Ok(summary) => Some(summary),
+            Err(e) => {
+                log::warn!("[summary] cards: {}", e.message);
+                None
+            }
+        }
     }
 }
 
@@ -448,6 +556,66 @@ mod tests {
             .unwrap();
         assert_eq!(r.summary, None);
         assert!(r.complex && !r.read.is_empty());
+    }
+
+    #[test]
+    fn a_card_answer_splits_into_spoken_text_and_points() {
+        let answer = "It wrote the plan and pushed it.\n\
+            POINTS:\n\
+            - Wrote docs/design/X_PLAN.md\n\
+            * Pushed to main\n\
+            \n\
+            3. Tests pass\n\
+            - four\n- five\n- six\n- seven";
+        let s = split_card_answer(answer, 60);
+        assert_eq!(
+            s.spoken.as_deref(),
+            Some("It wrote the plan and pushed it.")
+        );
+        assert_eq!(
+            s.points,
+            [
+                "Wrote docs/design/X_PLAN.md",
+                "Pushed to main",
+                "Tests pass",
+                "four",
+                "five",
+                "six"
+            ]
+        );
+        // No mark: all spoken, no points.
+        let s = split_card_answer("All done.", 60);
+        assert_eq!(s.spoken.as_deref(), Some("All done."));
+        assert!(s.points.is_empty());
+        // A bold mark, and a long point cut.
+        let long = "x".repeat(400);
+        let s = split_card_answer(&format!("Done.\n**POINTS:**\n- {long}"), 60);
+        assert_eq!(s.points[0].chars().count(), POINT_MAX);
+    }
+
+    #[tokio::test]
+    async fn a_card_summary_asks_for_points_after_the_user_message() {
+        let mock = Arc::new(MockReasoningEngine::with_response(
+            "Written and pushed.\nPOINTS:\n- Wrote it\n- Pushed it",
+        ));
+        let service = SpeechService::new(
+            &AppConfig::default(),
+            SpeechOptions {
+                engine: Some(mock.clone()),
+                ..SpeechOptions::default()
+            },
+        );
+        let s = service
+            .card_summary("Claude", "handlr", PATHS)
+            .await
+            .unwrap();
+        assert_eq!(s.spoken.as_deref(), Some("Written and pushed."));
+        assert_eq!(s.points, ["Wrote it", "Pushed it"]);
+        let sent = mock.recorded_transcripts();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].starts_with("The Claude agent in handlr replied:\n\n"));
+        assert!(sent[0].contains("All tests pass.\n\nThen, after the spoken text"));
+        assert!(sent[0].contains("at most 6 short lines"), "{}", sent[0]);
     }
 
     #[test]

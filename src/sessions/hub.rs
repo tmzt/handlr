@@ -33,10 +33,14 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 
 use libhandlr_proto::common::{
-    PendingQuestion, SERIAL_LINE_MAX, Section, SectionKind, Serial, Slot,
+    CardKind, PendingQuestion, SERIAL_LINE_MAX, Section, SectionKind, Serial, Slot,
 };
 use libherdr::protocol::AgentStatus;
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, mpsc};
+
+mod summaries;
+use summaries::SummaryJob;
+pub use summaries::{CARD_SUMMARIES_MAX, CardSummaries, CardSummarizer, CardSummary};
 
 use super::journal::{Approval, Journal};
 use super::links::Linker;
@@ -286,6 +290,8 @@ pub struct Source<'a> {
     pub live: &'a LiveState,
     /// The calls anywhere in the file that name a secret path.
     pub secrets: &'a HashSet<String>,
+    /// The Finished cards' summaries, given to the cards found.
+    pub summaries: Option<&'a CardSummaries>,
 }
 
 /// The sections, cards among them, that start on lines `a` to `b`.
@@ -307,13 +313,16 @@ fn span(src: &Source, a: u32, b: u32) -> std::io::Result<Vec<Section>> {
         .cloned()
         .collect();
     let live = src.live.live();
-    let cards = sections::cards(
+    let mut cards = sections::cards(
         src.file,
         &placed,
         &approvals,
         at_end.then_some(&live),
         src.linker,
     );
+    if let Some(summaries) = src.summaries {
+        cards.iter_mut().for_each(|c| summaries.apply(c));
+    }
     let within = |s: &Section| (a..=b).contains(&s.serial.line);
     Ok(sections::merged(
         builder.sections().values().filter(|s| within(s)).cloned(),
@@ -409,6 +418,8 @@ struct Kept {
     chars: u32,
     rev: u32,
     removed: bool,
+    /// A Finished card's slot.
+    bookend: bool,
 }
 
 /// A session file's sections by index (plan 20261024_01, decision 1).
@@ -477,6 +488,7 @@ impl Outline {
             lines: k.lines,
             chars: k.chars,
             rev: k.rev,
+            bookend: k.bookend,
         })
     }
 
@@ -493,6 +505,7 @@ impl Outline {
     /// names it still; no other section ever takes it).
     pub fn put(&mut self, section: &Section) -> Slot {
         let (lines, chars) = sections::size(section);
+        let bookend = is_bookend(section);
         let key = section.serial.to_u64();
         let index = match self.by_serial.get(&key) {
             Some(&i) => {
@@ -502,6 +515,7 @@ impl Outline {
                 k.chars = chars;
                 k.rev = k.rev.saturating_add(1);
                 k.removed = false;
+                k.bookend = bookend;
                 i
             }
             None => {
@@ -513,6 +527,7 @@ impl Outline {
                     chars,
                     rev: 0,
                     removed: false,
+                    bookend,
                 });
                 self.by_serial.insert(key, i);
                 i
@@ -590,6 +605,16 @@ impl Outline {
         }
         out
     }
+}
+
+/// Whether `section` is a bookend: a Finished card, which closes a section
+/// of the session (plan 20261022_03, the L3 amendment of 2026-10-24 12:27
+/// EDT).
+pub fn is_bookend(section: &Section) -> bool {
+    section
+        .card
+        .as_ref()
+        .is_some_and(|c| c.card == CardKind::Finished)
 }
 
 /// Every section of the file, in serial order, read a span at a time.
@@ -705,6 +730,11 @@ struct TailState {
     /// Bumped each time the file is read again from its start, after it
     /// shrank or was replaced: indexes of another epoch do not apply.
     epoch: u64,
+    /// The summaries' generation the cards were last given.
+    summaries_seen: u64,
+    /// The cards have been found once since the state was read: before
+    /// that, only the newest Finished card is new.
+    primed: bool,
 }
 
 /// One session file, tailed for its subscribers.
@@ -719,7 +749,13 @@ pub struct Tailer {
     linker: Linker,
     state: Mutex<TailState>,
     tx: broadcast::Sender<Arc<Batch>>,
-    wake: Notify,
+    wake: Arc<Notify>,
+    /// The Finished cards' summaries, and where new cards are sent to be
+    /// summarised (`[summary] cards`), if anywhere.
+    summaries: Arc<CardSummaries>,
+    jobs: Option<mpsc::UnboundedSender<SummaryJob>>,
+    /// The project named to the summariser: the cwd's last part.
+    project: String,
 }
 
 impl std::fmt::Debug for Tailer {
@@ -775,8 +811,26 @@ impl Tailer {
             linker,
             state: Mutex::new(state),
             tx,
-            wake: Notify::new(),
+            wake: Arc::new(Notify::new()),
+            summaries: Arc::new(CardSummaries::default()),
+            jobs: None,
+            project: String::new(),
         })
+    }
+
+    /// This tailer with its cards summarised: given from `summaries`, and
+    /// each new Finished card sent to `jobs`, as a reply of `project`.
+    pub fn with_summaries(
+        mut self,
+        summaries: Arc<CardSummaries>,
+        jobs: Option<mpsc::UnboundedSender<SummaryJob>>,
+        project: &str,
+    ) -> Self {
+        self.summaries = summaries;
+        self.jobs = jobs;
+        self.project = project.to_string();
+        self.state.lock().unwrap().dirty = true;
+        self
     }
 
     fn fresh_state(
@@ -835,6 +889,8 @@ impl Tailer {
             gone: false,
             outline: None,
             epoch: 0,
+            summaries_seen: 0,
+            primed: false,
         })
     }
 
@@ -965,6 +1021,7 @@ impl Tailer {
             approvals: &snapshot.approvals,
             live: &snapshot.live,
             secrets: &snapshot.secrets,
+            summaries: Some(&self.summaries),
         })
     }
 
@@ -1153,6 +1210,11 @@ impl Tailer {
             st.live.quiet = quiet;
             st.dirty = true;
         }
+        let generation = self.summaries.generation();
+        if generation != st.summaries_seen {
+            st.summaries_seen = generation;
+            st.dirty = true;
+        }
         if !st.dirty {
             return None;
         }
@@ -1177,7 +1239,9 @@ impl Tailer {
             .collect();
         let window = st.window.make_contiguous().to_vec();
         let live = st.live.live();
-        let cards = sections::cards(self.file, &window, &approvals, Some(&live), &self.linker);
+        let mut cards = sections::cards(self.file, &window, &approvals, Some(&live), &self.linker);
+        cards.iter_mut().for_each(|c| self.summaries.apply(c));
+        self.ask_summaries(st, &window, &cards);
         let mut out: BTreeMap<u64, Section> = changed
             .into_iter()
             .map(|s| (s.serial.to_u64(), s))
@@ -1235,6 +1299,50 @@ impl Tailer {
         })
     }
 
+    /// Send the new Finished cards among `cards` to be summarised, once
+    /// each: those not among the cards last broadcast, and, the first time
+    /// the cards are found, only the newest.
+    fn ask_summaries(&self, st: &mut TailState, window: &[Placed], cards: &[Section]) {
+        let primed = std::mem::replace(&mut st.primed, true);
+        let Some(jobs) = &self.jobs else {
+            return;
+        };
+        // The pane's shown name, once a subscription has given it; the
+        // agent's own name before.
+        let agent = if st.live.name == LiveState::default().name {
+            self.agent.clone()
+        } else {
+            st.live.name.clone()
+        };
+        let finished: Vec<&Section> = cards.iter().filter(|c| is_bookend(c)).collect();
+        let new: Vec<&Section> = if primed {
+            finished
+                .into_iter()
+                .filter(|c| !st.cards.contains_key(&c.serial.to_u64()))
+                .collect()
+        } else {
+            finished.last().copied().into_iter().collect()
+        };
+        for card in new {
+            let Some(key) = CardSummaries::key(card) else {
+                continue;
+            };
+            let Some(reply) = reply_at(window, card.serial.line) else {
+                continue;
+            };
+            if !self.summaries.ask(key) {
+                continue;
+            }
+            let _ = jobs.send(SummaryJob {
+                key,
+                agent: agent.clone(),
+                project: self.project.clone(),
+                reply,
+                wake: Arc::clone(&self.wake),
+            });
+        }
+    }
+
     /// Check every `CHECK_INTERVAL`, or at once when woken, until nobody
     /// is subscribed; then leave `hub`.
     async fn run(self: Arc<Self>, hub: Weak<SessionHub>) {
@@ -1263,6 +1371,26 @@ impl Tailer {
             }
         }
     }
+}
+
+/// The whole redacted reply that ends on `line`: the agent's text entries
+/// before its last one there, back to the first entry that is not one.
+fn reply_at(window: &[Placed], line: u32) -> Option<String> {
+    let is_reply = |p: &Placed| {
+        p.item.role == super::Role::Assistant
+            && p.item.kind == super::EntryKind::Text
+            && p.item.origin.is_none()
+    };
+    let end = window.iter().rposition(|p| p.line == line && is_reply(p))?;
+    let start = window[..end]
+        .iter()
+        .rposition(|p| !is_reply(p))
+        .map_or(0, |i| i + 1);
+    let parts: Vec<String> = window[start..=end]
+        .iter()
+        .map(|p| super::redact::redact(&p.item.text))
+        .collect();
+    Some(parts.join("\n\n"))
 }
 
 /// The ids of the tool calls on `lines` that name a secret path.
@@ -1310,6 +1438,11 @@ pub struct SessionHub {
     repowiki: Option<String>,
     journal: Journal,
     tailers: Mutex<HashMap<PathBuf, Arc<Tailer>>>,
+    /// The Finished cards' summaries, kept across tailers.
+    summaries: Arc<CardSummaries>,
+    /// Where new Finished cards go to be summarised, once a summariser is
+    /// set.
+    jobs: Mutex<Option<mpsc::UnboundedSender<SummaryJob>>>,
 }
 
 impl SessionHub {
@@ -1322,7 +1455,25 @@ impl SessionHub {
             repowiki,
             journal,
             tailers: Mutex::new(HashMap::new()),
+            summaries: Arc::new(CardSummaries::default()),
+            jobs: Mutex::new(None),
         })
+    }
+
+    /// Summarise each new Finished card once with `summarizer`
+    /// (`[summary] cards`), for the tailers started from now. Needs a
+    /// tokio runtime; without one, nothing is summarised.
+    pub fn summarize_cards_with(&self, summarizer: Arc<dyn CardSummarizer>) {
+        let jobs = summaries::spawn_worker(summarizer, Arc::clone(&self.summaries));
+        if jobs.is_none() {
+            log::warn!("no runtime for the card summaries; cards are not summarised");
+        }
+        *self.jobs.lock().unwrap() = jobs;
+    }
+
+    /// The Finished cards' summaries.
+    pub fn summaries(&self) -> &Arc<CardSummaries> {
+        &self.summaries
     }
 
     pub fn journal(&self) -> &Journal {
@@ -1356,8 +1507,15 @@ impl SessionHub {
             let journal = self.journal.clone();
             let agent = agent.to_string();
             let at = located.clone();
+            let summaries = Arc::clone(&self.summaries);
+            let jobs = self.jobs.lock().unwrap().clone();
+            let project = cwd
+                .and_then(|c| Path::new(c).file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "this project".to_string());
             let opened = tokio::task::spawn_blocking(move || {
                 Tailer::open(sessions, &agent, &at, linker, &journal)
+                    .map(|t| t.with_summaries(summaries, jobs, &project))
             })
             .await
             .map_err(std::io::Error::other)??;

@@ -118,7 +118,8 @@ impl Daemon {
             .unwrap_or_else(|| Arc::new(Sessions::new()));
         let speech = speech::SpeechService::new(config, turns.speech.clone());
         let hub = SessionHub::new(Arc::clone(&sessions), config.urls.repowiki_url.clone());
-        Arc::new(Daemon {
+        let cards = config.summary.cards;
+        let daemon = Arc::new(Daemon {
             sessions,
             hub,
             speech,
@@ -133,7 +134,14 @@ impl Daemon {
             uid: unsafe { libc::getuid() },
             link,
             turns: companion::TurnService::new(config, turns),
-        })
+        });
+        // `[summary] cards`: each new Finished card summarised once.
+        if cards {
+            daemon
+                .hub
+                .summarize_cards_with(Arc::new(speech::DaemonCards(Arc::downgrade(&daemon))));
+        }
+        daemon
     }
 
     /// Every pane in `snapshot`, named by `[naming]`. The broker's word
