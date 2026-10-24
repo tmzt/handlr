@@ -2012,3 +2012,20 @@ vendor addition. The ⓘ texts' links to developer.android.com moved out of thei
 texts into `link`, labelled "Android documentation". The Samsung page's link to
 dontkillmyapp.com/samsung, which isn't Android's documentation, keeps its own
 label and is drawn last too.
+
+## 2026-10-24 14:35 EDT — the launcher icon through libmorph 0.4.2's `Icon`
+
+libmorph 0.4.2 and libmorph-build 0.2.5 (rev `4e5b75c`, libmobile 0.2.5) make
+the launcher icon from a master PNG. `build.rs` now calls
+`.icon(Icon::png("icon/artwork-1024.png").background_color([0x0F, 0x0F, 0x26])
+.monochrome_png("icon/artwork-1024.png"))`. The `extra_script` hook and its
+manifest overlay (`icon/android/icon.gradle`, `AndroidManifest.xml`) are gone.
+- **The master:** `make_icon.py` writes `artwork-1024.png`, the dog centred on a
+  transparent 1024 square with its farthest pixel just inside the square's
+  inscribed circle. libmobile scales the square into the centre 66 dp, where
+  launchers keep only that circle.
+- **Its other outputs** (the masters, the contact sheet, and `icon/android/res`)
+  stay as `docs/APP_ICON.md`'s previews. The build no longer reads the res
+  directory.
+- **The pins:** handlr-audio's libmorph pin moved too, with the root lock.
+- **Checked:** aapt shows `icon='res/mipmap-anydpi-v26/ic_launcher.xml'`.
