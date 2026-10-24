@@ -912,3 +912,64 @@ The owner (2026-10-23): "improve was a typo, discuss would be better".
 This replaces "improve" in the 21:57 EDT amendment and in the amendment
 before this one: the plan question's middle word is **discuss**, and it
 takes a message starting "Discuss the <plan>: ".
+
+## Amendment — 2026-10-23 23:54 EDT: the scrollback is a ribbon of sections in serial order (living section L3)
+
+The owner (2026-10-23), after scrolling back on the S23 with session
+subscriptions (plan 20261023_03): "i was able to scroll back to start of
+session but way too quickly"; "its just not consistent, it should be a
+ribbon made up of in order sections"; then "yes" to this amendment. This
+replaces how the agent view holds its place and lays itself out: L3-1's
+"kept on the entry at its top", plan 20261023_03's flattening of sections
+into the app's entries and cards (`Sections::flatten` feeding
+`AgentScreen::set_content`), and the 22:55 EDT amendment's re-layout of
+the whole flow on each change. What a section shows, the cards' rules, the
+pinned card and the history paging (A7) stand.
+
+Found on the S23 before this amendment. The app gets the sections
+flattened into one entry list, resent whole on every change. It holds its
+place by searching that list for the entry that was at the window's top by
+time, role and kind, which several entries can share (a reply's parallel
+tool calls), so the view can jump. It lays out every entry's text on each
+change, and the phone logged 235 skipped frames, and a fling advances by
+its speed times the frame time, so slow frames make it leap. The "loading
+earlier…" row comes and goes at the top through the same search.
+
+1. **The ribbon.** The app keeps the view's sections by serial, in serial
+   order, as the client does. The scrollback is those sections laid end
+   to end: each section is one block (its entries, or its card), and the
+   ribbon's height is the sum of the blocks.
+2. **Each block laid out once.** A block's height, rows, fills, buttons
+   and links are laid out when its section arrives and cached by serial.
+   They are laid out again only when that section is replaced with
+   different content, when the width or scale changes, or for the pinned
+   card's place. Adding, replacing or removing a section touches only its
+   own block and the running heights after it.
+3. **The place is a serial.** Scrolled back, the view's position is the
+   serial of the block at the window's top and the distance from that
+   block's top. Sections paged in above it, or a section replaced below
+   it, never move it. If its section is removed, the place moves to the
+   next section still held, at the same point on screen. Following the
+   bottom is unchanged.
+4. **The marker row has a fixed place.** The ribbon starts with one row
+   of fixed height that is always there: "loading earlier…" while a page
+   is on its way, "start of session" once the first line is reached, and
+   blank otherwise. Its text changing never moves the view.
+5. **The client gives sections.** `handlr-companion` gives the app the
+   view's sections in serial order (with the hide rule for a just-answered
+   card applied, and the pinned card's serial), and marks which serials
+   changed since the last event, in place of the flattened entries and
+   cards. The memory guard (rows only for the window and `KEEP_SCREENS`
+   on each side) applies per block.
+6. **A fling moves evenly.** A frame's time is capped at 1/30 s for the
+   fling (in place of 0.1 s), so a slow frame cannot throw the view.
+
+Tests: a page of sections landing above the window does not move it; two
+sections whose entries share a time do not confuse the place; replacing a
+section below the window does not move it, and removing the one at the
+top keeps the next one at the same point; the marker row changing does not
+move the view; a fling over the same speed covers the same distance
+whether or not a page lands during it; and a delivery of one section lays
+out one block (counted). On the S23: scrolling back through a long session
+to its start moves smoothly at the finger's speed, with no jumps as pages
+land.
