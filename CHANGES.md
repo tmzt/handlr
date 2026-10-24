@@ -2100,3 +2100,11 @@ Built in the handlr-audio commit and the companion commit before this entry.
    then shows *Default*.
 7. **`OptionRow` gains `enabled`:** drawn dim, with its arrows ignored. Its ⓘ
    still works while dim.
+
+## 2026-10-24 15:13 EDT — the Voice row: *Default*'s preview says "This is the default voice."
+
+The owner (2026-10-24), of item 3 in the previous entry: "queue that change for
+next release". The *Default* preview reads the new copy key
+`voice_preview_default`, "This is the default voice.", instead of filling
+`voice_preview` with "Default". It is in the next build, not the one just
+installed.
