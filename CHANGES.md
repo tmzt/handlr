@@ -1138,3 +1138,9 @@ json), and send it when user resumes app".
   (`ASLEEP_AFTER`) is taken as asleep even without being told, since an
   awake phone always asks within about 30 s; any other request, or an
   active ping, wakes it.
+
+## 2026-10-23 22:20 EDT — plan 20261022_03, L3: the setting is `[urls] repowiki_url`
+
+The owner: "make the section urls then option repowiki_url". The 21:57 EDT
+amendment's `[repowiki] url` is `[urls] repowiki_url` instead, so other
+addresses can join it under `[urls]`. Nothing else changes.
