@@ -1508,3 +1508,15 @@ Built in `efcf983` (handlr-companion) and `587550d` (companion).
 - **New event field:** `Event::AgentView.held_end`, the held-aside outline's
   live cards and newest section, so the line can state the end it covers.
   handlr-companion's version is not bumped, as with `new_content` before.
+
+## 2026-10-24 11:14 EDT — plan 20261022_02 liveness: the resume ping is timed, 3 s
+
+Found on the S23. The owner said: "app didn't update at all when returning
+to it". Samsung's Freecess had frozen the app in the background. Back in
+front, the client sent its `ping {active: true}` but didn't time it, so
+the dead socket was only noticed 13 s later, and the view sat stale until
+then. The resume ping now sets `ping_sent` with its own wait,
+`PING_WAIT_RESUME` = 3 s. Unanswered, the link is closed and made again,
+and the subscription resumes (`after`, `from`, `epoch`). The idle ping
+keeps `PING_WAIT` (10 s). This adds to the earlier departure, in which
+the idle ping replaced `SO_KEEPALIVE`.
