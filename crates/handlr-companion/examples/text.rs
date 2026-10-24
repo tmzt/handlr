@@ -140,6 +140,11 @@ fn print_event(event: Event) {
         Event::Ding => println!("* ding: an agent is done"),
         Event::Refreshed { new } => println!("* refreshed: {new} new"),
         Event::Cache { bytes } => println!("* cache: {bytes} bytes"),
+        Event::SessionCards(cards) => {
+            for c in cards {
+                println!("* {:?} from {}: {}", c.kind, c.agent, c.text);
+            }
+        }
         Event::Unpaired { daemon } => {
             println!("* unpaired{}", if daemon { "" } else { " here only" })
         }

@@ -125,6 +125,10 @@ pub enum Input {
     /// *Clear cache* (plan 20261024_02, the 12:12 EDT amendment): the
     /// closed views kept in memory are dropped.
     ClearCache,
+    /// A swipe down on another session's card (plan 20261022_03, the L3
+    /// amendment of 2026-10-24 15:56 EDT, item 3): that pane's newest card
+    /// goes. A question or approval stays away while the same is asked.
+    DismissCard(String),
 }
 
 /// A grade of memory pressure (plan 20261022_03, the L3 amendment of
@@ -511,6 +515,11 @@ pub enum Event {
     Cache {
         bytes: u64,
     },
+    /// Other sessions' cards, newest first, whenever they change (plan
+    /// 20261022_03, the L3 amendments of 2026-10-24 15:56, 16:00 and 16:01
+    /// EDT): the app shows the newest at the bottom, with "+N" for the
+    /// rest. A new question or approval also gives [`Event::Ding`].
+    SessionCards(Vec<crate::cross::SessionCard>),
     Error(String),
 }
 
@@ -754,6 +763,12 @@ enum Sent {
     Ping,
     /// `link.unpair`.
     Unpair,
+    /// `session.peek` of a pane whose turn just stopped on `line`: how long
+    /// the turn ran, for another session's finished card.
+    Peek {
+        pane_id: String,
+        line: String,
+    },
     /// `session.content` for this subscription (plan 20261024_01): the
     /// slots asked for, as (index, serial, rev) when asked, under the
     /// view's outline generation `generation`.
@@ -992,6 +1007,8 @@ pub struct State {
     cache_shown: u64,
     /// A refresh running ([`Input::Refresh`]).
     refresh: Option<Refresh>,
+    /// Other sessions' cards, and the interactions they follow.
+    cross: crate::cross::Cross,
 }
 
 /// A refresh running (plan 20261022_03, the L3 amendment of 2026-10-24
@@ -1421,6 +1438,7 @@ impl State {
             settings: Settings::default(),
             unpairing: None,
             dinged: HashSet::new(),
+            cross: crate::cross::Cross::default(),
             closed: VecDeque::new(),
             cache_shown: 0,
             refresh: None,
@@ -1669,7 +1687,9 @@ impl State {
                 self.closed.clear();
                 self.show_cache(&mut out);
             }
+            Input::DismissCard(pane_id) => self.cross.dismiss(&pane_id, false),
         }
+        self.show_cards(&mut out);
         self.gate(out)
     }
 
@@ -2087,6 +2107,9 @@ impl State {
     }
 
     fn open_agent(&mut self, pane_id: String, out: &mut Vec<Output>) {
+        self.interact(&pane_id);
+        // Its own cards are seen.
+        self.cross.dismiss(&pane_id, true);
         if self.view.as_ref().is_some_and(|v| v.pane_id == pane_id) {
             return self.show_view(out);
         }
@@ -2534,8 +2557,19 @@ impl State {
             let Some(before) = self.agents.iter().find(|b| b.pane_id == a.pane_id) else {
                 continue;
             };
+            // The open view's agent, once its session answered, is dinged
+            // by its own Finished card: a list while it is open (watching
+            // other sessions) does not ding it again.
+            if self
+                .view
+                .as_ref()
+                .is_some_and(|v| v.pane_id == a.pane_id && v.answered)
+            {
+                continue;
+            }
             match &a.turn {
-                Some(common::Turn::Stopped { .. }) if before.turn != a.turn => {
+                Some(common::Turn::Stopped { line }) if before.turn != a.turn => {
+                    self.peek_finished(a, line, out);
                     if !self.dinged.remove(&a.pane_id) {
                         log::info!("ding: an agent finished");
                         out.push(event(Event::Ding));
@@ -2555,6 +2589,14 @@ impl State {
     fn answer_id(&mut self, confirm_id: u64, approve: bool, out: &mut Vec<Output>) {
         if self.confirms.front().map(|c| c.id) == Some(confirm_id) {
             return self.answer(approve, None, out);
+        }
+        if let Some(pane_id) = self
+            .confirms
+            .iter()
+            .find(|c| c.id == confirm_id)
+            .map(|c| c.pane_id.clone())
+        {
+            self.interact(&pane_id);
         }
         let before = self.confirms.len();
         self.confirms.retain(|c| c.id != confirm_id);
@@ -2811,6 +2853,7 @@ impl State {
             "kind": common::SendKind::Message,
             "handle": message_handle(&target, &text),
         });
+        self.interact(&target.pane_id);
         out.push(self.request(methods::AGENTS_SEND, params, Sent::Message));
         self.show_dictation(out);
     }
@@ -2827,6 +2870,7 @@ impl State {
             )));
             return;
         }
+        self.interact(&pane_id);
         let (word, kind) = response.send();
         // A Yes or No answering the agent's question says what it answers;
         // a plan answer names the plan.
@@ -3006,6 +3050,7 @@ impl State {
                 log::warn!("ignoring a request from the daemon: {}", request.method);
             }
         }
+        self.show_cards(&mut out);
         self.gate(out)
     }
 
@@ -3070,6 +3115,7 @@ impl State {
             log::debug!("no confirmation to answer");
             return;
         };
+        self.interact(&confirm.pane_id);
         let params = common::ConfirmReplyParams {
             confirm_id: confirm.id,
             approve,
@@ -3145,6 +3191,7 @@ impl State {
                     log::warn!("agents.list: {message}");
                 }
                 Sent::Options => log::warn!("client.options: {message}"),
+                Sent::Peek { .. } => log::info!("session.peek: {message}"),
                 Sent::Ping => {}
                 Sent::Unpair => {
                     log::warn!("link.unpair: {message}; forgetting the pairing here");
@@ -3383,6 +3430,10 @@ impl State {
                 }
             },
             Sent::Interrupt | Sent::ConfirmReply(_) | Sent::Options | Sent::Ping => {}
+            Sent::Peek { pane_id, line } => match parse::<common::SessionPeekResult>(result) {
+                Ok(r) => self.peeked(&pane_id, line, r),
+                Err(e) => log::warn!("a bad session.peek result: {e}"),
+            },
             Sent::Unpair => {
                 // The daemon forgot this device and closes the link.
                 log::info!("unpairing: the daemon forgot this device");
@@ -4005,6 +4056,86 @@ impl State {
         }
     }
 
+    /// The user interacted with the session in `pane_id` (plan
+    /// 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT, item 2).
+    fn interact(&mut self, pane_id: &str) {
+        let agent = self.agents.iter().find(|a| a.pane_id == pane_id);
+        self.cross.interact(pane_id, agent, self.now);
+    }
+
+    /// When the session in `pane_id` was last interacted with, on the
+    /// driver's clock.
+    pub fn last_interaction(&self, pane_id: &str) -> Option<Duration> {
+        self.cross.last_interaction(pane_id)
+    }
+
+    /// The turn of `a` stopped on `line`: if its session was used within
+    /// the hour and is not the one viewed, how long the turn ran is asked
+    /// for, for its finished card (the 16:01 EDT amendment).
+    fn peek_finished(&mut self, a: &common::AgentInfo, line: &str, out: &mut Vec<Output>) {
+        let viewed = self.view.as_ref().map(|v| v.pane_id.as_str());
+        if Some(a.pane_id.as_str()) == viewed
+            || !self.cross.recent(a, self.now)
+            || a.session.is_none()
+        {
+            return;
+        }
+        let params = common::SessionPeekParams {
+            pane_id: a.pane_id.clone(),
+            entries: common::PEEK_ENTRIES_MAX,
+        };
+        let sent = Sent::Peek {
+            pane_id: a.pane_id.clone(),
+            line: line.to_string(),
+        };
+        out.push(self.request(methods::SESSION_PEEK, params, sent));
+    }
+
+    /// The finished turn's session, read: a finished card when it ran at
+    /// least [`crate::cross::LONG_TURN`].
+    fn peeked(&mut self, pane_id: &str, line: String, r: common::SessionPeekResult) {
+        let Some(span) = r
+            .session
+            .as_ref()
+            .and_then(|p| crate::cross::turn_span(&p.entries))
+        else {
+            return;
+        };
+        let Some(a) = self.agents.iter().find(|a| a.pane_id == pane_id).cloned() else {
+            return;
+        };
+        // Working again, or asking, since: not finished.
+        if !matches!(a.turn, Some(common::Turn::Stopped { .. })) {
+            return;
+        }
+        let viewed = self.view.as_ref().map(|v| v.pane_id.clone());
+        log::info!("cards: a turn of {} s finished", span.as_secs());
+        self.cross
+            .finished(&a, line, span, viewed.as_deref(), self.now);
+    }
+
+    /// Gives other sessions' cards if they changed, with a ding for a new
+    /// question or approval.
+    fn show_cards(&mut self, out: &mut Vec<Output>) {
+        let approvals: Vec<(String, String)> = self
+            .confirms
+            .iter()
+            .map(|c| (c.pane_id.clone(), c.command.clone()))
+            .collect();
+        let viewed = self.view.as_ref().map(|v| v.pane_id.clone());
+        let came = self
+            .cross
+            .update(&self.agents, &approvals, viewed.as_deref(), self.now);
+        self.cross.expire(self.now);
+        if let Some(cards) = self.cross.take_changed() {
+            if came {
+                log::info!("ding: another session asks");
+                out.push(event(Event::Ding));
+            }
+            out.push(event(Event::SessionCards(cards)));
+        }
+    }
+
     /// The panes with a handlr confirmation waiting, each once, in the
     /// order they were asked (plan 20261023_04, section 4).
     pub fn pending_panes(&self) -> Vec<String> {
@@ -4038,7 +4169,14 @@ impl State {
     /// way; every `LIST_INTERVAL` since the last list sent or, once asked
     /// for, `LIST_MIN_INTERVAL` after it.
     fn list_if_due(&mut self, out: &mut Vec<Output>) {
-        if self.background || !self.online() || self.listing || self.view.is_some() {
+        if self.background || !self.online() || self.listing {
+            return;
+        }
+        // In a view, only while another session used within the hour is
+        // watched for its questions and turns (plan 20261022_03, the L3
+        // amendment of 2026-10-24 15:56 EDT, item 5).
+        let viewed = self.view.as_ref().map(|v| v.pane_id.as_str());
+        if viewed.is_some() && !self.cross.watching(viewed, self.now) {
             return;
         }
         let due = match self.listed_at {
@@ -8210,5 +8348,326 @@ mod tests {
         );
         s.input(settings(false, true, true, true));
         assert!(said(&s.input(Input::Replay("All done.".into()))).is_empty());
+    }
+
+    // ── Other sessions' cards (plan 20261022_03, the L3 amendments of
+    // 2026-10-24 15:56, 16:00 and 16:01 EDT) ─────────────────────────────
+
+    /// An agent in `pane` with its own session `session`, and `turn`.
+    fn in_session(pane: &str, session: &str, turn: Value) -> Value {
+        let mut a = agent_info(pane, "idle");
+        a["session"] = json!({"session_id": session, "matched": "id"});
+        if !turn.is_null() {
+            a["turn"] = turn;
+        }
+        a
+    }
+
+    fn asks(q: &str) -> Value {
+        json!({"state": "asking", "question": q})
+    }
+
+    /// The last cards given, if any were.
+    fn cards_of(out: &[Output]) -> Option<Vec<crate::cross::SessionCard>> {
+        events(out).into_iter().rev().find_map(|e| match e {
+            Event::SessionCards(c) => Some(c),
+            _ => None,
+        })
+    }
+
+    /// On the overview at 0 s, `w2:pA` (session sA) opened and closed:
+    /// used. `w2:pB` (sB) is listed but never used.
+    fn used_a() -> State {
+        let mut s = overview();
+        let out = s.input(Input::OpenAgent("w2:pA".into()));
+        answer_list(
+            &mut s,
+            &out,
+            json!([
+                in_session("w2:pA", "sA", working()),
+                in_session("w2:pB", "sB", working())
+            ]),
+        );
+        s.input(Input::CloseAgent);
+        s
+    }
+
+    /// `w2:pB` opened and closed too.
+    fn use_b(s: &mut State) {
+        let out = s.input(Input::OpenAgent("w2:pB".into()));
+        answer_list(
+            s,
+            &out,
+            json!([
+                in_session("w2:pA", "sA", working()),
+                in_session("w2:pB", "sB", working())
+            ]),
+        );
+        s.input(Input::CloseAgent);
+    }
+
+    /// Lists at `t` s, answered with `agents`.
+    fn list_at(s: &mut State, t: f64, agents: Value) -> Vec<Output> {
+        let mut out = s.input(Input::Tick(secs(t)));
+        assert_eq!(
+            requests(&out, "agents.list").len(),
+            1,
+            "a list at {t} s: {out:?}"
+        );
+        let answered = answer_list(s, &out, agents);
+        out.extend(answered);
+        out
+    }
+
+    #[test]
+    fn interactions_are_kept_for_each_session() {
+        let mut s = overview();
+        assert_eq!(s.last_interaction("w2:pZ"), None);
+        s.input(Input::Tick(secs(3.0)));
+        s.input(Input::OpenAgent("w2:pZ".into()));
+        assert_eq!(s.last_interaction("w2:pZ"), Some(secs(3.0)));
+        s.input(Input::Tick(secs(4.0)));
+        s.input(Input::Respond(Suggestion::Continue));
+        assert_eq!(s.last_interaction("w2:pZ"), Some(secs(4.0)));
+        s.input(Input::CloseAgent);
+        // A card answered.
+        let mut s = overview();
+        s.input(Input::Tick(secs(6.0)));
+        s.incoming(confirm_requested(7));
+        s.input(Input::Answer {
+            confirm_id: 7,
+            approve: true,
+        });
+        assert_eq!(s.last_interaction("w2:pZ"), Some(secs(6.0)));
+    }
+
+    #[test]
+    fn a_question_from_a_session_used_within_the_hour_shows_a_card_in_its_colour() {
+        let mut s = used_a();
+        let out = list_at(
+            &mut s,
+            15.0,
+            json!([
+                in_session("w2:pA", "sA", asks("Ship it?")),
+                in_session("w2:pB", "sB", asks("Merge?"))
+            ]),
+        );
+        let cards = cards_of(&out).expect("cards");
+        // Only the session used: pB was never opened.
+        assert_eq!(cards.len(), 1, "{cards:?}");
+        let c = &cards[0];
+        assert_eq!(c.pane_id, "w2:pA");
+        assert_eq!(c.kind, crate::cross::SessionCardKind::Question);
+        assert_eq!(c.colour, crate::cross::session_colour("sA"));
+        assert_eq!(
+            (c.agent.as_str(), c.text.as_str()),
+            ("the handlr agent", "Ship it?")
+        );
+        assert_eq!(c.at, secs(15.0));
+        assert_eq!(dings(&out), 1);
+        // Listed again, the same: no new card and no ding.
+        let out = list_at(
+            &mut s,
+            30.0,
+            json!([
+                in_session("w2:pA", "sA", asks("Ship it?")),
+                in_session("w2:pB", "sB", asks("Merge?"))
+            ]),
+        );
+        assert!(cards_of(&out).is_none());
+        assert_eq!(dings(&out), 0);
+        // The ding follows the settings.
+        let mut s = used_a();
+        s.input(settings(true, false, true, true));
+        let out = list_at(
+            &mut s,
+            15.0,
+            json!([in_session("w2:pA", "sA", asks("Ship it?"))]),
+        );
+        assert!(cards_of(&out).is_some());
+        assert_eq!(dings(&out), 0);
+    }
+
+    #[test]
+    fn a_session_used_over_an_hour_ago_gives_no_card() {
+        let mut s = used_a();
+        let mut t = 15.0;
+        while t < 3600.0 {
+            list_at(&mut s, t, json!([in_session("w2:pA", "sA", working())]));
+            t += 15.0;
+        }
+        let out = list_at(
+            &mut s,
+            3615.0,
+            json!([in_session("w2:pA", "sA", asks("Ship it?"))]),
+        );
+        assert!(cards_of(&out).is_none_or(|c| c.is_empty()), "{out:?}");
+    }
+
+    #[test]
+    fn in_another_sessions_view_the_list_is_watched_and_its_own_question_gives_none() {
+        let mut s = used_a();
+        let out = s.input(Input::OpenAgent("w2:pB".into()));
+        answer_list(
+            &mut s,
+            &out,
+            json!([
+                in_session("w2:pA", "sA", working()),
+                in_session("w2:pB", "sB", working())
+            ]),
+        );
+        // pA was used: listed every 15 s while pB's view is open.
+        let out = list_at(
+            &mut s,
+            15.0,
+            json!([
+                in_session("w2:pA", "sA", asks("Ship it?")),
+                in_session("w2:pB", "sB", asks("Merge?"))
+            ]),
+        );
+        let cards = cards_of(&out).expect("cards");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].pane_id, "w2:pA");
+    }
+
+    #[test]
+    fn a_tap_opens_the_session_and_a_swipe_dismisses_its_card() {
+        let ask = json!([in_session("w2:pA", "sA", asks("Ship it?"))]);
+        // The tap: the app opens the view; its card goes.
+        let mut s = used_a();
+        list_at(&mut s, 15.0, ask.clone());
+        let out = s.input(Input::OpenAgent("w2:pA".into()));
+        assert_eq!(requests(&out, "session.subscribe").len(), 1);
+        assert_eq!(cards_of(&out), Some(vec![]));
+        // The swipe: gone, and not back while the same is asked.
+        let mut s = used_a();
+        list_at(&mut s, 15.0, ask.clone());
+        let out = s.input(Input::DismissCard("w2:pA".into()));
+        assert_eq!(cards_of(&out), Some(vec![]));
+        let out = list_at(&mut s, 30.0, ask.clone());
+        assert!(cards_of(&out).is_none());
+        // A new question comes again.
+        let out = list_at(
+            &mut s,
+            45.0,
+            json!([in_session("w2:pA", "sA", asks("And now?"))]),
+        );
+        assert_eq!(cards_of(&out).expect("cards")[0].text, "And now?");
+    }
+
+    #[test]
+    fn several_cards_come_newest_first_for_the_plus_n() {
+        let mut s = used_a();
+        use_b(&mut s);
+        list_at(
+            &mut s,
+            15.0,
+            json!([
+                in_session("w2:pA", "sA", asks("One?")),
+                in_session("w2:pB", "sB", working())
+            ]),
+        );
+        let out = list_at(
+            &mut s,
+            30.0,
+            json!([
+                in_session("w2:pA", "sA", asks("One?")),
+                in_session("w2:pB", "sB", asks("Two?"))
+            ]),
+        );
+        let cards = cards_of(&out).expect("cards");
+        assert_eq!(
+            cards.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
+            ["Two?", "One?"]
+        );
+    }
+
+    #[test]
+    fn an_approval_for_a_used_session_shows_as_needing_approval() {
+        let mut s = overview();
+        s.input(Input::OpenAgent("w2:pZ".into()));
+        s.input(Input::CloseAgent);
+        let out = s.incoming(confirm_requested(7));
+        let cards = cards_of(&out).expect("cards");
+        assert_eq!(cards[0].kind, crate::cross::SessionCardKind::Approval);
+        assert_eq!(cards[0].text, "continue");
+    }
+
+    /// The `session.peek` in `out`, answered with a turn from `from` to
+    /// `to` (times of day on 2026-10-24, UTC).
+    fn answer_peek(s: &mut State, out: &[Output], from: &str, to: &str) -> Vec<Output> {
+        let peek = requests(out, "session.peek");
+        assert_eq!(peek.len(), 1, "{out:?}");
+        assert_eq!(peek[0].params["pane_id"], "w2:pA");
+        let session = json!({
+            "session_id": "sA", "matched": "id",
+            "entries": [
+                {"ts": "2026-10-24T09:00:00Z", "role": "user", "kind": "text", "summary": "old"},
+                {"ts": format!("2026-10-24T{from}Z"), "role": "user", "kind": "text",
+                 "summary": "build it"},
+                {"ts": format!("2026-10-24T{to}Z"), "role": "assistant", "kind": "text",
+                 "summary": "Done."}
+            ]
+        });
+        let id = peek[0].id.clone();
+        s.incoming(response(id, json!({"session": session, "status": "idle"})))
+    }
+
+    #[test]
+    fn a_long_turn_finished_gives_a_one_line_card_that_hides_after_10_s() {
+        let mut s = used_a();
+        let out = list_at(
+            &mut s,
+            15.0,
+            json!([in_session("w2:pA", "sA", stopped("Done."))]),
+        );
+        let out = answer_peek(&mut s, &out, "10:00:00", "10:03:00");
+        let cards = cards_of(&out).expect("a finished card");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].kind, crate::cross::SessionCardKind::Finished);
+        assert_eq!(cards[0].text, "Done.");
+        assert_eq!(cards[0].colour, crate::cross::session_colour("sA"));
+        assert!(cards_of(&s.input(Input::Tick(secs(24.9)))).is_none());
+        assert_eq!(cards_of(&s.input(Input::Tick(secs(25.0)))), Some(vec![]));
+    }
+
+    #[test]
+    fn a_turn_under_3_minutes_gives_no_card() {
+        let mut s = used_a();
+        let out = list_at(
+            &mut s,
+            15.0,
+            json!([in_session("w2:pA", "sA", stopped("Done."))]),
+        );
+        let out = answer_peek(&mut s, &out, "10:00:00", "10:02:59");
+        assert!(cards_of(&out).is_none(), "{out:?}");
+    }
+
+    #[test]
+    fn a_question_takes_the_place_of_a_finished_card() {
+        let mut s = used_a();
+        use_b(&mut s);
+        let out = list_at(
+            &mut s,
+            15.0,
+            json!([
+                in_session("w2:pA", "sA", stopped("Done.")),
+                in_session("w2:pB", "sB", working())
+            ]),
+        );
+        let out = answer_peek(&mut s, &out, "10:00:00", "10:05:00");
+        assert_eq!(cards_of(&out).expect("finished").len(), 1);
+        s.input(Input::Tick(secs(20.0)));
+        let out = list_at(
+            &mut s,
+            30.0,
+            json!([
+                in_session("w2:pA", "sA", stopped("Done.")),
+                in_session("w2:pB", "sB", asks("Merge?"))
+            ]),
+        );
+        let cards = cards_of(&out).expect("cards");
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].kind, crate::cross::SessionCardKind::Question);
     }
 }

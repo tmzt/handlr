@@ -18,6 +18,7 @@
 //! from typed lines.
 
 pub mod client;
+pub mod cross;
 pub mod keys;
 mod net;
 pub mod scan;
@@ -34,6 +35,7 @@ pub use client::{
     CACHED_VIEWS, DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Pressure, Settings,
     Speaker, Suggestion,
 };
+pub use cross::{SessionCard, SessionCardKind};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
 pub use view::{AgentCard, Bookend, CardKind, Shows, ViewSection};
