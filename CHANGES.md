@@ -2120,3 +2120,18 @@ labels".
   out of the list (case-insensitively), so *Default* appears once, first.
   Not seen on screen: the phone was in another app. The second "Default" is
   taken to be Phonon's own.
+
+## 2026-10-24 15:36 EDT — plan 20261024_05, decision 6: the system bars follow the theme's colours
+
+The owner (2026-10-24), on Android's status and navigation bars: "right, they
+should follow our theme background and titlebar colors". This replaces
+decision 6's "follow the theme's `dark` flag (light or dark icons), if
+libmorph offers a way":
+- the status bar's background is the theme's `header`, and the navigation
+  bar's is its `bg`;
+- each bar's icons are dark or light, whichever contrasts with its colour
+  (by relative luminance), and are set again on every theme change.
+
+libmorph is asked to include this with its dark mode plans rather than later.
+Until it has the call, handlr builds the colours behind a seam that does
+nothing, with a TODO naming that request.
