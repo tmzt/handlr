@@ -159,6 +159,14 @@ pub mod codes {
     pub const HELLO_REQUIRED: i64 = -32010;
     /// The protocol or version in `hello` is not served.
     pub const UNSUPPORTED_PROTOCOL: i64 = -32011;
+    /// The connection already holds `SUBSCRIPTIONS_MAX` session
+    /// subscriptions (plan 20261023_03, 4.1).
+    pub const TOO_MANY_SUBSCRIPTIONS: i64 = -32012;
+    /// No such session subscription on this connection (4.3).
+    pub const SUBSCRIPTION_NOT_FOUND: i64 = -32013;
+    /// `session.history`'s `before` is not of the subscription's current
+    /// session file; a reset delivery follows (A5).
+    pub const SESSION_CHANGED: i64 = -32014;
     /// A service the request needs is not there: Gemini has no key, a
     /// prompt did not load, or the call failed or timed out (plan
     /// 20261023_05, section 4).
@@ -167,9 +175,9 @@ pub mod codes {
     /// (plan 20261022_02, decision 9).
     pub const BUSY: i64 = -32020;
 
-    /// Every code above but `UNAVAILABLE`, for checking they are distinct.
-    /// `UNAVAILABLE` came in 0.1.1, which is additive; growing this array
-    /// would change its type.
+    /// Every code above but `UNAVAILABLE` and the three subscription codes,
+    /// for checking they are distinct. Those came in additive releases
+    /// (0.1.1, 0.3.5); growing this array would change its type.
     pub const ALL: [i64; 15] = [
         PARSE_ERROR,
         INVALID_REQUEST,
@@ -249,6 +257,13 @@ mod tests {
             .filter(|c| seen.insert(*c))
             .collect();
         assert_eq!(unique.len(), codes::ALL.len());
-        assert!(!codes::ALL.contains(&codes::UNAVAILABLE));
+        for later in [
+            codes::UNAVAILABLE,
+            codes::TOO_MANY_SUBSCRIPTIONS,
+            codes::SUBSCRIPTION_NOT_FOUND,
+            codes::SESSION_CHANGED,
+        ] {
+            assert!(seen.insert(later), "{later} repeats a code");
+        }
     }
 }

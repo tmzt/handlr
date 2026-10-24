@@ -52,6 +52,18 @@ pub mod methods {
     /// Notification, to the connection that added the device: its first
     /// `hello` was answered.
     pub const LINK_PAIR_DONE: &str = "link.pair_done";
+
+    /// Subscribe to one pane's session: a backfill of sections, then each
+    /// new or changed one pushed as `session.delivery` (plan 20261023_03,
+    /// section 4, as amended at 14:54 EDT, A5). Companions and local
+    /// clients.
+    pub const SESSION_SUBSCRIBE: &str = "session.subscribe";
+    /// End a subscription. Answered `{}`.
+    pub const SESSION_UNSUBSCRIBE: &str = "session.unsubscribe";
+    /// A page of a subscription's sections from before a serial.
+    pub const SESSION_HISTORY: &str = "session.history";
+    /// Notification: a subscription's new or changed sections.
+    pub const SESSION_DELIVERY: &str = "session.delivery";
 }
 
 /// Topics for `events.subscribe`.
@@ -604,6 +616,367 @@ pub struct ConfirmResolved {
     pub detail: Option<String>,
 }
 
+/// The identity and place of a section of an agent's session (plan
+/// 20261023_03, the 14:54 EDT amendment, A2): derived from the session
+/// file, never counted, so the same line gives the same serial on every
+/// read, for every client, and after a daemon restart.
+///
+/// * `file`: the 32-bit FNV-1a hash of the session file's name (not its
+///   path), [`Serial::file_hash`];
+/// * `line`: the 1-based number of the JSONL line the section starts on,
+///   counting every line; at most [`SERIAL_LINE_MAX`];
+/// * `slot`: the section's place among those starting on that line.
+///
+/// On the wire it is a string with the hash as its prefix,
+/// `"3fa9c21e:412.2"`: a packed u64 would pass 2^53, which many JSON
+/// readers cannot hold exactly. In memory it packs into a u64
+/// ([`Serial::to_u64`]) that orders as the serials of one file do.
+///
+/// Serials of two files have no order: `partial_cmp` gives `None`, and a
+/// different prefix means a different session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Serial {
+    pub file: u32,
+    pub line: u32,
+    pub slot: u8,
+}
+
+/// The largest `Serial::line`: it packs into 24 bits.
+pub const SERIAL_LINE_MAX: u32 = (1 << 24) - 1;
+
+/// A serial string that does not parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseSerialError(pub String);
+
+impl std::fmt::Display for ParseSerialError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "bad serial: {}", self.0)
+    }
+}
+
+impl std::error::Error for ParseSerialError {}
+
+impl Serial {
+    pub fn new(file: u32, line: u32, slot: u8) -> Self {
+        Serial { file, line, slot }
+    }
+
+    /// The 32-bit FNV-1a hash of a session file's name, such as
+    /// `992c3f44-18e7-4cf8-814f-e437b90209b6.jsonl`.
+    pub fn file_hash(name: &str) -> u32 {
+        let mut hash: u32 = 0x811c_9dc5;
+        for b in name.bytes() {
+            hash ^= u32::from(b);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        hash
+    }
+
+    /// The packed form: `file` in bits 63–32, `line` in 31–8, `slot` in
+    /// 7–0. A `line` past [`SERIAL_LINE_MAX`] does not fit and is cut to
+    /// its low 24 bits.
+    pub fn to_u64(self) -> u64 {
+        (u64::from(self.file) << 32)
+            | (u64::from(self.line & SERIAL_LINE_MAX) << 8)
+            | u64::from(self.slot)
+    }
+
+    pub fn from_u64(v: u64) -> Self {
+        Serial {
+            file: (v >> 32) as u32,
+            line: ((v >> 8) as u32) & SERIAL_LINE_MAX,
+            slot: v as u8,
+        }
+    }
+
+    /// Whether both are of the same session file.
+    pub fn same_file(self, other: Serial) -> bool {
+        self.file == other.file
+    }
+}
+
+impl PartialOrd for Serial {
+    /// `None` across files; within one, by line, then slot.
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.same_file(*other)
+            .then(|| (self.line, self.slot).cmp(&(other.line, other.slot)))
+    }
+}
+
+impl std::fmt::Display for Serial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:08x}:{}.{}", self.file, self.line, self.slot)
+    }
+}
+
+impl std::str::FromStr for Serial {
+    type Err = ParseSerialError;
+
+    /// `"3fa9c21e:412.2"`: 8 hex digits, then the line and the slot in
+    /// decimal.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bad = || ParseSerialError(s.to_string());
+        let (file, rest) = s.split_once(':').ok_or_else(bad)?;
+        let (line, slot) = rest.split_once('.').ok_or_else(bad)?;
+        let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+        if file.len() != 8 || !file.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(bad());
+        }
+        if !digits(line) || !digits(slot) {
+            return Err(bad());
+        }
+        let file = u32::from_str_radix(file, 16).map_err(|_| bad())?;
+        let line: u32 = line.parse().map_err(|_| bad())?;
+        let slot: u8 = slot.parse().map_err(|_| bad())?;
+        if line > SERIAL_LINE_MAX {
+            return Err(ParseSerialError(format!(
+                "{s}: line {line} is past {SERIAL_LINE_MAX}"
+            )));
+        }
+        Ok(Serial { file, line, slot })
+    }
+}
+
+impl Serialize for Serial {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for Serial {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = std::borrow::Cow::<str>::deserialize(deserializer)?;
+        text.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// What a [`Section`] is (A1, and the 22:55 EDT amendment's `context`).
+/// Open: a kind this crate does not know reads as `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SectionKind {
+    /// A user prompt: the start of a turn.
+    Turn,
+    /// A block of the agent's output: consecutive assistant text entries
+    /// with no tool call between them.
+    Text,
+    /// A tool call and, once it arrives, its result.
+    Tool,
+    /// A priority card.
+    Card,
+    /// A context entry (one with an `origin`): never part of a turn and
+    /// never a card.
+    Context,
+    /// A kind from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A card's kind, highest priority first (the order compares so). Open:
+/// a kind this crate does not know reads as `Unknown`, ordered last.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CardKind {
+    /// A handlr confirmation for the pane.
+    Approval,
+    /// The agent asked a question.
+    Question,
+    /// An error result, failing tests, or the pane blocked.
+    Broke,
+    /// The agent finished a turn with a reply.
+    Finished,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A card section's body (A3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CardBody {
+    pub card: CardKind,
+    /// Live until resolved; a resolved card is shown faded.
+    pub live: bool,
+    /// "Approval needed", "<name> is asking", "Something broke",
+    /// "Finished".
+    pub title: String,
+    pub text: String,
+    /// The confirmation an Approval card answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_id: Option<u64>,
+    /// A Question card's question is about a plan (see
+    /// `PendingQuestion::about_plan`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub about_plan: bool,
+    /// The links in `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Link>,
+}
+
+/// One unit of the agent view (A1, A3): sections are flat and ordered by
+/// serial. A section that changes (a text block that grows, a tool that
+/// gets its result, a card resolved) is sent again with the same serial,
+/// and replaces the one held.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Section {
+    pub serial: Serial,
+    pub kind: SectionKind,
+    /// Redacted, oldest first; empty for a card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<Entry>,
+    /// For kind `card`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub card: Option<CardBody>,
+}
+
+/// Sections a subscription's backfill holds by default, and the most a
+/// backfill, a history page or one delivery may hold.
+pub const SUBSCRIBE_SECTIONS_DEFAULT: usize = 50;
+pub const SECTIONS_MAX: usize = 200;
+/// Sections a history page holds by default.
+pub const HISTORY_SECTIONS_DEFAULT: usize = 100;
+/// Subscriptions one connection may hold.
+pub const SUBSCRIPTIONS_MAX: usize = 8;
+
+fn subscribe_sections_default() -> usize {
+    SUBSCRIBE_SECTIONS_DEFAULT
+}
+
+fn history_sections_default() -> usize {
+    HISTORY_SECTIONS_DEFAULT
+}
+
+/// `session.subscribe` (4.1, as amended by A5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSubscribeParams {
+    /// A pane id or a name, resolved once, as `session.peek` resolves it.
+    pub pane_id: String,
+    /// The backfill's size, 1 to `SECTIONS_MAX`.
+    #[serde(default = "subscribe_sections_default")]
+    pub sections: usize,
+    /// The newest serial the client holds: when it is of the pane's
+    /// current session file, the backfill is only what follows it;
+    /// otherwise the first delivery is a reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<Serial>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSubscribeResult {
+    pub subscription_id: u64,
+    /// The first delivery.
+    pub delivery: SessionDelivery,
+}
+
+/// The session a delivery is from, as `session.peek` names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub matched: SessionMatched,
+}
+
+/// Why `SessionDelivery::session` is null.
+pub mod delivery_reasons {
+    /// An agent without a session reader.
+    pub const NO_READER: &str = "no_reader";
+    /// No session file was found.
+    pub const NO_SESSION: &str = "no_session";
+    /// The principal may not reach the pane's agent.
+    pub const NOT_PERMITTED: &str = "not_permitted";
+    /// The pane is gone: no more deliveries follow.
+    pub const PANE_CLOSED: &str = "pane_closed";
+    /// The session file is longer than serials can number.
+    pub const TOO_LONG: &str = "too_long";
+}
+
+/// `session.delivery`, and the first delivery in `session.subscribe`'s
+/// result (4.2, as amended by A5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDelivery {
+    pub subscription_id: u64,
+    /// The subscription's pane.
+    pub pane_id: String,
+    /// The pane's agent.
+    pub agent: String,
+    /// Drop what was held for this subscription: `sections` is a fresh
+    /// backfill.
+    #[serde(default)]
+    pub reset: bool,
+    /// Null when the pane has no session, with `reason` saying why.
+    pub session: Option<SessionRef>,
+    /// One of [`delivery_reasons`], or null.
+    pub reason: Option<String>,
+    /// New sections, above the newest serial already delivered, and
+    /// changed ones, at or below it; in serial order.
+    #[serde(default)]
+    pub sections: Vec<Section>,
+    /// herdr's status: present when it changed since the last delivery,
+    /// or on a reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Absent when unchanged since the last delivery; null when it was
+    /// cleared.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "double_option"
+    )]
+    pub pending_question: Option<Option<PendingQuestion>>,
+    /// Sections held that no longer stand (a card the session went past,
+    /// such as Finished when the agent carried on), to drop. Left out of
+    /// the wire when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<Serial>,
+}
+
+/// An `Option<Option<T>>` field: absent is `None`, null is `Some(None)`.
+mod double_option {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<T: Serialize, S: Serializer>(
+        value: &Option<Option<T>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(inner) => inner.serialize(serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Option<T>>, D::Error> {
+        Option::<T>::deserialize(deserializer).map(Some)
+    }
+}
+
+/// `session.unsubscribe` (4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUnsubscribeParams {
+    pub subscription_id: u64,
+}
+
+/// `session.history` (A5): the sections just below `before`, from the
+/// subscription's current session file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHistoryParams {
+    pub subscription_id: u64,
+    pub before: Serial,
+    /// 1 to `SECTIONS_MAX`.
+    #[serde(default = "history_sections_default")]
+    pub sections: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionHistoryResult {
+    /// Oldest first.
+    pub sections: Vec<Section>,
+    /// The page reaches the file's first line.
+    #[serde(default)]
+    pub start: bool,
+}
+
 /// `link.pair_begin` takes no parameters; it serialises as `{}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LinkPairBeginParams {}
@@ -669,6 +1042,250 @@ mod tests {
         let text = serde_json::to_string(&value).unwrap();
         let back: T = serde_json::from_str(&text).unwrap();
         assert_eq!(back, value, "{text}");
+    }
+
+    #[test]
+    fn serials_round_trip_through_the_string_the_u64_and_serde() {
+        let s = Serial::new(0x3fa9_c21e, 412, 2);
+        assert_eq!(s.to_string(), "3fa9c21e:412.2");
+        assert_eq!("3fa9c21e:412.2".parse::<Serial>().unwrap(), s);
+        assert_eq!(Serial::from_u64(s.to_u64()), s);
+        assert_eq!(s.to_u64(), 0x3fa9_c21e_0001_9c02);
+        assert_eq!(serde_json::to_value(s).unwrap(), json!("3fa9c21e:412.2"));
+        assert_eq!(
+            serde_json::from_value::<Serial>(json!("3fa9c21e:412.2")).unwrap(),
+            s
+        );
+        // The extremes.
+        for s in [
+            Serial::new(0, 0, 0),
+            Serial::new(u32::MAX, SERIAL_LINE_MAX, 255),
+            Serial::new(1, 1, 0),
+        ] {
+            assert_eq!(s.to_string().parse::<Serial>().unwrap(), s);
+            assert_eq!(Serial::from_u64(s.to_u64()), s);
+        }
+        assert_eq!(Serial::new(7, 3, 1).to_string(), "00000007:3.1");
+    }
+
+    #[test]
+    fn serials_order_within_a_file_and_not_across() {
+        use std::cmp::Ordering;
+        let a = Serial::new(9, 412, 2);
+        let b = Serial::new(9, 412, 3);
+        let c = Serial::new(9, 413, 0);
+        assert!(a < b && b < c && a < c);
+        assert_eq!(a.partial_cmp(&a), Some(Ordering::Equal));
+        // The packed form orders the same within a file.
+        assert!(a.to_u64() < b.to_u64() && b.to_u64() < c.to_u64());
+        let other = Serial::new(10, 1, 0);
+        assert_eq!(a.partial_cmp(&other), None);
+        assert!(a.lt(&other) == a.ge(&other) && a != other, "neither below nor above");
+        assert!(a.same_file(c) && !a.same_file(other));
+    }
+
+    #[test]
+    fn serials_keep_the_24_bit_line_limit_and_refuse_bad_text() {
+        let max = format!("00000001:{SERIAL_LINE_MAX}.0");
+        assert_eq!(max.parse::<Serial>().unwrap().line, SERIAL_LINE_MAX);
+        let past = format!("00000001:{}.0", SERIAL_LINE_MAX + 1);
+        assert!(past.parse::<Serial>().is_err());
+        for bad in [
+            "",
+            "3fa9c21e",
+            "3fa9c21e:412",
+            "3fa9c21e:412.",
+            "3fa9c21:412.2",
+            "3fa9c21e0:412.2",
+            "3fa9c21g:412.2",
+            "3fa9c21e:-1.2",
+            "3fa9c21e:412.256",
+            "3fa9c21e:41 2.2",
+            "3fa9c21e:+412.2",
+        ] {
+            assert!(bad.parse::<Serial>().is_err(), "{bad:?} parsed");
+        }
+        assert!(serde_json::from_value::<Serial>(json!(17)).is_err());
+        assert!(serde_json::from_value::<Serial>(json!("x")).is_err());
+    }
+
+    #[test]
+    fn the_file_hash_is_fnv_1a() {
+        // FNV-1a 32 of "" and "a", the published test values.
+        assert_eq!(Serial::file_hash(""), 0x811c_9dc5);
+        assert_eq!(Serial::file_hash("a"), 0xe40c_292c);
+        assert_eq!(Serial::file_hash("foobar"), 0xbf9c_f968);
+    }
+
+    fn section(serial: Serial, kind: SectionKind) -> Section {
+        Section {
+            serial,
+            kind,
+            entries: vec![Entry {
+                ts: "t".into(),
+                role: Role::Assistant,
+                kind: EntryKind::Text,
+                tool: None,
+                summary: "Done.".into(),
+                links: vec![],
+                origin: None,
+            }],
+            card: None,
+        }
+    }
+
+    #[test]
+    fn the_subscription_types_round_trip() {
+        let s = Serial::new(0x3fa9_c21e, 412, 0);
+        round_trip(SessionSubscribeParams {
+            pane_id: "w2:pZ".into(),
+            sections: 200,
+            after: Some(s),
+        });
+        let p: SessionSubscribeParams =
+            serde_json::from_value(json!({"pane_id": "w2:pZ"})).unwrap();
+        assert_eq!((p.sections, p.after), (SUBSCRIBE_SECTIONS_DEFAULT, None));
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            json!({"pane_id": "w2:pZ", "sections": 50})
+        );
+        let card = Section {
+            serial: Serial::new(0x3fa9_c21e, 412, 192),
+            kind: SectionKind::Card,
+            entries: vec![],
+            card: Some(CardBody {
+                card: CardKind::Question,
+                live: true,
+                title: "Claude is asking".into(),
+                text: "Approve docs/design/X_PLAN.md?".into(),
+                confirm_id: None,
+                about_plan: true,
+                links: vec![Link {
+                    text: "docs/design/X_PLAN.md".into(),
+                    url: "u".into(),
+                }],
+            }),
+        };
+        let full = SessionDelivery {
+            subscription_id: 3,
+            pane_id: "w2:pZ".into(),
+            agent: "claude".into(),
+            reset: true,
+            session: Some(SessionRef {
+                session_id: Some("992c".into()),
+                matched: SessionMatched::Id,
+            }),
+            reason: None,
+            sections: vec![section(s, SectionKind::Text), card],
+            status: Some("idle".into()),
+            pending_question: Some(Some(PendingQuestion {
+                text: "Go on?".into(),
+                ts: "t".into(),
+                about_plan: false,
+                plan: None,
+                links: vec![],
+            })),
+            removed: vec![Serial::new(0x3fa9_c21e, 400, 195)],
+        };
+        round_trip(full.clone());
+        round_trip(SessionSubscribeResult {
+            subscription_id: 3,
+            delivery: full.clone(),
+        });
+        // Every optional field absent: status and pending_question are
+        // left out; session and reason are null.
+        let bare = SessionDelivery {
+            reset: false,
+            session: None,
+            reason: Some(delivery_reasons::NO_READER.into()),
+            sections: vec![],
+            status: None,
+            pending_question: None,
+            removed: vec![],
+            ..full.clone()
+        };
+        round_trip(bare.clone());
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            json!({"subscription_id": 3, "pane_id": "w2:pZ", "agent": "claude",
+                   "reset": false, "session": null, "reason": "no_reader",
+                   "sections": []})
+        );
+        // A cleared question is null, and reads back as cleared.
+        let cleared = SessionDelivery {
+            pending_question: Some(None),
+            ..bare.clone()
+        };
+        round_trip(cleared.clone());
+        assert_eq!(
+            serde_json::to_value(&cleared).unwrap()["pending_question"],
+            serde_json::Value::Null
+        );
+        let read: SessionDelivery = serde_json::from_value(json!({
+            "subscription_id": 3, "pane_id": "w2:pZ", "agent": "claude",
+            "session": null, "reason": null, "pending_question": null
+        }))
+        .unwrap();
+        assert_eq!(read.pending_question, Some(None));
+        assert!(!read.reset && read.sections.is_empty() && read.removed.is_empty());
+        round_trip(SessionUnsubscribeParams { subscription_id: 3 });
+        round_trip(SessionHistoryParams {
+            subscription_id: 3,
+            before: s,
+            sections: 20,
+        });
+        let h: SessionHistoryParams =
+            serde_json::from_value(json!({"subscription_id": 3, "before": "3fa9c21e:412.0"}))
+                .unwrap();
+        assert_eq!(h.sections, HISTORY_SECTIONS_DEFAULT);
+        assert!(
+            serde_json::from_value::<SessionHistoryParams>(
+                json!({"subscription_id": 3, "before": "nope"})
+            )
+            .is_err()
+        );
+        round_trip(SessionHistoryResult {
+            sections: vec![section(s, SectionKind::Turn)],
+            start: true,
+        });
+    }
+
+    #[test]
+    fn section_and_card_kinds_are_open() {
+        for (kind, wire) in [
+            (SectionKind::Turn, "turn"),
+            (SectionKind::Text, "text"),
+            (SectionKind::Tool, "tool"),
+            (SectionKind::Card, "card"),
+            (SectionKind::Context, "context"),
+        ] {
+            assert_eq!(serde_json::to_value(kind).unwrap(), json!(wire));
+            assert_eq!(
+                serde_json::from_value::<SectionKind>(json!(wire)).unwrap(),
+                kind
+            );
+        }
+        assert_eq!(
+            serde_json::from_value::<SectionKind>(json!("diagram")).unwrap(),
+            SectionKind::Unknown
+        );
+        assert_eq!(
+            serde_json::from_value::<CardKind>(json!("celebration")).unwrap(),
+            CardKind::Unknown
+        );
+        assert!(CardKind::Approval < CardKind::Question);
+        assert!(CardKind::Broke < CardKind::Finished && CardKind::Finished < CardKind::Unknown);
+        // A text section without entries or card leaves both out.
+        let empty = Section {
+            serial: Serial::new(1, 2, 3),
+            kind: SectionKind::Text,
+            entries: vec![],
+            card: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&empty).unwrap(),
+            json!({"serial": "00000001:2.3", "kind": "text"})
+        );
     }
 
     #[test]

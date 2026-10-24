@@ -141,3 +141,35 @@ lifecycle, pushed):
   `pane_closed` (or the dotted spellings). `HerdrEvent` is an exhaustive
   enum; these events were `Other` before.
 - **Added:** `Subscription::focus_and_panes()`, the four as an array.
+
+## libhandlr_proto 0.3.5 — 2026-10-23 (the commit tagged `libhandlr_proto-v0.3.5`)
+
+Additive, by the owner's rulings ("appending to a struct is additive";
+"same with open enums, not closed"): new methods, new types, and two
+new enums that are open (plan 20261023_03, step 2, as amended at 14:54
+and 22:55 EDT):
+
+- **Added:**
+  - `common::methods::SESSION_SUBSCRIBE`, `SESSION_UNSUBSCRIBE`,
+    `SESSION_HISTORY` and the notification `SESSION_DELIVERY`;
+  - `common::Serial` (`file`, `line`, `slot`), with `new`, `file_hash`
+    (FNV-1a), `to_u64`, `from_u64`, `same_file`, `PartialOrd` (`None`
+    across files), `Display` and `FromStr` (`"3fa9c21e:412.2"`), and
+    serde as that string; `common::ParseSerialError`;
+    `common::SERIAL_LINE_MAX`;
+  - `common::Section` (`serial`, `kind`, `entries`, `card`),
+    `common::CardBody` (`card`, `live`, `title`, `text`, `confirm_id`,
+    `about_plan`, `links`);
+  - `common::SectionKind` (`turn`, `text`, `tool`, `card`, `context`)
+    and `common::CardKind` (`approval`, `question`, `broke`, `finished`),
+    both `#[non_exhaustive]` with an `Unknown` variant that any other
+    kind reads as;
+  - `common::SessionSubscribeParams`, `SessionSubscribeResult`,
+    `SessionDelivery` (with `removed`, the serials of sections to drop),
+    `SessionRef`, `SessionUnsubscribeParams`, `SessionHistoryParams`,
+    `SessionHistoryResult`, and `common::delivery_reasons`;
+  - `common::SUBSCRIBE_SECTIONS_DEFAULT` (50), `SECTIONS_MAX` (200),
+    `HISTORY_SECTIONS_DEFAULT` (100), `SUBSCRIPTIONS_MAX` (8);
+  - `envelope::codes::TOO_MANY_SUBSCRIPTIONS` (-32012),
+    `SUBSCRIPTION_NOT_FOUND` (-32013) and `SESSION_CHANGED` (-32014).
+    `codes::ALL` is unchanged, so its type stays `[i64; 15]`.
