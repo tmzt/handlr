@@ -304,3 +304,19 @@ ranges named in steps 3 and 6.
    of "`gt`, `lt`, both, and `from`/`to`", and `from` resumes in place of
    `gt`. Step 6's log fetches a content range by `from` only, `to` only
    and both.
+
+## Amendment — 2026-10-24 00:06 EDT: approved
+
+The owner approved the plan on 2026-10-24 ("approve"). Its open
+questions take the plan's values until the owner says otherwise:
+- contents are fetched for the window ± `KEEP_SCREENS` (5) and forgotten
+  past 20 screens;
+- the newest 8 indexes' contents ride along with deliveries
+  (`LIVE_INLINE`).
+
+The plan stays `Draft` until its first implementing commit, which sets
+`In implementation` (Rule 1.5). Steps 1–3 (protocol and daemon) can start
+at once. Steps 4 and 5 build on the L3 ribbon, which is being built at the
+time of writing, so they start once it lands. Plan 20261023_09's step 1
+moves the shared types out of `libhandlr_proto`, so it follows this plan's
+step 1, so that the new types move with the rest.
