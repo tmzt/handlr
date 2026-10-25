@@ -2274,3 +2274,17 @@ Plan: [Rename project to flankr across CLI, protocols, crates and apps](docs/des
 - Historical design documents, historical entries in `CHANGES.md`/`VERSIONS.md`,
   and past evidence logs remain untouched under their original names.
 
+## 2026-10-25 14:53 EDT — Extract libinfer into standalone repository ~/src/libinfer
+
+Plan: [Extract libinfer into standalone repository ~/src/libinfer](docs/design/20261025_02_EXTRACT_LIBINFER_PLAN.md)
+(`In implementation`).
+
+- `crates/libinfer` (`libinfer` and `libinfer-gemini`) is extracted into its own
+  repository at `/Users/tmeade/src/libinfer`.
+- The new repository is initialized with full project governance per AGENTS.md,
+  including `AGENTS.md`, `CHANGES.md`, `VERSIONS.md`, `repowiki.toml`, and registration
+  in `~/src/repowiki/sites.toml`.
+- `flankr` updates its dependencies to point to `../libinfer/libinfer` and
+  `../libinfer/libinfer-gemini`, and removes `crates/libinfer/` from its workspace.
+
+

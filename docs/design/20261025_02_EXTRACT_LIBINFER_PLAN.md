@@ -1,7 +1,7 @@
 ---
 title: Extract libinfer into standalone repository ~/src/libinfer
 date: 2026-10-25
-status: Draft
+status: In implementation
 covers:
   - "Extracting `crates/libinfer` from `flankr` into a new standalone repository `~/src/libinfer`"
   - "Creating root workspace and configuration for `~/src/libinfer` with members `libinfer` and `libinfer-gemini`"
@@ -127,3 +127,8 @@ In `~/src/handlr` (flankr):
 - Remove `crates/libinfer/` from `workspace.members` and delete `crates/libinfer/`.
 - Update docstrings in `src/reasoning.rs` or `src/server/companion.rs` if needed.
 - **Done when:** `cargo test -p flankr` passes all 276 unit tests, 40 companion tests, 11 daemon tests, 9 link tests, 1 live naming test, and 22 subscription tests.
+
+## Amendment — 2026-10-25 14:53 EDT: implementation started
+
+Implementation has started. This document is now immutable.
+
