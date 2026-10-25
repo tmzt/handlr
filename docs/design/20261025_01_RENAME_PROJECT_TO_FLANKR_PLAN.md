@@ -1,7 +1,7 @@
 ---
 title: Rename project to flankr across CLI, protocols, crates and apps
 date: 2026-10-25
-status: Draft
+status: In implementation
 covers:
   - "Renaming the root crate and CLI binary from `handlr` to `flankr`"
   - "Renaming workspace crates: `crates/handlr-*` and `crates/libhandlr_proto` to `crates/flankr-*` and `crates/libflankr_proto`"
@@ -226,4 +226,9 @@ In Section 4, Step 3:
    - Status strings in `apps/companion`: `"flankr is offline"`.
 3. **Test Fixtures:**
    Mock data in unit tests (`naming.rs`, `notify.rs`, `agent_card.rs`) using `cwd: ".../handlr"` or `label: "handlr"` are updated to `"flankr"` to maintain test consistency.
+
+## Amendment — 2026-10-25 12:20 EDT: implementation started
+
+Implementation has started. This document is now immutable.
+
 
