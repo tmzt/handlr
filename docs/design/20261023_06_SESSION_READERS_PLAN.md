@@ -1,7 +1,7 @@
 ---
 title: Session readers for agy and other agents, behind one agnostic trait
 date: 2026-10-23
-status: In implementation
+status: Implemented
 covers:
   - "Reading the sessions of agents other than Claude Code and Codex,
     starting with agy (the Antigravity CLI), so their panes get the agent
@@ -216,3 +216,16 @@ Open question 3 is answered by the owner's "It shouldn't include the
 memory or anything like that. Just a session": agy's `brain/`, annotations
 and summaries are never read, and its state snapshots (step type 23) are
 left out. The document is now immutable; departures go to CHANGES.md.
+
+## Amendment — 2026-10-25 02:54 EDT: implementation is complete
+
+Every step is built and verified:
+- **Step 1 (fixtures and findings):** `364df48`, `2807e4e`, `273168d`, `b93b05e`.
+- **Step 2 (generic trait and Item.pos):** `fb97fef`.
+- **Step 3 (protobuf wire decoder):** `671e251`.
+- **Step 4 (agy SQLite reader):** `66ec882`.
+- **Step 5 (live verification):** logged in `out/sessions/LOG.md` and
+  `out/sessions/20261025_01_agy_live/`. `session.peek` and `agents.list`
+  read all active agy panes directly from SQLite WAL without blocking.
+
+`status` is set to `Implemented`.
