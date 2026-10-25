@@ -92,7 +92,7 @@ impl RemoteSshConfig {
             port: None,
             identity_file: None,
             remote_socket_path: Some(default_local_socket_path()),
-            control_path: Some(PathBuf::from("/tmp/handlr_ssh_%C")),
+            control_path: Some(PathBuf::from("/tmp/flankr_ssh_%C")),
             control_persist: Some("10m".to_string()),
             ssh_binary: Some("ssh".to_string()),
             extra_options: Vec::new(),
@@ -164,7 +164,7 @@ impl Default for MockState {
         let default_pane = PaneInfo {
             pane_id: "p1".to_string(),
             terminal_title: Some("claude-worker".to_string()),
-            cwd: Some("/Users/tmeade/src/handlr".to_string()),
+            cwd: Some("/Users/tmeade/src/flankr".to_string()),
             agent_status: Some(AgentStatus::Working),
             focused: true,
             command: Some("cargo build".to_string()),
@@ -174,7 +174,7 @@ impl Default for MockState {
 
         let default_workspace = WorkspaceInfo {
             workspace_id: "w1".to_string(),
-            name: Some("handlr-dev".to_string()),
+            name: Some("flankr-dev".to_string()),
             tabs: vec![TabInfo {
                 tab_id: "t1".to_string(),
                 title: Some("build".to_string()),
@@ -189,8 +189,8 @@ impl Default for MockState {
         buffers.insert(
             "p1".to_string(),
             vec![
-                "Compiling handlr v0.1.0 (/Users/tmeade/src/handlr)".to_string(),
-                "   Compiling libherdr v0.1.0 (/Users/tmeade/src/handlr/crates/libherdr)"
+                "Compiling flankr v0.1.0 (/Users/tmeade/src/flankr)".to_string(),
+                "   Compiling libherdr v0.1.0 (/Users/tmeade/src/flankr/crates/libherdr)"
                     .to_string(),
                 "    Finished dev [unoptimized + debuginfo] target(s) in 1.42s".to_string(),
             ],

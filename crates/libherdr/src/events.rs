@@ -302,7 +302,7 @@ mod tests {
         match &events[2] {
             HerdrEvent::PaneUpdated(pane) => {
                 assert_eq!(pane.pane_id, "w2:pZ");
-                assert_eq!(pane.cwd.as_deref(), Some("/src/handlr"));
+                assert_eq!(pane.cwd.as_deref(), Some("/src/flankr"));
                 assert!(pane.focused);
                 let session = pane.agent_session.as_ref().expect("a session");
                 assert_eq!(session.id(), Some("00000000-0000-4000-8000-0000000000a1"));
