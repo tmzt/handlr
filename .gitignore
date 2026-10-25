@@ -5,6 +5,7 @@
 
 /target
 
+flankr*.log
 handlr*.log
 *.wav
 

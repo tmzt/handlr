@@ -1,4 +1,4 @@
-Prompts that handlr runs besides the main system prompt in PROMPT.md, read
+Prompts that flankr runs besides the main system prompt in PROMPT.md, read
 with libtypedmd (docs/design/20261023_05_SPOKEN_SUMMARIES_PLAN.md). Each
 prompt is one object tagged Prompt, its head the prompt's name. Its members
 are its settings; `system` and `user` are literal blocks whose slots the

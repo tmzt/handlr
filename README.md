@@ -1,6 +1,6 @@
-# handlr
+# flankr
 
-`handlr` is the voice-native command line interface and LLM tool-calling
+`flankr` is the voice-native command line interface and LLM tool-calling
 bridge for the `herdr` terminal multiplexer. See [AGENTS.md](AGENTS.md) for
 the architecture and [PROMPT.md](PROMPT.md) for the runtime system prompt.
 
