@@ -28,7 +28,7 @@ use crate::wire;
 /// What the app tells the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
-    /// What `handlr pair` shows: the pairing URL, the bare `handlr1…`
+    /// What `flankr pair` shows: the pairing URL, the bare `flankr1…`
     /// string, or the QR code's `data:image/png;base64,` URL. The `net`
     /// thread stores the server, gives [`Event::PairingCode`] and connects;
     /// [`State`] itself cannot, and gives [`Event::PairFailed`].
@@ -373,8 +373,8 @@ pub enum Event {
     Disconnected {
         retry_in_ms: u32,
     },
-    /// The device's code, `handlrkey1…`, for the user to paste into
-    /// `handlr pair` on `server` (show it with a Copy button). The client
+    /// The device's code, `flankrkey1…`, for the user to paste into
+    /// `flankr pair` on `server` (show it with a Copy button). The client
     /// keeps connecting until the server knows its key.
     PairingCode {
         code: String,
@@ -436,7 +436,7 @@ pub enum Event {
     /// The agents, as `agents.list` gave them: on its first answer on each
     /// connection, then whenever the list changes (plan 20261023_04, decision 6).
     Agents(Vec<common::AgentInfo>),
-    /// The panes with a handlr confirmation waiting, as
+    /// The panes with a flankr confirmation waiting, as
     /// [`State::pending_panes`] gives them, whenever they change.
     PendingPanes(Vec<String>),
     /// A line of the conversation with Gemini (plan 20261023_04, A5): the
@@ -724,7 +724,7 @@ pub fn message_handle(target: &common::FocusInfo, text: &str) -> String {
     out
 }
 
-/// "Stopped the handlr agent.", "Stopped A and B.", "Stopped A, B and C."
+/// "Stopped the flankr agent.", "Stopped A and B.", "Stopped A, B and C."
 pub fn stopped_sentence(names: &[String]) -> String {
     let joined = match names {
         [] => String::new(),
@@ -814,7 +814,7 @@ struct Reading {
     serial: u64,
     /// The reply's time, which names it.
     ts: String,
-    /// The reply as the view has it, read through `handlr_speech` when the
+    /// The reply as the view has it, read through `flankr_speech` when the
     /// daemon does not say how to read it.
     text: String,
     /// When the summary was asked for.
@@ -3540,7 +3540,7 @@ impl State {
     }
 
     /// Ask the daemon how to say a reply, and queue it to be read in its
-    /// turn. Offline, it is read through `handlr_speech` here.
+    /// turn. Offline, it is read through `flankr_speech` here.
     fn read_reply(
         &mut self,
         pane_id: &str,
@@ -3595,7 +3595,7 @@ impl State {
     }
 
     /// The daemon's answer for a reply being read: what to say (A3), or
-    /// `None` to read it through `handlr_speech` here (no answer, or an
+    /// `None` to read it through `flankr_speech` here (no answer, or an
     /// error).
     fn summarized(&mut self, serial: u64, spoken: Option<String>, out: &mut Vec<Output>) {
         let now = self.local_time;
@@ -4136,7 +4136,7 @@ impl State {
         }
     }
 
-    /// The panes with a handlr confirmation waiting, each once, in the
+    /// The panes with a flankr confirmation waiting, each once, in the
     /// order they were asked (plan 20261023_04, section 4).
     pub fn pending_panes(&self) -> Vec<String> {
         let mut panes: Vec<String> = Vec::new();
@@ -4405,7 +4405,7 @@ mod tests {
             "confirm.requested",
             json!({
                 "confirm_id": id, "pane_id": "w2:pZ", "agent": "claude",
-                "name": "Claude", "project": "handlr",
+                "name": "Claude", "project": "flankr",
                 "command": "continue", "requested_by": "companion:test",
                 "label": "keep-going", "phrase": "copper-lantern-ninety",
                 "text": "Approve sending \"continue\" to Claude? For keep going."
@@ -4557,7 +4557,7 @@ mod tests {
     #[test]
     fn an_interrupt_that_stopped_an_agent_says_so() {
         let mut s = online();
-        let req = start(&mut s, "send continue to the handlr agent");
+        let req = start(&mut s, "send continue to the flankr agent");
         let out = s.input(Input::Tap);
         assert_eq!(events(&out), vec![Event::StopSpeaking]);
         assert_eq!(sent(&out)[0].method, "turn.interrupt");
@@ -4566,16 +4566,16 @@ mod tests {
             json!({
                 "outcome": "interrupted",
                 "ran": [{"pane_id": "w2:pZ", "command": "continue"}],
-                "interrupted": [{"pane_id": "w2:pZ", "name": "handlr", "spoken": "the handlr agent"}]
+                "interrupted": [{"pane_id": "w2:pZ", "name": "flankr", "spoken": "the flankr agent"}]
             }),
         ));
         assert_eq!(
             events(&out),
             vec![
-                say("Stopped the handlr agent."),
+                say("Stopped the flankr agent."),
                 Event::TurnEnded {
                     outcome: "interrupted".into(),
-                    stopped: vec!["the handlr agent".into()]
+                    stopped: vec!["the flankr agent".into()]
                 }
             ]
         );
@@ -4619,7 +4619,7 @@ mod tests {
                     phrase: "copper-lantern-ninety".into(),
                     command: "continue".into(),
                     agent: "Claude".into(),
-                    project: Some("handlr".into()),
+                    project: Some("flankr".into()),
                 },
                 say(text),
                 Event::PendingPanes(vec!["w2:pZ".into()]),
@@ -5409,8 +5409,8 @@ mod tests {
     // The agent view (plan 20261022_03, step 4).
 
     fn agent_info(pane: &str, status: &str) -> Value {
-        json!({"pane_id": pane, "name": "the handlr agent", "spoken": "the handlr agent",
-               "agent": "claude", "project": "handlr", "tab_label": "17-hr",
+        json!({"pane_id": pane, "name": "the flankr agent", "spoken": "the flankr agent",
+               "agent": "claude", "project": "flankr", "tab_label": "17-fl",
                "tab_number": 17, "status": status, "focused": false})
     }
 
@@ -5472,7 +5472,7 @@ mod tests {
             sections.push(json!({"serial": serial(line, 0), "kind": kind, "entries": [e]}));
             if q.is_object() && q["ts"] == e["ts"] && kind == "text" {
                 let mut card = json!({"card": "question", "live": true,
-                    "title": "the handlr agent is asking", "text": q["text"]});
+                    "title": "the flankr agent is asking", "text": q["text"]});
                 if q["about_plan"] == true {
                     card["about_plan"] = json!(true);
                 }
@@ -5648,7 +5648,7 @@ mod tests {
     fn the_view_is_named_from_agents_list_and_closing_unsubscribes() {
         let mut s = viewing("idle", asking());
         match s.agent_view() {
-            Some(Event::AgentView { name, .. }) => assert_eq!(name, "the handlr agent"),
+            Some(Event::AgentView { name, .. }) => assert_eq!(name, "the flankr agent"),
             other => panic!("{other:?}"),
         }
         let out = s.input(Input::CloseAgent);
@@ -5698,7 +5698,7 @@ mod tests {
     fn a_question_resolves_when_the_daemon_says_so() {
         let mut s = viewing("idle", asking());
         let resolved = json!({"serial": serial(2, 128), "kind": "card", "card": {
-            "card": "question", "live": false, "title": "the handlr agent is asking",
+            "card": "question", "live": false, "title": "the flankr agent is asking",
             "text": "Shall I go on?"}});
         let yes = json!({"serial": serial(3, 0), "kind": "turn", "entries": [
             {"ts": "3", "role": "user", "kind": "text", "summary": "yes"}]});
@@ -6079,7 +6079,7 @@ mod tests {
         let target = d.target.expect("a target");
         assert_eq!(target.pane_id, "w2:pZ");
         assert_eq!(target.agent.as_deref(), Some("Claude"));
-        assert_eq!(target.name, "the handlr agent");
+        assert_eq!(target.name, "the flankr agent");
         // The list asked for at the start does not move it to the focus.
         let out = list_answer(&mut s, &out, claude());
         if let Some(d) = dictation_of(&out) {
@@ -6102,13 +6102,13 @@ mod tests {
         assert_eq!(
             sends[0].params,
             json!({"pane_id": "w2:pZ", "text": "continue",
-                   "handle": "reply-claude-handlr-cont"})
+                   "handle": "reply-claude-flankr-cont"})
         );
         let out = s.input(Input::Respond(Suggestion::Yes));
         assert_eq!(
             requests(&out, "agents.send")[0].params,
             json!({"pane_id": "w2:pZ", "text": "Yes, go on", "kind": "message",
-                   "handle": "reply-claude-handlr-yes"})
+                   "handle": "reply-claude-flankr-yes"})
         );
         // The tap is the approval: its question is answered, not asked.
         let id = requests(&out, "agents.send")[0].id.clone();
@@ -6507,7 +6507,7 @@ mod tests {
             "text": "Shall I build docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md?",
             "ts": "2", "about_plan": true,
             "links": [{"text": "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md",
-                       "url": "http://w/#/src--handlr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN"}]
+                       "url": "http://w/#/src--flankr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN"}]
         });
         if let Some(p) = plan {
             q["plan"] = json!(p);
@@ -8461,7 +8461,7 @@ mod tests {
         assert_eq!(c.colour, crate::cross::session_colour("sA"));
         assert_eq!(
             (c.agent.as_str(), c.text.as_str()),
-            ("the handlr agent", "Ship it?")
+            ("the flankr agent", "Ship it?")
         );
         assert_eq!(c.at, secs(15.0));
         assert_eq!(dings(&out), 1);

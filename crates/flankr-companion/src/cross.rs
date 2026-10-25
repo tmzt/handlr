@@ -207,7 +207,7 @@ impl Cross {
     }
 
     /// The questions and approvals as they stand: `agents` as listed,
-    /// `approvals` the panes with a handlr confirmation waiting and its
+    /// `approvals` the panes with a flankr confirmation waiting and its
     /// command, `viewed` the open view's pane. Returns whether a question
     /// or an approval came that was not showing. A question or approval
     /// takes the place of every finished card.

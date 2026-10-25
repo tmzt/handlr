@@ -1,5 +1,5 @@
-//! The `net` thread over handlr link, against an in-test server built from
-//! `libhandlr_proto::link::accept` with a minimal JSON-RPC responder that
+//! The `net` thread over flankr link, against an in-test server built from
+//! `libflankr_proto::link::accept` with a minimal JSON-RPC responder that
 //! authorizes the keys in a set: pairing by device code (plan 20261022_02,
 //! amendment of 23:07 EDT) from a string or the QR code's data URL (plan
 //! 20261022_06, step 5), reconnecting with `IK` and the stored
@@ -91,7 +91,7 @@ impl Server {
         }
     }
 
-    /// The pairing string `handlr pair` would show for `addresses`.
+    /// The pairing string `flankr pair` would show for `addresses`.
     fn pairing(&self, addresses: Vec<String>) -> PairingPayload {
         PairingPayload {
             server_key: self.key.public,
@@ -325,7 +325,7 @@ fn pairing_shows_the_code_and_connects_once_it_is_added() {
     );
 }
 
-/// Plan 20261022_06, step 5: the data URL `handlr pair` prints pairs.
+/// Plan 20261022_06, step 5: the data URL `flankr pair` prints pairs.
 #[test]
 fn pairing_from_the_qr_codes_data_url() {
     let server = Server::start();

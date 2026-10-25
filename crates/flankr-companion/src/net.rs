@@ -4,7 +4,7 @@
 //! 18:10 EDT amendment's steps 1 and 2).
 //!
 //! With a paired server in the [`KeyStore`] (a server record and this
-//! client's static key), it connects over handlr link: TCP to the record's
+//! client's static key), it connects over flankr link: TCP to the record's
 //! addresses in order, `IK`, and `hello` carried in the handshake. Without
 //! one, it connects to the daemon's local socket.
 //!
@@ -13,7 +13,7 @@
 //! and addresses, makes its own key if it has none, and gives its device
 //! code as [`Event::PairingCode`]. It then connects with `IK` as usual,
 //! but retries every [`PAIRING_RETRY`] for [`PAIRING_WINDOW`] while the
-//! server drops it, until the user pastes the code into `handlr pair`;
+//! server drops it, until the user pastes the code into `flankr pair`;
 //! after that it falls back to the usual backoff. The `hello` answered with
 //! `paired: true` gives [`Event::Paired`] (plan 20261022_02, amendment of
 //! 23:07 EDT).

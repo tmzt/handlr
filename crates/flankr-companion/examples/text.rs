@@ -1,6 +1,6 @@
 //! The companion without audio (plan 20261022_04, step 2 of the 18:10 EDT
 //! amendment): each typed line is an utterance, an empty line is the tap,
-//! and `pair <URL, handlr1… or data: URL>` pairs. `/start`, `/submit`,
+//! and `pair <URL, flankr1… or data: URL>` pairs. `/start`, `/submit`,
 //! `/clear` and `/scratch` are the dictation buttons; `/view <pane>` opens an
 //! agent view and `/close` closes it. Events are printed as they arrive.
 //!

@@ -1,7 +1,7 @@
 //! What [`Input::Pair`](crate::Input::Pair) is given (plan 20261022_06,
 //! step 5, from the 23:07 EDT amendment): the pairing URL
-//! `handlr://<host>:<port>/pair#handlr1…`, the bare `handlr1…` string, or
-//! a `data:image/png;base64,` URL of the QR code `handlr pair` prints. The
+//! `flankr://<host>:<port>/pair#flankr1…`, the bare `flankr1…` string, or
+//! a `data:image/png;base64,` URL of the QR code `flankr pair` prints. The
 //! QR code must hold one of the first two forms.
 //!
 //! The PNG is read with `png` (expanded to 8-bit samples, then to luma)

@@ -24,6 +24,6 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-# Tests build the QR code's data URL as handlr pair does.
+# Tests build the QR code's data URL as flankr pair does.
 qrcodeurl = { path = "../qrcodeurl" }
 tokio = { version = "1", features = ["rt", "net", "time", "sync", "io-util", "macros"] }
