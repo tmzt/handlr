@@ -201,3 +201,29 @@ Because the application is not yet public:
    - Pair or connect via `flankr ctl` and `flankr session peek`.
    - Install `dev.flankr.companion` on the S23 Ultra and verify live connection.
    - **Done when:** Live verification passes and is recorded in the evidence log.
+
+## Amendment — 2026-10-25 12:18 EDT: dynamic agent names vs static strings
+
+This amendment clarifies Section 2 (Area 7: Spoken, Displayed & Status Strings) and Section 4 (Step 3).
+
+### Replaced Text
+In Section 2, Area 7:
+> - **Spoken & Shown Agent Names:**
+>   - `"the flankr agent"` (was `"the handlr agent"`)
+>   - `"the flankr shell"` (was `"the handlr shell"`)
+>   - `"Claude in flankr"`, `"Agy in flankr"`
+
+In Section 4, Step 3:
+> - Update naming rules: `"the flankr agent"`, `"the flankr shell"`.
+
+### New Text & Clarification
+1. **Dynamic Naming Logic:**
+   Spoken and shown agent phrases such as `"the handlr agent"`, `"the handlr shell"`, and `"Claude in handlr"` are dynamically computed at runtime by `src/core/naming.rs` from workspace labels and directory basenames (`cwd`) provided by `herdr`. They are not static strings in the naming logic and require no code changes in the naming resolution algorithm.
+2. **Static Strings Updated:**
+   The static strings updated in Area 7 are:
+   - Daemon prompt in `src/transport.rs`: `"handlr itself asks the user to approve..."` → `"flankr itself asks the user to approve..."`.
+   - Companion UI header in `apps/companion/src/overview.rs`: `heading("handlr", ...)` → `heading("flankr", ...)`.
+   - Status strings in `apps/companion`: `"flankr is offline"`.
+3. **Test Fixtures:**
+   Mock data in unit tests (`naming.rs`, `notify.rs`, `agent_card.rs`) using `cwd: ".../handlr"` or `label: "handlr"` are updated to `"flankr"` to maintain test consistency.
+
