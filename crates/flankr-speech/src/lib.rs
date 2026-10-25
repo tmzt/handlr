@@ -1,4 +1,4 @@
-//! `handlr-speech`: an agent's reply as it is read aloud
+//! `flankr-speech`: an agent's reply as it is read aloud
 //! (docs/design/20261023_05_SPOKEN_SUMMARIES_PLAN.md, the 16:28 EDT
 //! amendment, A1, A2 and A5).
 //!
@@ -280,8 +280,8 @@ mod tests {
             "Up as a Draft: The overview (home) screen."
         );
         assert_eq!(
-            said("A new field, `AgentInfo.asking`, in libhandlr_proto 0.2.0."),
-            "A new field, agent info asking, in libhandlr_proto 0.2.0."
+            said("A new field, `AgentInfo.asking`, in libflankr_proto 0.2.0."),
+            "A new field, agent info asking, in libflankr_proto 0.2.0."
         );
         assert_eq!(
             said("They go in `src/overview/` and `apps/companion/src/agent/`."),
@@ -296,11 +296,11 @@ mod tests {
     const LIST: &str = "I changed three files:\n\
         - src/server/speech.rs\n\
         - src/sessions/mod.rs\n\
-        - crates/libhandlr_proto/src/common.rs\n\
+        - crates/libflankr_proto/src/common.rs\n\
         All tests pass.";
     const PATHS: &str = "I wrote the plan in docs/design/20261023_05_SPOKEN_SUMMARIES_PLAN.md, \
-        moved the rules from crates/handlr-companion/src/client.rs into \
-        crates/handlr-speech/src/lib.rs, and changed `src/server/speech.rs` and \
+        moved the rules from crates/flankr-companion/src/client.rs into \
+        crates/flankr-speech/src/lib.rs, and changed `src/server/speech.rs` and \
         `src/server/conn.rs` to use them. The tests are in tests/companion.rs.";
 
     #[test]

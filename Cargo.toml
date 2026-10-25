@@ -33,7 +33,7 @@ socket2 = "0.6"
 # `handlr pair`: the pairing URL's QR code as a PNG (plan 20261022_06).
 qrcodeurl = { path = "crates/qrcodeurl" }
 # The reading rules and the complexity measure (plan 20261023_05, A5).
-handlr-speech = { path = "crates/handlr-speech" }
+handlr-speech = { package = "flankr-speech", path = "crates/flankr-speech" }
 # ADDITIONAL_PROMPTS.md (src/prompts.rs, plan 20261023_05), v0.2.0.
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
 # agy session reader (src/sessions/agy.rs, plan 20261023_06).
@@ -50,10 +50,10 @@ rqrr = { version = "0.11", default-features = false }
 [workspace]
 members = [
     ".",
+    "crates/flankr-speech",
     "crates/handlr-audio",
     "crates/handlr-companion",
     "crates/handlr-markdown",
-    "crates/handlr-speech",
     "crates/libflankr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",
@@ -64,9 +64,9 @@ members = [
 # (docs/design/20261022_04_COMPANION_APP_PLAN.md, 18:10 EDT amendment).
 default-members = [
     ".",
+    "crates/flankr-speech",
     "crates/handlr-companion",
     "crates/handlr-markdown",
-    "crates/handlr-speech",
     "crates/libflankr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",

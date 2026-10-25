@@ -1324,6 +1324,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
+name = "flankr-speech"
+version = "0.1.0"
+
+[[package]]
 name = "flate2"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1701,9 +1705,9 @@ dependencies = [
  "blake2",
  "dotenvy",
  "env_logger",
+ "flankr-speech",
  "futures-util",
  "getrandom 0.2.17",
- "handlr-speech",
  "libc",
  "libflankr_proto",
  "libherdr",
@@ -1744,7 +1748,7 @@ name = "handlr-companion"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
- "handlr-speech",
+ "flankr-speech",
  "libc",
  "libflankr_proto",
  "log",
@@ -1764,10 +1768,6 @@ version = "0.1.0"
 dependencies = [
  "pulldown-cmark",
 ]
-
-[[package]]
-name = "handlr-speech"
-version = "0.1.0"
 
 [[package]]
 name = "hashbrown"

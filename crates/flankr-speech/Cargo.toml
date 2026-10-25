@@ -1,5 +1,5 @@
 [package]
-name = "handlr-speech"
+name = "flankr-speech"
 version = "0.1.0"
 edition = "2024"
 description = "A reply as it is read aloud: the reading rules, clock times as relative, and the complexity measure"
