@@ -117,7 +117,7 @@ fn shape(sections: &[Section]) -> Vec<Shape> {
 }
 
 /// Every section of `path` read through `reader`, with no live state.
-fn read_with(reader: &dyn SessionReader, path: &Path) -> Vec<Section> {
+fn read_with(reader: &dyn LineReader, path: &Path) -> Vec<Section> {
     let (index, _) = LineIndex::scan(path).unwrap();
     let live = LiveState::default();
     let secrets = HashSet::new();
@@ -287,18 +287,15 @@ fn the_same_lines_keep_their_serials_read_twice_and_after_appending() {
 
 /// Claude Code's reader, and one that also reads `note` lines, which the
 /// first skips.
+use crate::sessions::LineReader;
+
 struct Wider(crate::sessions::claude::ClaudeCode);
 
-impl SessionReader for Wider {
-    fn kind(&self) -> &'static str {
-        "wider"
-    }
-    fn locate(&self, _: Option<&Path>, _: Option<&str>) -> Option<Located> {
-        None
-    }
+impl LineReader for Wider {
     fn parse_line(&self, line: &str) -> Vec<Item> {
         if line.contains("\"type\":\"note\"") {
             return vec![Item {
+                pos: 0,
                 ts: ts(0),
                 role: crate::sessions::Role::User,
                 kind: EntryKind::Text,
@@ -312,6 +309,22 @@ impl SessionReader for Wider {
     }
     fn is_bookkeeping(&self, line: &[u8]) -> bool {
         !line.windows(6).any(|w| w == b"\"note\"") && self.0.is_bookkeeping(line)
+    }
+}
+
+impl crate::sessions::SessionReader for Wider {
+    fn kind(&self) -> &'static str {
+        "wider"
+    }
+    fn locate(&self, _: Option<&Path>, _: Option<&str>) -> Option<Located> {
+        None
+    }
+    fn read_back(
+        &self,
+        at: &Located,
+        enough: &dyn Fn(&[Item]) -> bool,
+    ) -> Result<crate::sessions::Read, String> {
+        crate::sessions::read_tail(self, &at.path, enough)
     }
 }
 

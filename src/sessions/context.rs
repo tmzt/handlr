@@ -172,6 +172,7 @@ mod tests {
 
     fn item(role: Role, kind: EntryKind, ts: &str, text: &str) -> Item {
         Item {
+            pos: 0,
             ts: ts.to_string(),
             role,
             kind,

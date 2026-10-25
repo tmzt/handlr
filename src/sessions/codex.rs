@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
-use super::{EntryKind, Item, Located, Matched, Role, SessionReader, cut, first_line, safe_id};
+use super::{
+    EntryKind, Item, LineReader, Located, Matched, Role, SessionReader, cut, first_line, safe_id,
+};
 use super::{TEXT_MAX, TOOL_TEXT_MAX};
 
 /// How many day directories are searched, newest first.
@@ -131,6 +133,16 @@ impl SessionReader for Codex {
         })
     }
 
+    fn read_back(
+        &self,
+        at: &Located,
+        enough: &dyn Fn(&[Item]) -> bool,
+    ) -> Result<super::Read, String> {
+        super::read_tail(self, &at.path, enough)
+    }
+}
+
+impl LineReader for Codex {
     fn parse_line(&self, line: &str) -> Vec<Item> {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
@@ -173,6 +185,7 @@ impl SessionReader for Codex {
                     return Vec::new();
                 }
                 Item {
+                    pos: 0,
                     ts,
                     role,
                     kind: EntryKind::Text,
@@ -193,6 +206,7 @@ impl SessionReader for Codex {
                     None => p.get("action").map(Value::to_string).unwrap_or_default(),
                 };
                 Item {
+                    pos: 0,
                     ts,
                     role: Role::Assistant,
                     kind: EntryKind::ToolUse,
@@ -215,6 +229,7 @@ impl SessionReader for Codex {
                     None => String::new(),
                 };
                 Item {
+                    pos: 0,
                     ts,
                     role: Role::Tool,
                     kind: EntryKind::ToolResult,
@@ -285,6 +300,10 @@ mod tests {
             ]
         );
         assert_eq!(items[0].ts, "2026-01-03T09:00:01.000Z");
+        assert_eq!(
+            items.iter().map(|i| i.pos).collect::<Vec<_>>(),
+            vec![5, 8, 9, 10, 12]
+        );
     }
 
     #[test]

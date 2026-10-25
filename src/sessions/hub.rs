@@ -45,7 +45,7 @@ pub use summaries::{CARD_SUMMARIES_MAX, CardSummaries, CardSummarizer, CardSumma
 use super::journal::{Approval, Journal};
 use super::links::Linker;
 use super::sections::{self, ApprovalCard, Builder, Live, Placed, REACH};
-use super::{Item, Located, SessionReader, Sessions, TAIL_READ_MAX, pending};
+use super::{Item, LineReader, Located, Sessions, TAIL_READ_MAX, pending};
 
 /// How often a tailer checks its file.
 pub const CHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -199,7 +199,7 @@ impl LineIndex {
 /// known from their first bytes and not read further; a line longer than
 /// `TAIL_READ_MAX` is not read.
 pub fn read_lines(
-    reader: &dyn SessionReader,
+    reader: &dyn LineReader,
     path: &Path,
     index: &LineIndex,
     from: u32,
@@ -279,7 +279,7 @@ impl LiveState {
 
 /// What a span of the file is read from.
 pub struct Source<'a> {
-    pub reader: &'a dyn SessionReader,
+    pub reader: &'a dyn LineReader,
     pub path: &'a Path,
     pub index: &'a LineIndex,
     /// The file name's hash, the serials' prefix.
@@ -842,8 +842,8 @@ impl Tailer {
     ) -> std::io::Result<TailState> {
         let (index, flagged) = LineIndex::scan(path)?;
         let reader = sessions
-            .reader_for(agent)
-            .ok_or_else(|| std::io::Error::other(format!("no reader for {agent}")))?;
+            .line_reader_for(agent)
+            .ok_or_else(|| std::io::Error::other(format!("no line reader for {agent}")))?;
         let secrets = secret_calls(reader, path, &index, &flagged)?;
         let last = index.lines();
         // The end of the file, enough of it for the live cards: read back
@@ -895,8 +895,8 @@ impl Tailer {
     }
 
     /// The reader of this tailer's agent.
-    fn reader(&self) -> Option<&dyn SessionReader> {
-        self.sessions.reader_for(&self.agent)
+    fn reader(&self) -> Option<&dyn LineReader> {
+        self.sessions.line_reader_for(&self.agent)
     }
 
     /// Subscribe: the batches from now, and the state they follow from.
@@ -1395,7 +1395,7 @@ fn reply_at(window: &[Placed], line: u32) -> Option<String> {
 
 /// The ids of the tool calls on `lines` that name a secret path.
 fn secret_calls(
-    reader: &dyn SessionReader,
+    reader: &dyn LineReader,
     path: &Path,
     index: &LineIndex,
     lines: &[u32],

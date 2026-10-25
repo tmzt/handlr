@@ -24,8 +24,9 @@ pub mod turn;
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub use libhandlr_proto::common::{
     ENTRY_SUMMARY_MAX, Entry, EntryKind, PENDING_QUESTION_MAX, PendingQuestion, Role,
@@ -53,6 +54,10 @@ pub(crate) const TEXT_MAX: usize = 32 * 1024;
 /// One entry as it was read, before it is redacted and cut for a client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
+    /// The record's position in its session: a JSONL line's number
+    /// (1-based), or agy's `steps.idx` (0-based). Stable across reads
+    /// (plan 20261023_06, decision 2).
+    pub pos: u64,
     /// RFC 3339, from the file; empty when the line had none.
     pub ts: String,
     pub role: Role,
@@ -141,62 +146,95 @@ impl Located {
     /// [`pending::TURN_QUIET`], so a final reply ended the turn whatever
     /// herdr's status.
     pub fn quiet(&self) -> bool {
-        std::fs::metadata(&self.path)
-            .and_then(|m| m.modified())
-            .ok()
+        self.modified()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age >= pending::TURN_QUIET)
     }
+
+    /// When the session was last modified: a file's modification time for
+    /// JSONL, the newer of the database's and its `-wal`'s for SQLite
+    /// (plan 20261023_06, decision 1).
+    pub fn modified(&self) -> Option<SystemTime> {
+        let db = std::fs::metadata(&self.path)
+            .and_then(|m| m.modified())
+            .ok();
+        let mut wal_path = self.path.clone().into_os_string();
+        wal_path.push("-wal");
+        let wal = std::fs::metadata(wal_path).and_then(|m| m.modified()).ok();
+        match (db, wal) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
-/// One agent's session format (decision 3).
+/// One agent's session format (decision 3; plan 20261023_06, decision 1).
 pub trait SessionReader: Send + Sync {
-    /// `claude_code` or `codex`.
+    /// `claude_code`, `codex`, `agy`.
     fn kind(&self) -> &'static str;
 
     /// The session for a pane: by `session_id` when herdr gives one, else
     /// the newest session for `cwd`.
     fn locate(&self, cwd: Option<&Path>, session_id: Option<&str>) -> Option<Located>;
 
-    /// The entries one line holds. Unknown and malformed lines give none.
-    fn parse_line(&self, line: &str) -> Vec<Item>;
+    /// Records from the newest back, oldest first in the result, until
+    /// `enough` says so or the reader's limits are reached.
+    fn read_back(&self, at: &Located, enough: &dyn Fn(&[Item]) -> bool) -> Result<Read, String>;
 
-    /// Whether a line is bookkeeping that holds no entry, known cheaply
-    /// from its first bytes: such a line is neither parsed nor counted
-    /// toward `TAIL_MAX`. `false` unless the reader knows its format's.
-    fn is_bookkeeping(&self, _line: &[u8]) -> bool {
-        false
+    /// When the session last changed, for [`Located::quiet`].
+    fn modified(&self, at: &Located) -> Option<SystemTime> {
+        at.modified()
     }
 
     /// The last `n` entries of the file at `path`.
     fn tail(&self, path: &Path, n: usize) -> Result<Vec<Item>, String> {
-        let mut items = read_tail(self, path, |items| items.len() >= n)?.items;
+        let at = Located {
+            path: path.to_path_buf(),
+            session_id: None,
+            matched: Matched::Id,
+        };
+        let mut items = self.read_back(&at, &|items| items.len() >= n)?.items;
         let skip = items.len().saturating_sub(n);
         items.drain(..skip);
         Ok(items)
     }
 }
 
-/// What [`read_tail`] read.
+/// Helper trait for line-based JSONL session readers (plan 20261023_06,
+/// decision 1).
+pub trait LineReader: Send + Sync {
+    /// The entries one line holds. Unknown and malformed lines give none.
+    fn parse_line(&self, line: &str) -> Vec<Item>;
+
+    /// Whether a line is bookkeeping that holds no entry, known cheaply
+    /// from its first bytes.
+    fn is_bookkeeping(&self, _line: &[u8]) -> bool {
+        false
+    }
+}
+
+/// What [`SessionReader::read_back`] read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Tail {
-    /// Every entry in the whole lines read, oldest first.
+pub struct Read {
+    /// Every entry in the whole lines or records read, oldest first.
     pub items: Vec<Item>,
     /// How many bytes of the file were read.
     pub bytes_read: u64,
 }
+
+pub type Tail = Read;
 
 /// Read entries from the end of the file at `path`: its last `TAIL_CHUNK`
 /// bytes, then `TAIL_CHUNK` more at a time until `enough` holds, the file's
 /// start is reached, `TAIL_MAX` bytes of conversation have been read, or
 /// `TAIL_READ_MAX` bytes in all. Lines the reader knows as bookkeeping are
 /// neither parsed nor counted as conversation. Only whole lines are
-/// parsed, each once.
-pub fn read_tail<R: SessionReader + ?Sized>(
+/// parsed, each once. Sets each item's `pos` to its 1-based line number.
+pub fn read_tail<R: LineReader + ?Sized>(
     reader: &R,
     path: &Path,
     enough: impl Fn(&[Item]) -> bool,
-) -> Result<Tail, String> {
+) -> Result<Read, String> {
     let mut file = File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
     let len = file
         .metadata()
@@ -207,6 +245,7 @@ pub fn read_tail<R: SessionReader + ?Sized>(
     let mut carry: Vec<u8> = Vec::new();
     let mut items: Vec<Item> = Vec::new();
     let mut conversation: u64 = 0;
+    let mut earliest_start;
     loop {
         let next = start
             .saturating_sub(TAIL_CHUNK)
@@ -227,10 +266,14 @@ pub fn read_tail<R: SessionReader + ?Sized>(
                 .position(|&b| b == b'\n')
                 .map_or(chunk.len(), |i| i + 1)
         };
-        let (mut fresh, bytes) = parse_lines(reader, &chunk[whole..]);
+        earliest_start = start + whole as u64;
+        let (mut fresh, bytes, line_count) = parse_lines(reader, &chunk[whole..]);
         chunk.truncate(whole);
         carry = chunk;
         conversation += bytes;
+        for item in &mut items {
+            item.pos += line_count;
+        }
         if !fresh.is_empty() {
             fresh.append(&mut items);
             items = fresh;
@@ -238,30 +281,70 @@ pub fn read_tail<R: SessionReader + ?Sized>(
         }
         let at_limit = start == 0 || conversation >= TAIL_MAX || len - start >= TAIL_READ_MAX;
         if at_limit || enough(&items) {
-            return Ok(Tail {
-                items,
-                bytes_read: len - start,
-            });
+            break;
         }
     }
+
+    let base_lines = if earliest_start == 0 {
+        0
+    } else {
+        count_newlines(&mut file, earliest_start)
+            .map_err(|e| format!("count lines {}: {e}", path.display()))?
+    };
+
+    if base_lines > 0 {
+        for item in &mut items {
+            item.pos += base_lines;
+        }
+    }
+
+    Ok(Read {
+        items,
+        bytes_read: len - start,
+    })
 }
 
-/// The entries in `bytes`' lines, and how many bytes of them are
-/// conversation (not bookkeeping).
-fn parse_lines<R: SessionReader + ?Sized>(reader: &R, bytes: &[u8]) -> (Vec<Item>, u64) {
+fn count_newlines(file: &mut File, up_to: u64) -> std::io::Result<u64> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut count = 0u64;
+    let mut buf = [0u8; 64 * 1024];
+    let mut remaining = up_to;
+    while remaining > 0 {
+        let to_read = (remaining as usize).min(buf.len());
+        let n = file.read(&mut buf[..to_read])?;
+        if n == 0 {
+            break;
+        }
+        count += buf[..n].iter().filter(|&&b| b == b'\n').count() as u64;
+        remaining -= n as u64;
+    }
+    Ok(count)
+}
+
+/// The entries in `bytes`' lines, how many bytes of them are
+/// conversation (not bookkeeping), and how many total lines.
+fn parse_lines<R: LineReader + ?Sized>(reader: &R, bytes: &[u8]) -> (Vec<Item>, u64, u64) {
     let mut conversation = 0u64;
-    let items = bytes
-        .split(|&b| b == b'\n')
-        .map(<[u8]>::trim_ascii)
-        .filter(|l| !l.is_empty() && !reader.is_bookkeeping(l))
-        .flat_map(|l| {
-            // A huge line (an image in a tool result) counts as no more
-            // than `LINE_BUDGET_MAX`: the reader keeps little of it.
-            conversation += (l.len() as u64 + 1).min(LINE_BUDGET_MAX);
-            reader.parse_line(&String::from_utf8_lossy(l))
-        })
-        .collect();
-    (items, conversation)
+    let mut line_no = 0u64;
+    let mut items = Vec::new();
+    let slice = bytes.strip_suffix(b"\n").unwrap_or(bytes);
+    if slice.is_empty() {
+        return (items, conversation, 0);
+    }
+    for l in slice.split(|&b| b == b'\n') {
+        line_no += 1;
+        let trimmed = l.trim_ascii();
+        if trimmed.is_empty() || reader.is_bookkeeping(trimmed) {
+            continue;
+        }
+        conversation += (trimmed.len() as u64 + 1).min(LINE_BUDGET_MAX);
+        let s = String::from_utf8_lossy(trimmed);
+        for mut item in reader.parse_line(&s) {
+            item.pos = line_no;
+            items.push(item);
+        }
+    }
+    (items, conversation, line_no)
 }
 
 /// Give each tool result its call's tool name, and redact a result whose
@@ -345,6 +428,15 @@ impl Sessions {
         }
     }
 
+    /// The line-based reader for an agent, if any.
+    pub fn line_reader_for(&self, agent: &str) -> Option<&dyn LineReader> {
+        match agent {
+            "claude" => Some(&self.claude),
+            "codex" => Some(&self.codex),
+            _ => None,
+        }
+    }
+
     /// The session of the agent in `pane`, if it has a reader and a file.
     pub fn locate(&self, pane: &AgentRef) -> Option<(&dyn SessionReader, Located)> {
         let reader = self.reader_for(&pane.agent)?;
@@ -355,14 +447,14 @@ impl Sessions {
     }
 
     /// Read the session of the agent in `pane` from the end until `enough`
-    /// holds (within `read_tail`'s limits).
+    /// holds (within the reader's limits).
     pub fn read(&self, pane: &AgentRef, enough: impl Fn(&[Item]) -> bool) -> Option<SessionRead> {
         let (reader, located) = self.locate(pane)?;
-        match read_tail(reader, &located.path, enough) {
-            Ok(tail) => Some(SessionRead {
+        match reader.read_back(&located, &enough) {
+            Ok(read) => Some(SessionRead {
                 kind: reader.kind(),
                 located,
-                items: tail.items,
+                items: read.items,
             }),
             Err(e) => {
                 log::warn!("Could not read the {} session: {e}", reader.kind());
@@ -542,6 +634,7 @@ mod tests {
         let secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789";
         let long = format!("{} {secret} the end", "word ".repeat(400));
         let item = Item {
+            pos: 1,
             ts: "t".into(),
             role: Role::Assistant,
             kind: EntryKind::Text,

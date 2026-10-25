@@ -78,6 +78,7 @@ mod tests {
 
     fn text(role: Role, text: &str) -> Item {
         Item {
+            pos: 0,
             ts: "t".to_string(),
             role,
             kind: EntryKind::Text,
@@ -90,6 +91,7 @@ mod tests {
 
     fn tool_use(text: &str) -> Item {
         Item {
+            pos: 0,
             ts: "t".to_string(),
             role: Role::Assistant,
             kind: EntryKind::ToolUse,

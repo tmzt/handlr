@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{
-    EntryKind, Item, Located, Matched, Role, SessionReader, TEXT_MAX, TOOL_TEXT_MAX, cut,
-    jsonl_newest_first, safe_id,
+    EntryKind, Item, LineReader, Located, Matched, Role, SessionReader, TEXT_MAX, TOOL_TEXT_MAX,
+    cut, jsonl_newest_first, safe_id,
 };
 
 /// How much of a file's start is searched for its `cwd`.
@@ -121,30 +121,7 @@ fn file_cwd(path: &Path) -> Option<String> {
         .find_map(|v| v.get("cwd").and_then(|c| c.as_str()).map(str::to_string))
 }
 
-impl SessionReader for ClaudeCode {
-    fn kind(&self) -> &'static str {
-        "claude_code"
-    }
-
-    fn locate(&self, cwd: Option<&Path>, session_id: Option<&str>) -> Option<Located> {
-        if let Some(id) = session_id {
-            // herdr named the session: that file or nothing, never another
-            // agent's newest file.
-            return self.by_id(cwd, id).map(|path| Located {
-                path,
-                session_id: Some(id.to_string()),
-                matched: Matched::Id,
-            });
-        }
-        let path = self.by_cwd(cwd?)?;
-        let session_id = path.file_stem().map(|s| s.to_string_lossy().into_owned());
-        Some(Located {
-            path,
-            session_id,
-            matched: Matched::Cwd,
-        })
-    }
-
+impl LineReader for ClaudeCode {
     fn is_bookkeeping(&self, line: &[u8]) -> bool {
         is_bookkeeping(line)
     }
@@ -194,6 +171,7 @@ impl SessionReader for ClaudeCode {
                 return None;
             }
             Some(Item {
+                pos: 0,
                 ts: ts.clone(),
                 role,
                 kind: EntryKind::Text,
@@ -213,6 +191,7 @@ impl SessionReader for ClaudeCode {
                         let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                         let input = b.get("input").map(Value::to_string).unwrap_or_default();
                         Some(Item {
+                            pos: 0,
                             ts: ts.clone(),
                             role: Role::Assistant,
                             kind: EntryKind::ToolUse,
@@ -231,6 +210,7 @@ impl SessionReader for ClaudeCode {
                             body
                         };
                         Some(Item {
+                            pos: 0,
                             ts: ts.clone(),
                             role: Role::Tool,
                             kind: EntryKind::ToolResult,
@@ -249,6 +229,39 @@ impl SessionReader for ClaudeCode {
                 .collect(),
             _ => Vec::new(),
         }
+    }
+}
+
+impl SessionReader for ClaudeCode {
+    fn kind(&self) -> &'static str {
+        "claude_code"
+    }
+
+    fn locate(&self, cwd: Option<&Path>, session_id: Option<&str>) -> Option<Located> {
+        if let Some(id) = session_id {
+            // herdr named the session: that file or nothing, never another
+            // agent's newest file.
+            return self.by_id(cwd, id).map(|path| Located {
+                path,
+                session_id: Some(id.to_string()),
+                matched: Matched::Id,
+            });
+        }
+        let path = self.by_cwd(cwd?)?;
+        let session_id = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+        Some(Located {
+            path,
+            session_id,
+            matched: Matched::Cwd,
+        })
+    }
+
+    fn read_back(
+        &self,
+        at: &Located,
+        enough: &dyn Fn(&[Item]) -> bool,
+    ) -> Result<super::Read, String> {
+        super::read_tail(self, &at.path, enough)
     }
 }
 
@@ -322,6 +335,7 @@ fn queued_item(v: &Value, line_ts: &str) -> Option<Item> {
         return None;
     }
     Some(Item {
+        pos: 0,
         ts: ts.to_string(),
         role: Role::User,
         kind: EntryKind::Text,
@@ -400,6 +414,7 @@ fn notice(ts: &str, origin: String, text: &str) -> Option<Item> {
         return None;
     }
     Some(Item {
+        pos: 0,
         ts: ts.to_string(),
         role: Role::User,
         kind: EntryKind::Text,
@@ -562,10 +577,14 @@ mod tests {
                 ),
             ]
         );
-        // Results carry their call's tool name; timestamps come through.
+        // Results carry their call's tool name; timestamps come through; line numbers match the file.
         assert_eq!(items[3].tool.as_deref(), Some("Read"));
         assert_eq!(items[5].tool.as_deref(), Some("Bash"));
         assert_eq!(items[0].ts, "2026-01-02T10:00:00.000Z");
+        assert_eq!(
+            items.iter().map(|i| i.pos).collect::<Vec<_>>(),
+            vec![3, 5, 6, 7, 9, 10, 12, 13]
+        );
         let e = items[5].entry();
         assert!(e.summary.starts_with("error: "));
     }
@@ -745,7 +764,19 @@ mod tests {
         let r = reader();
         let want = r.tail(&fixture("claude_context.jsonl"), 200).unwrap();
         assert_eq!(want.len(), 10);
-        assert_eq!(r.tail(&path, 200).unwrap(), want);
+        let got = r.tail(&path, 200).unwrap();
+        let strip_pos = |items: Vec<Item>| {
+            items
+                .into_iter()
+                .map(|mut i| {
+                    i.pos = 0;
+                    i
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strip_pos(got.clone()), strip_pos(want.clone()));
+        assert_eq!(got[0].pos, 1);
+        assert!(got[1].pos > want[1].pos);
     }
 
     #[test]
