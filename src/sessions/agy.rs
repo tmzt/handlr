@@ -136,6 +136,73 @@ impl AgyReader {
             bytes_read: total_bytes,
         })
     }
+
+    /// Highest step `idx` in the session database, if any.
+    pub fn max_idx(&self, path: &Path) -> std::io::Result<Option<u32>> {
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| std::io::Error::other(format!("open agy db {}: {e}", path.display())))?;
+
+        conn.busy_timeout(std::time::Duration::from_millis(100))
+            .map_err(|e| std::io::Error::other(format!("busy timeout: {e}")))?;
+
+        let mut stmt = conn
+            .prepare("SELECT MAX(idx) FROM steps")
+            .map_err(|e| std::io::Error::other(format!("prepare max idx: {e}")))?;
+
+        let max: Option<i64> = stmt
+            .query_row([], |row| row.get(0))
+            .map_err(|e| std::io::Error::other(format!("query max idx: {e}")))?;
+
+        Ok(max.map(|m| m.max(0) as u32))
+    }
+
+    /// Read records between step indexes `from` and `to` inclusive, in ascending order.
+    pub fn read_range(
+        &self,
+        path: &Path,
+        from: u32,
+        to: u32,
+    ) -> std::io::Result<Vec<(u32, Vec<Item>)>> {
+        if from > to {
+            return Ok(Vec::new());
+        }
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )
+        .map_err(|e| std::io::Error::other(format!("open agy db {}: {e}", path.display())))?;
+
+        conn.busy_timeout(std::time::Duration::from_millis(100))
+            .map_err(|e| std::io::Error::other(format!("busy timeout: {e}")))?;
+
+        let mut stmt = conn
+            .prepare("SELECT idx, step_type, status, step_payload FROM steps WHERE idx >= ? AND idx <= ? ORDER BY idx ASC")
+            .map_err(|e| std::io::Error::other(format!("prepare steps range: {e}")))?;
+
+        let rows = stmt
+            .query_map([from as i64, to as i64], |row| {
+                let idx: i64 = row.get(0)?;
+                let step_type: i64 = row.get(1)?;
+                let status: i64 = row.get(2)?;
+                let payload: Vec<u8> = row.get(3)?;
+                Ok((idx, step_type, status, payload))
+            })
+            .map_err(|e| std::io::Error::other(format!("query steps range: {e}")))?;
+
+        let mut out = Vec::new();
+        for row in rows {
+            let (idx, step_type, status, payload) =
+                row.map_err(|e| std::io::Error::other(format!("read step row: {e}")))?;
+            let items = decode_step(idx as u64, step_type, status, &payload);
+            if !items.is_empty() {
+                out.push((idx as u32, items));
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl SessionReader for AgyReader {
@@ -531,6 +598,25 @@ mod tests {
         // Verify the decoy token file was never modified or touched
         let token_content = std::fs::read_to_string(&token_path).unwrap();
         assert_eq!(token_content, "secret_oauth_token_decoy");
+    }
+
+    #[test]
+    fn max_idx_and_read_range() {
+        let path = fixture_path("asking.db");
+        let reader = AgyReader::new(path.parent().unwrap().to_path_buf());
+        let max = reader.max_idx(&path).unwrap();
+        assert_eq!(max, Some(4));
+
+        let rows = reader.read_range(&path, 1, 3).unwrap();
+        // Steps 1 and 2 produce items; step 3 (type 23) produces none.
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].0, 1);
+        assert_eq!(rows[1].0, 2);
+        assert_eq!(rows[0].1[0].pos, 1);
+        assert_eq!(rows[1].1[0].pos, 2);
+
+        let empty = reader.read_range(&path, 5, 10).unwrap();
+        assert!(empty.is_empty());
     }
 
     #[test]

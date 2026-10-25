@@ -122,9 +122,11 @@ fn read_with(reader: &dyn LineReader, path: &Path) -> Vec<Section> {
     let live = LiveState::default();
     let secrets = HashSet::new();
     let src = Source {
-        reader,
+        backend: SourceBackend::Line {
+            reader,
+            index: &index,
+        },
         path,
-        index: &index,
         file: file_hash(path),
         linker: &Linker::default(),
         approvals: &[],
@@ -211,6 +213,39 @@ fn a_codex_transcript_gives_its_sections_and_serials() {
             (12, 128, Card, 0, Some((CardKind::Question, true))),
         ]
     );
+}
+
+#[test]
+fn an_agy_transcript_gives_its_sections_and_serials() {
+    let home = tempfile::tempdir().unwrap();
+    let path = fixture("agy/asking.db");
+    let t = tailer(home.path(), "agy", &path);
+    let sections = all(&t);
+    assert_eq!(
+        shape(&sections),
+        [
+            (0, 0, Turn, 1, None),
+            (1, 0, Text, 1, None),
+            (1, 1, Tool, 2, None),
+            (4, 0, Text, 1, None),
+            (4, 128, Card, 0, Some((CardKind::Question, true))),
+        ]
+    );
+    let name = "asking.db";
+    assert!(
+        sections
+            .iter()
+            .all(|s| s.serial.file == Serial::file_hash(name))
+    );
+
+    // Outline works and builds slots
+    let (outline, _) = t.outline().unwrap();
+    assert_eq!(outline.len(), 5);
+    assert_eq!(outline.slot(0).unwrap().serial.line, 0);
+    assert_eq!(outline.slot(1).unwrap().serial.line, 1);
+    assert_eq!(outline.slot(2).unwrap().serial.line, 1);
+    assert_eq!(outline.slot(3).unwrap().serial.line, 4);
+    assert_eq!(outline.slot(4).unwrap().serial.line, 4);
 }
 
 #[test]

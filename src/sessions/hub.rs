@@ -45,7 +45,7 @@ pub use summaries::{CARD_SUMMARIES_MAX, CardSummaries, CardSummarizer, CardSumma
 use super::journal::{Approval, Journal};
 use super::links::Linker;
 use super::sections::{self, ApprovalCard, Builder, Live, Placed, REACH};
-use super::{Item, LineReader, Located, Sessions, TAIL_READ_MAX, pending};
+use super::{Item, LineReader, Located, Matched, Sessions, TAIL_READ_MAX, pending};
 
 /// How often a tailer checks its file.
 pub const CHECK_INTERVAL: Duration = Duration::from_millis(250);
@@ -277,11 +277,22 @@ impl LiveState {
     }
 }
 
+/// The source backend for reading items.
+pub enum SourceBackend<'a> {
+    Line {
+        reader: &'a dyn LineReader,
+        index: &'a LineIndex,
+    },
+    Agy {
+        reader: &'a super::agy::AgyReader,
+        max_idx: u32,
+    },
+}
+
 /// What a span of the file is read from.
 pub struct Source<'a> {
-    pub reader: &'a dyn LineReader,
+    pub backend: SourceBackend<'a>,
     pub path: &'a Path,
-    pub index: &'a LineIndex,
     /// The file name's hash, the serials' prefix.
     pub file: u32,
     pub linker: &'a Linker,
@@ -294,15 +305,40 @@ pub struct Source<'a> {
     pub summaries: Option<&'a CardSummaries>,
 }
 
+impl<'a> Source<'a> {
+    pub fn first(&self) -> u32 {
+        match &self.backend {
+            SourceBackend::Line { .. } => 1,
+            SourceBackend::Agy { .. } => 0,
+        }
+    }
+
+    pub fn last(&self) -> u32 {
+        match &self.backend {
+            SourceBackend::Line { index, .. } => index.lines(),
+            SourceBackend::Agy { max_idx, .. } => *max_idx,
+        }
+    }
+
+    pub fn read_records(&self, from: u32, to: u32) -> std::io::Result<Vec<(u32, Vec<Item>)>> {
+        match &self.backend {
+            SourceBackend::Line { reader, index } => {
+                read_lines(*reader, self.path, index, from, to)
+            }
+            SourceBackend::Agy { reader, .. } => reader.read_range(self.path, from, to),
+        }
+    }
+}
+
 /// The sections, cards among them, that start on lines `a` to `b`.
 fn span(src: &Source, a: u32, b: u32) -> std::io::Result<Vec<Section>> {
-    let last = src.index.lines();
-    let from = a.saturating_sub(REACH).max(1);
+    let last = src.last();
+    let from = a.saturating_sub(REACH).max(src.first());
     let to = b.saturating_add(REACH).min(last);
     let mut builder = Builder::new(src.file, src.linker.clone());
     builder.add_secrets(src.secrets);
     let mut placed: Vec<Placed> = Vec::new();
-    for (line, items) in read_lines(src.reader, src.path, src.index, from, to)? {
+    for (line, items) in src.read_records(from, to)? {
         placed.extend(builder.feed(line, items));
     }
     let at_end = to >= last;
@@ -343,9 +379,10 @@ pub struct Page {
 /// read back from `below`'s line, a span at a time, until there are `n`
 /// or the file's first line is reached.
 pub fn page(src: &Source, below: Option<Serial>, n: usize) -> std::io::Result<Page> {
-    let last = src.index.lines();
+    let first = src.first();
+    let last = src.last();
     let hi = below.map_or(last, |s| s.line.min(last));
-    if hi == 0 || n == 0 {
+    if (hi == 0 && first > 0) || n == 0 {
         return Ok(Page {
             sections: Vec::new(),
             start: true,
@@ -353,13 +390,13 @@ pub fn page(src: &Source, below: Option<Serial>, n: usize) -> std::io::Result<Pa
     }
     let mut back: u32 = 64;
     loop {
-        let a = hi.saturating_sub(back).max(1);
+        let a = hi.saturating_sub(back).max(first);
         let mut found: Vec<Section> = span(src, a, hi)?
             .into_iter()
             .filter(|s| below.is_none_or(|b| s.serial.to_u64() < b.to_u64()))
             .collect();
-        if found.len() >= n || a == 1 {
-            let start = a == 1 && found.len() <= n;
+        if found.len() >= n || a == first {
+            let start = a == first && found.len() <= n;
             let skip = found.len().saturating_sub(n);
             found.drain(..skip);
             return Ok(Page {
@@ -384,7 +421,7 @@ pub struct Since {
 /// which may have changed; a reset with the newest `n` when that is more
 /// than `n` new ones or `after` is not of this file.
 pub fn since(src: &Source, after: Serial, n: usize) -> std::io::Result<Since> {
-    let last = src.index.lines();
+    let last = src.last();
     let reset = |src: &Source| -> std::io::Result<Since> {
         Ok(Since {
             sections: page(src, None, n)?.sections,
@@ -394,7 +431,7 @@ pub fn since(src: &Source, after: Serial, n: usize) -> std::io::Result<Since> {
     if after.file != src.file || after.line > last || last - after.line > SINCE_MAX_LINES {
         return reset(src);
     }
-    let from = after.line.saturating_sub(REACH).max(1);
+    let from = after.line.saturating_sub(REACH).max(src.first());
     let found = span(src, from, last)?;
     let newer = found
         .iter()
@@ -619,12 +656,16 @@ pub fn is_bookend(section: &Section) -> bool {
 
 /// Every section of the file, in serial order, read a span at a time.
 pub fn every_section(src: &Source) -> std::io::Result<Vec<Section>> {
-    let last = src.index.lines();
+    let first = src.first();
+    let last = src.last();
     let mut out = Vec::new();
-    let mut a = 1;
+    let mut a = first;
     while a <= last {
         let b = a.saturating_add(OUTLINE_SPAN - 1).min(last);
         out.extend(span(src, a, b)?);
+        if b == u32::MAX || b >= last {
+            break;
+        }
         a = b + 1;
     }
     Ok(out)
@@ -700,7 +741,14 @@ pub struct Batch {
 /// What a subscriber reads its backfill from: the tailer's state when it
 /// subscribed.
 #[derive(Debug, Clone)]
+pub enum SnapshotBackend {
+    Line(LineIndex),
+    Agy { max_idx: u32 },
+}
+
+#[derive(Debug, Clone)]
 pub struct Snapshot {
+    pub backend: SnapshotBackend,
     pub index: LineIndex,
     pub approvals: Vec<ApprovalCard>,
     pub live: LiveState,
@@ -710,8 +758,17 @@ pub struct Snapshot {
 }
 
 #[derive(Debug)]
+enum TailBackend {
+    Line(LineIndex),
+    Agy {
+        max_idx: u32,
+        last_modified: Option<SystemTime>,
+    },
+}
+
+#[derive(Debug)]
 struct TailState {
-    index: LineIndex,
+    backend: TailBackend,
     builder: Builder,
     window: VecDeque<Placed>,
     /// The cards as last broadcast, from the window's first line on.
@@ -798,7 +855,11 @@ impl Tailer {
     ) -> std::io::Result<Tailer> {
         let session = session_key(located);
         let file = file_hash(&located.path);
-        let state = Self::fresh_state(&sessions, agent, &located.path, file, &linker)?;
+        let state = if agent == "agy" {
+            Self::fresh_state_agy(&sessions, &located.path, file, &linker)?
+        } else {
+            Self::fresh_state_line(&sessions, agent, &located.path, file, &linker)?
+        };
         let mut state = state;
         state.approvals = journal.read(&session);
         let (tx, _) = broadcast::channel(64);
@@ -833,7 +894,7 @@ impl Tailer {
         self
     }
 
-    fn fresh_state(
+    fn fresh_state_line(
         sessions: &Sessions,
         agent: &str,
         path: &Path,
@@ -876,8 +937,60 @@ impl Tailer {
             window.pop_front();
         }
         Ok(TailState {
+            backend: TailBackend::Line(index),
             too_long: last > SERIAL_LINE_MAX,
-            index,
+            builder,
+            window,
+            cards: BTreeMap::new(),
+            approvals: Vec::new(),
+            pending: HashSet::new(),
+            live: LiveState::default(),
+            secrets,
+            dirty: true,
+            gone: false,
+            outline: None,
+            epoch: 0,
+            summaries_seen: 0,
+            primed: false,
+        })
+    }
+
+    fn fresh_state_agy(
+        sessions: &Sessions,
+        path: &Path,
+        file: u32,
+        linker: &Linker,
+    ) -> std::io::Result<TailState> {
+        let max_idx = sessions.agy.max_idx(path)?.unwrap_or(0);
+        let mut builder = Builder::new(file, linker.clone());
+        let mut window: VecDeque<Placed> = VecDeque::new();
+        let back = 2 * REACH;
+        let from = max_idx.saturating_sub(back);
+        let start = from.saturating_sub(REACH);
+        for (pos, items) in sessions.agy.read_range(path, start, max_idx)? {
+            let placed = builder.feed(pos, items);
+            if pos >= from {
+                window.extend(placed);
+            }
+        }
+        let secrets = builder.secret_calls().cloned().collect();
+        builder.take_changed();
+        builder.prune();
+        while window.len() > KEEP_ITEMS {
+            window.pop_front();
+        }
+        let last_modified = Located {
+            path: path.to_path_buf(),
+            session_id: None,
+            matched: Matched::Id,
+        }
+        .modified();
+        Ok(TailState {
+            backend: TailBackend::Agy {
+                max_idx,
+                last_modified,
+            },
+            too_long: max_idx > SERIAL_LINE_MAX,
             builder,
             window,
             cards: BTreeMap::new(),
@@ -930,7 +1043,10 @@ impl Tailer {
         let blocked = matches!(status, AgentStatus::Blocked);
         let blocked_at = match (blocked, st.live.blocked_at) {
             (true, Some(at)) => Some(at),
-            (true, None) => Some(st.index.lines()),
+            (true, None) => Some(match &st.backend {
+                TailBackend::Line(idx) => idx.lines(),
+                TailBackend::Agy { max_idx, .. } => *max_idx,
+            }),
             (false, _) => None,
         };
         if st.live.name != name || st.live.status != *status || st.live.blocked_at != blocked_at {
@@ -991,7 +1107,10 @@ impl Tailer {
 
     /// The newest whole line.
     pub fn newest_line(&self) -> u32 {
-        self.state.lock().unwrap().index.lines()
+        match &self.state.lock().unwrap().backend {
+            TailBackend::Line(idx) => idx.lines(),
+            TailBackend::Agy { max_idx, .. } => *max_idx,
+        }
     }
 
     /// Whether confirmation `confirm_id` is known to this tailer.
@@ -1012,10 +1131,19 @@ impl Tailer {
     /// The sections of a span of the file, as a backfill or a history page
     /// reads them, from `snapshot`.
     pub fn source<'a>(&'a self, snapshot: &'a Snapshot) -> Option<Source<'a>> {
+        let backend = match &snapshot.backend {
+            SnapshotBackend::Line(index) => SourceBackend::Line {
+                reader: self.reader()?,
+                index,
+            },
+            SnapshotBackend::Agy { max_idx } => SourceBackend::Agy {
+                reader: &self.sessions.agy,
+                max_idx: *max_idx,
+            },
+        };
         Some(Source {
-            reader: self.reader()?,
+            backend,
             path: &self.path,
-            index: &snapshot.index,
             file: self.file,
             linker: &self.linker,
             approvals: &snapshot.approvals,
@@ -1137,75 +1265,176 @@ impl Tailer {
                 });
             }
         };
-        let len = meta.len();
-        if len < st.index.end() {
-            // Replaced or truncated: start again from what is there now.
-            match Self::fresh_state(
-                &self.sessions,
-                &self.agent,
-                &self.path,
-                self.file,
-                &self.linker,
-            ) {
-                Ok(mut fresh) => {
-                    fresh.approvals = std::mem::take(&mut st.approvals);
-                    fresh.pending = std::mem::take(&mut st.pending);
-                    fresh.live = st.live.clone();
-                    fresh.epoch = st.epoch + 1;
-                    *st = fresh;
-                }
-                Err(_) => st.gone = true,
-            }
-            return Some(Batch {
-                truncated: true,
-                ..Batch::default()
-            });
-        }
         let mut changed = Vec::new();
-        if len > st.index.scanned() && !st.too_long {
-            let was_long = st.too_long;
-            let extended = File::open(&self.path)
-                .and_then(|mut f| st.index.extend(&mut f, len, READ_PER_CHECK));
-            match extended {
-                Ok((Some((first, last)), _)) => {
-                    if last > SERIAL_LINE_MAX {
-                        st.too_long = true;
-                    } else if let Some(reader) = self.reader() {
-                        match read_lines(reader, &self.path, &st.index, first, last) {
-                            Ok(lines) => {
-                                for (line, items) in lines {
-                                    let placed = st.builder.feed(line, items);
-                                    st.window.extend(placed);
-                                }
-                                while st.window.len() > KEEP_ITEMS {
-                                    st.window.pop_front();
-                                }
-                                let found: Vec<String> =
-                                    st.builder.secret_calls().cloned().collect();
-                                st.secrets.extend(found);
-                                changed = st.builder.take_changed();
-                                st.builder.prune();
-                                st.dirty = true;
-                            }
-                            Err(e) => log::warn!("reading {}: {e}", self.path.display()),
-                        }
+        let is_line = matches!(st.backend, TailBackend::Line(_));
+        if is_line {
+            let len = meta.len();
+            let need_fresh = if let TailBackend::Line(index) = &st.backend {
+                len < index.end()
+            } else {
+                false
+            };
+            if need_fresh {
+                match Self::fresh_state_line(
+                    &self.sessions,
+                    &self.agent,
+                    &self.path,
+                    self.file,
+                    &self.linker,
+                ) {
+                    Ok(mut fresh) => {
+                        fresh.approvals = std::mem::take(&mut st.approvals);
+                        fresh.pending = std::mem::take(&mut st.pending);
+                        fresh.live = st.live.clone();
+                        fresh.epoch = st.epoch + 1;
+                        *st = fresh;
                     }
+                    Err(_) => st.gone = true,
                 }
-                Ok((None, _)) => {}
-                Err(e) => log::warn!("reading {}: {e}", self.path.display()),
-            }
-            if st.too_long && !was_long {
                 return Some(Batch {
-                    too_long: true,
+                    truncated: true,
                     ..Batch::default()
                 });
             }
+            if !st.too_long {
+                let TailBackend::Line(ref mut index) = st.backend else {
+                    unreachable!()
+                };
+                let extended = if len > index.scanned() {
+                    File::open(&self.path)
+                        .and_then(|mut f| index.extend(&mut f, len, READ_PER_CHECK))
+                } else {
+                    Ok((None, Vec::new()))
+                };
+                match extended {
+                    Ok((Some((first, last)), _)) => {
+                        if last > SERIAL_LINE_MAX {
+                            st.too_long = true;
+                            return Some(Batch {
+                                too_long: true,
+                                ..Batch::default()
+                            });
+                        } else if let Some(reader) = self.reader() {
+                            let TailBackend::Line(ref index) = st.backend else {
+                                unreachable!()
+                            };
+                            match read_lines(reader, &self.path, index, first, last) {
+                                Ok(lines) => {
+                                    for (line, items) in lines {
+                                        let placed = st.builder.feed(line, items);
+                                        st.window.extend(placed);
+                                    }
+                                    while st.window.len() > KEEP_ITEMS {
+                                        st.window.pop_front();
+                                    }
+                                    let found: Vec<String> =
+                                        st.builder.secret_calls().cloned().collect();
+                                    st.secrets.extend(found);
+                                    changed = st.builder.take_changed();
+                                    st.builder.prune();
+                                    st.dirty = true;
+                                }
+                                Err(e) => log::warn!("reading {}: {e}", self.path.display()),
+                            }
+                        }
+                    }
+                    Ok((None, _)) => {}
+                    Err(e) => log::warn!("reading {}: {e}", self.path.display()),
+                }
+            }
+        } else {
+            let (max_idx, last_modified) = match st.backend {
+                TailBackend::Agy {
+                    max_idx,
+                    last_modified,
+                } => (max_idx, last_modified),
+                _ => unreachable!(),
+            };
+            let modified = Located {
+                path: self.path.clone(),
+                session_id: None,
+                matched: Matched::Id,
+            }
+            .modified();
+            if modified != last_modified {
+                match self.sessions.agy.max_idx(&self.path) {
+                    Ok(Some(new_max)) => {
+                        if new_max < max_idx {
+                            match Self::fresh_state_agy(
+                                &self.sessions,
+                                &self.path,
+                                self.file,
+                                &self.linker,
+                            ) {
+                                Ok(mut fresh) => {
+                                    fresh.approvals = std::mem::take(&mut st.approvals);
+                                    fresh.pending = std::mem::take(&mut st.pending);
+                                    fresh.live = st.live.clone();
+                                    fresh.epoch = st.epoch + 1;
+                                    *st = fresh;
+                                }
+                                Err(_) => st.gone = true,
+                            }
+                            return Some(Batch {
+                                truncated: true,
+                                ..Batch::default()
+                            });
+                        } else if new_max > max_idx && !st.too_long {
+                            if new_max > SERIAL_LINE_MAX {
+                                st.too_long = true;
+                                st.backend = TailBackend::Agy {
+                                    max_idx: new_max,
+                                    last_modified: modified,
+                                };
+                                return Some(Batch {
+                                    too_long: true,
+                                    ..Batch::default()
+                                });
+                            }
+                            match self
+                                .sessions
+                                .agy
+                                .read_range(&self.path, max_idx + 1, new_max)
+                            {
+                                Ok(steps) => {
+                                    for (pos, items) in steps {
+                                        let placed = st.builder.feed(pos, items);
+                                        st.window.extend(placed);
+                                    }
+                                    while st.window.len() > KEEP_ITEMS {
+                                        st.window.pop_front();
+                                    }
+                                    let found: Vec<String> =
+                                        st.builder.secret_calls().cloned().collect();
+                                    st.secrets.extend(found);
+                                    changed = st.builder.take_changed();
+                                    st.builder.prune();
+                                    st.dirty = true;
+                                    st.backend = TailBackend::Agy {
+                                        max_idx: new_max,
+                                        last_modified: modified,
+                                    };
+                                }
+                                Err(e) => log::warn!("reading {}: {e}", self.path.display()),
+                            }
+                        } else {
+                            st.backend = TailBackend::Agy {
+                                max_idx,
+                                last_modified: modified,
+                            };
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => log::warn!("reading max_idx {}: {e}", self.path.display()),
+                }
+            }
         }
-        let quiet = meta
-            .modified()
-            .ok()
-            .and_then(|t| SystemTime::now().duration_since(t).ok())
-            .is_some_and(|age| age >= pending::TURN_QUIET);
+        let quiet = Located {
+            path: self.path.clone(),
+            session_id: None,
+            matched: Matched::Id,
+        }
+        .quiet();
         if quiet != st.live.quiet {
             st.live.quiet = quiet;
             st.dirty = true;
@@ -1416,8 +1645,16 @@ fn secret_calls(
 }
 
 fn snapshot_of(st: &TailState) -> Snapshot {
+    let (backend, index) = match &st.backend {
+        TailBackend::Line(index) => (SnapshotBackend::Line(index.clone()), index.clone()),
+        TailBackend::Agy { max_idx, .. } => (
+            SnapshotBackend::Agy { max_idx: *max_idx },
+            LineIndex::default(),
+        ),
+    };
     Snapshot {
-        index: st.index.clone(),
+        backend,
+        index,
         approvals: approval_cards(st),
         live: st.live.clone(),
         too_long: st.too_long,
