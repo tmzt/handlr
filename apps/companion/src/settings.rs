@@ -401,10 +401,9 @@ pub fn allows_on_overview(hit: AgentHit) -> bool {
     allows(hit) && (hit != AgentHit::Message || current().general_agent)
 }
 
-/// Whether the app can show the soft keyboard. Not until libmorph's text
-/// input (its plan 20261024_06, awaiting the owner) is released and wired
-/// in; until then the keyboard glyph is dim and inert.
-pub const TEXT_INPUT: bool = false;
+/// Whether the app can show the soft keyboard (libmorph text input plan
+/// 20261024_06, step 1).
+pub const TEXT_INPUT: bool = true;
 
 /// Draws everything pushed to `list` since `start` at
 /// [`DISABLED_ALPHA`] of its opacity.

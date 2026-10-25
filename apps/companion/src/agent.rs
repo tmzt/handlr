@@ -5028,8 +5028,8 @@ mod tests {
         );
         assert!(keys.rect.x + keys.rect.w < mic.x, "left of record");
         assert_eq!(keys.bg[3], 0.0, "no background");
-        // Dim and inert until text input exists.
-        assert!(!crate::settings::allows(AgentHit::Keyboard));
+        // Live with text input.
+        assert!(crate::settings::allows(AgentHit::Keyboard));
     }
 
     #[test]
@@ -6744,15 +6744,16 @@ mod tests {
                 assert_eq!(tap(&mut a, yes), Some(AgentHit::Suggest(Suggestion::Yes)));
             }
         }
-        // The keyboard glyph is dim and inert without text input.
+        // The keyboard glyph is live with text input.
         let keys = a.rect_of(AgentHit::Keyboard).unwrap();
         let mut list = DrawList::new();
         a.draw(&mut list, &DrawContext::default(), None);
-        assert!(
-            (alpha_in(&list, keys) - DISABLED_ALPHA).abs() < 1e-6,
-            "keyboard dim without text input"
+        assert_eq!(alpha_in(&list, keys), 1.0, "keyboard live with text input");
+        assert_eq!(
+            tap(&mut a, keys),
+            Some(AgentHit::Keyboard),
+            "keyboard live with text input"
         );
-        assert_eq!(tap(&mut a, keys), None, "keyboard inert without text input");
         settings::set_current(Settings::default());
     }
 

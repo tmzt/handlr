@@ -24,7 +24,7 @@ libflankr_proto = { path = "../../crates/libflankr_proto", features = ["link"] }
 # libmorph 0.4.1: the key store and the secure store (`secure-store`), URL
 # schemes (`on_open_url`), `open_link`, `data_dir` on every host,
 # `build_info`, and the memory hooks (`on_low_memory`, `on_trim_memory`).
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "4e5b75c2bd49413192c4180a86b2d70d288ee699", default-features = false, features = ["secure-store"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8", default-features = false, features = ["secure-store"] }
 # The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
 # 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
@@ -60,12 +60,12 @@ env_logger = "0.11"
 # Battery sections).
 [target.'cfg(target_os = "android")'.dependencies]
 flankr-audio = { path = "../../crates/flankr-audio", features = ["morph"] }
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "4e5b75c2bd49413192c4180a86b2d70d288ee699", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery"] }
 android_logger = "0.14"
 
 # Generates the Gradle project when building for Android; a no-op on the host.
 [build-dependencies]
-libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "4e5b75c2bd49413192c4180a86b2d70d288ee699" }
+libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8" }
 # SETTINGS_COPY.md, read into settings_copy.rs (plan 20261024_04, decision
 # 6), at the revision the root crate pins for ADDITIONAL_PROMPTS.md.
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
@@ -75,7 +75,7 @@ toml = { version = "0.8", features = ["preserve_order"] }
 
 # The key tests use libdevice's memory vault, through libmorph's `script`.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "4e5b75c2bd49413192c4180a86b2d70d288ee699", default-features = false, features = ["secure-store", "script"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8", default-features = false, features = ["secure-store", "script"] }
 
 # The settings tests write settings.toml and delete data in a scratch directory.
 [dev-dependencies]

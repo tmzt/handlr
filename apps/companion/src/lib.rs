@@ -925,13 +925,15 @@ impl App {
     }
 
     /// A tap on one of the agent view's controls, or the overview's.
-    fn agent_hit(&mut self, hit: AgentHit) {
+    fn agent_hit(&mut self, ctx: &mut MorphContext, hit: AgentHit) {
+        log::info!("companion: agent_hit: {hit:?}");
         match hit {
             AgentHit::Back => self.close_agent(),
             AgentHit::Message => self.send(Input::StartDictation),
-            // Dim and inert until libmorph's text input is wired in
-            // (`settings::TEXT_INPUT`); a tap never reaches here before.
-            AgentHit::Keyboard => log::info!("keyboard: no text input yet"),
+            AgentHit::Keyboard => {
+                self.send(Input::StartTextPrompt);
+                ctx.start_text_input("", &libmorph::TextInputOptions::default());
+            }
             AgentHit::Reply => {
                 if let Some(agent) = &mut self.agent {
                     agent.begin_reply();
@@ -1011,9 +1013,15 @@ impl App {
                     agent.set_read_aloud(self.read_aloud);
                 }
             }
-            AgentHit::Submit => self.send(Input::Submit),
+            AgentHit::Submit => {
+                ctx.stop_text_input();
+                self.send(Input::Submit);
+            }
             AgentHit::Scratch => self.send(Input::Scratch),
-            AgentHit::Clear => self.send(Input::Clear),
+            AgentHit::Clear => {
+                ctx.stop_text_input();
+                self.send(Input::Clear);
+            }
         }
     }
 
@@ -1190,7 +1198,7 @@ impl App {
     /// A touch on the screen shown: on the overview and in the agent view,
     /// every phase goes to the screen (a drag scrolls, a tap hits); on the
     /// pairing screen, only a touch's end counts.
-    fn touch(&mut self, touch: Touch) {
+    fn touch(&mut self, ctx: &mut MorphContext, touch: Touch) {
         let now = self.started.elapsed();
         // Another session's card, over whichever screen is shown.
         let s = self.scale();
@@ -1209,7 +1217,7 @@ impl App {
         }
         if let Some(agent) = &mut self.agent {
             if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
-                self.agent_hit(hit);
+                self.agent_hit(ctx, hit);
             }
             return;
         }
@@ -1219,7 +1227,7 @@ impl App {
                 .touch(touch.id, touch.phase, touch.x, touch.y, now)
             {
                 Some(OverviewHit::Agent(pane_id)) => self.open_agent(pane_id),
-                Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
+                Some(OverviewHit::Bottom(hit)) => self.agent_hit(ctx, hit),
                 Some(OverviewHit::Tap) => self.send(Input::Tap),
                 Some(OverviewHit::Settings) => self.open_settings(),
                 None => {}
@@ -1822,7 +1830,7 @@ impl MorphApp for App {
     /// The controls, and a tap anywhere else ([`App::touch`]); then any
     /// link it tapped opens.
     fn on_touch(&mut self, ctx: &mut MorphContext, touch: Touch) {
-        self.touch(touch);
+        self.touch(ctx, touch);
         // Links tapped in the settings' copy and the agent view.
         let mut links = std::mem::take(&mut self.links);
         if let Some(screen) = &mut self.settings_screen {
@@ -1834,8 +1842,13 @@ impl MorphApp for App {
     }
 
     /// Typing into the focused field (desktop): Enter pairs, Escape clears.
-    /// libmorph has no Backspace, paste or on-screen keyboard yet.
     fn on_key(&mut self, _ctx: &mut MorphContext, key: Key) -> KeyStatus {
+        // Back or Escape cancels an active prompt card / dictation.
+        if self.dictation.is_some() && matches!(key, Key::Back | Key::Escape) {
+            _ctx.stop_text_input();
+            self.send(Input::Clear);
+            return KeyStatus::Handled;
+        }
         // The system Back cancels the settings' modal, or closes them.
         if matches!(key, Key::Back | Key::Escape)
             && let Some(screen) = &mut self.settings_screen
@@ -1878,6 +1891,23 @@ impl MorphApp for App {
             _ => return KeyStatus::Unhandled,
         }
         KeyStatus::Handled
+    }
+
+    fn on_text_input(&mut self, ctx: &mut MorphContext, event: &libmorph::TextInputEvent) {
+        log::info!("companion: on_text_input: {event:?}");
+        match event {
+            libmorph::TextInputEvent::Changed(text) => {
+                self.send(Input::SetText(text.clone()));
+            }
+            libmorph::TextInputEvent::Action(_) => {
+                ctx.stop_text_input();
+                self.send(Input::Submit);
+            }
+            libmorph::TextInputEvent::Dismissed => {
+                self.send(Input::Clear);
+            }
+            _ => {}
+        }
     }
 
     fn render(&mut self, ctx: &mut MorphContext, frame: &Frame<'_>) {

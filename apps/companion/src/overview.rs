@@ -1232,11 +1232,15 @@ mod tests {
         o.draw(&mut list, &ctx, None);
         assert_eq!(alpha_in(&list, play), 1.0);
         assert_eq!(alpha_in(&list, record), 1.0);
-        assert!(
-            (alpha_in(&list, keys) - settings::DISABLED_ALPHA).abs() < 1e-6,
-            "keyboard is dim without text input"
+        assert_eq!(
+            alpha_in(&list, keys),
+            1.0,
+            "keyboard is live with text input"
         );
-        assert_eq!(tap(&mut o, keys.x + 5.0, keys.y + 5.0), None);
+        assert_eq!(
+            tap(&mut o, keys.x + 5.0, keys.y + 5.0),
+            Some(OverviewHit::Bottom(AgentHit::Keyboard))
+        );
 
         for (settings, off) in [
             (with(false, true, true), AgentHit::ReadAloud),

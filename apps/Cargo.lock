@@ -1666,7 +1666,7 @@ dependencies = [
 [[package]]
 name = "libmorph"
 version = "0.4.2"
-source = "git+https://github.com/tmzt/libmorph?rev=4e5b75c2bd49413192c4180a86b2d70d288ee699#4e5b75c2bd49413192c4180a86b2d70d288ee699"
+source = "git+https://github.com/tmzt/libmorph?rev=0b288e8d1096c0b7441bc953ce745a44a9632be8#0b288e8d1096c0b7441bc953ce745a44a9632be8"
 dependencies = [
  "block2 0.5.1",
  "cpal",
@@ -1688,7 +1688,7 @@ dependencies = [
 [[package]]
 name = "libmorph-build"
 version = "0.2.5"
-source = "git+https://github.com/tmzt/libmorph?rev=4e5b75c2bd49413192c4180a86b2d70d288ee699#4e5b75c2bd49413192c4180a86b2d70d288ee699"
+source = "git+https://github.com/tmzt/libmorph?rev=0b288e8d1096c0b7441bc953ce745a44a9632be8#0b288e8d1096c0b7441bc953ce745a44a9632be8"
 dependencies = [
  "libmobile",
 ]
