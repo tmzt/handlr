@@ -387,16 +387,8 @@ impl Overview {
         }
         let divider_y = y + 4.0 * s;
         self.divider_y = Some(divider_y);
-        let section_y = divider_y + 12.0 * s;
-        headings.push(Heading {
-            text: "OVERVIEW \u{b7} 2-COLUMN FIXED TAB ORDER".to_string(),
-            x: Some(pad),
-            y: section_y,
-            px: 12.0 * s,
-            color: theme().muted,
-        });
         self.headings = headings;
-        let top = section_y + 16.0 * s;
+        let top = divider_y + 12.0 * s;
 
         // The bottom row, then the cards above it.
         let row_bottom = l.h - l.bottom - 16.0 * s;
