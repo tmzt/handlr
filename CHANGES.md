@@ -2292,4 +2292,14 @@ Plan: [Navy overview screen theme, saturated session palette and custom panel sh
   render anti-aliased navy background panels with signed distance fields,
   composited beneath `libmsdf`'s overlay pass.
 
+## 2026-10-25 17:53 EDT — Keyboard prompt card styling and shaded input area
+
+Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md)
+(living section L3).
+
+- `flankr_companion::Dictation` distinguishes `PromptMode`: `Voice` and `Keyboard`.
+- The prompt card displays "Type your message" placeholder in keyboard mode instead of "(say your message)".
+- In keyboard mode, the input text / placeholder renders inside a shaded input area (`theme().input`), distinct from the card container and buttons.
+
+
 

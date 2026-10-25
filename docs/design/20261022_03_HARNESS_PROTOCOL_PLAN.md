@@ -1591,3 +1591,18 @@ The owner (2026-10-24), after libmorph was asked for soft keyboard support:
 Tests: the glyph sits left of record with record's hit box and no fill; it is
 dim and inert without text input; a tap asks for the keyboard when text input
 exists.
+
+## Amendment — 2026-10-25 17:53 EDT: keyboard prompt card styling and shaded input area (living section L3)
+
+The owner approved (2026-10-25): in keyboard mode, the prompt card displays
+"Type your message" and a shaded input area.
+1. **Mode tracking:** `flankr_companion::Dictation` distinguishes `PromptMode`:
+   `Voice` (started by dictation/record button) and `Keyboard` (started by the
+   keyboard glyph).
+2. **Placeholder:** When the buffer is empty, voice mode shows
+   `"(say your message)"` and keyboard mode shows `"Type your message"`.
+3. **Shaded input area:** In keyboard mode, the input text / placeholder sits
+   inside a distinct shaded input box (`theme().input`) within the prompt card,
+   inset below the target line and above the controls, on both the overview
+   and agent view screens.
+
