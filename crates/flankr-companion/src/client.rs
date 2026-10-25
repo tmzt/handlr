@@ -16,9 +16,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::time::Duration;
 
-use handlr_speech::LocalTime;
-use libhandlr_proto::common::{self, methods, protocols};
-use libhandlr_proto::{Id, Incoming, Notification, Request, Response};
+use flankr_speech::LocalTime;
+use libflankr_proto::common::{self, methods, protocols};
+use libflankr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -1560,7 +1560,7 @@ impl State {
         // it is.
         let now = self.local_time;
         for r in self.reading.iter_mut().filter(|r| r.ready.is_none()) {
-            r.ready = Some(handlr_speech::read_aloud(&r.text, now));
+            r.ready = Some(flankr_speech::read_aloud(&r.text, now));
         }
         self.read_in_order();
         self.flush_notices(&mut out);
@@ -2820,7 +2820,7 @@ impl State {
         let refusal = if d.parts.is_empty() {
             Some("The message is empty.")
         } else if !online {
-            Some("I'm not connected to handlr.")
+            Some("I'm not connected to flankr.")
         } else {
             match &d.target {
                 None => Some("No agent is focused. Say focus, and the agent's name."),
@@ -2866,7 +2866,7 @@ impl State {
         };
         if !self.online() {
             out.push(event(Event::Say(
-                "I'm not connected to handlr.".to_string(),
+                "I'm not connected to flankr.".to_string(),
             )));
             return;
         }
@@ -3056,7 +3056,7 @@ impl State {
 
     fn tap(&mut self, out: &mut Vec<Output>) {
         if !self.online() {
-            out.push(event(Event::Error("not connected to handlr".to_string())));
+            out.push(event(Event::Error("not connected to flankr".to_string())));
         } else if !self.confirms.is_empty() {
             out.push(event(Event::Arm));
         } else if let Some(turn) = self.turn.as_mut() {
@@ -3083,7 +3083,7 @@ impl State {
             return;
         }
         if !self.online() {
-            out.push(event(Event::Error("not connected to handlr".to_string())));
+            out.push(event(Event::Error("not connected to flankr".to_string())));
         } else if !self.confirms.is_empty() {
             let approve = is_approval(&text);
             if self.dictation.is_some() {
@@ -3202,7 +3202,7 @@ impl State {
                 sent @ Sent::Content { .. } => {
                     // The session changed under the range: the reset that
                     // follows brings the new outline.
-                    if error.code != libhandlr_proto::envelope::codes::SESSION_CHANGED {
+                    if error.code != libflankr_proto::envelope::codes::SESSION_CHANGED {
                         log::warn!("session.content: {message}");
                     }
                     self.content_answered(sent, None, out);
@@ -3231,7 +3231,7 @@ impl State {
                     }
                     // The session changed under the page: the reset that
                     // follows brings the new one.
-                    if error.code != libhandlr_proto::envelope::codes::SESSION_CHANGED {
+                    if error.code != libflankr_proto::envelope::codes::SESSION_CHANGED {
                         log::warn!("session.history: {message}");
                     }
                     self.show_view(out);
@@ -3560,7 +3560,7 @@ impl State {
             out.push(self.request(methods::SPEECH_SUMMARIZE, params, Sent::Summarize(serial)));
             None
         } else {
-            Some(handlr_speech::read_aloud(&text, self.local_time))
+            Some(flankr_speech::read_aloud(&text, self.local_time))
         };
         self.reading.push_back(Reading {
             serial,
@@ -3603,7 +3603,7 @@ impl State {
             let spoken = spoken
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty());
-            r.ready = Some(spoken.unwrap_or_else(|| handlr_speech::read_aloud(&r.text, now)));
+            r.ready = Some(spoken.unwrap_or_else(|| flankr_speech::read_aloud(&r.text, now)));
         }
         self.read_in_order();
         self.flush_notices(out);
@@ -3619,7 +3619,7 @@ impl State {
                 Some(text) => text,
                 None if now.saturating_sub(front.asked_at) >= SUMMARY_WAIT => {
                     log::info!("no answer in time; reading the reply here");
-                    handlr_speech::read_aloud(&front.text, local_time)
+                    flankr_speech::read_aloud(&front.text, local_time)
                 }
                 None => break,
             };
@@ -4355,7 +4355,7 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         s.incoming(response(
             id,
-            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": ["claude"]}),
+            json!({"server": "flankr", "session_id": "companion:test", "vocabulary": ["claude"]}),
         ));
         assert!(s.online());
         s
@@ -4423,7 +4423,7 @@ mod tests {
         assert_eq!(hello.method, "hello");
         assert_eq!(
             hello.params,
-            json!({"protocol": "handlr.companion", "version": 1, "client": "test",
+            json!({"protocol": "flankr.companion", "version": 1, "client": "test",
                    "session_id": "companion:test"})
         );
     }
@@ -4435,13 +4435,13 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         let out = s.incoming(response(
             id,
-            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": ["claude", "hr"]}),
+            json!({"server": "flankr", "session_id": "companion:test", "vocabulary": ["claude", "hr"]}),
         ));
         assert_eq!(
             events(&out),
             vec![
                 Event::Connected {
-                    server: "handlr".into()
+                    server: "flankr".into()
                 },
                 Event::Vocabulary(vec!["claude".into(), "hr".into()]),
             ]
@@ -4455,7 +4455,7 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         let refusal = Response::err(
             Some(id),
-            libhandlr_proto::ErrorObject::new(-32011, "unsupported protocol"),
+            libflankr_proto::ErrorObject::new(-32011, "unsupported protocol"),
         );
         let out = s.incoming(Incoming::Response(refusal));
         assert!(out.iter().any(|o| matches!(o, Output::Close(_))), "{out:?}");
@@ -4684,7 +4684,7 @@ mod tests {
         let reply = sent(&out)[0].id.clone();
         let out = s.incoming(Incoming::Response(Response::err(
             Some(reply),
-            libhandlr_proto::ErrorObject::new(-32008, "wrong nonce; 4 attempt(s) left"),
+            libflankr_proto::ErrorObject::new(-32008, "wrong nonce; 4 attempt(s) left"),
         )));
         assert_eq!(
             events(&out),
@@ -4860,7 +4860,7 @@ mod tests {
     fn the_state_machine_does_not_pair() {
         let mut s = State::new("test");
         assert!(matches!(
-            events(&s.input(Input::Pair("handlr1abc".into())))[..],
+            events(&s.input(Input::Pair("flankr1abc".into())))[..],
             [Event::PairFailed(_)]
         ));
     }
@@ -5277,7 +5277,7 @@ mod tests {
         let send = message_send(&s.input(Input::Submit)).unwrap();
         let refusal = Response::err(
             Some(send.id),
-            libhandlr_proto::ErrorObject::new(
+            libflankr_proto::ErrorObject::new(
                 -32001,
                 "Message rejected: the character '/' is not permitted.",
             ),
@@ -5373,7 +5373,7 @@ mod tests {
         let mut s = State::new("test");
         let out = s.connected();
         let id = sent(&out)[0].id.clone();
-        let out = s.incoming(response(id, json!({"server": "handlr", "vocabulary": []})));
+        let out = s.incoming(response(id, json!({"server": "flankr", "vocabulary": []})));
         let out = list_answer(&mut s, &out, claude());
         assert!(
             matches!(&events(&out)[..], [Event::Agents(a), Event::Focus(Some(f))] if a.is_empty() && f.pane_id == "w2:p4")
@@ -5724,7 +5724,7 @@ mod tests {
         assert_eq!(before.len(), 2);
         let out = s.connected();
         let id = sent(&out)[0].id.clone();
-        let out = s.incoming(response(id, json!({"server": "handlr"})));
+        let out = s.incoming(response(id, json!({"server": "flankr"})));
         let subs = requests(&out, "session.subscribe");
         assert_eq!(subs.len(), 1, "{out:?}");
         assert_eq!(
@@ -5955,7 +5955,7 @@ mod tests {
         assert_eq!(page.params["before"], json!(serial(100, 0)));
         let changed = Response::err(
             Some(page.id.clone()),
-            libhandlr_proto::ErrorObject::new(-32014, "the session changed"),
+            libflankr_proto::ErrorObject::new(-32014, "the session changed"),
         );
         let out = s.incoming(Incoming::Response(changed));
         assert!(!events(&out).iter().any(|e| matches!(e, Event::Error(_))));
@@ -6152,7 +6152,7 @@ mod tests {
         let id = requests(&out, "agents.send")[0].id.clone();
         let refusal = Response::err(
             Some(id),
-            libhandlr_proto::ErrorObject::new(-32003, "not allowed"),
+            libflankr_proto::ErrorObject::new(-32003, "not allowed"),
         );
         let out = s.incoming(Incoming::Response(refusal));
         assert!(
@@ -6235,7 +6235,7 @@ mod tests {
 
     /// The rules as the client reads a reply itself, at noon EDT.
     fn here(text: &str) -> String {
-        handlr_speech::read_aloud(text, NOON_EDT)
+        flankr_speech::read_aloud(text, NOON_EDT)
     }
 
     const NOON_EDT: LocalTime = LocalTime {
@@ -6260,7 +6260,7 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         let out = s.incoming(response(
             id,
-            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
+            json!({"server": "flankr", "session_id": "companion:test", "vocabulary": []}),
         ));
         assert_eq!(
             options(&out),
@@ -6288,7 +6288,7 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         let out = s.incoming(response(
             id,
-            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
+            json!({"server": "flankr", "session_id": "companion:test", "vocabulary": []}),
         ));
         assert_eq!(
             options(&out),
@@ -6298,7 +6298,7 @@ mod tests {
         let id = requests(&out, "client.options")[0].id.clone();
         let refused = Response::err(
             Some(id),
-            libhandlr_proto::ErrorObject::new(-32601, "no such method"),
+            libflankr_proto::ErrorObject::new(-32601, "no such method"),
         );
         assert!(s.incoming(Incoming::Response(refused)).is_empty());
     }
@@ -6337,7 +6337,7 @@ mod tests {
     /// Replies as agents gave them (plan 20261023_05, step 4).
     const PLAIN: &str = "I ran the tests and they all pass. Shall I go on?";
     const BACKQUOTES: &str = "Done: `Sessions::reply_text` now joins the parts.";
-    const PATHS: &str = "I changed three files:\n- src/server/speech.rs\n- src/sessions/mod.rs\n- crates/libhandlr_proto/src/common.rs";
+    const PATHS: &str = "I changed three files:\n- src/server/speech.rs\n- src/sessions/mod.rs\n- crates/libflankr_proto/src/common.rs";
 
     /// Viewing w2:pZ with play on, then a peek at 200 s with `replies`
     /// new after the first: the `speech.summarize` requests it sent.
@@ -6399,7 +6399,7 @@ mod tests {
         let (mut s, asked, _) = reading(&[BACKQUOTES]);
         let refused = Incoming::Response(Response::err(
             Some(asked[0].id.clone()),
-            libhandlr_proto::ErrorObject::new(-32015, "no summary: no key"),
+            libflankr_proto::ErrorObject::new(-32015, "no summary: no key"),
         ));
         let out = s.incoming(refused);
         assert_eq!(said(&out), [here(BACKQUOTES)]);
@@ -6711,7 +6711,7 @@ mod tests {
         let id = requests(&out, "agents.send")[0].id.clone();
         let refusal = Response::err(
             Some(id),
-            libhandlr_proto::ErrorObject::new(-32003, "not allowed"),
+            libflankr_proto::ErrorObject::new(-32003, "not allowed"),
         );
         let out = s.incoming(Incoming::Response(refusal));
         let (_, cards, _) = view_of(&out).expect("the view again");
@@ -6808,7 +6808,7 @@ mod tests {
         let mut s = State::new("test");
         let out = s.connected();
         let id = sent(&out)[0].id.clone();
-        let out = s.incoming(response(id, json!({"server": "handlr", "vocabulary": []})));
+        let out = s.incoming(response(id, json!({"server": "flankr", "vocabulary": []})));
         let out = answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
         assert_eq!(agents_of(&out).len(), 1, "the first answer: {out:?}");
         s
@@ -7420,7 +7420,7 @@ mod tests {
         s.disconnected(1000);
         let out = s.connected();
         let id = sent(&out)[0].id.clone();
-        let out = s.incoming(response(id, json!({"server": "handlr"})));
+        let out = s.incoming(response(id, json!({"server": "flankr"})));
         let params = &requests(&out, "session.subscribe")[0].params;
         assert_eq!(params["epoch"], 78);
         assert_eq!(params["from"], 59);
@@ -7821,7 +7821,7 @@ mod tests {
         let id = sent(&out)[0].id.clone();
         let out = s.incoming(response(
             id,
-            json!({"server": "handlr", "session_id": "companion:test", "vocabulary": []}),
+            json!({"server": "flankr", "session_id": "companion:test", "vocabulary": []}),
         ));
         let list = requests(&out, "agents.list")[0].id.clone();
         let out = s.incoming(response(list, json!({"agents": agents})));
@@ -7946,7 +7946,7 @@ mod tests {
         let id = requests(&out, "link.unpair")[0].id.clone();
         let out = s.incoming(Incoming::Response(Response::err(
             Some(id),
-            libhandlr_proto::ErrorObject::new(
+            libflankr_proto::ErrorObject::new(
                 -32001,
                 "link.unpair is served only over a paired link",
             ),

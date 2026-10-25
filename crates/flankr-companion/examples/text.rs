@@ -5,25 +5,25 @@
 //! agent view and `/close` closes it. Events are printed as they arrive.
 //!
 //! ```text
-//! cargo run -p handlr-companion --example text -- [--keys <dir>] [--socket <path>]
-//!     [--client <name>] [--name <device name>] [--pair <what handlr pair printed>]
+//! cargo run -p flankr-companion --example text -- [--keys <dir>] [--socket <path>]
+//!     [--client <name>] [--name <device name>] [--pair <what flankr pair printed>]
 //! ```
 //!
 //! `--pair` (or a `pair` line) prints the device code to paste into
-//! `handlr pair`, then connects once it has been pasted. `--name` is the
+//! `flankr pair`, then connects once it has been pasted. `--name` is the
 //! name the device asks to be paired as (default: the hostname).
 //!
 //! `--keys` is where the key and the paired server are kept (default
-//! `~/.config/handlr-companion/`). Without a paired server it uses the
+//! `~/.config/flankr-companion/`). Without a paired server it uses the
 //! daemon's local socket (`--socket`, default
-//! `~/.config/handlr/handlr.sock`).
+//! `~/.config/flankr/flankr.sock`).
 
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input};
+use flankr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input};
 
 const USAGE: &str = "usage: text [--keys <dir>] [--socket <path>] [--client <name>] \
      [--name <device name>] [--pair <pairing URL, string or data URL>]\n\
@@ -130,7 +130,7 @@ fn print_event(event: Event) {
             println!("* disconnected; retrying in {retry_in_ms} ms")
         }
         Event::PairingCode { code, server } => {
-            println!("* paste this code into handlr pair on {server}:");
+            println!("* paste this code into flankr pair on {server}:");
             println!("{code}");
         }
         Event::Paired { name } => println!("* paired as {name}"),
@@ -215,7 +215,7 @@ fn print_event(event: Event) {
             if start {
                 println!("* start of session");
             }
-            let (entries, cards, pinned) = handlr_companion::view::flatten_view(&sections, pinned);
+            let (entries, cards, pinned) = flankr_companion::view::flatten_view(&sections, pinned);
             let loading = if loading { ", loading" } else { "" };
             println!(
                 "* view of {name} ({status}{loading}): {} entries",

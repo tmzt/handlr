@@ -21,8 +21,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use libhandlr_proto::common::{CardBody, Entry, EntryKind, Link, Role, Section, Serial};
-pub use libhandlr_proto::common::{CardKind, SectionKind, Slot};
+use libflankr_proto::common::{CardBody, Entry, EntryKind, Link, Role, Section, Serial};
+pub use libflankr_proto::common::{CardKind, SectionKind, Slot};
 
 /// A card as the view shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]

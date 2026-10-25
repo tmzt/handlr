@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use libhandlr_proto::common::{self, AgentInfo, Entry, EntryKind, Role, Turn};
+use libflankr_proto::common::{self, AgentInfo, Entry, EntryKind, Role, Turn};
 
 /// How long after the last interaction a session's cards still show.
 pub const INTERACTED_WITHIN: Duration = Duration::from_secs(60 * 60);
@@ -30,7 +30,7 @@ pub const SESSION_COLOURS: u8 = 16;
 pub enum SessionCardKind {
     /// The agent asks a question: "<agent> is asking".
     Question,
-    /// A handlr confirmation waits for its pane: "<agent> needs approval".
+    /// A flankr confirmation waits for its pane: "<agent> needs approval".
     Approval,
     /// A long turn finished: "<agent> finished: <line>", one line.
     Finished,
@@ -367,7 +367,7 @@ fn card(a: &AgentInfo, kind: SessionCardKind, text: String, now: Duration) -> Se
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhandlr_proto::common::{AgentSessionInfo, SessionMatched};
+    use libflankr_proto::common::{AgentSessionInfo, SessionMatched};
 
     fn agent(pane: &str, session: Option<&str>, turn: Option<Turn>) -> AgentInfo {
         AgentInfo {

@@ -1,5 +1,5 @@
 //! The companion client (docs/design/20261022_04_COMPANION_APP_PLAN.md):
-//! the client side of `handlr.companion` apart from audio and UI.
+//! the client side of `flankr.companion` apart from audio and UI.
 //!
 //! [`Companion`] is a worker in libvoicexn's style. A `net` thread keeps a
 //! connection to the daemon and runs the logic of [`client::State`]; the app
@@ -8,12 +8,12 @@
 //!
 //! Steps 1 and 2 of the plan's 18:10 EDT amendment: the logic,
 //! [`FileKeyStore`], and the connection. With a paired server in the
-//! [`KeyStore`], the client reconnects to it over handlr link (`IK`, with
+//! [`KeyStore`], the client reconnects to it over flankr link (`IK`, with
 //! `hello` and its `session_id` in the handshake); without one, it uses the
 //! daemon's Unix socket. [`Input::Pair`] pairs from the pairing URL, the
-//! bare `handlr1…` string or the QR code's `data:` URL: the client stores
+//! bare `flankr1…` string or the QR code's `data:` URL: the client stores
 //! the server, shows its device code as [`Event::PairingCode`] for the user
-//! to paste into `handlr pair`, and connects once the server knows its key
+//! to paste into `flankr pair`, and connects once the server knows its key
 //! (plan 20261022_02, amendment of 23:07 EDT). `examples/text.rs` drives it
 //! from typed lines.
 
@@ -103,18 +103,18 @@ pub fn device_name_from(host: &str) -> Option<String> {
         .to_ascii_lowercase()
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-        .take(libhandlr_proto::link::DEVICE_NAME_MAX)
+        .take(libflankr_proto::link::DEVICE_NAME_MAX)
         .collect();
     (!name.is_empty()).then_some(name)
 }
 
-/// `~/.config/handlr/handlr.sock`, where `handlr serve` listens by default.
+/// `~/.config/flankr/flankr.sock`, where `flankr serve` listens by default.
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
-        .join("handlr")
-        .join("handlr.sock")
+        .join("flankr")
+        .join("flankr.sock")
 }
 
 /// The client: the `net` thread and its two channels. Dropping it stops
@@ -187,7 +187,7 @@ impl Companion {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhandlr_proto::link::DeviceCode;
+    use libflankr_proto::link::DeviceCode;
 
     #[test]
     fn device_names_come_from_the_hostname() {

@@ -6,7 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use handlr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input, Speaker};
+use flankr_companion::{Companion, CompanionConfig, Event, FileKeyStore, Input, Speaker};
 use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,7 +85,7 @@ impl Conn {
         assert_eq!(hello["method"], "hello");
         self.write(json!({
             "jsonrpc": "2.0", "id": hello["id"],
-            "result": {"server": "handlr", "server_version": "0.1.0", "protocol_version": 1,
+            "result": {"server": "flankr", "server_version": "0.1.0", "protocol_version": 1,
                        "session_id": "companion:test", "vocabulary": ["claude", "hr"]}
         }));
         let options = self.read();
@@ -106,7 +106,7 @@ fn expect_connected(c: &Companion) {
     assert_eq!(
         next_event(c),
         Event::Connected {
-            server: "handlr".into()
+            server: "flankr".into()
         }
     );
     assert_eq!(
@@ -142,7 +142,7 @@ fn hello_then_a_turn_and_its_say() {
     let hello = conn.greet();
     assert_eq!(
         hello,
-        json!({"protocol": "handlr.companion", "version": 1, "client": "test"})
+        json!({"protocol": "flankr.companion", "version": 1, "client": "test"})
     );
     expect_connected(&c);
 
@@ -277,7 +277,7 @@ fn backoff_doubles_while_the_daemon_is_away() {
     assert_eq!(
         e,
         Event::Connected {
-            server: "handlr".into()
+            server: "flankr".into()
         }
     );
 }
@@ -308,10 +308,10 @@ fn a_tap_during_a_turn_interrupts_it_over_the_socket() {
     let mut conn = accept(&listener);
     conn.greet();
     expect_connected(&c);
-    c.send(Input::Utterance("send continue to the handlr agent".into()));
+    c.send(Input::Utterance("send continue to the flankr agent".into()));
     let start = conn.read();
     c.send(Input::Tap);
-    expect_user(&c, "send continue to the handlr agent");
+    expect_user(&c, "send continue to the flankr agent");
     assert_eq!(next_event(&c), Event::StopSpeaking);
     let interrupt = conn.read();
     assert_eq!(interrupt["method"], "turn.interrupt");
@@ -319,11 +319,11 @@ fn a_tap_during_a_turn_interrupts_it_over_the_socket() {
     conn.write(json!({"jsonrpc": "2.0", "id": interrupt["id"], "result": {}}));
     conn.write(json!({"jsonrpc": "2.0", "id": start["id"], "result": {
         "outcome": "interrupted", "ran": [],
-        "interrupted": [{"pane_id": "w2:pZ", "name": "handlr", "spoken": "the handlr agent"}]
+        "interrupted": [{"pane_id": "w2:pZ", "name": "flankr", "spoken": "the flankr agent"}]
     }}));
     assert_eq!(
         next_event(&c),
-        Event::Say("Stopped the handlr agent.".into())
+        Event::Say("Stopped the flankr agent.".into())
     );
     assert!(matches!(next_event(&c), Event::TurnEnded { outcome, .. } if outcome == "interrupted"));
 }

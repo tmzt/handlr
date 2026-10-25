@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use libhandlr_proto::link::{self, StaticKey, StaticKeypair};
+use libflankr_proto::link::{self, StaticKey, StaticKeypair};
 use serde::{Deserialize, Serialize};
 
 /// Where a client keeps its static key and the server it is paired with.
@@ -65,10 +65,10 @@ impl FileKeyStore {
         FileKeyStore { dir: dir.into() }
     }
 
-    /// `~/.config/handlr-companion/`.
+    /// `~/.config/flankr-companion/`.
     pub fn default_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".config").join("handlr-companion")
+        PathBuf::from(home).join(".config").join("flankr-companion")
     }
 
     pub fn dir(&self) -> &Path {

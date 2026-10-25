@@ -12,10 +12,10 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use base64::Engine;
-use handlr_companion::{
+use flankr_companion::{
     Companion, CompanionConfig, Event, FileKeyStore, Input, KeyStore, ServerRecord, Speaker,
 };
-use libhandlr_proto::link::{self, DeviceCode, PairingPayload, StaticKeypair};
+use libflankr_proto::link::{self, DeviceCode, PairingPayload, StaticKeypair};
 use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -145,7 +145,7 @@ impl Ctx {
         });
         let mut stream = accepted.stream;
         let mut hello = json!({"jsonrpc": "2.0", "id": hello_id, "result": {
-            "server": "handlr", "server_version": "0.1.0", "protocol_version": 1,
+            "server": "flankr", "server_version": "0.1.0", "protocol_version": 1,
             "session_id": "companion:phone", "vocabulary": ["claude"]
         }});
         if paired {
@@ -222,7 +222,7 @@ fn expect_connected(c: &Companion) {
     assert_eq!(
         next_event(c),
         Event::Connected {
-            server: "handlr".into()
+            server: "flankr".into()
         }
     );
     assert_eq!(next_event(c), Event::Vocabulary(vec!["claude".into()]));
@@ -239,7 +239,7 @@ fn assert_exact_hello(first: &Value) -> Value {
     assert_eq!(keys, ["id", "jsonrpc", "method", "params"], "{first}");
     assert_eq!(first["jsonrpc"], "2.0");
     assert_eq!(first["method"], "hello");
-    assert_eq!(first["params"]["protocol"], "handlr.companion");
+    assert_eq!(first["params"]["protocol"], "flankr.companion");
     assert_eq!(first["params"]["client"], "test");
     first["params"].clone()
 }

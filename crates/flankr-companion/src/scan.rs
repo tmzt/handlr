@@ -9,7 +9,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use libhandlr_proto::link::PairingPayload;
+use libflankr_proto::link::PairingPayload;
 
 /// The only data URL accepted.
 pub const DATA_URL_PREFIX: &str = "data:image/png;base64,";
@@ -46,7 +46,7 @@ pub fn read(input: &str) -> Result<Pairing, String> {
     }
     // `decode` has checked that a URL's host is one of the addresses.
     let address = text
-        .strip_prefix("handlr://")
+        .strip_prefix("flankr://")
         .and_then(|rest| rest.split('/').next())
         .unwrap_or(&payload.addresses[0]);
     Ok(Pairing {
@@ -132,7 +132,7 @@ fn rgb_luma(r: u8, g: u8, b: u8) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhandlr_proto::link::generate_keypair;
+    use libflankr_proto::link::generate_keypair;
 
     fn payload(addresses: &[&str]) -> PairingPayload {
         PairingPayload {

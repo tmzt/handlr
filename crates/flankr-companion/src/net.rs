@@ -38,8 +38,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use libhandlr_proto::Incoming;
-use libhandlr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, StaticKey};
+use libflankr_proto::Incoming;
+use libflankr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, StaticKey};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{TcpSocket, TcpStream, UnixStream};
@@ -694,8 +694,8 @@ async fn tcp_connect(addr: &str) -> std::io::Result<TcpStream> {
     Err(last)
 }
 
-/// The phone's local time of day, as `handlr_speech` reads it.
-fn local_now() -> handlr_speech::LocalTime {
+/// The phone's local time of day, as `flankr_speech` reads it.
+fn local_now() -> flankr_speech::LocalTime {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -706,14 +706,14 @@ fn local_now() -> handlr_speech::LocalTime {
     if unsafe { libc::localtime_r(&now, &mut tm) }.is_null() {
         // UTC, then.
         let seconds = secs % 86_400;
-        return handlr_speech::LocalTime {
+        return flankr_speech::LocalTime {
             hour: (seconds / 3600) as u8,
             minute: (seconds / 60 % 60) as u8,
             second: (seconds % 60) as u8,
             utc_offset_minutes: 0,
         };
     }
-    handlr_speech::LocalTime {
+    flankr_speech::LocalTime {
         hour: tm.tm_hour as u8,
         minute: tm.tm_min as u8,
         second: tm.tm_sec as u8,
