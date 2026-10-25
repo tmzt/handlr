@@ -2274,17 +2274,22 @@ Plan: [Rename project to flankr across CLI, protocols, crates and apps](docs/des
 - Historical design documents, historical entries in `CHANGES.md`/`VERSIONS.md`,
   and past evidence logs remain untouched under their original names.
 
-## 2026-10-25 14:53 EDT — Extract libinfer into standalone repository ~/src/libinfer
+## 2026-10-25 15:27 EDT — Navy overview theme, saturated session palette and custom panel shader
 
-Plan: [Extract libinfer into standalone repository ~/src/libinfer](docs/design/20261025_02_EXTRACT_LIBINFER_PLAN.md)
+Plan: [Navy overview screen theme, saturated session palette and custom panel shader](docs/design/20261025_03_NAVY_OVERVIEW_THEME_PLAN.md)
 (`In implementation`).
 
-- `crates/libinfer` (`libinfer` and `libinfer-gemini`) is extracted into its own
-  repository at `/Users/tmeade/src/libinfer`.
-- The new repository is initialized with full project governance per AGENTS.md,
-  including `AGENTS.md`, `CHANGES.md`, `VERSIONS.md`, `repowiki.toml`, and registration
-  in `~/src/repowiki/sites.toml`.
-- `flankr` updates its dependencies to point to `../libinfer/libinfer` and
-  `../libinfer/libinfer-gemini`, and removes `crates/libinfer/` from its workspace.
+- The companion app adopts `Dark (navy)` as its default theme, placed first in
+  `apps/companion/themes.toml` with the palette extracted from the design mockup.
+- Session colors `session_1..16` in `Dark (navy)` and dark themes are upgraded
+  to saturated, vibrant hues matching the design example, retained as colored
+  bars on overview cards and under the agent view header.
+- The overview screen adapts to the design mockup: top-left `flankr` title,
+  centered metadata subtitle, horizontal header divider, `OVERVIEW · 2-COLUMN FIXED TAB ORDER`
+  section label, right-aligned status labels, interactive question choice pills,
+  monospace command pill containers, and footer metadata lines.
+- A custom WGSL shader (`PanelShader`) is implemented in `apps/companion` to
+  render anti-aliased navy background panels with signed distance fields,
+  composited beneath `libmsdf`'s overlay pass.
 
 

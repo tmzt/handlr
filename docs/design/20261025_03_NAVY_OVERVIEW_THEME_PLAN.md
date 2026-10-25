@@ -1,7 +1,7 @@
 ---
 title: Navy overview screen theme, saturated session palette and custom panel shader
 date: 2026-10-25
-status: Draft
+status: In implementation
 covers:
   - "The default theme for the companion app becomes Dark (navy), placed first in `themes.toml` with the exact palette extracted from the overview screen mockup"
   - "The 16 session colors upgraded from pastels to saturated vibrant hues matching the design example, retained as session bars on the overview cards and agent view header"
@@ -139,3 +139,8 @@ The navy background panels are rendered using a custom WGSL shader (`PanelShader
 4. **Verification and Android build.**
    Run formatting, linter, tests, and Android apk build.
    **Done when:** `cargo fmt -p companion -- --check`, `cargo clippy -p companion --all-targets`, and `cargo test` pass with 0 warnings, and `./apps/companion/scripts/android.sh --install` builds and runs cleanly on the device.
+
+## Amendment — 2026-10-25 15:27 EDT: Implementation started
+
+Implementation of docs/design/20261025_03_NAVY_OVERVIEW_THEME_PLAN.md has begun.
+The document is now immutable.
