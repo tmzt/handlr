@@ -56,6 +56,10 @@ pub enum Input {
     Tick(Duration),
     /// The Start button: take a message (plan 20261023_02, decision 2).
     StartDictation,
+    /// Start taking a typed text prompt (plan 20261022_03, living section L3).
+    StartTextPrompt,
+    /// Set the current prompt text after an edit.
+    SetText(String),
     /// The Submit button: submit the message now.
     Submit,
     /// The Clear button: discard the message and leave the mode.
@@ -1619,6 +1623,17 @@ impl State {
             Input::Approve => self.answer(true, None, &mut out),
             Input::Deny => self.answer(false, None, &mut out),
             Input::StartDictation => self.start_dictation(&mut out),
+            Input::StartTextPrompt => self.start_text_prompt(&mut out),
+            Input::SetText(text) => {
+                if let Some(d) = self.dictation.as_mut() {
+                    d.parts = if text.is_empty() {
+                        Vec::new()
+                    } else {
+                        vec![text]
+                    };
+                    self.show_dictation(&mut out);
+                }
+            }
             Input::Submit => self.submit(true, &mut out),
             Input::Clear => self.clear_dictation(&mut out),
             Input::Scratch => self.scratch(&mut out),
@@ -2705,6 +2720,33 @@ impl State {
 
     fn start_dictation(&mut self, out: &mut Vec<Output>) {
         self.start_dictation_with(Vec::new(), out);
+    }
+
+    fn start_text_prompt(&mut self, out: &mut Vec<Output>) {
+        if self.dictation.is_some() {
+            return;
+        }
+        let fixed_pane = self.view.as_ref().map(|v| v.pane_id.clone());
+        let target = match &fixed_pane {
+            Some(pane_id) => self.target_for(pane_id),
+            None => self.focus.clone(),
+        };
+        self.dictation = Some(Dictating {
+            fixed_pane,
+            parts: Vec::new(),
+            target,
+            refresh_target: self.online(),
+            phase: DictationPhase::Collecting,
+            confirm_id: None,
+            own_approval: false,
+            quiet_from: None,
+            read_back: ReadBack::No,
+            submit_waiting: None,
+        });
+        if self.online() {
+            self.ask_list(out);
+        }
+        self.show_dictation(out);
     }
 
     /// Take a message whose first parts are `parts`, already in it.
@@ -4982,6 +5024,23 @@ mod tests {
         s.input(Input::StartDictation);
         let out = s.input(Input::Utterance("clear".into()));
         assert!(!dictation_of(&out).unwrap().active);
+    }
+
+    #[test]
+    fn start_text_prompt_and_set_text() {
+        let mut s = online();
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        let out = s.input(Input::StartTextPrompt);
+        let d = dictation_of(&out).unwrap();
+        assert!(d.active);
+        assert_eq!(d.text, "");
+        let out = s.input(Input::SetText("Please run tests".into()));
+        let d = dictation_of(&out).unwrap();
+        assert!(d.active);
+        assert_eq!(d.text, "Please run tests");
+        let out = s.input(Input::Submit);
+        let send = message_send(&out).expect("submitted text");
+        assert_eq!(send.params["text"], "Please run tests");
     }
 
     #[test]
