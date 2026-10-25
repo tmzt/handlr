@@ -284,10 +284,7 @@ mod tests {
     #[test]
     fn test_system_prompt_extraction() {
         let prompt = default_system_prompt().expect("should extract system prompt from PROMPT.md");
-        assert!(
-            prompt.contains("reasoning engine for `handlr`")
-                || prompt.contains("reasoning engine for `flankr`")
-        );
+        assert!(prompt.contains("reasoning engine for `flankr`"));
         assert!(prompt.contains("RAG-Based Environment Context"));
         assert!(prompt.contains("Action Tools (`focus`, `run_command`"));
         assert!(prompt.contains("`watch_pane(pane_id)`"));
@@ -496,10 +493,7 @@ mod tests {
 
         assert_eq!(engine.max_turns(), 5);
         let prompt = engine.system_prompt().expect("system prompt should be set");
-        assert!(
-            prompt.contains("reasoning engine for `handlr`")
-                || prompt.contains("reasoning engine for `flankr`")
-        );
+        assert!(prompt.contains("reasoning engine for `flankr`"));
         assert_eq!(engine.tools().len(), 1);
 
         let decls = match &engine.tools()[0] {
