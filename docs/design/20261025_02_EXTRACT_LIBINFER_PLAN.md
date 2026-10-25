@@ -1,7 +1,7 @@
 ---
 title: Extract libinfer into standalone repository ~/src/libinfer
 date: 2026-10-25
-status: In implementation
+status: Implemented
 covers:
   - "Extracting `crates/libinfer` from `flankr` into a new standalone repository `~/src/libinfer`"
   - "Creating root workspace and configuration for `~/src/libinfer` with members `libinfer` and `libinfer-gemini`"
@@ -131,4 +131,15 @@ In `~/src/handlr` (flankr):
 ## Amendment — 2026-10-25 14:53 EDT: implementation started
 
 Implementation has started. This document is now immutable.
+
+## Amendment — 2026-10-25 14:58 EDT: implementation completed
+
+Implementation has completed. Every step is done and its **Done when:** holds:
+
+- **Step 1 (create and initialize `~/src/libinfer`):** implemented in `~/src/libinfer` commits `e6bb434`, `d7e1cd2`, and `acb8f8e`. All fmt, clippy, and tests pass.
+- **Step 2 (versioning, tags, and repowiki registration):** implemented in `~/src/libinfer` commit `be7b61f` (tagged `v0.1.0`), and added to `~/src/repowiki/sites.toml`.
+- **Step 3 (cut over flankr workspace):** implemented in `flankr` commit `606ea89`. `crates/libinfer/` removed, path dependencies updated to `../libinfer/libinfer` and `../libinfer/libinfer-gemini`, all 360 unit, companion, daemon, link, live naming, and subscription tests passing cleanly.
+
+Status moves to `Implemented`.
+
 
