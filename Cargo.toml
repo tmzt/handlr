@@ -1,5 +1,5 @@
 [package]
-name = "handlr"
+name = "flankr"
 version = "0.1.0"
 edition = "2024"
 
@@ -22,7 +22,7 @@ toml = "0.8"
 blake2 = "0.10"
 getrandom = "0.2"
 # The daemon (src/server/): socket lines, peer uid, wire types.
-libhandlr_proto = { package = "libflankr_proto", path = "crates/libflankr_proto", features = ["link"] }
+libflankr_proto = { path = "crates/libflankr_proto", features = ["link"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 libc = "0.2"
@@ -30,10 +30,10 @@ libc = "0.2"
 # link sockets get SO_KEEPALIVE.
 base64 = "0.22"
 socket2 = "0.6"
-# `handlr pair`: the pairing URL's QR code as a PNG (plan 20261022_06).
+# `flankr pair`: the pairing URL's QR code as a PNG (plan 20261022_06).
 qrcodeurl = { path = "crates/qrcodeurl" }
 # The reading rules and the complexity measure (plan 20261023_05, A5).
-handlr-speech = { package = "flankr-speech", path = "crates/flankr-speech" }
+flankr-speech = { path = "crates/flankr-speech" }
 # ADDITIONAL_PROMPTS.md (src/prompts.rs, plan 20261023_05), v0.2.0.
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
 # agy session reader (src/sessions/agy.rs, plan 20261023_06).

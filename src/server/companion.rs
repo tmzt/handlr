@@ -1,4 +1,4 @@
-//! `handlr.companion` version 1 in the daemon: sessions, the turn service,
+//! `flankr.companion` version 1 in the daemon: sessions, the turn service,
 //! notices, vocabulary and interrupt keys
 //! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, decisions 8–13,
 //! with the amendments of 12:06, 17:59, 18:03, 18:05 and 18:07 EDT).
@@ -16,10 +16,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use libhandlr_proto::common::methods as common_methods;
-use libhandlr_proto::companion::{self, TurnOutcome, methods};
-use libhandlr_proto::envelope::codes;
-use libhandlr_proto::{ErrorObject, Id, Notification};
+use libflankr_proto::common::methods as common_methods;
+use libflankr_proto::companion::{self, TurnOutcome, methods};
+use libflankr_proto::envelope::codes;
+use libflankr_proto::{ErrorObject, Id, Notification};
 use libherdr::events::PaneAgentStatusChanged;
 use libherdr::protocol::AgentStatus;
 use libinfer::TurnContributor;
@@ -37,7 +37,7 @@ use crate::core::policy::Denied;
 use crate::core::principal::Principal;
 use crate::reasoning::{
     GeminiReasoningEngine, Message, ReasoningEngine, SessionManager, declare_gemini_tools,
-    default_system_prompt, with_handlr_routes,
+    default_system_prompt, with_flankr_routes,
 };
 use crate::transport::{HerdrContextContributor, HerdrToolExecutor, TurnLog, VoiceTurn};
 
@@ -102,7 +102,7 @@ impl TurnService {
 
     /// The engine. Gemini is built on first use, so a daemon without a key
     /// still serves everything else, and a turn says why it cannot think.
-    /// It is wrapped in handlr's routes, so "never mind" needs no request.
+    /// It is wrapped in flankr's routes, so "never mind" needs no request.
     fn engine(&self) -> Result<Arc<dyn ReasoningEngine>, String> {
         if let Some(engine) = &self.given {
             return Ok(Arc::clone(engine));
@@ -123,7 +123,7 @@ impl TurnService {
         }
         let gemini = builder.build()?;
         log::info!("The reasoning engine is Gemini, model {}", gemini.model());
-        let engine = with_handlr_routes(Arc::new(gemini));
+        let engine = with_flankr_routes(Arc::new(gemini));
         Ok(Arc::clone(self.gemini.get_or_init(|| engine)))
     }
 
@@ -500,7 +500,7 @@ pub(super) async fn agents_interrupt(
     principal: &Principal,
     snap: &Value,
     target: &str,
-) -> Result<libhandlr_proto::common::AgentsInterruptResult, ErrorObject> {
+) -> Result<libflankr_proto::common::AgentsInterruptResult, ErrorObject> {
     let names = daemon.names(snap);
     let named = names.resolve(target).map_err(super::conn::resolve_error)?;
     let pane_id = named.agent.pane_id.clone();
@@ -513,7 +513,7 @@ pub(super) async fn agents_interrupt(
                 ErrorObject::new(codes::HERDR_UNAVAILABLE, format!("herdr: {e}"))
             }
         })?;
-    Ok(libhandlr_proto::common::AgentsInterruptResult {
+    Ok(libflankr_proto::common::AgentsInterruptResult {
         interrupted,
         name: named.shown.clone(),
         spoken: named.spoken.clone(),
@@ -925,7 +925,7 @@ pub(super) async fn check_vocabulary(conn: Arc<Conn>) {
 /// be read.
 pub(super) async fn vocabulary(
     daemon: &Daemon,
-) -> (Vec<String>, Option<libhandlr_proto::common::FocusInfo>) {
+) -> (Vec<String>, Option<libflankr_proto::common::FocusInfo>) {
     match tokio::time::timeout(super::NAME_LOOKUP_TIMEOUT, daemon.client.list_panes()).await {
         Ok(Ok(snap)) => {
             let names = daemon.names(&snap);
@@ -1068,8 +1068,8 @@ mod tests {
     #[test]
     fn questions_name_the_command_the_agent_and_the_handle() {
         assert_eq!(
-            confirm_text("continue", "the handlr agent", None),
-            "Approve sending \"continue\" to the handlr agent?"
+            confirm_text("continue", "the flankr agent", None),
+            "Approve sending \"continue\" to the flankr agent?"
         );
         assert_eq!(
             confirm_text("/compact", "Claude", Some("compact-after-tests")),

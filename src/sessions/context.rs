@@ -203,12 +203,12 @@ mod tests {
     #[test]
     fn the_last_six_texts_and_the_tool_calls_among_them() {
         let items = transcript("0", 5, 10);
-        let block = AgentContext::new("The handlr agent", "w2:pZ", "idle", &items, None);
+        let block = AgentContext::new("The flankr agent", "w2:pZ", "idle", &items, None);
         assert_eq!(block.entries(), 6);
         // From "ask 2": calls after asks 2, 3 and 4.
         assert_eq!(block.tool_calls, 3);
         let text = block.render();
-        assert!(text.starts_with("#### The handlr agent (pane w2:pZ, idle)\n"));
+        assert!(text.starts_with("#### The flankr agent (pane w2:pZ, idle)\n"));
         assert!(!text.contains("ask 1"));
         assert!(text.contains("- user [2026-01-01T00:002:00Z]: ask 2"));
         assert!(text.contains("(3 tool calls in between)"));

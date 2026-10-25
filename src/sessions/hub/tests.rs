@@ -4,7 +4,7 @@
 use super::*;
 use crate::sessions::test_support::fixture;
 use crate::sessions::{EntryKind, Matched};
-use libhandlr_proto::common::{CardKind, SectionKind};
+use libflankr_proto::common::{CardKind, SectionKind};
 use std::io::Write as _;
 
 pub(crate) fn ts(n: u32) -> String {

@@ -1,4 +1,4 @@
-//! The server's static key, `~/.config/handlr/link_key`
+//! The server's static key, `~/.config/flankr/link_key`
 //! (plan 20261022_02, decision 4).
 //!
 //! The file holds the 32-byte X25519 private key in base64 (standard
@@ -11,7 +11,7 @@ use std::path::Path;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use libhandlr_proto::link::{KEY_LEN, StaticKeypair, generate_keypair};
+use libflankr_proto::link::{KEY_LEN, StaticKeypair, generate_keypair};
 
 /// Whether a file mode is 0600 or stricter: no access for group or others.
 pub fn mode_is_private(mode: u32) -> bool {

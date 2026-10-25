@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime};
 
-use libhandlr_proto::common::{
+use libflankr_proto::common::{
     CardKind, PendingQuestion, SERIAL_LINE_MAX, Section, SectionKind, Serial, Slot,
 };
 use libherdr::protocol::AgentStatus;

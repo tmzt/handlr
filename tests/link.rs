@@ -1,21 +1,21 @@
 //! The link end to end (plan 20261022_02, step 3, and the amendments of
 //! 18:20 and 23:07 EDT): pairing by public keys over TCP on 127.0.0.1 with
 //! an ephemeral port, in a temporary config directory, over the herdr mock.
-//! Nothing touches `~/.config/handlr` or a live herdr.
+//! Nothing touches `~/.config/flankr` or a live herdr.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use flankr::config::AppConfig;
+use flankr::server::companion::TurnOptions;
+use flankr::server::link::auth::{AuthFile, format_key};
+use flankr::server::link::{Link, LinkSettings};
+use flankr::server::{self, Daemon, ServeOptions};
+use flankr::sessions::Sessions;
+use flankr::transport::HerdrClient;
 use futures_util::StreamExt;
-use handlr::config::AppConfig;
-use handlr::server::companion::TurnOptions;
-use handlr::server::link::auth::{AuthFile, format_key};
-use handlr::server::link::{Link, LinkSettings};
-use handlr::server::{self, Daemon, ServeOptions};
-use handlr::sessions::Sessions;
-use handlr::transport::HerdrClient;
-use libhandlr_proto::link::{
+use libflankr_proto::link::{
     DeviceCode, LinkStream, PairingPayload, StaticKeypair, generate_keypair, reconnect,
 };
 use serde_json::{Value, json};
@@ -88,7 +88,7 @@ async fn start() -> Env {
     }
 }
 
-/// `handlr pair`, as a daemon-socket client.
+/// `flankr pair`, as a daemon-socket client.
 struct Local {
     write: OwnedWriteHalf,
     lines: FramedRead<OwnedReadHalf, LinesCodec>,
@@ -108,10 +108,10 @@ impl Local {
         let r = c
             .call(
                 "hello",
-                json!({"protocol": "handlr.harness", "version": 1, "client": "pair"}),
+                json!({"protocol": "flankr.harness", "version": 1, "client": "pair"}),
             )
             .await;
-        assert_eq!(r["result"]["server"], "handlr", "{r}");
+        assert_eq!(r["result"]["server"], "flankr", "{r}");
         c
     }
 
@@ -182,7 +182,7 @@ fn device(server: &[u8; 32], name: &str) -> (StaticKeypair, String) {
 fn hello_bytes() -> Vec<u8> {
     serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "id": 0, "method": "hello",
-        "params": {"protocol": "handlr.harness", "version": 1, "client": "test"}
+        "params": {"protocol": "flankr.harness", "version": 1, "client": "test"}
     }))
     .unwrap()
 }
@@ -220,7 +220,7 @@ async fn first_connect(env: &Env, keypair: &StaticKeypair) -> LinkStream<TcpStre
     stream
 }
 
-/// The whole flow, as `handlr pair` and the device run it: the code is
+/// The whole flow, as `flankr pair` and the device run it: the code is
 /// added, the device connects, and `link.pair_done` arrives. Returns the
 /// stream and the device's key pair.
 async fn pair_device(
@@ -244,7 +244,7 @@ async fn reconnect_with(
     env: &Env,
     private: &[u8; 32],
     first: &[u8],
-) -> Result<LinkStream<TcpStream>, libhandlr_proto::link::LinkError> {
+) -> Result<LinkStream<TcpStream>, libflankr_proto::link::LinkError> {
     let key = StaticKeypair::from_private(*private).unwrap();
     let tcp = TcpStream::connect(&env.address).await.unwrap();
     reconnect(tcp, &key, &env.link.public_key(), Some(first)).await
@@ -271,7 +271,7 @@ async fn pairing_reconnecting_and_revoking() {
     assert_eq!(
         begun["url"],
         format!(
-            "handlr://{}/pair#{}",
+            "flankr://{}/pair#{}",
             env.address,
             begun["pairing"].as_str().unwrap()
         )
@@ -312,7 +312,7 @@ async fn pairing_reconnecting_and_revoking() {
         .await
         .unwrap();
     let hello = recv(&mut stream).await;
-    assert_eq!(hello["result"]["server"], "handlr", "{hello}");
+    assert_eq!(hello["result"]["server"], "flankr", "{hello}");
     assert!(hello["result"].get("paired").is_none(), "{hello}");
     let r = call(&mut stream, 1, "agents.list").await;
     let agents = r["result"]["agents"].as_array().unwrap();
@@ -371,8 +371,8 @@ async fn codes_for_another_server_mistyped_codes_and_server_urls_are_refused() {
     for (code, why) in [
         (foreign, "another server"),
         (mistyped, "mistyped"),
-        (begun["url"].as_str().unwrap().to_string(), "handlrkey1"),
-        (begun["pairing"].as_str().unwrap().to_string(), "handlrkey1"),
+        (begun["url"].as_str().unwrap().to_string(), "flankrkey1"),
+        (begun["pairing"].as_str().unwrap().to_string(), "flankrkey1"),
     ] {
         let r = local.add(json!({"code": code})).await;
         assert_eq!(r["error"]["code"], -32602, "{r}");
@@ -426,11 +426,11 @@ async fn pairing_from_the_scanned_qr_code() {
     let env = start().await;
     let mut local = Local::connect(&env.socket).await;
     let begun = local.begin().await;
-    let shown = handlr::pair::Shown::new(begun["pairing"].as_str().unwrap()).unwrap();
+    let shown = flankr::pair::Shown::new(begun["pairing"].as_str().unwrap()).unwrap();
     let url = scan(&shown.png);
     assert_eq!(url, shown.url);
     assert_eq!(url, begun["url"]);
-    assert!(url.starts_with(&format!("handlr://{}/pair#handlr1", env.address)));
+    assert!(url.starts_with(&format!("flankr://{}/pair#flankr1", env.address)));
 
     // The phone has only what it scanned.
     let payload = PairingPayload::decode(&url).unwrap();
@@ -541,11 +541,11 @@ async fn hello_is_limited_to_the_entrys_protocols() {
         vec!["companion"]
     );
 
-    // handlr.companion is served (plan 02, step 4), with the session of
+    // flankr.companion is served (plan 02, step 4), with the session of
     // the paired name; it is the first hello answered, so it says paired.
     let companion = serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "id": 0, "method": "hello",
-        "params": {"protocol": "handlr.companion", "version": 1, "client": "phone"}
+        "params": {"protocol": "flankr.companion", "version": 1, "client": "phone"}
     }))
     .unwrap();
     let mut stream = reconnect_with(&env, &keypair.private, &companion)
@@ -609,7 +609,7 @@ async fn link_unpair_is_refused_on_the_daemon_socket() {
 /// so none reaches Gemini.
 fn test_config() -> AppConfig {
     AppConfig {
-        summary: handlr::config::SummaryConfig { cards: false },
+        summary: flankr::config::SummaryConfig { cards: false },
         ..AppConfig::default()
     }
 }

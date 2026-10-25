@@ -5,7 +5,7 @@
 //! question's (redacted) text gets a [`Link`] to its page on repowiki:
 //! `<url>/#/<site>/<path without .md>`, where the site is the agent's
 //! directory's parent and own name joined with `--` (repowiki's own rule:
-//! `/Users/tmeade/src/handlr` is `src--handlr`). Without the setting
+//! `/Users/tmeade/src/flankr` is `src--flankr`). Without the setting
 //! no `docs/…` path links.
 //!
 //! Every `http://` or `https://` URL in the text links to itself, with or
@@ -24,7 +24,7 @@
 
 use std::path::Path;
 
-use libhandlr_proto::common::{Entry, Link, PendingQuestion};
+use libflankr_proto::common::{Entry, Link, PendingQuestion};
 
 /// The repowiki site id for an agent's directory: its parent's and its own
 /// name joined with `--`. None for a directory without both.
@@ -271,7 +271,7 @@ pub fn plan_question(question: &str) -> (bool, Option<String>) {
     let about = says || !plans.is_empty();
     let name = match plans.as_slice() {
         [one] => {
-            let spoken = handlr_speech::read_aloud(one, handlr_speech::LocalTime::default());
+            let spoken = flankr_speech::read_aloud(one, flankr_speech::LocalTime::default());
             (!spoken.is_empty()).then_some(spoken)
         }
         _ => None,
@@ -282,15 +282,15 @@ pub fn plan_question(question: &str) -> (bool, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhandlr_proto::common::{EntryKind, Role};
+    use libflankr_proto::common::{EntryKind, Role};
 
     const PLAN: &str = "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md";
 
     #[test]
     fn the_site_is_the_parent_and_the_directory() {
         assert_eq!(
-            site_id(Path::new("/Users/tmeade/src/handlr")).as_deref(),
-            Some("src--handlr")
+            site_id(Path::new("/Users/tmeade/src/flankr")).as_deref(),
+            Some("src--flankr")
         );
         assert_eq!(site_id(Path::new("/")), None);
     }
@@ -315,12 +315,12 @@ mod tests {
 
     #[test]
     fn links_point_at_the_page_without_md() {
-        let links = links("http://wiki:8088/", "src--handlr", &format!("Read {PLAN}."));
+        let links = links("http://wiki:8088/", "src--flankr", &format!("Read {PLAN}."));
         assert_eq!(
             links,
             vec![Link {
                 text: PLAN.to_string(),
-                url: "http://wiki:8088/#/src--handlr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN"
+                url: "http://wiki:8088/#/src--flankr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN"
                     .to_string(),
             }]
         );
@@ -330,17 +330,17 @@ mod tests {
     fn docs_paths_are_not_linked_without_the_setting() {
         let text = format!("Wrote {PLAN}");
         assert!(
-            Linker::new(None, Some("/src/handlr"))
+            Linker::new(None, Some("/src/flankr"))
                 .links(&text)
                 .is_empty()
         );
         assert!(
-            Linker::new(Some(" "), Some("/src/handlr"))
+            Linker::new(Some(" "), Some("/src/flankr"))
                 .links(&text)
                 .is_empty()
         );
         assert!(Linker::new(Some("http://w"), None).links(&text).is_empty());
-        let linker = Linker::new(Some("http://w"), Some("/Users/t/src/handlr"));
+        let linker = Linker::new(Some("http://w"), Some("/Users/t/src/flankr"));
         let mut entry = Entry {
             ts: "t".into(),
             role: Role::Assistant,
@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(entry.links.len(), 1);
         assert_eq!(
             entry.links[0].url,
-            "http://w/#/src--handlr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN"
+            "http://w/#/src--flankr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN"
         );
     }
 
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn web_and_docs_links_come_in_text_order() {
-        let linker = Linker::new(Some("http://w"), Some("/Users/t/src/handlr"));
+        let linker = Linker::new(Some("http://w"), Some("/Users/t/src/flankr"));
         let texts: Vec<String> = linker
             .links(&format!("{PLAN} is at https://a.b/c; see {PLAN}."))
             .into_iter()

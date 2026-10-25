@@ -5,11 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_util::{Stream, StreamExt};
-use libhandlr_proto::common::{self, methods, protocols, topics};
-use libhandlr_proto::companion;
-use libhandlr_proto::envelope::codes;
-use libhandlr_proto::link::{KEY_LEN, LinkError, LinkStream};
-use libhandlr_proto::{ErrorObject, Id, Incoming, Notification, Request, Response};
+use libflankr_proto::common::{self, methods, protocols, topics};
+use libflankr_proto::companion;
+use libflankr_proto::envelope::codes;
+use libflankr_proto::link::{KEY_LEN, LinkError, LinkStream};
+use libflankr_proto::{ErrorObject, Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -66,7 +66,7 @@ pub(super) struct Conn {
     origin: Origin,
     out: mpsc::UnboundedSender<String>,
     principal: OnceLock<Principal>,
-    /// Set at `hello` for `handlr.companion`: its session.
+    /// Set at `hello` for `flankr.companion`: its session.
     session: OnceLock<Arc<Session>>,
     topics: Mutex<HashSet<String>>,
     inflight: Mutex<HashMap<Id, AbortHandle>>,
@@ -506,7 +506,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
         let _ = conn.session.set(conn.daemon.turns.session(&session_id));
         let paired_now = first_hello();
         let result = ok(companion::HelloResult {
-            server: "handlr".to_string(),
+            server: "flankr".to_string(),
             server_version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: COMPANION_VERSION,
             session_id: Some(session_id),
@@ -516,7 +516,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
         return Ok((principal, result));
     }
     let mut result = ok(common::HelloResult {
-        server: "handlr".to_string(),
+        server: "flankr".to_string(),
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: HARNESS_VERSION,
     })?;
@@ -1004,7 +1004,7 @@ async fn call(
                 }
                 error
             })?;
-            // How it was found, for `handlr ctl` (plan 20261023_01, section 4).
+            // How it was found, for `flankr ctl` (plan 20261023_01, section 4).
             let mut result = ok(common::ConfirmStatusResult {
                 confirm_id: found.view.confirm_id,
                 handle: found.view.handle,

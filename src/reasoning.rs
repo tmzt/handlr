@@ -1,4 +1,4 @@
-//! Reasoning engine trait, Gemini integration, and mock implementations for `handlr`.
+//! Reasoning engine trait, Gemini integration, and mock implementations for `flankr`.
 //!
 //! Grounded in the `herdr` terminal multiplexer architecture, converting spoken intent
 //! and natural-language transcripts into tool calls and concise spoken feedback.
@@ -217,7 +217,7 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
         .with_parameters::<FocusParams>(),
         FunctionDeclaration::new(
             "run_command",
-            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. handlr asks the user to approve it when that agent requires approval. Use the command's and agent's real names; the returned `handle` is the name handlr kept.",
+            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. flankr asks the user to approve it when that agent requires approval. Use the command's and agent's real names; the returned `handle` is the name flankr kept.",
             None,
         )
         .with_parameters::<RunCommandParams>(),
@@ -247,22 +247,22 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
 /// What a routed turn answers.
 pub const ROUTED_REPLY: &str = "Okay.";
 
-/// The utterances handlr answers without asking Gemini
+/// The utterances flankr answers without asking Gemini
 /// (docs/design/20261022_07_LIBINFER_PROVIDERS_PLAN.md, decision 4): the
 /// most common non-requests. Routes never call tools; approving and
 /// denying are the companion's own.
-pub fn handlr_routes() -> Vec<Route> {
+pub fn flankr_routes() -> Vec<Route> {
     vec![Route::new(
         &["never mind", "cancel", "forget it", "nothing"],
         ROUTED_REPLY,
     )]
 }
 
-/// `inner` behind [`handlr_routes`].
-pub fn with_handlr_routes(
+/// `inner` behind [`flankr_routes`].
+pub fn with_flankr_routes(
     inner: std::sync::Arc<dyn ReasoningEngine>,
 ) -> std::sync::Arc<dyn ReasoningEngine> {
-    std::sync::Arc::new(RoutingReasoningEngine::new(inner, handlr_routes()))
+    std::sync::Arc::new(RoutingReasoningEngine::new(inner, flankr_routes()))
 }
 
 // -------------------------------------------------------------------
@@ -284,7 +284,10 @@ mod tests {
     #[test]
     fn test_system_prompt_extraction() {
         let prompt = default_system_prompt().expect("should extract system prompt from PROMPT.md");
-        assert!(prompt.contains("reasoning engine for `handlr`"));
+        assert!(
+            prompt.contains("reasoning engine for `handlr`")
+                || prompt.contains("reasoning engine for `flankr`")
+        );
         assert!(prompt.contains("RAG-Based Environment Context"));
         assert!(prompt.contains("Action Tools (`focus`, `run_command`"));
         assert!(prompt.contains("`watch_pane(pane_id)`"));
@@ -299,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn test_prompt_leaves_approval_to_handlr() {
+    fn test_prompt_leaves_approval_to_flankr() {
         let prompt = default_system_prompt().expect("embedded prompt");
         assert!(prompt.contains("awaiting_user_approval"));
         assert!(!prompt.contains("NEVER** execute"));
@@ -429,7 +432,7 @@ mod tests {
             "list_panes",
             json!({
                 "workspaces": [
-                    {"workspace_id": "w1", "name": "handlr"},
+                    {"workspace_id": "w1", "name": "flankr"},
                     {"workspace_id": "w2", "name": "herdr"}
                 ]
             }),
@@ -493,7 +496,10 @@ mod tests {
 
         assert_eq!(engine.max_turns(), 5);
         let prompt = engine.system_prompt().expect("system prompt should be set");
-        assert!(prompt.contains("reasoning engine for `handlr`"));
+        assert!(
+            prompt.contains("reasoning engine for `handlr`")
+                || prompt.contains("reasoning engine for `flankr`")
+        );
         assert_eq!(engine.tools().len(), 1);
 
         let decls = match &engine.tools()[0] {

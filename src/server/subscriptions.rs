@@ -26,14 +26,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use libhandlr_proto::common::{
+use libflankr_proto::common::{
     self, LIVE_INLINE, PendingQuestion, SECTIONS_MAX, SLOTS_MAX, SUBSCRIPTIONS_MAX, Section,
     SessionContentParams, SessionContentResult, SessionDelivery, SessionHistoryParams,
     SessionHistoryResult, SessionRef, SessionSubscribeParams, SessionSubscribeResult,
     SessionUnsubscribeParams, Slot, delivery_reasons, methods,
 };
-use libhandlr_proto::envelope::codes;
-use libhandlr_proto::{ErrorObject, Id, Notification};
+use libflankr_proto::envelope::codes;
+use libflankr_proto::{ErrorObject, Id, Notification};
 use serde_json::Value;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;

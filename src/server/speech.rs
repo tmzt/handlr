@@ -6,11 +6,11 @@
 //! The client names the reply by its pane and time. The daemon reads the
 //! whole reply from the agent's session through the same reader and
 //! redaction as `session.peek` and measures it with
-//! [`handlr_speech::complexity`]. A complex reply, on a connection whose
+//! [`flankr_speech::complexity`]. A complex reply, on a connection whose
 //! `client.options` turned spoken output on, gets the `spoken_summary`
 //! prompt of `ADDITIONAL_PROMPTS.md`: one system text, one user message, no
 //! tools and no history. Every other reply is answered with
-//! [`handlr_speech::read_aloud`] at the daemon's local time. Summaries are
+//! [`flankr_speech::read_aloud`] at the daemon's local time. Summaries are
 //! kept by `(pane_id, ts)`, so the same reply is never summarised twice.
 //!
 //! With `[summary] cards` (the CHANGES.md departure of 2026-10-24 12:06
@@ -24,10 +24,10 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use handlr_speech::LocalTime;
-use libhandlr_proto::ErrorObject;
-use libhandlr_proto::common::{CARD_POINTS_MAX, SpeechSummarizeParams, SpeechSummarizeResult};
-use libhandlr_proto::envelope::codes;
+use flankr_speech::LocalTime;
+use libflankr_proto::ErrorObject;
+use libflankr_proto::common::{CARD_POINTS_MAX, SpeechSummarizeParams, SpeechSummarizeResult};
+use libflankr_proto::envelope::codes;
 use serde_json::Value;
 
 use super::conn::{self, Conn};
@@ -195,10 +195,10 @@ impl SpeechService {
         now: LocalTime,
         cached: Option<String>,
     ) -> Result<SpeechSummarizeResult, ErrorObject> {
-        let complex = handlr_speech::complexity(reply).is_complex();
+        let complex = flankr_speech::complexity(reply).is_complex();
         // The rules' version is made fresh every time: its clock times
         // are relative to now.
-        let read = handlr_speech::read_aloud(reply, now);
+        let read = flankr_speech::read_aloud(reply, now);
         // Both versions: a failed summary leaves `read` to be said.
         let summary = if !(complex && spoken_output) {
             None
@@ -453,7 +453,7 @@ mod tests {
     const PATHS: &str = "I changed three files:\n\
         - src/server/speech.rs\n\
         - src/sessions/mod.rs\n\
-        - crates/libhandlr_proto/src/common.rs\n\
+        - crates/libflankr_proto/src/common.rs\n\
         All tests pass.";
 
     const NOON: LocalTime = LocalTime {
@@ -485,14 +485,14 @@ mod tests {
         // Not complex: the rules, on or off.
         for on in [false, true] {
             let r = service
-                .answer("Claude", "handlr", BACKQUOTES, on, NOON, None)
+                .answer("Claude", "flankr", BACKQUOTES, on, NOON, None)
                 .await
                 .unwrap();
             assert_eq!(r.read, "Done: sessions reply text now joins the parts.");
             assert_eq!((r.summary, r.complex), (None, false));
         }
         let r = service
-            .answer("Claude", "handlr", PLAIN, true, NOON, None)
+            .answer("Claude", "flankr", PLAIN, true, NOON, None)
             .await
             .unwrap();
         assert_eq!(
@@ -501,7 +501,7 @@ mod tests {
         );
         // Complex, off: the rules, and no call.
         let r = service
-            .answer("Claude", "handlr", PATHS, false, NOON, None)
+            .answer("Claude", "flankr", PATHS, false, NOON, None)
             .await
             .unwrap();
         let rules = "I changed three files: the speech the mod the common All tests pass.";
@@ -510,7 +510,7 @@ mod tests {
         assert!(mock.recorded_transcripts().is_empty());
         // Complex, on: Gemini.
         let r = service
-            .answer("Claude", "handlr", PATHS, true, NOON, None)
+            .answer("Claude", "flankr", PATHS, true, NOON, None)
             .await
             .unwrap();
         // Both versions.
@@ -519,7 +519,7 @@ mod tests {
         assert!(r.complex);
         let sent = mock.recorded_transcripts();
         assert_eq!(sent.len(), 1);
-        assert!(sent[0].starts_with("The Claude agent in handlr replied:\n\n"));
+        assert!(sent[0].starts_with("The Claude agent in flankr replied:\n\n"));
         assert!(sent[0].ends_with("All tests pass."));
     }
 
@@ -606,14 +606,14 @@ mod tests {
             },
         );
         let s = service
-            .card_summary("Claude", "handlr", PATHS)
+            .card_summary("Claude", "flankr", PATHS)
             .await
             .unwrap();
         assert_eq!(s.spoken.as_deref(), Some("Written and pushed."));
         assert_eq!(s.points, ["Wrote it", "Pushed it"]);
         let sent = mock.recorded_transcripts();
         assert_eq!(sent.len(), 1);
-        assert!(sent[0].starts_with("The Claude agent in handlr replied:\n\n"));
+        assert!(sent[0].starts_with("The Claude agent in flankr replied:\n\n"));
         assert!(sent[0].contains("All tests pass.\n\nThen, after the spoken text"));
         assert!(sent[0].contains("at most 6 short lines"), "{}", sent[0]);
     }

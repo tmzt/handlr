@@ -1,11 +1,11 @@
-//! `handlr session tail`: follow one pane's session over the daemon socket
+//! `flankr session tail`: follow one pane's session over the daemon socket
 //! and print each delivery as it comes (plan 20261023_03, section 8, and
-//! A8.8). A read-only client: it says `hello` as `handlr.companion` with
+//! A8.8). A read-only client: it says `hello` as `flankr.companion` with
 //! the client name `tail`, subscribes, and sends nothing to herdr or to
 //! any pane.
 //!
 //! ```text
-//! handlr session tail [--pane <id or name>] [--follow] [--entries N] [--history N]
+//! flankr session tail [--pane <id or name>] [--follow] [--entries N] [--history N]
 //!                     [--outline] [--from N] [--to N]
 //! ```
 //!
@@ -28,13 +28,13 @@ use std::io::Write;
 use std::path::Path;
 
 use futures_util::StreamExt;
-use libhandlr_proto::common::{
+use libflankr_proto::common::{
     self, AgentsListResult, PendingQuestion, SECTIONS_MAX, Section, SectionKind,
     SessionContentParams, SessionContentResult, SessionDelivery, SessionHistoryParams,
     SessionHistoryResult, SessionSubscribeParams, SessionSubscribeResult, SessionUnsubscribeParams,
     Slot, methods, protocols,
 };
-use libhandlr_proto::{Id, Incoming, Request, companion};
+use libflankr_proto::{Id, Incoming, Request, companion};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -43,7 +43,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 
 use crate::server::conn::MAX_LINE;
 
-/// What `handlr session tail` was asked.
+/// What `flankr session tail` was asked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TailOptions {
     /// A pane id or a name; herdr's focus when absent.
@@ -221,7 +221,7 @@ struct Wire {
     lines: FramedRead<OwnedReadHalf, LinesCodec>,
     next_id: i64,
     /// Notifications that came while waiting for a response.
-    notes: std::collections::VecDeque<libhandlr_proto::Notification>,
+    notes: std::collections::VecDeque<libflankr_proto::Notification>,
 }
 
 impl Wire {
@@ -268,7 +268,7 @@ impl Wire {
         }
     }
 
-    async fn note(&mut self) -> Result<Option<libhandlr_proto::Notification>, String> {
+    async fn note(&mut self) -> Result<Option<libflankr_proto::Notification>, String> {
         if let Some(n) = self.notes.pop_front() {
             return Ok(Some(n));
         }
@@ -305,7 +305,7 @@ pub async fn run(
     }
     let stream = UnixStream::connect(socket).await.map_err(|e| {
         format!(
-            "connect {}: {e} (is `handlr serve` running?)",
+            "connect {}: {e} (is `flankr serve` running?)",
             socket.display()
         )
     })?;
@@ -533,7 +533,7 @@ async fn page_back(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhandlr_proto::common::{
+    use libflankr_proto::common::{
         CardBody, CardKind, Entry, EntryKind, Role, Serial, SessionMatched, SessionRef,
     };
 

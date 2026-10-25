@@ -394,7 +394,7 @@ mod tests {
         let snap = json!({"snapshot": {
             "panes": [
                 {"pane_id": "w1:p1", "agent": "Claude", "workspace_id": "w1", "tab_id": "w1:t1",
-                 "cwd": "/src/handlr", "agent_status": "blocked", "focused": true,
+                 "cwd": "/src/flankr", "agent_status": "blocked", "focused": true,
                  "agent_session": {"source": "herdr:claude", "agent": "claude", "kind": "id",
                                    "value": "00000000-0000-4000-8000-000000000001"}},
                 {"pane_id": "w2:p2", "workspace_id": "w2", "cwd": "/src/highbay/"}

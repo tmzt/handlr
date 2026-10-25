@@ -1,4 +1,4 @@
-//! What handlr calls an agent when it speaks or shows it
+//! What flankr calls an agent when it speaks or shows it
 //! (docs/design/20261022_05_SPOKEN_NAMES_PLAN.md, decisions 3–10).
 //!
 //! A pure module: a herdr snapshot and a [`NamingConfig`] go in, names come
@@ -308,7 +308,7 @@ impl Names {
     ///
     /// Agents are named among agents and shells among shells, so a shell in
     /// a project does not push its agent to a longer name; a shell's project
-    /// rung reads "the handlr shell".
+    /// rung reads "the flankr shell".
     pub fn from_snapshot(snapshot: &serde_json::Value, config: &NamingConfig) -> Self {
         let labels = agents::workspace_labels(snapshot);
         let refs = agents::agents(snapshot);
@@ -742,7 +742,7 @@ mod tests {
     /// workspace w2, "cc-highbay", with top-level tabs. Plus one shell.
     fn highbay() -> Value {
         let tabs = [
-            ("w2:pZ", "17-hr", 17, "/Users/tmeade/src/handlr"),
+            ("w2:pZ", "17-fl", 17, "/Users/tmeade/src/flankr"),
             ("w2:p2", "16-stt", 16, "/Users/tmeade/src/libvoicexn"),
             ("w2:p3", "-ad", 3, "/Users/tmeade/src/libmorph"),
             ("w2:p4", "-mb", 4, "/Users/tmeade/src/libmorph"),
@@ -804,16 +804,16 @@ mod tests {
                 .map(|a| a.agent.pane_id.clone())
                 .collect()
         };
-        assert_eq!(ids("What is the handlr agent waiting on?"), ["w2:pZ"]);
-        assert_eq!(ids("and handlr?"), ["w2:pZ"]);
+        assert_eq!(ids("What is the flankr agent waiting on?"), ["w2:pZ"]);
+        assert_eq!(ids("and flankr?"), ["w2:pZ"]);
         // Two agents share the project.
         assert_eq!(ids("check libmorph"), ["w2:p3", "w2:p4"]);
         assert_eq!(ids("what about tab em bee"), ["w2:p4"]);
         // Every agent is Claude: the agent part alone names none.
         assert!(ids("what is claude doing").is_empty());
         // Words, not substrings; short parts alone do not count.
-        assert!(ids("handlrs everywhere").is_empty());
-        assert!(ids("hr").is_empty());
+        assert!(ids("flankrs everywhere").is_empty());
+        assert!(ids("fl").is_empty());
         assert!(ids("").is_empty());
     }
 
@@ -843,7 +843,7 @@ mod tests {
             }
         }
         // All share cc-highbay, so the project is the cwd's basename.
-        assert_eq!(n.get("w2:pZ").unwrap().shown, "the handlr agent");
+        assert_eq!(n.get("w2:pZ").unwrap().shown, "the flankr agent");
         assert_eq!(n.get("w2:p2").unwrap().spoken, "the libvoicexn agent");
         // The lone shell is "Shell".
         assert_eq!(n.get("w1:p1").unwrap().shown, "Shell");
@@ -865,7 +865,7 @@ mod tests {
     fn workspace_label_is_the_project_when_not_shared() {
         let snap = json!({"snapshot": {
             "workspaces": [
-                {"workspace_id": "w1", "label": "handlr"},
+                {"workspace_id": "w1", "label": "flankr"},
                 {"workspace_id": "w2", "label": "highbay"}
             ],
             "panes": [
@@ -878,7 +878,7 @@ mod tests {
             ..NamingConfig::default()
         };
         let n = Names::from_snapshot(&snap, &workspace);
-        assert_eq!(n.get("w1:p6").unwrap().shown, "the handlr agent");
+        assert_eq!(n.get("w1:p6").unwrap().shown, "the flankr agent");
         assert_eq!(n.get("w2:p1").unwrap().shown, "the highbay agent");
     }
 
@@ -889,14 +889,14 @@ mod tests {
         let snap = json!({"snapshot": {
             "workspaces": [{"workspace_id": "w2", "label": "cc-highbay"}],
             "panes": [
-                {"pane_id": "w2:pZ", "agent": "claude", "workspace_id": "w2", "cwd": "/src/handlr"},
+                {"pane_id": "w2:pZ", "agent": "claude", "workspace_id": "w2", "cwd": "/src/flankr"},
                 {"pane_id": "w2:pR", "agent": "claude", "workspace_id": "w2", "cwd": "/src/libmorph"}
             ]
         }});
         let n = names(&snap);
         assert_eq!(
             n.get("w2:pZ").unwrap().project.as_ref().unwrap().shown,
-            "handlr"
+            "flankr"
         );
         assert_eq!(
             n.get("w2:pR").unwrap().project.as_ref().unwrap().shown,
@@ -923,17 +923,17 @@ mod tests {
     fn ladder_rungs() {
         // Lone agent: its name.
         let snap = json!({"snapshot": {"panes": [
-            {"pane_id": "w1:p1", "agent": "claude", "cwd": "/src/handlr"},
-            {"pane_id": "w1:p2", "agent": "agy", "cwd": "/src/handlr"},
+            {"pane_id": "w1:p1", "agent": "claude", "cwd": "/src/flankr"},
+            {"pane_id": "w1:p2", "agent": "agy", "cwd": "/src/flankr"},
             {"pane_id": "w1:p3", "agent": "claude", "cwd": "/src/highbay"},
             {"pane_id": "w1:p4", "agent": "agy", "cwd": "/src/other"}
         ]}});
         let n = names(&snap);
-        // Claude twice and handlr holds two agents: rung 3.
-        assert_eq!(n.get("p1").unwrap().shown, "Claude in handlr");
+        // Claude twice and flankr holds two agents: rung 3.
+        assert_eq!(n.get("p1").unwrap().shown, "Claude in flankr");
         // highbay holds only one agent: rung 2.
         assert_eq!(n.get("p3").unwrap().shown, "the highbay agent");
-        assert_eq!(n.get("p2").unwrap().shown, "Agy in handlr");
+        assert_eq!(n.get("p2").unwrap().shown, "Agy in flankr");
 
         // Same agent, project and tab label: rung 5, the tab number.
         let snap = json!({"snapshot": {
@@ -1059,10 +1059,10 @@ mod tests {
     // ── step 1: resolution ──
 
     #[test]
-    fn hr_resolves_to_handlr() {
+    fn fl_resolves_to_flankr() {
         let n = names(&highbay());
         for target in [
-            "hr", "HR", "17-hr", "aitch ar", "tab hr", "w2:pZ", "pZ", "H.R.",
+            "fl", "FL", "17-fl", "ef el", "tab fl", "w2:pZ", "pZ", "F.L.",
         ] {
             assert_eq!(
                 n.resolve(target).map(|a| a.agent.pane_id.as_str()),
@@ -1071,7 +1071,7 @@ mod tests {
             );
         }
         assert_eq!(
-            resolve_pane_id(&highbay(), &cfg(), "the handlr agent").as_deref(),
+            resolve_pane_id(&highbay(), &cfg(), "the flankr agent").as_deref(),
             Ok("w2:pZ")
         );
     }
@@ -1150,13 +1150,13 @@ mod tests {
         let vocab = names(&highbay()).vocabulary();
         for word in [
             "Claude",
-            "handlr",
+            "flankr",
             "libmorph",
             "cc-highbay",
-            "17-hr",
-            "hr",
-            "aitch ar",
-            "HR",
+            "17-fl",
+            "fl",
+            "ef el",
+            "FL",
             "-mb",
             "em bee",
             "MB",

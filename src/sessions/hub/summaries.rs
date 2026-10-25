@@ -17,7 +17,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use libhandlr_proto::common::{CardKind, Section};
+use libflankr_proto::common::{CardKind, Section};
 use tokio::sync::{Notify, mpsc};
 
 /// The most cards whose summaries are kept, the oldest asked dropped
@@ -150,7 +150,7 @@ pub fn spawn_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhandlr_proto::common::{CardBody, SectionKind, Serial};
+    use libflankr_proto::common::{CardBody, SectionKind, Serial};
 
     fn finished(line: u32, text: &str) -> Section {
         Section {

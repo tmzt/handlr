@@ -36,7 +36,7 @@ pub const RESOLVED_KEPT: Duration = Duration::from_secs(24 * 3600);
 /// Wrong nonces after which a confirmation is denied.
 pub const MAX_BAD_NONCES: u32 = 5;
 
-const NONCE_CONTEXT: &[u8] = b"handlr.confirm/1";
+const NONCE_CONTEXT: &[u8] = b"flankr.confirm/1";
 
 /// The BIP-39 English list: 2048 words, SHA-256
 /// `2f5eed53a4727b4bf8880d8f3f199efc90e58503646d9ff8eff3a2ed3b24dbda`.
@@ -121,7 +121,7 @@ impl Token {
         principal.can_approve.then_some(self.0.as_str())
     }
 
-    /// The token, for the daemon's own terminal (`handlr serve`) only.
+    /// The token, for the daemon's own terminal (`flankr serve`) only.
     pub fn expose_for_terminal(&self) -> &str {
         &self.0
     }
@@ -1811,7 +1811,7 @@ mod tests {
     fn priors() -> WordPriors {
         WordPriors::new()
             .with_commands(["continue", "/compact", "/usage", "/clear"])
-            .with_agents(["claude", "omp", "Agy", "handlr"])
+            .with_agents(["claude", "omp", "Agy", "flankr"])
             .with_projects(["highbay", "bubble"])
             .with_letter_names(crate::core::naming::LETTER_NAMES)
     }
@@ -2026,12 +2026,12 @@ mod tests {
     fn a_garbled_utterance_keeps_geminis_handle() {
         // Speech-to-text heard "sin did again"; Gemini's handle is kept.
         let settled = settle_handle(
-            &req(Some("send-continue-again-handlr")),
+            &req(Some("send-continue-again-flankr")),
             &[],
             &priors(),
             no_word,
         );
-        assert_eq!(settled, HandleInfo::new("send-continue-again-handlr"));
+        assert_eq!(settled, HandleInfo::new("send-continue-again-flankr"));
         let settled = settle_handle(
             &req(Some("Send-Usage-Claude-Highbay")),
             &[],

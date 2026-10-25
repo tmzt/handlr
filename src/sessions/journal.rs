@@ -1,9 +1,9 @@
 //! The approval journal (plan 20261023_03, the 14:54 EDT amendment, A4).
 //!
-//! Approval cards come from handlr's confirmations, not the session file.
+//! Approval cards come from flankr's confirmations, not the session file.
 //! So that history and a restarted daemon can rebuild them, each
 //! confirmation that reaches a session's pane is appended to
-//! `~/.local/state/handlr/sessions/<session id>.jsonl` (directory 0700,
+//! `~/.local/state/flankr/sessions/<session id>.jsonl` (directory 0700,
 //! file 0600), one line when it is asked and one when it resolves:
 //!
 //! ```json

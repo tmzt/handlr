@@ -200,13 +200,13 @@ mod tests {
         assert!(!system.contains("{{"));
         let v = values(&[
             ("agent", "claude"),
-            ("project", "handlr"),
+            ("project", "flankr"),
             ("reply", "Done: `src/prompts.rs` added."),
         ]);
         let user = p.fill(&p.user, &v).unwrap();
         assert_eq!(
             user,
-            "The claude agent in handlr replied:\n\nDone: `src/prompts.rs` added."
+            "The claude agent in flankr replied:\n\nDone: `src/prompts.rs` added."
         );
     }
 

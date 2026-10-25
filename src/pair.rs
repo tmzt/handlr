@@ -1,4 +1,4 @@
-//! `handlr pair`: print the daemon's pairing URL and its QR code as a
+//! `flankr pair`: print the daemon's pairing URL and its QR code as a
 //! `data:` URL, read the code the device shows, add the device with
 //! `link.pair_add`, and wait for it to connect (plan 20261022_02, decision
 //! 5 as amended at 23:07 EDT; plan 20261022_06, step 3 as amended at 22:55
@@ -13,12 +13,12 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use futures_util::StreamExt;
-use libhandlr_proto::common::{
+use libflankr_proto::common::{
     HelloParams, LinkPairAddParams, LinkPairAddResult, LinkPairBeginParams, LinkPairBeginResult,
     LinkPairDone, methods, protocols,
 };
-use libhandlr_proto::link::{PAIRING_PREFIX, PAIRING_URL_SCHEME, PairingPayload};
-use libhandlr_proto::{ErrorObject, Id, Incoming, Notification, Request};
+use libflankr_proto::link::{PAIRING_PREFIX, PAIRING_URL_SCHEME, PairingPayload};
+use libflankr_proto::{ErrorObject, Id, Incoming, Notification, Request};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -30,14 +30,14 @@ use crate::server::conn::MAX_LINE;
 /// The prompt for the device's code.
 pub const PROMPT: &str = "Paste the pairing code from the device: ";
 
-/// What `handlr pair` says of a pasted server address.
+/// What `flankr pair` says of a pasted server address.
 pub const NOT_A_DEVICE_CODE: &str =
     "That is this server's pairing URL; paste it on the device, then paste the device's code here.";
 
-/// What `handlr pair` shows for the server.
+/// What `flankr pair` shows for the server.
 #[derive(Debug)]
 pub struct Shown {
-    /// `handlr://<host>:<port>/pair#handlr1…`.
+    /// `flankr://<host>:<port>/pair#flankr1…`.
     pub url: String,
     /// The PNG of the URL's QR code.
     pub png: Vec<u8>,
@@ -67,7 +67,7 @@ impl Shown {
     }
 }
 
-/// What `handlr pair` was asked for.
+/// What `flankr pair` was asked for.
 #[derive(Debug, Clone, Default)]
 pub struct PairOptions {
     /// Pair as this name instead of the device's own.
@@ -123,7 +123,7 @@ impl Daemon {
     async fn connect(socket: &Path) -> Result<Daemon, String> {
         let stream = UnixStream::connect(socket).await.map_err(|e| {
             format!(
-                "connect {}: {e} (is `handlr serve` running?)",
+                "connect {}: {e} (is `flankr serve` running?)",
                 socket.display()
             )
         })?;
@@ -220,7 +220,7 @@ impl Daemon {
     }
 }
 
-/// Run `handlr pair`. Returns the process exit code.
+/// Run `flankr pair`. Returns the process exit code.
 pub async fn run(socket: &Path, options: PairOptions) -> Result<i32, String> {
     let mut daemon = Daemon::connect(socket).await?;
     let begun = match daemon
@@ -229,7 +229,7 @@ pub async fn run(socket: &Path, options: PairOptions) -> Result<i32, String> {
     {
         Ok(result) => result,
         Err(error) => {
-            eprintln!("handlr pair: {}", error.message);
+            eprintln!("flankr pair: {}", error.message);
             return Ok(1);
         }
     };
@@ -268,7 +268,7 @@ pub async fn run(socket: &Path, options: PairOptions) -> Result<i32, String> {
                     .map_err(|e| format!("unexpected reply: {e}"))?;
             }
             Err(error) => {
-                eprintln!("handlr pair: {}", error.message);
+                eprintln!("flankr pair: {}", error.message);
                 if options.code.is_some() {
                     return Ok(1);
                 }
@@ -316,7 +316,7 @@ fn show(result: &LinkPairBeginResult, qr_png: Option<&Path>) -> Result<(), Strin
     if !shown.remote {
         eprintln!(
             "warning: every address is this machine's own; a phone cannot reach it \
-             (run tailscale serve, or pass --listen to handlr serve)"
+             (run tailscale serve, or pass --listen to flankr serve)"
         );
     }
     println!("{}", shown.url);
@@ -345,7 +345,7 @@ fn write_png(path: &Path, png: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use libhandlr_proto::link::generate_keypair;
+    use libflankr_proto::link::generate_keypair;
 
     fn pairing(addresses: &[&str]) -> String {
         PairingPayload {
@@ -362,7 +362,7 @@ mod tests {
         let shown = Shown::new(&pairing).unwrap();
         assert_eq!(
             shown.url,
-            format!("handlr://m4.tail1a2b3c.ts.net:7347/pair#{pairing}")
+            format!("flankr://m4.tail1a2b3c.ts.net:7347/pair#{pairing}")
         );
         assert!(shown.remote);
         assert_eq!(shown.png, qrcodeurl::png(&shown.url).unwrap());
@@ -381,7 +381,7 @@ mod tests {
     fn loopback_alone_is_not_remote() {
         let shown = Shown::new(&pairing(&["127.0.0.1:7347"])).unwrap();
         assert!(!shown.remote);
-        assert!(shown.url.starts_with("handlr://127.0.0.1:7347/pair#"));
+        assert!(shown.url.starts_with("flankr://127.0.0.1:7347/pair#"));
     }
 
     #[test]
@@ -408,8 +408,8 @@ mod tests {
         }
         assert_eq!(Pasted::classify("  \n"), Pasted::Empty);
         assert_eq!(
-            Pasted::classify(" handlrkey1abc\n"),
-            Pasted::Code("handlrkey1abc".to_string())
+            Pasted::classify(" flankrkey1abc\n"),
+            Pasted::Code("flankrkey1abc".to_string())
         );
     }
 }

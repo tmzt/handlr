@@ -8,17 +8,17 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use flankr::config::{AppConfig, SummaryConfig};
+use flankr::reasoning::MockReasoningEngine;
+use flankr::server::companion::TurnOptions;
+use flankr::server::link::auth::{self, AuthEntry};
+use flankr::server::link::{Link, LinkSettings};
+use flankr::server::speech::SpeechOptions;
+use flankr::server::{self, Daemon, ServeOptions};
+use flankr::sessions::Sessions;
+use flankr::transport::{AgentSession, HerdrClient, HerdrTransport, PaneInfo};
 use futures_util::StreamExt;
-use handlr::config::{AppConfig, SummaryConfig};
-use handlr::reasoning::MockReasoningEngine;
-use handlr::server::companion::TurnOptions;
-use handlr::server::link::auth::{self, AuthEntry};
-use handlr::server::link::{Link, LinkSettings};
-use handlr::server::speech::SpeechOptions;
-use handlr::server::{self, Daemon, ServeOptions};
-use handlr::sessions::Sessions;
-use handlr::transport::{AgentSession, HerdrClient, HerdrTransport, PaneInfo};
-use libhandlr_proto::link::{LinkStream, StaticKeypair, generate_keypair, reconnect};
+use libflankr_proto::link::{LinkStream, StaticKeypair, generate_keypair, reconnect};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -285,7 +285,7 @@ impl Client {
             bytes: 0,
         };
         let r = c.call("hello", hello(protocol)["params"].clone()).await;
-        assert_eq!(r["result"]["server"], "handlr", "{r}");
+        assert_eq!(r["result"]["server"], "flankr", "{r}");
         c
     }
 
@@ -305,7 +305,7 @@ impl Client {
 
     async fn link_with(address: &str, link: &Link, keypair: &StaticKeypair) -> Client {
         let tcp = TcpStream::connect(address).await.unwrap();
-        let first = serde_json::to_vec(&hello("handlr.companion")).unwrap();
+        let first = serde_json::to_vec(&hello("flankr.companion")).unwrap();
         let stream = reconnect(tcp, keypair, &link.public_key(), Some(&first))
             .await
             .unwrap();
@@ -316,7 +316,7 @@ impl Client {
             bytes: 0,
         };
         let r = c.recv(WAIT).await.expect("hello answered");
-        assert_eq!(r["result"]["server"], "handlr", "{r}");
+        assert_eq!(r["result"]["server"], "flankr", "{r}");
         c
     }
 
@@ -451,7 +451,7 @@ fn newest(delivery: &Value) -> String {
 #[tokio::test]
 async fn a_subscription_backfills_then_pushes_within_a_second() {
     let env = start(false).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let id = c
         .request(
             "session.subscribe",
@@ -517,7 +517,7 @@ async fn after_gives_only_what_was_missed() {
     let mut lines: Vec<String> = (0..400).map(|_| blob()).collect();
     lines.push(user(500, "the last one before"));
     append_lines(&env.session(SESSION_A), &lines);
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1"})).await;
     let held = newest(&r["delivery"]);
     let sub = r["subscription_id"].as_u64().unwrap();
@@ -548,7 +548,7 @@ async fn after_gives_only_what_was_missed() {
 #[tokio::test]
 async fn a_new_session_in_the_pane_resets_onto_it() {
     let env = start(false).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1"})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
     // `/clear`: a new file, and herdr reports its id.
@@ -585,7 +585,7 @@ async fn herdr_focus_is_pushed_at_once_and_the_subscription_stays() {
         panes.push(p2);
     })
     .await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1"})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
     env.set_focus("p2").await;
@@ -613,7 +613,7 @@ async fn herdr_focus_is_pushed_at_once_and_the_subscription_stays() {
 #[tokio::test]
 async fn a_closed_pane_ends_its_subscription() {
     let env = start(false).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1"})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
     env.pane(|panes| panes.clear()).await;
@@ -636,7 +636,7 @@ async fn a_closed_pane_ends_its_subscription() {
 #[tokio::test]
 async fn a_connection_holds_at_most_eight() {
     let env = start(false).await;
-    let mut c = Client::unix(&env.socket, "handlr.harness").await;
+    let mut c = Client::unix(&env.socket, "flankr.harness").await;
     for bad in [0, 201] {
         let r = c
             .call(
@@ -848,10 +848,10 @@ async fn a_client_that_stops_reading_gets_a_reset_not_everything() {
 #[tokio::test]
 async fn a_confirmation_for_the_pane_is_an_approval_card_and_journalled() {
     let env = start(false).await;
-    let mut phone = Client::unix(&env.socket, "handlr.companion").await;
+    let mut phone = Client::unix(&env.socket, "flankr.companion").await;
     let r = phone.subscribe(json!({"pane_id": "p1"})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
-    let mut mcp = Client::unix(&env.socket, "handlr.harness").await;
+    let mut mcp = Client::unix(&env.socket, "flankr.harness").await;
     let r = mcp
         .call(
             "agents.send",
@@ -892,7 +892,7 @@ async fn a_confirmation_for_the_pane_is_an_approval_card_and_journalled() {
     let journal = env
         .dir
         .path()
-        .join("home/.local/state/handlr/sessions")
+        .join("home/.local/state/flankr/sessions")
         .join(format!("{SESSION_A}.jsonl"));
     let text = std::fs::read_to_string(&journal).unwrap();
     let lines: Vec<Value> = text
@@ -913,7 +913,7 @@ async fn a_confirmation_for_the_pane_is_an_approval_card_and_journalled() {
     assert!(card(&r["delivery"], false), "{}", r["delivery"]);
 }
 
-/// What `handlr session tail` printed, shared with the test.
+/// What `flankr session tail` printed, shared with the test.
 #[derive(Clone, Default)]
 struct Printed(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -946,13 +946,13 @@ impl Printed {
     }
 }
 
-/// `handlr session tail` against the daemon, printing into `Printed`.
-fn tail(env: &Env, options: handlr::tail::TailOptions) -> (Printed, tokio::task::JoinHandle<()>) {
+/// `flankr session tail` against the daemon, printing into `Printed`.
+fn tail(env: &Env, options: flankr::tail::TailOptions) -> (Printed, tokio::task::JoinHandle<()>) {
     let socket = env.socket.clone();
     let printed = Printed::default();
     let mut out = printed.clone();
     let job = tokio::spawn(async move {
-        let code = handlr::tail::run(&socket, &options, &mut out)
+        let code = flankr::tail::run(&socket, &options, &mut out)
             .await
             .unwrap();
         assert_eq!(code, 0);
@@ -978,11 +978,11 @@ async fn session_tail_backfills_pages_back_and_prints_what_comes() {
     // back: lines 13 to 32.
     let (printed, job) = tail(
         &env,
-        handlr::tail::TailOptions {
+        flankr::tail::TailOptions {
             pane: Some("p1".to_string()),
             sections: 6,
             history: 20,
-            ..handlr::tail::TailOptions::default()
+            ..flankr::tail::TailOptions::default()
         },
     );
     printed.wait_for("-- history: 20 section(s) before ").await;
@@ -1009,12 +1009,12 @@ async fn session_tail_follows_the_focus_only_when_asked() {
     })
     .await;
     // Without --pane: herdr's focus, p1. One tail follows, one does not.
-    let follow = handlr::tail::TailOptions {
+    let follow = flankr::tail::TailOptions {
         follow: true,
-        ..handlr::tail::TailOptions::default()
+        ..flankr::tail::TailOptions::default()
     };
     let (following, a) = tail(&env, follow);
-    let (staying, b) = tail(&env, handlr::tail::TailOptions::default());
+    let (staying, b) = tail(&env, flankr::tail::TailOptions::default());
     following.wait_for("-- subscribed to p1 --").await;
     staying.wait_for("-- subscribed to p1 --").await;
     env.set_focus("p2").await;
@@ -1061,7 +1061,7 @@ async fn an_outline_covers_every_index_in_chunks_with_only_the_newest_contents()
         .map(|i| user(i, &format!("prompt {i}")))
         .collect();
     write_lines(&env.session(SESSION_A), &lines);
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
     let first = &r["delivery"];
@@ -1110,10 +1110,10 @@ async fn an_outline_covers_every_index_in_chunks_with_only_the_newest_contents()
 #[tokio::test]
 async fn an_outline_resumes_from_an_index_and_content_answers_ranges() {
     let env = start(false).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     // Three turns and replies: two resolved Finished cards, and a live one
     // with the pane idle.
-    env.pane(|panes| panes[0].agent_status = Some(handlr::transport::AgentStatus::Idle))
+    env.pane(|panes| panes[0].agent_status = Some(flankr::transport::AgentStatus::Idle))
         .await;
     let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
@@ -1245,7 +1245,7 @@ async fn an_outline_resumes_from_an_index_and_content_answers_ranges() {
 #[tokio::test]
 async fn content_of_a_file_the_subscription_moved_off_is_session_changed() {
     let env = start(false).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
     let r = c
@@ -1304,7 +1304,7 @@ async fn content_of_a_file_the_subscription_moved_off_is_session_changed() {
 #[tokio::test]
 async fn a_subscription_without_outline_is_as_before_beside_one_with_it() {
     let env = start(false).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let outlined = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
     let r = c.subscribe(json!({"pane_id": "p1"})).await;
     let plain = r["subscription_id"].as_u64().unwrap();
@@ -1344,10 +1344,10 @@ async fn session_tail_prints_the_outline_and_a_content_range() {
     let env = start(false).await;
     let (printed, job) = tail(
         &env,
-        handlr::tail::TailOptions {
+        flankr::tail::TailOptions {
             pane: Some("p1".to_string()),
             content: Some((Some(0), Some(2))),
-            ..handlr::tail::TailOptions::default()
+            ..flankr::tail::TailOptions::default()
         },
     );
     let marker = "-- content #0 to #2: 3 section(s) --";
@@ -1416,7 +1416,7 @@ async fn an_entry_carries_its_full_text_and_its_summary_stays_at_500() {
         &env.session(SESSION_A),
         &[user(100, "go on"), reply(101, &long)],
     );
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1"})).await;
     let first = &r["delivery"];
     let text = first["sections"]
@@ -1443,7 +1443,7 @@ async fn an_entry_carries_its_full_text_and_its_summary_stays_at_500() {
 async fn a_finished_card_gets_its_points_and_spoken_text_and_is_replaced() {
     let mock = Arc::new(MockReasoningEngine::with_response(CARD_ANSWER));
     let env = start_summarising(Arc::clone(&mock), true).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
     let sub = r["subscription_id"].as_u64().unwrap();
     let first = &r["delivery"];
@@ -1504,7 +1504,7 @@ async fn a_finished_card_gets_its_points_and_spoken_text_and_is_replaced() {
     assert!(sent[0].contains("POINTS:"), "{}", sent[0]);
     // A second subscriber gets the summary with the card, and nothing is
     // asked again.
-    let mut d = Client::unix(&env.socket, "handlr.companion").await;
+    let mut d = Client::unix(&env.socket, "flankr.companion").await;
     let again = d.subscribe(json!({"pane_id": "p1"})).await;
     assert!(summarised(&again["delivery"]).is_some(), "{again}");
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1547,7 +1547,7 @@ async fn a_finished_card_gets_its_points_and_spoken_text_and_is_replaced() {
 async fn with_cards_off_no_summary_is_asked() {
     let mock = Arc::new(MockReasoningEngine::with_response(CARD_ANSWER));
     let env = start_summarising(Arc::clone(&mock), false).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1", "outline": true})).await;
     append_lines(
         &env.session(SESSION_A),
@@ -1579,7 +1579,7 @@ async fn with_cards_off_no_summary_is_asked() {
 async fn without_gemini_a_finished_card_keeps_its_fields_empty() {
     let mock = Arc::new(MockReasoningEngine::with_error("GEMINI_API_KEY not set"));
     let env = start_summarising(Arc::clone(&mock), true).await;
-    let mut c = Client::unix(&env.socket, "handlr.companion").await;
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
     let r = c.subscribe(json!({"pane_id": "p1"})).await;
     let started = Instant::now();
     while mock.recorded_transcripts().is_empty() {

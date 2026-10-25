@@ -1,7 +1,7 @@
 //! Reaching the link from the tailnet (plan 20261022_02, the 11:58 EDT
 //! amendment, "Listening").
 //!
-//! handlr never changes Tailscale's configuration. It reads `tailscale
+//! flankr never changes Tailscale's configuration. It reads `tailscale
 //! status --json` and `tailscale serve status --json`, and when Tailscale
 //! is running without the forward, logs the command that adds it.
 
@@ -28,7 +28,7 @@ pub enum Tailscale {
 }
 
 impl Tailscale {
-    /// The warning to give the person running handlr, if any.
+    /// The warning to give the person running flankr, if any.
     pub fn warning(&self) -> Option<String> {
         match self {
             Tailscale::NoForward { .. } => Some(format!(

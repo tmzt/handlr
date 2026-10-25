@@ -36,7 +36,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use libhandlr_proto::common::{CardBody, CardKind, Section, SectionKind, Serial};
+use libflankr_proto::common::{CardBody, CardKind, Section, SectionKind, Serial};
 use libherdr::protocol::AgentStatus;
 
 use super::links::Linker;
@@ -235,7 +235,7 @@ impl Builder {
         }
     }
 
-    fn entry(&self, item: &Item) -> libhandlr_proto::common::Entry {
+    fn entry(&self, item: &Item) -> libflankr_proto::common::Entry {
         let mut entry = item.entry();
         self.linker.link_entry(&mut entry);
         entry

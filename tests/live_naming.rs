@@ -3,9 +3,9 @@
 //! than only fixtures.
 //!
 //! Capture one with `herdr api snapshot > snap.json`, then:
-//! `HANDLR_SNAPSHOT=snap.json cargo test --test live_naming -- --nocapture`
-use handlr::config::NamingConfig;
-use handlr::core::naming::Names;
+//! `FLANKR_SNAPSHOT=snap.json cargo test --test live_naming -- --nocapture`
+use flankr::config::NamingConfig;
+use flankr::core::naming::Names;
 
 /// Whether `name` contains `pane_id`, fully qualified or as a short id word.
 fn contains_pane_id(name: &str, pane_id: &str) -> bool {
@@ -18,8 +18,8 @@ fn contains_pane_id(name: &str, pane_id: &str) -> bool {
 
 #[test]
 fn names_agents_in_a_captured_snapshot() {
-    let Ok(path) = std::env::var("HANDLR_SNAPSHOT") else {
-        eprintln!("HANDLR_SNAPSHOT not set; skipping");
+    let Ok(path) = std::env::var("FLANKR_SNAPSHOT") else {
+        eprintln!("FLANKR_SNAPSHOT not set; skipping");
         return;
     };
     let text = std::fs::read_to_string(&path).expect("read snapshot");

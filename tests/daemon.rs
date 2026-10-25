@@ -1,4 +1,4 @@
-//! `handlr serve` end to end, on a temporary socket, over the herdr mock
+//! `flankr serve` end to end, on a temporary socket, over the herdr mock
 //! (plan 20261022_01, step 5). The mock's command log stands in for the
 //! panes, so nothing is typed into a real session.
 
@@ -6,14 +6,14 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use flankr::config::AppConfig;
+use flankr::core::confirm::{ConfirmEvent, nonce};
+use flankr::core::principal::Principal;
+use flankr::server::companion::TurnOptions;
+use flankr::server::{self, Daemon, ServeOptions};
+use flankr::sessions::Sessions;
+use flankr::transport::{HerdrClient, HerdrTransport};
 use futures_util::StreamExt;
-use handlr::config::AppConfig;
-use handlr::core::confirm::{ConfirmEvent, nonce};
-use handlr::core::principal::Principal;
-use handlr::server::companion::TurnOptions;
-use handlr::server::{self, Daemon, ServeOptions};
-use handlr::sessions::Sessions;
-use handlr::transport::{HerdrClient, HerdrTransport};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -44,10 +44,10 @@ impl Client {
         let r = c
             .call(
                 "hello",
-                json!({"protocol": "handlr.harness", "version": 1, "client": client}),
+                json!({"protocol": "flankr.harness", "version": 1, "client": client}),
             )
             .await;
-        assert_eq!(r["result"]["server"], "handlr", "{r}");
+        assert_eq!(r["result"]["server"], "flankr", "{r}");
         c
     }
 
@@ -142,7 +142,7 @@ async fn hello_must_come_first() {
     let r = c
         .call(
             "hello",
-            json!({"protocol": "handlr.nope", "version": 1, "client": "t"}),
+            json!({"protocol": "flankr.nope", "version": 1, "client": "t"}),
         )
         .await;
     assert_eq!(r["error"]["code"], -32011);
@@ -339,15 +339,15 @@ async fn closing_the_connection_cancels_its_confirmations() {
     for _ in 0..50 {
         let status = daemon
             .broker
-            .status(&principal, &handlr::core::confirm::StatusKey::Id(id))
+            .status(&principal, &flankr::core::confirm::StatusKey::Id(id))
             .map(|(_, o)| o);
-        if status != Some(handlr::core::confirm::Outcome::Pending) {
+        if status != Some(flankr::core::confirm::Outcome::Pending) {
             outcome = status;
             break;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(outcome, Some(handlr::core::confirm::Outcome::Cancelled));
+    assert_eq!(outcome, Some(flankr::core::confirm::Outcome::Cancelled));
     assert!(sent(&daemon).await.is_empty());
 }
 
@@ -362,7 +362,7 @@ async fn closing_the_connection_cancels_its_confirmations() {
 /// label `dev`.
 fn tabbed_snapshot() -> Value {
     let tabs = [
-        ("w1:p1", "w1:t1", "17-hr", 17, "/src/handlr"),
+        ("w1:p1", "w1:t1", "17-fl", 17, "/src/flankr"),
         ("w1:p2", "w1:t2", "-mb", 4, "/src/libmorph"),
         ("w1:p3", "w1:t3", "-ad", 3, "/src/libmorph"),
         ("w1:p4", "w1:t4", "dev", 5, "/src/alpha"),
@@ -488,11 +488,11 @@ async fn agents_are_listed_with_names_and_tabs() {
     let agents = r["result"]["agents"].as_array().unwrap();
     let by_pane = |id: &str| agents.iter().find(|a| a["pane_id"] == id).unwrap();
 
-    let hr = by_pane("w1:p1");
-    assert_eq!(hr["name"], "the handlr agent", "{r}");
-    assert_eq!(hr["spoken"], "the handlr agent");
-    assert_eq!(hr["tab_label"], "17-hr");
-    assert_eq!(hr["tab_number"], 17);
+    let fl = by_pane("w1:p1");
+    assert_eq!(fl["name"], "the flankr agent", "{r}");
+    assert_eq!(fl["spoken"], "the flankr agent");
+    assert_eq!(fl["tab_label"], "17-fl");
+    assert_eq!(fl["tab_number"], 17);
 
     let mb = by_pane("w1:p2");
     assert_eq!(mb["name"], "Claude in libmorph, tab -mb");
@@ -519,7 +519,7 @@ async fn agents_are_listed_with_names_and_tabs() {
 async fn targets_resolve_by_label_spoken_form_and_tab_number() {
     let (_dir, socket, _daemon, herdr) = start_tabbed().await;
     let mut c = Client::hello(&socket, "t").await;
-    for target in ["hr", "HR", "17-hr", "aitch ar", "w1:p1", "p1"] {
+    for target in ["fl", "FL", "17-fl", "ef el", "w1:p1", "p1"] {
         let r = c
             .call("agents.read", json!({"pane_id": target, "lines": 5}))
             .await;
@@ -543,7 +543,7 @@ async fn targets_resolve_by_label_spoken_form_and_tab_number() {
     assert_eq!(r["result"]["watched"], json!([]), "{r}");
 
     // agents.focus resolves names, and passes workspace and tab ids through.
-    for target in ["hr", "w1", "w1:t2"] {
+    for target in ["fl", "w1", "w1:t2"] {
         let r = c.call("agents.focus", json!({"target_id": target})).await;
         assert!(r.get("error").is_none(), "{target}: {r}");
     }
@@ -718,7 +718,7 @@ async fn status_by_handle_lists_pending_when_ambiguous() {
 /// so none reaches Gemini.
 fn test_config() -> AppConfig {
     AppConfig {
-        summary: handlr::config::SummaryConfig { cards: false },
+        summary: flankr::config::SummaryConfig { cards: false },
         ..AppConfig::default()
     }
 }

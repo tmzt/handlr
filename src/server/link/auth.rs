@@ -1,4 +1,4 @@
-//! The paired clients, `~/.config/handlr/auth.toml`
+//! The paired clients, `~/.config/flankr/auth.toml`
 //! (plan 20261022_02, decision 6, and the 18:20 EDT amendment).
 //!
 //! ```toml
@@ -22,8 +22,8 @@ use std::path::Path;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use libhandlr_proto::common::protocols;
-use libhandlr_proto::link::KEY_LEN;
+use libflankr_proto::common::protocols;
+use libflankr_proto::link::KEY_LEN;
 use serde::{Deserialize, Serialize};
 
 use crate::core::principal::Principal;
@@ -35,7 +35,7 @@ pub const KEY_PREFIX: &str = "x25519:";
 pub const COMPANION: &str = "companion";
 pub const HARNESS: &str = "harness";
 
-const HEADER: &str = "# Paired handlr clients (`handlr pair`). Delete an entry to revoke it.\n";
+const HEADER: &str = "# Paired flankr clients (`flankr pair`). Delete an entry to revoke it.\n";
 
 /// One paired client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,9 +57,12 @@ pub struct AuthEntry {
     pub approve: Option<bool>,
 }
 
-/// The short name of a `hello` protocol: `handlr.companion` → `companion`.
+/// The short name of a `hello` protocol: `flankr.companion` → `companion`.
 pub fn short_protocol(protocol: &str) -> &str {
-    protocol.strip_prefix("handlr.").unwrap_or(protocol)
+    protocol
+        .strip_prefix("flankr.")
+        .or_else(|| protocol.strip_prefix("handlr."))
+        .unwrap_or(protocol)
 }
 
 /// A key as `auth.toml` writes it.

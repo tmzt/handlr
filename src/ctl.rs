@@ -1,4 +1,4 @@
-//! `handlr ctl`: send one JSON-RPC request to the daemon and print what
+//! `flankr ctl`: send one JSON-RPC request to the daemon and print what
 //! comes back (plan 20261022_01, decision 1). A debugging client.
 //!
 //! The result is printed, then any notifications until the request is done.
@@ -6,7 +6,7 @@
 //! `confirm.resolved` arrives. `--follow` keeps printing notifications.
 //!
 //! For `confirm.reply`, params may carry `token` (and `handle`) as read off
-//! `handlr serve`'s terminal. They are turned into the `nonce` here and
+//! `flankr serve`'s terminal. They are turned into the `nonce` here and
 //! never sent.
 //!
 //! `--handle <text>` adds a `handle` param. For `confirm.status` the
@@ -21,8 +21,8 @@
 use std::path::Path;
 
 use futures_util::StreamExt;
-use libhandlr_proto::common::{HelloParams, methods, protocols};
-use libhandlr_proto::{Id, Incoming, Request};
+use libflankr_proto::common::{HelloParams, methods, protocols};
+use libflankr_proto::{Id, Incoming, Request};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
@@ -68,7 +68,7 @@ pub async fn run(
     let params = token_to_nonce(method, params)?;
     let stream = UnixStream::connect(socket).await.map_err(|e| {
         format!(
-            "connect {}: {e} (is `handlr serve` running?)",
+            "connect {}: {e} (is `flankr serve` running?)",
             socket.display()
         )
     })?;

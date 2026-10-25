@@ -1,4 +1,4 @@
-//! `handlr.companion` and the turn service end to end (plan 20261022_02,
+//! `flankr.companion` and the turn service end to end (plan 20261022_02,
 //! step 4, with the amendments of 12:06, 18:03 and 18:05 EDT), over the
 //! herdr mock and a scripted mock engine. The mock's command and keystroke
 //! logs stand in for the panes: nothing reaches a live herdr or Gemini.
@@ -8,16 +8,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use flankr::config::{AgentConfig, AppConfig};
+use flankr::reasoning::{MockHandler, MockReasoningEngine, ReasoningEngine, ToolExecutor};
+use flankr::server::companion::{INTERRUPTED_ENTRY, TurnOptions};
+use flankr::server::link::{Link, LinkSettings};
+use flankr::server::speech::SpeechOptions;
+use flankr::server::{self, CoreEvent, Daemon, ServeOptions};
+use flankr::sessions::Sessions;
+use flankr::transport::{AgentSession, AgentStatus, HerdrClient, HerdrTransport};
 use futures_util::StreamExt;
-use handlr::config::{AgentConfig, AppConfig};
-use handlr::reasoning::{MockHandler, MockReasoningEngine, ReasoningEngine, ToolExecutor};
-use handlr::server::companion::{INTERRUPTED_ENTRY, TurnOptions};
-use handlr::server::link::{Link, LinkSettings};
-use handlr::server::speech::SpeechOptions;
-use handlr::server::{self, CoreEvent, Daemon, ServeOptions};
-use handlr::sessions::Sessions;
-use handlr::transport::{AgentSession, AgentStatus, HerdrClient, HerdrTransport};
-use libhandlr_proto::link::{DeviceCode, LinkStream, PairingPayload, generate_keypair, reconnect};
+use libflankr_proto::link::{DeviceCode, LinkStream, PairingPayload, generate_keypair, reconnect};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -85,7 +85,7 @@ struct Env {
 fn config(agents: Vec<AgentConfig>) -> AppConfig {
     AppConfig {
         agents,
-        summary: handlr::config::SummaryConfig { cards: false },
+        summary: flankr::config::SummaryConfig { cards: false },
         ..AppConfig::default()
     }
 }
@@ -93,7 +93,7 @@ fn config(agents: Vec<AgentConfig>) -> AppConfig {
 /// claude needs confirmation, as by default.
 fn confirming() -> AppConfig {
     AppConfig {
-        summary: handlr::config::SummaryConfig { cards: false },
+        summary: flankr::config::SummaryConfig { cards: false },
         ..AppConfig::default()
     }
 }
@@ -273,12 +273,12 @@ impl Client {
                 json!({"protocol": protocol, "version": 1, "client": client}),
             )
             .await;
-        assert_eq!(hello["result"]["server"], "handlr", "{hello}");
+        assert_eq!(hello["result"]["server"], "flankr", "{hello}");
         (c, hello)
     }
 
     async fn companion(env: &Env) -> (Client, Value) {
-        Client::unix(&env.socket, "handlr.companion", "t").await
+        Client::unix(&env.socket, "flankr.companion", "t").await
     }
 
     async fn send(&mut self, value: Value) {
@@ -387,10 +387,10 @@ async fn hello_gives_the_session_and_the_vocabulary() {
     );
     assert_eq!(hello["result"]["protocol_version"], 1);
     let vocabulary = hello["result"]["vocabulary"].as_array().unwrap();
-    assert!(vocabulary.iter().any(|w| w == "handlr"), "{hello}");
+    assert!(vocabulary.iter().any(|w| w == "flankr"), "{hello}");
 
     // Turns are a companion's: a harness connection does not have them.
-    let (mut harness, _) = Client::unix(&env.socket, "handlr.harness", "h").await;
+    let (mut harness, _) = Client::unix(&env.socket, "flankr.harness", "h").await;
     let r = harness.call("turn.start", turn(1, "hello")).await;
     assert_eq!(r["error"]["code"], -32601, "{r}");
 }
@@ -650,7 +650,7 @@ async fn an_empty_interrupt_key_sends_nothing() {
     assert_eq!(r["result"]["interrupted"], json!([]));
     assert!(mock_logs(&env.daemon).await.1.is_empty());
 
-    let (mut harness, _) = Client::unix(&env.socket, "handlr.harness", "h").await;
+    let (mut harness, _) = Client::unix(&env.socket, "flankr.harness", "h").await;
     let r = harness
         .call("agents.interrupt", json!({"target": "claude"}))
         .await;
@@ -661,7 +661,7 @@ async fn an_empty_interrupt_key_sends_nothing() {
 #[tokio::test]
 async fn agents_interrupt_from_a_harness_sends_the_key() {
     let env = start(confirming()).await;
-    let (mut harness, _) = Client::unix(&env.socket, "handlr.harness", "mcp").await;
+    let (mut harness, _) = Client::unix(&env.socket, "flankr.harness", "mcp").await;
     let r = harness
         .call("agents.interrupt", json!({"target": "claude"}))
         .await;
@@ -889,10 +889,10 @@ async fn an_engine_error_is_a_spoken_error_outcome() {
 
 #[tokio::test]
 async fn never_mind_is_answered_without_the_engine_and_kept_in_the_history() {
-    // handlr's Gemini engine is wrapped the same way (plan 20261022_07,
+    // flankr's Gemini engine is wrapped the same way (plan 20261022_07,
     // decision 4); the mock stands in for Gemini.
     let inner = Arc::new(MockReasoningEngine::with_handler(Script));
-    let engine = handlr::reasoning::with_handlr_routes(inner.clone());
+    let engine = flankr::reasoning::with_flankr_routes(inner.clone());
     let env = start_with(confirming(), engine, false).await;
     let (mut c, _) = Client::companion(&env).await;
 
@@ -947,7 +947,7 @@ async fn pair_companion(env: &Env) -> Client {
 /// Pair a device over the link for `protocol` (`companion` or `harness`),
 /// and say hello with it.
 async fn pair_as(env: &Env, protocol: &str) -> Client {
-    let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "pair").await;
+    let (mut local, _) = Client::unix(&env.socket, "flankr.harness", "pair").await;
     let r = local.call("link.pair_begin", json!({})).await;
     let payload = PairingPayload::decode(r["result"]["pairing"].as_str().unwrap()).unwrap();
     let keypair = generate_keypair().unwrap();
@@ -968,7 +968,7 @@ async fn pair_as(env: &Env, protocol: &str) -> Client {
     let tcp = TcpStream::connect(address).await.unwrap();
     let hello = serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "id": 0, "method": "hello",
-        "params": {"protocol": format!("handlr.{protocol}"), "version": 1, "client": "phone"}
+        "params": {"protocol": format!("flankr.{protocol}"), "version": 1, "client": "phone"}
     }))
     .unwrap();
     let stream = reconnect(tcp, &keypair, &payload.server_key, Some(&hello))
@@ -1038,7 +1038,7 @@ const MESSAGE: &str = "Please run the tests, then tell me what failed? It's in t
 
 fn message(pane: &str, text: &str) -> Value {
     json!({"pane_id": pane, "text": text, "kind": "message",
-           "handle": "message-claude-handlr-please-run"})
+           "handle": "message-claude-flankr-please-run"})
 }
 
 #[tokio::test]
@@ -1047,7 +1047,7 @@ async fn a_message_is_confirmed_once_and_sent_as_dictated() {
     let (mut c, _) = Client::companion(&env).await;
     let r = c.call("agents.send", message("claude", MESSAGE)).await;
     assert_eq!(r["result"]["status"], "pending", "{r}");
-    assert_eq!(r["result"]["handle"], "message-claude-handlr-please-run");
+    assert_eq!(r["result"]["handle"], "message-claude-flankr-please-run");
     let confirm_id = r["result"]["confirm_id"].as_u64().unwrap();
 
     // One question, naming the agent, with the full text for the card.
@@ -1060,7 +1060,7 @@ async fn a_message_is_confirmed_once_and_sent_as_dictated() {
     assert_eq!(asked["params"]["command"], MESSAGE);
     assert_eq!(
         asked["params"]["handle"],
-        "message-claude-handlr-please-run"
+        "message-claude-flankr-please-run"
     );
     assert!(
         mock_logs(&env.daemon).await.0.is_empty(),
@@ -1091,7 +1091,7 @@ async fn a_message_is_confirmed_once_and_sent_as_dictated() {
     let (commands, keys) = mock_logs(&env.daemon).await;
     assert_eq!(commands, vec![("p1".to_string(), MESSAGE.to_string())]);
     assert!(keys.is_empty(), "{keys:?}");
-    let rpc = handlr::transport::HerdrRequest::run_command("p1", MESSAGE).to_jsonrpc();
+    let rpc = flankr::transport::HerdrRequest::run_command("p1", MESSAGE).to_jsonrpc();
     assert_eq!(rpc.method, "pane.send_input");
     assert_eq!(rpc.params["text"], MESSAGE);
     assert_eq!(rpc.params["keys"], json!(["Enter"]));
@@ -1516,7 +1516,7 @@ async fn session_peek_is_for_companions_and_local_clients_only() {
     .await;
     give_session(&env.daemon).await;
     // A local harness client may peek.
-    let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "ctl").await;
+    let (mut local, _) = Client::unix(&env.socket, "flankr.harness", "ctl").await;
     let r = local.call("session.peek", json!({"pane_id": "p1"})).await;
     assert_eq!(r["result"]["session"]["matched"], "id", "{r}");
     // A paired companion may.
@@ -1741,7 +1741,7 @@ async fn a_complex_reply_calls_the_engine_only_with_spoken_output_on() {
     assert_eq!(mock.recorded_transcripts().len(), 1);
 
     // client.options is for companions.
-    let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "ctl").await;
+    let (mut local, _) = Client::unix(&env.socket, "flankr.harness", "ctl").await;
     let r = local
         .call("client.options", json!({"spoken_output": true}))
         .await;
@@ -1843,7 +1843,7 @@ async fn summaries_are_for_companions_and_agent_panes_only() {
         .await;
     assert_eq!(r["error"]["code"], -32002, "{r}");
     // A harness client may not.
-    let (mut local, _) = Client::unix(&env.socket, "handlr.harness", "ctl").await;
+    let (mut local, _) = Client::unix(&env.socket, "flankr.harness", "ctl").await;
     let r = local
         .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
         .await;

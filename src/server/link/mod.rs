@@ -36,13 +36,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use libhandlr_proto::common::{
+use libflankr_proto::common::{
     LinkPairAddParams, LinkPairAddResult, LinkPairBeginResult, LinkPairDone,
 };
-use libhandlr_proto::link::{
+use libflankr_proto::link::{
     DeviceCode, KEY_LEN, PairingPayload, PairingStringError, StaticKeypair, accept,
 };
-use libhandlr_proto::{Incoming, Request};
+use libflankr_proto::{Incoming, Request};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -74,7 +74,7 @@ pub struct LinkSettings {
 
 fn config_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".config").join("handlr")
+    PathBuf::from(home).join(".config").join("flankr")
 }
 
 fn expand_tilde(p: &str) -> PathBuf {
@@ -87,7 +87,7 @@ fn expand_tilde(p: &str) -> PathBuf {
 }
 
 impl LinkSettings {
-    /// From `[link]`; files default to `~/.config/handlr/`.
+    /// From `[link]`; files default to `~/.config/flankr/`.
     pub fn from_config(config: &LinkConfig) -> Self {
         LinkSettings {
             key_path: config
@@ -451,7 +451,7 @@ pub fn spawn(daemon: Arc<Daemon>, listeners: Vec<TcpListener>) {
 fn is_hello(bytes: &[u8]) -> bool {
     matches!(
         serde_json::from_slice::<Incoming>(bytes),
-        Ok(Incoming::Request(Request { ref method, .. })) if method == libhandlr_proto::common::methods::HELLO
+        Ok(Incoming::Request(Request { ref method, .. })) if method == libflankr_proto::common::methods::HELLO
     )
 }
 
@@ -526,7 +526,7 @@ fn code_error(e: PairingStringError) -> String {
                 .to_string()
         }
         PairingStringError::BadPrefix => {
-            "that is not a device code: a device code starts with handlrkey1".to_string()
+            "that is not a device code: a device code starts with flankrkey1".to_string()
         }
         PairingStringError::BadName => {
             "the device's name in that code is not valid; pass --name".to_string()
@@ -561,8 +561,8 @@ mod tests {
     #[test]
     fn settings_default_to_the_config_dir_and_an_empty_list_is_off() {
         let s = LinkSettings::from_config(&LinkConfig::default());
-        assert!(s.key_path.ends_with(".config/handlr/link_key"));
-        assert!(s.auth_path.ends_with(".config/handlr/auth.toml"));
+        assert!(s.key_path.ends_with(".config/flankr/link_key"));
+        assert!(s.auth_path.ends_with(".config/flankr/auth.toml"));
         assert_eq!(s.revoke_interval, DEFAULT_REVOKE_INTERVAL);
         assert!(s.enabled());
         let off = LinkSettings::from_config(&LinkConfig {

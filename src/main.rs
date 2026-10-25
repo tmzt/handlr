@@ -1,22 +1,22 @@
-//! `handlr serve` (the default) runs the daemon; `handlr ctl` sends it one
+//! `flankr serve` (the default) runs the daemon; `flankr ctl` sends it one
 //! request (docs/design/20261022_01_ORCHESTRATION_DAEMON_PLAN.md,
 //! decision 1).
 //!
 //! ```text
-//! handlr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
-//!                 --socket <herdr.sock> | --mock] [--listen <handlr.sock>] [--show-tokens]
+//! flankr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
+//!                 --socket <herdr.sock> | --mock] [--listen <flankr.sock>] [--show-tokens]
 //!                [--prompts <ADDITIONAL_PROMPTS.md>]
-//! handlr ctl [--listen <handlr.sock>] [--client <name>] [--follow] [--handle <text>]
+//! flankr ctl [--listen <flankr.sock>] [--client <name>] [--follow] [--handle <text>]
 //!            <method> [<params as JSON>]
-//! handlr pair [--listen <handlr.sock>] [--name <name>] [--protocols companion,harness]
+//! flankr pair [--listen <flankr.sock>] [--name <name>] [--protocols companion,harness]
 //!             [--replace] [--code <code>] [--qr-png <file>]
-//! handlr session tail [--listen <handlr.sock>] [--pane <id or name>] [--follow]
+//! flankr session tail [--listen <flankr.sock>] [--pane <id or name>] [--follow]
 //!                     [--entries N] [--history N] [--outline] [--from N] [--to N]
 //! ```
 
 use std::path::{Path, PathBuf};
 
-use handlr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig};
+use flankr::transport::{HerdrClient, HerdrTransport, RemoteSshConfig};
 
 struct AppArgs {
     config: Option<String>,
@@ -137,7 +137,7 @@ fn expand_tilde(p: impl AsRef<Path>) -> PathBuf {
 
 /// The herdr transport named by the flags, else by `config.toml`, else the
 /// default local socket.
-fn select_transport(args: &AppArgs, config: &handlr::config::AppConfig) -> HerdrTransport {
+fn select_transport(args: &AppArgs, config: &flankr::config::AppConfig) -> HerdrTransport {
     if args.mock_mode {
         log::info!("Using Mock Transport");
         return HerdrTransport::mock();
@@ -152,7 +152,7 @@ fn select_transport(args: &AppArgs, config: &handlr::config::AppConfig) -> Herdr
         return HerdrTransport::local(socket_path);
     }
     let Some(t) = config.find_transport(args.transport_name.as_deref()) else {
-        let socket_path = handlr::transport::default_local_socket_path();
+        let socket_path = flankr::transport::default_local_socket_path();
         log::info!(
             "Connecting via default UNIX domain socket: {:?}",
             socket_path
@@ -171,7 +171,7 @@ fn select_transport(args: &AppArgs, config: &handlr::config::AppConfig) -> Herdr
                 remote_target.clone(),
             ));
         }
-        let socket_path = handlr::transport::default_local_socket_path();
+        let socket_path = flankr::transport::default_local_socket_path();
         log::warn!(
             "Config transport '{}' mode is 'remote' but 'remote' string is missing; falling back to local socket: {:?}",
             transport_name,
@@ -183,7 +183,7 @@ fn select_transport(args: &AppArgs, config: &handlr::config::AppConfig) -> Herdr
         .socket
         .as_ref()
         .map(expand_tilde)
-        .unwrap_or_else(handlr::transport::default_local_socket_path);
+        .unwrap_or_else(flankr::transport::default_local_socket_path);
     log::info!(
         "Connecting via UNIX domain socket (from config transport '{}'): {:?}",
         transport_name,
@@ -193,85 +193,85 @@ fn select_transport(args: &AppArgs, config: &handlr::config::AppConfig) -> Herdr
 }
 
 /// The daemon socket: `--listen`, else `[server] socket`, else the default.
-fn daemon_socket(args: &AppArgs, config: &handlr::config::AppConfig) -> PathBuf {
+fn daemon_socket(args: &AppArgs, config: &flankr::config::AppConfig) -> PathBuf {
     args.listen
         .as_ref()
         .or(config.server.socket.as_ref())
         .map(expand_tilde)
-        .unwrap_or_else(handlr::server::default_socket_path)
+        .unwrap_or_else(flankr::server::default_socket_path)
 }
 
 async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let config = flankr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     let transport = select_transport(&args, &config);
     let event_transport = (!args.mock_mode).then(|| transport.clone());
     let client = HerdrClient::new(transport);
     match client.list_panes().await {
         Ok(snapshot) => log::info!(
             "herdr reports {} pane(s)",
-            handlr::core::agents::agents(&snapshot).len()
+            flankr::core::agents::agents(&snapshot).len()
         ),
         Err(e) => log::warn!("herdr is not answering yet: {e}"),
     }
 
     // The link: its key is checked (and created) before anything listens.
-    let settings = handlr::server::link::LinkSettings::from_config(&config.link);
+    let settings = flankr::server::link::LinkSettings::from_config(&config.link);
     let link = if settings.enabled() {
-        Some(handlr::server::link::Link::open(settings)?)
+        Some(flankr::server::link::Link::open(settings)?)
     } else {
         log::info!("The link is off ([link] listen = [])");
         None
     };
 
     let socket = daemon_socket(&args, &config);
-    let listener = handlr::server::bind(&socket).await?;
+    let listener = flankr::server::bind(&socket).await?;
     let link_listeners = match &link {
         Some(link) => link.bind().await?,
         None => Vec::new(),
     };
-    log::info!("handlr serve listening on {}", socket.display());
-    let mut options = handlr::server::ServeOptions {
+    log::info!("flankr serve listening on {}", socket.display());
+    let mut options = flankr::server::ServeOptions {
         event_transport,
         ..Default::default()
     };
     options.show_tokens |= args.show_tokens;
-    let turns = handlr::server::companion::TurnOptions {
-        speech: handlr::server::speech::SpeechOptions {
+    let turns = flankr::server::companion::TurnOptions {
+        speech: flankr::server::speech::SpeechOptions {
             prompts_file: args.prompts.as_ref().map(expand_tilde),
             ..Default::default()
         },
         ..Default::default()
     };
-    let daemon = handlr::server::Daemon::with_turns(client, &config, link, turns);
-    handlr::server::link::spawn(std::sync::Arc::clone(&daemon), link_listeners);
-    handlr::server::run(daemon, listener, options).await;
+    let daemon = flankr::server::Daemon::with_turns(client, &config, link, turns);
+    flankr::server::link::spawn(std::sync::Arc::clone(&daemon), link_listeners);
+    flankr::server::run(daemon, listener, options).await;
     Ok(())
 }
 
 async fn pair(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
-    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let config = flankr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     let socket = daemon_socket(&args, &config);
-    let usage = "usage: handlr pair [--listen <socket>] [--name <name>] [--protocols companion,harness] [--replace] [--code <code>] [--qr-png <file>]";
+    let usage = "usage: flankr pair [--listen <socket>] [--name <name>] [--protocols companion,harness] [--replace] [--code <code>] [--qr-png <file>]";
     if !args.positional.is_empty() {
         return Err(usage.into());
     }
-    let options = handlr::pair::PairOptions {
+    let options = flankr::pair::PairOptions {
         name: args.name.clone(),
         protocols: (!args.protocols.is_empty()).then(|| args.protocols.clone()),
         replace: args.replace,
         code: args.code.clone(),
         qr_png: args.qr_png.as_deref().map(PathBuf::from),
     };
-    Ok(handlr::pair::run(&socket, options).await?)
+    Ok(flankr::pair::run(&socket, options).await?)
 }
 
 async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
-    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let config = flankr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     let socket = daemon_socket(&args, &config);
     let mut positional = args.positional.iter();
     let Some(method) = positional.next() else {
         return Err(
-            "usage: handlr ctl [--listen <socket>] [--client <name>] [--follow] [--handle <text>] <method> [<params as JSON>]".into(),
+            "usage: flankr ctl [--listen <socket>] [--client <name>] [--follow] [--handle <text>] <method> [<params as JSON>]".into(),
         );
     };
     let mut params: serde_json::Value = match positional.next() {
@@ -286,7 +286,7 @@ async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
             .ok_or("--handle needs params that are a JSON object")?;
         obj.insert("handle".to_string(), serde_json::json!(handle));
     }
-    Ok(handlr::ctl::run(
+    Ok(flankr::ctl::run(
         &socket,
         args.client.as_deref().unwrap_or("ctl"),
         method,
@@ -296,9 +296,9 @@ async fn ctl(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
     .await?)
 }
 
-/// `handlr session tail` (plan 20261023_03, section 8): read-only.
+/// `flankr session tail` (plan 20261023_03, section 8): read-only.
 async fn session(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
-    const USAGE: &str = "usage: handlr session tail [--listen <socket>] [--pane <id or name>] [--follow] [--entries N] [--history N] [--outline] [--from N] [--to N]";
+    const USAGE: &str = "usage: flankr session tail [--listen <socket>] [--pane <id or name>] [--follow] [--entries N] [--history N] [--outline] [--from N] [--to N]";
     if args.positional.first().map(String::as_str) != Some("tail") || args.positional.len() > 1 {
         return Err(USAGE.into());
     }
@@ -307,14 +307,14 @@ async fn session(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
             n.parse().map_err(|_| format!("not a number: {n}"))
         })
     };
-    let config = handlr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let config = flankr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     let socket = daemon_socket(&args, &config);
-    let options = handlr::tail::TailOptions {
+    let options = flankr::tail::TailOptions {
         pane: args.pane.clone(),
         follow: args.follow,
         sections: number(
             &args.entries,
-            libhandlr_proto::common::SUBSCRIBE_SECTIONS_DEFAULT,
+            libflankr_proto::common::SUBSCRIBE_SECTIONS_DEFAULT,
         )?,
         history: number(&args.history, 0)?,
         outline: args.outline,
@@ -329,15 +329,33 @@ async fn session(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
         },
     };
     let mut out = std::io::stdout();
-    Ok(handlr::tail::run(&socket, &options, &mut out).await?)
+    Ok(flankr::tail::run(&socket, &options, &mut out).await?)
 }
+
+const USAGE: &str = "\
+flankr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
+                --socket <herdr.sock> | --mock] [--listen <flankr.sock>] [--show-tokens]
+               [--prompts <ADDITIONAL_PROMPTS.md>]
+flankr ctl [--listen <flankr.sock>] [--client <name>] [--follow] [--handle <text>]
+           <method> [<params as JSON>]
+flankr pair [--listen <flankr.sock>] [--name <name>] [--protocols companion,harness]
+            [--replace] [--code <code>] [--qr-png <file>]
+flankr session tail [--listen <flankr.sock>] [--pane <id or name>] [--follow]
+                    [--entries N] [--history N] [--outline] [--from N] [--to N]";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv
+        .iter()
+        .any(|a| a == "--help" || a == "-h" || a == "help")
+    {
+        println!("{USAGE}");
+        return Ok(());
+    }
     dotenvy::dotenv().ok();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let mut argv: Vec<String> = std::env::args().skip(1).collect();
     let command = match argv.first().map(String::as_str) {
         Some("serve") | Some("ctl") | Some("pair") | Some("session") => argv.remove(0),
         _ => "serve".to_string(),

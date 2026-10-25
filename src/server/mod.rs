@@ -1,4 +1,4 @@
-//! `handlr serve`: the daemon (plan 20261022_01, decisions 7–9 and 11).
+//! `flankr serve`: the daemon (plan 20261022_01, decisions 7–9 and 11).
 //!
 //! One Unix socket, mode 0600, one JSON-RPC object per line. Each
 //! connection says `hello` first, then sends any of the common methods;
@@ -31,13 +31,13 @@ use crate::sessions::Sessions;
 use crate::sessions::hub::SessionHub;
 use crate::watch::WatchRegistry;
 
-/// The socket `handlr serve` listens on unless `[server] socket` says otherwise.
+/// The socket `flankr serve` listens on unless `[server] socket` says otherwise.
 pub fn default_socket_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home)
         .join(".config")
-        .join("handlr")
-        .join("handlr.sock")
+        .join("flankr")
+        .join("flankr.sock")
 }
 
 /// Events from herdr that connections may subscribe to.
@@ -211,11 +211,11 @@ pub fn word_priors(
 pub fn focus_info(
     snapshot: &serde_json::Value,
     names: &Names,
-) -> Option<libhandlr_proto::common::FocusInfo> {
+) -> Option<libflankr_proto::common::FocusInfo> {
     let pane_id = agents::focused_pane_id(snapshot)?;
     let named = names.get(&pane_id)?;
     let a = &named.agent;
-    Some(libhandlr_proto::common::FocusInfo {
+    Some(libflankr_proto::common::FocusInfo {
         pane_id: a.pane_id.clone(),
         project: named
             .project
@@ -254,7 +254,7 @@ pub async fn bind(path: &Path) -> Result<UnixListener, String> {
     if path.exists() {
         if tokio::net::UnixStream::connect(path).await.is_ok() {
             return Err(format!(
-                "another handlr daemon is already listening on {}",
+                "another flankr daemon is already listening on {}",
                 path.display()
             ));
         }
@@ -447,10 +447,10 @@ mod tests {
 
     #[test]
     fn token_lines_name_the_agent_and_its_tab() {
-        let hr = names("the handlr agent", Some("17-hr"));
+        let fl = names("the flankr agent", Some("17-fl"));
         assert_eq!(
-            token_line(&view(Some("keep-going")), Some(&hr), "a-b-c"),
-            "confirm 3 keep-going (the handlr agent, tab 17-hr): a-b-c"
+            token_line(&view(Some("keep-going")), Some(&fl), "a-b-c"),
+            "confirm 3 keep-going (the flankr agent, tab 17-fl): a-b-c"
         );
         // A name that already carries its tab does not repeat it.
         let mb = names("Claude in libmorph, tab -mb", Some("-mb"));

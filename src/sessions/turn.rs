@@ -16,7 +16,7 @@
 
 use libherdr::protocol::AgentStatus;
 
-pub use libhandlr_proto::common::{TURN_TEXT_MAX, Turn};
+pub use libflankr_proto::common::{TURN_TEXT_MAX, Turn};
 
 use super::redact::redact;
 use super::{EntryKind, Item, Role, cut, pending};

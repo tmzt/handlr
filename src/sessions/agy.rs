@@ -622,7 +622,7 @@ mod tests {
     #[test]
     #[ignore]
     fn repowiki_example_if_available() {
-        let Some(path_str) = std::env::var_os("HANDLR_AGY_EXAMPLE") else {
+        let Some(path_str) = std::env::var_os("FLANKR_AGY_EXAMPLE") else {
             return;
         };
         let path = PathBuf::from(path_str);

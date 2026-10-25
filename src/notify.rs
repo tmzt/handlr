@@ -126,7 +126,7 @@ impl<T: std::fmt::Debug> Announcer<T> {
 }
 
 /// The sentence announcing `status` for an agent named `name`. The name
-/// starts the sentence, so it is capitalised ("The handlr agent finished.").
+/// starts the sentence, so it is capitalised ("The flankr agent finished.").
 pub fn announcement(status: &AgentStatus, name: &str) -> Option<String> {
     let name = capitalise(name);
     match status {
@@ -260,8 +260,8 @@ mod tests {
             Some("Highbay agent finished.")
         );
         assert_eq!(
-            announcement(&AgentStatus::Done, "the handlr agent").as_deref(),
-            Some("The handlr agent finished.")
+            announcement(&AgentStatus::Done, "the flankr agent").as_deref(),
+            Some("The flankr agent finished.")
         );
         assert_eq!(announcement(&AgentStatus::Working, "Claude"), None);
     }

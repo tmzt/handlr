@@ -30,7 +30,7 @@ use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-pub use libhandlr_proto::common::{
+pub use libflankr_proto::common::{
     ENTRY_SUMMARY_MAX, Entry, EntryKind, PENDING_QUESTION_MAX, PendingQuestion, Role,
 };
 
@@ -389,7 +389,7 @@ pub struct Sessions {
     pub codex: codex::Codex,
     pub agy: agy::AgyReader,
     /// Where the approval journals are kept (plan 20261023_03, A4):
-    /// `.local/state/handlr/sessions` under the home.
+    /// `.local/state/flankr/sessions` under the home.
     pub state: PathBuf,
 }
 
@@ -408,7 +408,7 @@ impl Sessions {
 
     /// The readers for the files under `home` (`.claude/projects`,
     /// `.codex/sessions`, `.gemini/antigravity-cli/conversations`), with the
-    /// approval journals in `.local/state/handlr/sessions` under it.
+    /// approval journals in `.local/state/flankr/sessions` under it.
     pub fn with_home(home: &Path) -> Self {
         Sessions {
             claude: claude::ClaudeCode::new(home.join(".claude").join("projects")),
@@ -421,7 +421,7 @@ impl Sessions {
             state: home
                 .join(".local")
                 .join("state")
-                .join("handlr")
+                .join("flankr")
                 .join("sessions"),
         }
     }
@@ -549,7 +549,7 @@ impl Sessions {
     }
 }
 
-impl From<Matched> for libhandlr_proto::common::SessionMatched {
+impl From<Matched> for libflankr_proto::common::SessionMatched {
     fn from(m: Matched) -> Self {
         match m {
             Matched::Id => Self::Id,

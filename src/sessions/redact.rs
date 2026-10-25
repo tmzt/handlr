@@ -1,4 +1,4 @@
-//! Redaction of session text before it leaves handlr (plan 20261022_03,
+//! Redaction of session text before it leaves flankr (plan 20261022_03,
 //! decision 7): Gemini's context, `agents.list` and `session.peek` only
 //! ever see redacted text.
 //!
@@ -376,7 +376,7 @@ mod tests {
         gone(&format!("secret: {b64}"), b64);
         // Paths and names do not look random.
         for plain in [
-            "/work/example/target/debug/deps/handlr-5f3c2a1b9d8e7f6a",
+            "/work/example/target/debug/deps/flankr-5f3c2a1b9d8e7f6a",
             "/Users/someone/src/project/docs/design/plans",
             "send-usage-to-the-claude-agent-in-the-project",
         ] {
@@ -421,7 +421,7 @@ mod tests {
 
     #[test]
     fn plain_text_is_unchanged() {
-        let text = "I updated src/transport.rs and ran cargo test -p handlr. Shall I commit?";
+        let text = "I updated src/transport.rs and ran cargo test -p flankr. Shall I commit?";
         assert_eq!(redact(text), text);
         assert_eq!(redact("héllo — ok?"), "héllo — ok?");
     }

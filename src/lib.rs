@@ -1,4 +1,4 @@
-//! `handlr` — Voice-native CLI and LLM tool-calling bridge for `herdr`.
+//! `flankr` — Voice-native CLI and LLM tool-calling bridge for `herdr`.
 
 pub mod commands;
 pub mod config;

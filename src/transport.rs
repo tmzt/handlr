@@ -1,4 +1,4 @@
-//! Transport layer for `handlr`, bridging to the `libherdr` crate and multiplexer backend.
+//! Transport layer for `flankr`, bridging to the `libherdr` crate and multiplexer backend.
 
 use async_trait::async_trait;
 
@@ -76,7 +76,7 @@ impl HerdrToolExecutor {
             client,
             agents,
             watches: None,
-            principal: Principal::local("handlr"),
+            principal: Principal::local("flankr"),
             naming: None,
             voice_turn: None,
         }
@@ -312,7 +312,7 @@ impl HerdrToolExecutor {
                 "agent": spoken,
                 "handle": handle,
                 "note": format!(
-                    "Not sent yet. Right after your reply, handlr itself asks the user to approve sending '{final_cmd}' to {spoken}, and sends it only if they approve. Do not ask for confirmation yourself and do not call run_command again for this; say in a few words that it is waiting for their approval."
+                    "Not sent yet. Right after your reply, flankr itself asks the user to approve sending '{final_cmd}' to {spoken}, and sends it only if they approve. Do not ask for confirmation yourself and do not call run_command again for this; say in a few words that it is waiting for their approval."
                 ),
             }));
         }
@@ -988,7 +988,7 @@ mod tests {
         assert_eq!(res["handle"], "send-continue-again-claude");
 
         assert_eq!(log.confirmations.lock().unwrap().len(), 3);
-        let principal = Principal::local("handlr");
+        let principal = Principal::local("flankr");
         let (view, _) = broker
             .status(
                 &principal,
@@ -1070,7 +1070,7 @@ mod tests {
         let contributor = HerdrContextContributor::new(client.clone(), vec![])
             .with_naming(NamingConfig::default())
             .with_sessions(fixture_sessions());
-        let content = context_for(&contributor, "what is the handlr agent waiting on?").await;
+        let content = context_for(&contributor, "what is the flankr agent waiting on?").await;
         let start = content.find("### Agent sessions").expect("the section");
         let section = &content[start..];
         assert!(section.len() <= crate::sessions::context::TOTAL_MAX);

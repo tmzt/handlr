@@ -1,6 +1,6 @@
-//! Configuration manager for `handlr`.
+//! Configuration manager for `flankr`.
 //!
-//! Loads TOML settings from `~/.config/handlr/config.toml` (or custom path),
+//! Loads TOML settings from `~/.config/flankr/config.toml` (or custom path),
 //! covering transports (`[[transports]]`), per-agent command permissions
 //! (`[[agents]]`), and LLM parameters.
 
@@ -287,10 +287,10 @@ pub struct GeminiConfig {
     pub model: Option<String>,
 }
 
-/// `[server]`: the daemon (`handlr serve`).
+/// `[server]`: the daemon (`flankr serve`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ServerConfig {
-    /// The daemon socket (default: ~/.config/handlr/handlr.sock).
+    /// The daemon socket (default: ~/.config/flankr/flankr.sock).
     pub socket: Option<String>,
     /// Seconds a confirmation waits for an answer, other than one asked for
     /// by a companion's own voice turn (default: 3600).
@@ -308,9 +308,9 @@ pub struct LinkConfig {
     /// check; these are the addresses a pairing string carries. An empty
     /// list turns the link off.
     pub listen: Option<Vec<String>>,
-    /// The server's private key (default: ~/.config/handlr/link_key).
+    /// The server's private key (default: ~/.config/flankr/link_key).
     pub key: Option<String>,
-    /// The paired clients (default: ~/.config/handlr/auth.toml).
+    /// The paired clients (default: ~/.config/flankr/auth.toml).
     pub auth: Option<String>,
     /// Seconds between checks of open link connections against
     /// `auth.toml` (default: 60).
@@ -366,20 +366,67 @@ impl Default for NamingConfig {
 }
 
 impl AppConfig {
-    /// Resolve default config location: `~/.config/handlr/config.toml`
+    /// Resolve default config location: `~/.config/flankr/config.toml`
     pub fn default_config_path() -> PathBuf {
         if let Ok(home) = std::env::var("HOME") {
             PathBuf::from(home)
                 .join(".config")
-                .join("handlr")
+                .join("flankr")
                 .join("config.toml")
         } else {
             PathBuf::from("config.toml")
         }
     }
 
+    /// If legacy `~/.config/handlr/config.toml` exists but `~/.config/flankr/config.toml`
+    /// does not, migrate config and key files into `~/.config/flankr/`.
+    pub fn maybe_migrate_legacy_config() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let home_path = PathBuf::from(home);
+        let new_dir = home_path.join(".config").join("flankr");
+        let new_cfg = new_dir.join("config.toml");
+        let old_dir = home_path.join(".config").join("handlr");
+        let old_cfg = old_dir.join("config.toml");
+
+        if !new_cfg.exists() && old_cfg.exists() {
+            if let Err(e) = std::fs::create_dir_all(&new_dir) {
+                log::warn!("Failed to create directory {}: {e}", new_dir.display());
+                return;
+            }
+            if let Err(e) = std::fs::copy(&old_cfg, &new_cfg) {
+                log::warn!("Failed to copy legacy config {}: {e}", old_cfg.display());
+                return;
+            }
+            let old_key = old_dir.join("link_key");
+            let new_key = new_dir.join("link_key");
+            if old_key.exists() && !new_key.exists() {
+                let _ = std::fs::copy(&old_key, &new_key);
+            }
+            let old_auth = old_dir.join("auth.toml");
+            let new_auth = new_dir.join("auth.toml");
+            if old_auth.exists() && !new_auth.exists() {
+                let _ = std::fs::copy(&old_auth, &new_auth);
+            }
+            eprintln!(
+                "Migrated legacy configuration from {} to {}",
+                old_dir.display(),
+                new_dir.display()
+            );
+            log::info!(
+                "Migrated legacy configuration from {} to {}",
+                old_dir.display(),
+                new_dir.display()
+            );
+        }
+    }
+
     /// Load config from file if present, or return defaults.
     pub fn load_or_default(custom_path: Option<&Path>) -> Self {
+        if custom_path.is_none() {
+            Self::maybe_migrate_legacy_config();
+        }
         let path = custom_path
             .map(PathBuf::from)
             .unwrap_or_else(Self::default_config_path);
@@ -690,15 +737,15 @@ w = "dub"
 
 [naming.aliases]
 "ctrls" = "controls"
-"17-hr" = "handlr"
+"17-fl" = "flankr"
 "#;
         let cfg: AppConfig = toml::from_str(sample).unwrap();
         assert_eq!(cfg.naming.spell_max_len, 0);
         assert_eq!(cfg.naming.vowels, "aeiou");
         assert_eq!(cfg.naming.letters.get("w").map(String::as_str), Some("dub"));
         assert_eq!(
-            cfg.naming.aliases.get("17-hr").map(String::as_str),
-            Some("handlr")
+            cfg.naming.aliases.get("17-fl").map(String::as_str),
+            Some("flankr")
         );
         assert_eq!(cfg.naming.aliases.len(), 2);
     }
