@@ -75,24 +75,44 @@ pub struct CardLayout {
 }
 
 impl CardLayout {
-    /// Draws the card moved down by `dy`, at scale `s`.
-    pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext, dy: f32, s: f32) {
+    /// Draws the card moved down by `dy`, at scale `s`. When `shader_panels`
+    /// is true, the card background fill and outline are skipped because the
+    /// custom GPU panel shader rendered them with exact anti-aliased SDF
+    /// falloff and vertical depth gradient.
+    pub fn draw(
+        &self,
+        list: &mut DrawList,
+        ctx: &DrawContext,
+        dy: f32,
+        s: f32,
+        shader_panels: bool,
+    ) {
         let moved = |r: Rect| Rect::new(r.x, r.y + dy, r.w, r.h);
-        for f in self.flow.fills.iter().chain(&self.band) {
-            fill(list, moved(f.rect), f.color, f.radius);
+        if !shader_panels {
+            for f in &self.flow.fills {
+                fill(list, moved(f.rect), f.color, f.radius);
+            }
+            if let Some((color, rect)) = self.outline {
+                let r = moved(rect);
+                list.push(SdfInstance {
+                    kind: SdfKind::Outline {
+                        radius: AgentCard::RADIUS * s,
+                        thickness: AgentCard::OUTLINE * s,
+                    },
+                    position: r.pos(),
+                    size: r.size(),
+                    color,
+                    anim: 0,
+                });
+            }
+        } else {
+            // Under the custom shader, draw only the focus bar if present (fills index 1)
+            for f in self.flow.fills.iter().skip(1) {
+                fill(list, moved(f.rect), f.color, f.radius);
+            }
         }
-        if let Some((color, rect)) = self.outline {
-            let r = moved(rect);
-            list.push(SdfInstance {
-                kind: SdfKind::Outline {
-                    radius: AgentCard::RADIUS * s,
-                    thickness: AgentCard::OUTLINE * s,
-                },
-                position: r.pos(),
-                size: r.size(),
-                color,
-                anim: 0,
-            });
+        if let Some(f) = &self.band {
+            fill(list, moved(f.rect), f.color, f.radius);
         }
         for r in &self.flow.rows {
             ctx.draw_text(list, &r.text, [r.x, r.y + dy], r.px, r.color);
@@ -146,6 +166,18 @@ impl AgentCard<'_> {
             Some(NeedsInput::Approval)
         } else if matches!(self.agent.turn, Some(Turn::Asking { .. })) {
             Some(NeedsInput::Question)
+        } else {
+            None
+        }
+    }
+
+    /// The outline's colour: amber for approval, periwinkle for asking,
+    /// and coral red for broke.
+    pub fn outline_color(&self) -> Option<[f32; 4]> {
+        if let Some(n) = self.needs_input() {
+            Some(n.colour())
+        } else if self.agent.status == "broke" {
+            Some(theme().red)
         } else {
             None
         }
@@ -270,7 +302,7 @@ impl AgentCard<'_> {
                 height: h,
                 ..Flow::default()
             },
-            outline: self.needs_input().map(|n| (n.colour(), rect)),
+            outline: self.outline_color().map(|c| (c, rect)),
             buttons,
             band: Some(Fill {
                 rect: band,

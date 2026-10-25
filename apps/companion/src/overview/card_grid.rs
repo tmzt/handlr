@@ -16,6 +16,7 @@ use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
 use super::agent_card::{AgentCard, CardLayout};
+use super::panel_shader::PanelInstance;
 use crate::agent::PAD;
 use crate::controls::scroll::{Scroll, Touched};
 use crate::theme::theme;
@@ -231,7 +232,42 @@ impl CardGrid {
         self.scroll.tick(dt, self.scale)
     }
 
-    pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
+    /// The panel instances for the custom GPU panel shader.
+    pub fn panel_instances(&self, scale: f32) -> Vec<PanelInstance> {
+        let dy = self.dy();
+        let v = self.viewport;
+        let s = self.scale;
+        let mut out = Vec::new();
+        for (_, c) in &self.cards {
+            let top = c.rect.y + dy;
+            if top + c.rect.h >= v.y && top <= v.y + v.h {
+                let border_col = if let Some((col, _)) = c.outline {
+                    col
+                } else {
+                    theme().band
+                };
+                let border_w = if c.outline.is_some() {
+                    2.0 * s
+                } else {
+                    1.0 * s
+                };
+                out.push(PanelInstance {
+                    rect: [
+                        c.rect.x * scale,
+                        (c.rect.y + dy) * scale,
+                        c.rect.w * scale,
+                        c.rect.h * scale,
+                    ],
+                    color: theme().card,
+                    border_color: border_col,
+                    params: [AgentCard::RADIUS * s * scale, border_w * scale, 1.0, 0.0],
+                });
+            }
+        }
+        out
+    }
+
+    pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext, shader_panels: bool) {
         let v = self.viewport;
         let s = self.scale;
         list.push_clip(v.pos(), v.size());
@@ -248,7 +284,7 @@ impl CardGrid {
         for (_, c) in &self.cards {
             let top = c.rect.y + dy;
             if top + c.rect.h >= v.y && top <= v.y + v.h {
-                c.draw(list, ctx, dy, s);
+                c.draw(list, ctx, dy, s, shader_panels);
             }
         }
         list.push_clip_end();

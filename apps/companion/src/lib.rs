@@ -222,6 +222,7 @@ pub struct App {
     screen: Screen,
     /// The home screen, once paired or connected.
     overview: Overview,
+    panel_shader: Option<overview::PanelShader>,
     /// What was drawn last: a change of screen draws the new one in full.
     shown: Option<Shown>,
     next_frame: Instant,
@@ -886,7 +887,9 @@ impl App {
         }
         self.viewed = false;
         self.settings_screen = None;
-        self.overview = Overview::new();
+        let mut overview = Overview::new();
+        overview.shader_panels = self.panel_shader.is_some();
+        self.overview = overview;
         self.screen.invalidate();
         self.link = "not paired \u{b7} paste a pairing URL below".into();
         self.note = Some(if daemon {
@@ -1605,6 +1608,12 @@ impl MorphApp for App {
             })
             .cloned()
             .collect();
+        let panel_shader = Some(overview::PanelShader::new(
+            ctx.device(),
+            ctx.surface_format(),
+        ));
+        let mut overview = Overview::new();
+        overview.shader_panels = true;
         let mut app = Self {
             fonts,
             roboto,
@@ -1616,7 +1625,8 @@ impl MorphApp for App {
             sdf,
             list: DrawList::new(),
             screen: Screen::new(),
-            overview: Overview::new(),
+            overview,
+            panel_shader,
             shown: None,
             next_frame: Instant::now(),
             companion: None,
@@ -1917,17 +1927,51 @@ impl MorphApp for App {
             self.session_cards.draw(&mut self.list, &draw, s);
         }
         let (w, h) = frame.size;
-        self.sdf.render_draw_list_in(
-            ctx.device(),
-            ctx.queue(),
-            frame.view,
-            w,
-            h,
-            1.0,
-            &self.list,
-            &self.fonts,
-            0.0,
-        );
+        let s = ctx.scale_factor();
+        if shown == Shown::Overview && self.panel_shader.is_some() {
+            let panels = self.overview.panel_instances(s);
+            if let Some(shader) = &mut self.panel_shader {
+                shader.draw(
+                    ctx.device(),
+                    ctx.queue(),
+                    frame.view,
+                    ctx.surface_format(),
+                    w,
+                    h,
+                    s,
+                    theme().bg,
+                    &panels,
+                );
+            }
+            let frame_sdf = self.list.lower_with(&self.fonts);
+            self.sdf.upload_chars(ctx.queue(), &frame_sdf.char_buffer);
+            self.sdf.upload_params(ctx.queue(), &frame_sdf.param_bank);
+            self.sdf.render_full_scaled_load(
+                ctx.device(),
+                ctx.queue(),
+                frame.view,
+                w,
+                h,
+                1.0,
+                &frame_sdf.draws,
+                0.0,
+                &[0; 16],
+                &[],
+                None,
+            );
+        } else {
+            self.sdf.render_draw_list_in(
+                ctx.device(),
+                ctx.queue(),
+                frame.view,
+                w,
+                h,
+                1.0,
+                &self.list,
+                &self.fonts,
+                0.0,
+            );
+        }
     }
 }
 

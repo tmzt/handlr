@@ -27,6 +27,7 @@
 pub mod agent_card;
 pub mod card_grid;
 pub mod gear;
+pub mod panel_shader;
 pub mod turn_log;
 pub mod turn_overlay;
 pub mod turn_strip;
@@ -49,6 +50,7 @@ use crate::theme::theme;
 use crate::ui::{Layout, Line, wrap};
 pub use card_grid::CardGrid;
 pub use gear::Gear;
+pub use panel_shader::{PanelInstance, PanelShader};
 pub use turn_log::TurnLog;
 pub use turn_overlay::TurnOverlay;
 pub use turn_strip::TurnStrip;
@@ -90,10 +92,11 @@ enum Target {
     Other,
 }
 
-/// One centred line at the top.
+/// One line at the top: optional fixed x (left-aligned), or centered when None.
 #[derive(Clone, Debug, PartialEq)]
 struct Heading {
     text: String,
+    x: Option<f32>,
     y: f32,
     px: f32,
     color: [f32; 4],
@@ -119,6 +122,7 @@ pub struct Overview {
     /// An agent view has been opened: play reads its replies.
     play_live: bool,
     headings: Vec<Heading>,
+    divider_y: Option<f32>,
     gear: Gear,
     /// The confirmation and dictation cards as placed.
     panels: Vec<Flow>,
@@ -134,6 +138,8 @@ pub struct Overview {
     /// EDT, item 2).
     cross_h: f32,
     cross_bottom: f32,
+    /// Whether the custom GPU panel shader is rendering the navy panels.
+    pub shader_panels: bool,
 }
 
 impl Default for Overview {
@@ -159,6 +165,7 @@ impl Overview {
             speaking: false,
             play_live: false,
             headings: Vec::new(),
+            divider_y: None,
             gear: Gear::default(),
             panels: Vec::new(),
             dictation_shown: false,
@@ -169,6 +176,7 @@ impl Overview {
             dirty: true,
             cross_h: 0.0,
             cross_bottom: 0.0,
+            shader_panels: false,
         }
     }
 
@@ -348,25 +356,47 @@ impl Overview {
         let pad = PAD * s;
         let mut headings = Vec::new();
         let mut y = l.top + 24.0 * s;
-        let mut heading = |text: &str, pt: f32, color, y: &mut f32| {
-            headings.push(Heading {
-                text: text.to_string(),
-                y: *y,
-                px: pt * s,
-                color,
-            });
-            *y += pt * s * 1.35;
-        };
         self.gear = Gear::place(l.w, pad, y, TITLE_PT * s * 1.35, s);
-        heading("flankr", TITLE_PT, theme().text, &mut y);
+        headings.push(Heading {
+            text: "flankr".to_string(),
+            x: Some(pad),
+            y,
+            px: TITLE_PT * s,
+            color: theme().text,
+        });
+        y += TITLE_PT * s * 1.25;
         for line in &self.status {
-            heading(line, STATUS_PT, theme().muted, &mut y);
+            headings.push(Heading {
+                text: line.clone(),
+                x: None,
+                y,
+                px: STATUS_PT * s,
+                color: theme().dim,
+            });
+            y += STATUS_PT * s * 1.35;
         }
         if let Some((note, color)) = &self.note {
-            heading(note, STATUS_PT, *color, &mut y);
+            headings.push(Heading {
+                text: note.clone(),
+                x: None,
+                y,
+                px: STATUS_PT * s,
+                color: *color,
+            });
+            y += STATUS_PT * s * 1.35;
         }
+        let divider_y = y + 4.0 * s;
+        self.divider_y = Some(divider_y);
+        let section_y = divider_y + 12.0 * s;
+        headings.push(Heading {
+            text: "OVERVIEW \u{b7} 2-COLUMN FIXED TAB ORDER".to_string(),
+            x: Some(pad),
+            y: section_y,
+            px: 12.0 * s,
+            color: theme().muted,
+        });
         self.headings = headings;
-        let top = y + 8.0 * s;
+        let top = section_y + 16.0 * s;
 
         // The bottom row, then the cards above it.
         let row_bottom = l.h - l.bottom - 16.0 * s;
@@ -548,13 +578,25 @@ impl Overview {
         list.clear();
         let l = self.layout;
         let s = self.scale();
-        fill(list, Rect::new(0.0, 0.0, l.w, l.h), theme().bg, 0.0);
+        if !self.shader_panels {
+            fill(list, Rect::new(0.0, 0.0, l.w, l.h), theme().bg, 0.0);
+        }
+        if let Some(div_y) = self.divider_y {
+            fill(list, Rect::new(0.0, div_y, l.w, 1.0 * s), theme().band, 0.0);
+        }
         for h in &self.headings {
-            let w = ctx.text_advance(&h.text, h.px);
-            ctx.draw_text(list, &h.text, [(l.w - w) * 0.5, h.y], h.px, h.color);
+            let px = h.px;
+            let x = match h.x {
+                Some(fixed_x) => fixed_x,
+                None => {
+                    let w = ctx.text_advance(&h.text, px);
+                    (l.w - w) * 0.5
+                }
+            };
+            ctx.draw_text(list, &h.text, [x, h.y], px, h.color);
         }
         self.gear.draw(list);
-        self.grid.draw(list, ctx);
+        self.grid.draw(list, ctx, self.shader_panels);
         if self.strip_shown() {
             self.strip.draw(list, ctx);
         }
@@ -599,6 +641,37 @@ impl Overview {
         }
         self.dirty = false;
         true
+    }
+
+    /// The panel instances for the custom GPU panel shader.
+    pub fn panel_instances(&self, scale: f32) -> Vec<PanelInstance> {
+        let mut out = Vec::new();
+        let v = self.grid.viewport();
+        if v.w > 0.0 && v.h > 0.0 {
+            out.push(PanelInstance {
+                rect: [v.x * scale, v.y * scale, v.w * scale, v.h * scale],
+                color: theme().bg,
+                border_color: [0.0; 4],
+                params: [0.0, 0.0, 0.0, 0.0],
+            });
+        }
+        out.extend(self.grid.panel_instances(scale));
+        for p in &self.panels {
+            if let Some(f) = p.fills.first() {
+                out.push(PanelInstance {
+                    rect: [
+                        f.rect.x * scale,
+                        f.rect.y * scale,
+                        f.rect.w * scale,
+                        f.rect.h * scale,
+                    ],
+                    color: f.color,
+                    border_color: theme().band,
+                    params: [f.radius * scale, 1.0 * scale, 1.0, 0.0],
+                });
+            }
+        }
+        out
     }
 }
 
