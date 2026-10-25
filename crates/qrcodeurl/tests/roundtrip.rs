@@ -7,10 +7,10 @@ use qrcodeurl::{Ecc, Error, Inline, Png, Qr, Terminal};
 
 const BASE58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-/// `handlr1` and base58 from a fixed seed, `len` characters in all.
+/// `flankr1` and base58 from a fixed seed, `len` characters in all.
 fn pairing_like(len: usize) -> String {
     let mut seed: u32 = 0x2545_F491;
-    let mut s = String::from("handlr1");
+    let mut s = String::from("flankr1");
     while s.len() < len {
         seed ^= seed << 13;
         seed ^= seed >> 17;
@@ -22,7 +22,7 @@ fn pairing_like(len: usize) -> String {
 
 fn pairing_url(len: usize) -> String {
     format!(
-        "handlr://m4.tail1a2b3c.ts.net:7347/pair#{}",
+        "flankr://m4.tail1a2b3c.ts.net:7347/pair#{}",
         pairing_like(len)
     )
 }

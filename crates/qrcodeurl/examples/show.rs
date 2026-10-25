@@ -2,7 +2,7 @@
 //! inline image, `--data-url` as a `data:` URL, else as terminal text.
 //!
 //! ```text
-//! cargo run -p qrcodeurl --example show -- --kitty 'handlr://example.ts.net:7347/pair#test'
+//! cargo run -p qrcodeurl --example show -- --kitty 'flankr://example.ts.net:7347/pair#test'
 //! ```
 
 use qrcodeurl::{Inline, Png, Qr, Terminal};
