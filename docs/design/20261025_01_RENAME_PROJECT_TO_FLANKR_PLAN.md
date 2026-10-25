@@ -1,7 +1,7 @@
 ---
 title: Rename project to flankr across CLI, protocols, crates and apps
 date: 2026-10-25
-status: In implementation
+status: Implemented
 covers:
   - "Renaming the root crate and CLI binary from `handlr` to `flankr`"
   - "Renaming workspace crates: `crates/handlr-*` and `crates/libhandlr_proto` to `crates/flankr-*` and `crates/libflankr_proto`"
@@ -230,5 +230,19 @@ In Section 4, Step 3:
 ## Amendment — 2026-10-25 12:20 EDT: implementation started
 
 Implementation has started. This document is now immutable.
+
+## Amendment — 2026-10-25 13:25 EDT: implementation completed
+
+Implementation has completed. Every step is done and its **Done when:** holds:
+
+- **Step 1 (wire protocol and core library crates):** implemented in `ba2d1bd`, `72862e1`, and `f9aad1e`.
+- **Step 2 (companion library and audio engine):** implemented in `a772ac3` and `df20cf3`.
+- **Step 3 (daemon binary and CLI):** implemented in `9bfe6cb` and `94ab19c`.
+- **Step 4 (mobile companion app and Keychain):** implemented in `047925d`, `72f6934`, and `f2841e5`.
+- **Step 5 (documentation, prompts and repository tooling):** implemented in `5816fd6`.
+- **Step 6 (end-to-end verification and live test):** completed on the S23 Ultra and mock daemon, recorded in evidence log `out/rename/LOG.md`.
+
+Status moves to `Implemented`.
+
 
 
