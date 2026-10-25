@@ -6,6 +6,7 @@ struct Panel {
     rect: vec4<f32>,         // [x, y, w, h] in physical pixels
     color: vec4<f32>,        // [r, g, b, a] surface
     border_color: vec4<f32>, // [r, g, b, a] border
+    clip: vec4<f32>,         // [clip_x, clip_y, clip_w, clip_h] (0 if unclipped)
     params: vec4<f32>,       // [radius, border_thickness, gradient_strength, _pad]
 }
 
@@ -43,6 +44,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     for (var i = 0u; i < count; i = i + 1u) {
         let p = u.panels[i];
+        if (p.clip.z > 0.0 && p.clip.w > 0.0) {
+            if (coord.x < p.clip.x || coord.x > (p.clip.x + p.clip.z) ||
+                coord.y < p.clip.y || coord.y > (p.clip.y + p.clip.w)) {
+                continue;
+            }
+        }
+
         let r = p.rect;
         let half = r.zw * 0.5;
         let center = r.xy + half;

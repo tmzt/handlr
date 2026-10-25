@@ -644,30 +644,16 @@ impl Overview {
     }
 
     /// The panel instances for the custom GPU panel shader.
-    pub fn panel_instances(&self, scale: f32) -> Vec<PanelInstance> {
-        let mut out = Vec::new();
-        let v = self.grid.viewport();
-        if v.w > 0.0 && v.h > 0.0 {
-            out.push(PanelInstance {
-                rect: [v.x * scale, v.y * scale, v.w * scale, v.h * scale],
-                color: theme().bg,
-                border_color: [0.0; 4],
-                params: [0.0, 0.0, 0.0, 0.0],
-            });
-        }
-        out.extend(self.grid.panel_instances(scale));
+    pub fn panel_instances(&self) -> Vec<PanelInstance> {
+        let mut out = self.grid.panel_instances();
         for p in &self.panels {
             if let Some(f) = p.fills.first() {
                 out.push(PanelInstance {
-                    rect: [
-                        f.rect.x * scale,
-                        f.rect.y * scale,
-                        f.rect.w * scale,
-                        f.rect.h * scale,
-                    ],
+                    rect: [f.rect.x, f.rect.y, f.rect.w, f.rect.h],
                     color: f.color,
                     border_color: theme().band,
-                    params: [f.radius * scale, 1.0 * scale, 1.0, 0.0],
+                    clip: [0.0; 4],
+                    params: [f.radius, 1.0 * self.scale(), 1.0, 0.0],
                 });
             }
         }

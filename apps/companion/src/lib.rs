@@ -1929,7 +1929,7 @@ impl MorphApp for App {
         let (w, h) = frame.size;
         let s = ctx.scale_factor();
         if shown == Shown::Overview && self.panel_shader.is_some() {
-            let panels = self.overview.panel_instances(s);
+            let panels = self.overview.panel_instances();
             if let Some(shader) = &mut self.panel_shader {
                 shader.draw(
                     ctx.device(),

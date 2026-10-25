@@ -16,12 +16,14 @@ pub struct PanelInstance {
     pub color: [f32; 4],
     /// Border stroke color `[r, g, b, a]`.
     pub border_color: [f32; 4],
+    /// Optional clipping rectangle `[clip_x, clip_y, clip_w, clip_h]`.
+    pub clip: [f32; 4],
     /// `[radius, border_thickness, gradient_strength, 0.0]`.
     pub params: [f32; 4],
 }
 
 pub const MAX_PANELS: usize = 32;
-pub const UNIFORM_FLOATS: usize = 4 + 4 + MAX_PANELS * 16;
+pub const UNIFORM_FLOATS: usize = 4 + 4 + MAX_PANELS * 20;
 
 /// Packs viewport, clear color, and up to `MAX_PANELS` panel instances into
 /// a contiguous float buffer matching `Uniforms` in `panel.wgsl`.
@@ -40,11 +42,12 @@ pub fn pack_uniforms(
     u[3] = count as f32;
     u[4..8].copy_from_slice(&bg);
     for (i, p) in panels.iter().take(MAX_PANELS).enumerate() {
-        let base = 8 + i * 16;
+        let base = 8 + i * 20;
         u[base..base + 4].copy_from_slice(&p.rect);
         u[base + 4..base + 8].copy_from_slice(&p.color);
         u[base + 8..base + 12].copy_from_slice(&p.border_color);
-        u[base + 12..base + 16].copy_from_slice(&p.params);
+        u[base + 12..base + 16].copy_from_slice(&p.clip);
+        u[base + 16..base + 20].copy_from_slice(&p.params);
     }
     u
 }
@@ -188,6 +191,7 @@ mod tests {
             rect: [10.0, 20.0, 300.0, 200.0],
             color: [0.1, 0.2, 0.3, 1.0],
             border_color: [0.5, 0.6, 0.7, 1.0],
+            clip: [0.0, 0.0, 500.0, 500.0],
             params: [12.0, 2.0, 1.0, 0.0],
         };
         let u = pack_uniforms(1080.0, 2340.0, 2.0, [0.05, 0.05, 0.1, 1.0], &[p]);
@@ -199,6 +203,7 @@ mod tests {
         assert_eq!(&u[8..12], &[10.0, 20.0, 300.0, 200.0]); // rect
         assert_eq!(&u[12..16], &[0.1, 0.2, 0.3, 1.0]); // color
         assert_eq!(&u[16..20], &[0.5, 0.6, 0.7, 1.0]); // border_color
-        assert_eq!(&u[20..24], &[12.0, 2.0, 1.0, 0.0]); // params
+        assert_eq!(&u[20..24], &[0.0, 0.0, 500.0, 500.0]); // clip
+        assert_eq!(&u[24..28], &[12.0, 2.0, 1.0, 0.0]); // params
     }
 }

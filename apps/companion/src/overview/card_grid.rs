@@ -233,7 +233,7 @@ impl CardGrid {
     }
 
     /// The panel instances for the custom GPU panel shader.
-    pub fn panel_instances(&self, scale: f32) -> Vec<PanelInstance> {
+    pub fn panel_instances(&self) -> Vec<PanelInstance> {
         let dy = self.dy();
         let v = self.viewport;
         let s = self.scale;
@@ -252,15 +252,11 @@ impl CardGrid {
                     1.0 * s
                 };
                 out.push(PanelInstance {
-                    rect: [
-                        c.rect.x * scale,
-                        (c.rect.y + dy) * scale,
-                        c.rect.w * scale,
-                        c.rect.h * scale,
-                    ],
+                    rect: [c.rect.x, c.rect.y + dy, c.rect.w, c.rect.h],
                     color: theme().card,
                     border_color: border_col,
-                    params: [AgentCard::RADIUS * s * scale, border_w * scale, 1.0, 0.0],
+                    clip: [v.x, v.y, v.w, v.h],
+                    params: [AgentCard::RADIUS * s, border_w, 1.0, 0.0],
                 });
             }
         }
