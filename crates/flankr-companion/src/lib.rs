@@ -32,8 +32,8 @@ use std::thread;
 use std::time::Duration;
 
 pub use client::{
-    CACHED_VIEWS, DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Pressure, Settings,
-    Speaker, Suggestion,
+    CACHED_VIEWS, DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Pressure, PromptMode,
+    Settings, Speaker, Suggestion,
 };
 pub use cross::{SessionCard, SessionCardKind};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};

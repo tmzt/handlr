@@ -334,11 +334,20 @@ pub enum DictationPhase {
     Confirming,
 }
 
+/// The prompt mode: voice dictation or typed message via keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptMode {
+    Voice,
+    Keyboard,
+}
+
 /// The dictation card (plan 20261023_02, decisions 3–5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dictation {
     /// The mode is on. Off, the rest is empty and the card goes away.
     pub active: bool,
+    /// Whether the prompt was started by voice dictation or the keyboard.
+    pub mode: PromptMode,
     /// The message so far: the utterances, joined with a space.
     pub text: String,
     /// The agent it goes to, fixed when the mode started. `None` (or one
@@ -356,6 +365,7 @@ impl Dictation {
     fn off() -> Self {
         Dictation {
             active: false,
+            mode: PromptMode::Voice,
             text: String::new(),
             target: None,
             focus_moved: None,
@@ -873,6 +883,7 @@ enum ReadBack {
 /// The dictation mode (plan 20261023_02).
 #[derive(Debug, Clone)]
 struct Dictating {
+    mode: PromptMode,
     parts: Vec<String>,
     target: Option<common::FocusInfo>,
     /// The target is the focus as last known; the `agents.list` asked for
@@ -2641,6 +2652,7 @@ impl State {
         });
         Dictation {
             active: true,
+            mode: d.mode,
             text: d.text(),
             target: d.target.clone(),
             focus_moved,
@@ -2732,6 +2744,7 @@ impl State {
             None => self.focus.clone(),
         };
         self.dictation = Some(Dictating {
+            mode: PromptMode::Keyboard,
             fixed_pane,
             parts: Vec::new(),
             target,
@@ -2765,6 +2778,7 @@ impl State {
             None => self.focus.clone(),
         };
         self.dictation = Some(Dictating {
+            mode: PromptMode::Voice,
             fixed_pane,
             parts,
             target,
@@ -5033,6 +5047,7 @@ mod tests {
         let out = s.input(Input::StartTextPrompt);
         let d = dictation_of(&out).unwrap();
         assert!(d.active);
+        assert_eq!(d.mode, PromptMode::Keyboard);
         assert_eq!(d.text, "");
         let out = s.input(Input::SetText("Please run tests".into()));
         let d = dictation_of(&out).unwrap();
