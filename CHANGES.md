@@ -2253,3 +2253,24 @@ Departures:
 - **Change detection for SQLite.** `Tailer::check` checks for database and WAL
   modification timestamps and compares `SELECT MAX(idx) FROM steps` to detect
   new records, broadcasting batches to subscribers as steps occur.
+
+## 2026-10-25 12:20 EDT — Rename project to flankr
+
+Plan: [Rename project to flankr across CLI, protocols, crates and apps](docs/design/20261025_01_RENAME_PROJECT_TO_FLANKR_PLAN.md)
+(`In implementation`).
+
+- The project changes name from `handlr` to `flankr`.
+- Workspace crates rename to `crates/libflankr_proto`, `crates/flankr-speech`,
+  `crates/flankr-markdown`, `crates/flankr-companion`, `crates/flankr-audio`,
+  and the root binary target is `flankr`.
+- Wire protocols, Noise Link framing prefixes, URL schemes, and pairing codes
+  cut over to `flankr.harness`, `flankr.companion`, `server: "flankr"`,
+  `flankr.link/1`, `flankr1…`, `flankr://`, and `flankrkey1…`.
+- The companion mobile application ID changes to `dev.flankr.companion`, and
+  desktop macOS secure storage namespace changes to `flankr-companion`
+  (`libmorph.flankr-companion`).
+- Default filesystem locations move to `~/.config/flankr/`,
+  `~/.local/state/flankr/`, and `~/Library/Application Support/dev.flankr.companion/`.
+- Historical design documents, historical entries in `CHANGES.md`/`VERSIONS.md`,
+  and past evidence logs remain untouched under their original names.
+
