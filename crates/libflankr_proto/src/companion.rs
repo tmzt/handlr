@@ -1,4 +1,4 @@
-//! `handlr.companion` version 1: conversational turns for the phone
+//! `flankr.companion` version 1: conversational turns for the phone
 //! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, decisions 8–13 and
 //! their amendments; names from plan 20261022_05, decision 7).
 //!
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// The protocol version served and spoken.
 pub const VERSION: u32 = 1;
 
-/// Method and notification names of `handlr.companion`.
+/// Method and notification names of `flankr.companion`.
 pub mod methods {
     /// Phone → daemon: a turn; answered when it ends.
     pub const TURN_START: &str = "turn.start";
@@ -49,7 +49,7 @@ pub struct HelloParams {
 /// `hello`'s result for a companion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloResult {
-    /// Always `handlr`.
+    /// Always `flankr`.
     pub server: String,
     #[serde(default)]
     pub server_version: String,
@@ -230,13 +230,13 @@ mod tests {
     #[test]
     fn every_type_round_trips() {
         round_trip(HelloParams {
-            protocol: "handlr.companion".into(),
+            protocol: "flankr.companion".into(),
             version: VERSION,
             client: "s23".into(),
             session_id: Some("companion:s23".into()),
         });
         round_trip(HelloResult {
-            server: "handlr".into(),
+            server: "flankr".into(),
             server_version: "0.1.0".into(),
             protocol_version: VERSION,
             session_id: Some("companion:s23".into()),
@@ -252,13 +252,13 @@ mod tests {
             ran: vec![Ran {
                 pane_id: "w2:pZ".into(),
                 command: "continue".into(),
-                name: Some("the handlr agent".into()),
-                spoken: Some("the handlr agent".into()),
+                name: Some("the flankr agent".into()),
+                spoken: Some("the flankr agent".into()),
             }],
             interrupted: vec![Interrupted {
                 pane_id: "w2:pZ".into(),
-                name: "the handlr agent".into(),
-                spoken: "the handlr agent".into(),
+                name: "the flankr agent".into(),
+                spoken: "the flankr agent".into(),
             }],
             detail: None,
         });
@@ -338,14 +338,14 @@ mod tests {
         let f: FocusChanged = serde_json::from_value(json!({})).unwrap();
         assert_eq!(f.focus, None);
         let h = HelloParams {
-            protocol: "handlr.companion".into(),
+            protocol: "flankr.companion".into(),
             version: VERSION,
             client: "tty".into(),
             session_id: None,
         };
         assert_eq!(
             serde_json::to_value(h).unwrap(),
-            json!({"protocol": "handlr.companion", "version": 1, "client": "tty"})
+            json!({"protocol": "flankr.companion", "version": 1, "client": "tty"})
         );
     }
 }

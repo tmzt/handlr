@@ -4,20 +4,20 @@
 //! The pairing string's payload, as bytes: version (1 byte, `2`), the
 //! server's public key (32), addresses (1-byte count, then each a 1-byte
 //! length and `host:port` in UTF-8), and a checksum: the first 4 bytes of
-//! BLAKE2s-256 over every field before it. The text form is `handlr1`
+//! BLAKE2s-256 over every field before it. The text form is `flankr1`
 //! followed by the payload in base58 with the Bitcoin alphabet. It holds no
 //! secret, so it may be shown, logged or kept freely.
 //!
 //! The pairing URL (plan 20261022_06, decision 1, as amended at 23:07 EDT)
-//! is `handlr://<host>:<port>/pair#<pairing string>`: the address a phone
+//! is `flankr://<host>:<port>/pair#<pairing string>`: the address a phone
 //! reaches the server at, and the string. A QR code carries it.
 //!
 //! The device code is what the device shows for the user to paste into
-//! `handlr pair`: version (1 byte, `1`), the device's public key (32), its
+//! `flankr pair`: version (1 byte, `1`), the device's public key (32), its
 //! name (1-byte length, then 1 to 32 bytes of ASCII letters, digits, `-`,
 //! `_` or `.`), and a checksum: the first 4 bytes of BLAKE2s-256 over the
 //! **server's** public key, then every field before it. The text form is
-//! `handlrkey1` and base58. Because the checksum covers the server's key, a
+//! `flankrkey1` and base58. Because the checksum covers the server's key, a
 //! code made for another server, or mistyped, fails it.
 
 use std::fmt;
@@ -27,9 +27,9 @@ use blake2::{Blake2s256, Digest};
 use super::KEY_LEN;
 
 /// The pairing string's prefix.
-pub const PAIRING_PREFIX: &str = "handlr1";
+pub const PAIRING_PREFIX: &str = "flankr1";
 /// The pairing URL's scheme.
-pub const PAIRING_URL_SCHEME: &str = "handlr";
+pub const PAIRING_URL_SCHEME: &str = "flankr";
 /// The pairing URL's path.
 const PAIRING_URL_PATH: &str = "/pair";
 
@@ -37,7 +37,7 @@ const PAIRING_URL_PATH: &str = "/pair";
 pub const PAIRING_VERSION: u8 = 2;
 
 /// The device code's prefix.
-pub const DEVICE_CODE_PREFIX: &str = "handlrkey1";
+pub const DEVICE_CODE_PREFIX: &str = "flankrkey1";
 /// The device code version this crate writes and reads.
 pub const DEVICE_CODE_VERSION: u8 = 1;
 /// The longest device name, in bytes.
@@ -67,8 +67,8 @@ pub struct DeviceCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PairingStringError {
-    /// The text does not start with `handlr1` (a pairing string) or
-    /// `handlrkey1` (a device code).
+    /// The text does not start with `flankr1` (a pairing string) or
+    /// `flankrkey1` (a device code).
     BadPrefix,
     /// A character outside the base58 alphabet.
     BadBase58,
@@ -83,7 +83,7 @@ pub enum PairingStringError {
     TooManyAddresses,
     /// Encoding: an address longer than 255 bytes.
     AddressTooLong,
-    /// A pairing URL that is not `handlr://<host>:<port>/pair#<string>`
+    /// A pairing URL that is not `flankr://<host>:<port>/pair#<string>`
     /// with a host the payload carries, or a payload with no address.
     BadUrl,
     /// A device name that is not 1 to 32 bytes of ASCII letters, digits,
@@ -95,7 +95,7 @@ impl fmt::Display for PairingStringError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let what = match self {
             PairingStringError::BadPrefix => {
-                "it does not start with \"handlr1\" (or \"handlrkey1\" for a device code)"
+                "it does not start with \"flankr1\" (or \"flankrkey1\" for a device code)"
             }
             PairingStringError::BadBase58 => "it has a character outside base58",
             PairingStringError::BadChecksum => "its checksum does not match",
@@ -106,7 +106,7 @@ impl fmt::Display for PairingStringError {
             PairingStringError::TooManyAddresses => "there are more than 255 addresses",
             PairingStringError::AddressTooLong => "an address is longer than 255 bytes",
             PairingStringError::BadUrl => {
-                "it is not a handlr://<host>:<port>/pair# URL for one of its addresses"
+                "it is not a flankr://<host>:<port>/pair# URL for one of its addresses"
             }
             PairingStringError::BadName => {
                 "the name is not 1 to 32 ASCII letters, digits, '-', '_' or '.'"
@@ -157,7 +157,7 @@ impl PairingPayload {
         })
     }
 
-    /// The text form: `handlr1` and the payload in base58.
+    /// The text form: `flankr1` and the payload in base58.
     pub fn encode(&self) -> Result<String, PairingStringError> {
         let bytes = self.to_bytes()?;
         Ok(format!(
@@ -166,7 +166,7 @@ impl PairingPayload {
         ))
     }
 
-    /// The pairing URL: `handlr://<host>:<port>/pair#<string>`, where
+    /// The pairing URL: `flankr://<host>:<port>/pair#<string>`, where
     /// `<host>:<port>` is the first address that is not loopback (with
     /// `tailscale serve`, the Tailscale name), or the first address if all
     /// are.
@@ -234,7 +234,7 @@ impl DeviceCode {
     }
 
     /// The text form for the server whose key is `server_key`:
-    /// `handlrkey1` and the code in base58.
+    /// `flankrkey1` and the code in base58.
     pub fn encode(&self, server_key: &[u8; KEY_LEN]) -> Result<String, PairingStringError> {
         if !Self::valid_name(&self.name) {
             return Err(PairingStringError::BadName);

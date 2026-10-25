@@ -22,7 +22,7 @@ toml = "0.8"
 blake2 = "0.10"
 getrandom = "0.2"
 # The daemon (src/server/): socket lines, peer uid, wire types.
-libhandlr_proto = { path = "crates/libhandlr_proto", features = ["link"] }
+libhandlr_proto = { package = "libflankr_proto", path = "crates/libflankr_proto", features = ["link"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 libc = "0.2"
@@ -54,7 +54,7 @@ members = [
     "crates/handlr-companion",
     "crates/handlr-markdown",
     "crates/handlr-speech",
-    "crates/libhandlr_proto",
+    "crates/libflankr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",
     "crates/libinfer/libinfer-gemini",
@@ -67,7 +67,7 @@ default-members = [
     "crates/handlr-companion",
     "crates/handlr-markdown",
     "crates/handlr-speech",
-    "crates/libhandlr_proto",
+    "crates/libflankr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",
     "crates/libinfer/libinfer-gemini",

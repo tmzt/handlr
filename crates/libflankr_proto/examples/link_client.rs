@@ -1,16 +1,16 @@
-//! A handlr link client, for pairing, reconnecting and revocation
+//! A flankr link client, for pairing, reconnecting and revocation
 //! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, step 3, as amended
 //! at 23:07 EDT: pairing by public keys).
 //!
 //! ```text
-//! cargo run -p libhandlr_proto --features link --example link_client -- \
-//!     --key <file> [--name <name>] [--protocol handlr.harness] [--wait] \
+//! cargo run -p libflankr_proto --features link --example link_client -- \
+//!     --key <file> [--name <name>] [--protocol flankr.harness] [--wait] \
 //!     [<pairing URL or string>]
 //! ```
 //!
 //! With a pairing URL or string, it uses the key in `--key` (or makes one),
 //! stores the server's key and addresses there (mode 0600), and prints its
-//! device code for `handlr pair`. It then connects (`IK`, `hello` in the
+//! device code for `flankr pair`. It then connects (`IK`, `hello` in the
 //! handshake) every 2 s until the server accepts its key, which it does once
 //! the code is pasted. Without one, it reads `--key` and connects once. Either
 //! way it then runs `agents.list`. `--wait` then stays connected, printing
@@ -29,11 +29,11 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use libhandlr_proto::common::{HelloParams, methods, protocols};
-use libhandlr_proto::link::{
+use libflankr_proto::common::{HelloParams, methods, protocols};
+use libflankr_proto::link::{
     DeviceCode, LinkError, LinkStream, PairingPayload, StaticKeypair, generate_keypair, reconnect,
 };
-use libhandlr_proto::{Id, Incoming, Request};
+use libflankr_proto::{Id, Incoming, Request};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
 
@@ -104,7 +104,7 @@ fn unhex(text: &str) -> Option<[u8; 32]> {
 impl Stored {
     fn save(&self, path: &Path) -> Result<(), String> {
         let text = format!(
-            "# handlr link_client key file\nprivate = {}\nserver = {}\nname = {}\naddresses = {}\n",
+            "# flankr link_client key file\nprivate = {}\nserver = {}\nname = {}\naddresses = {}\n",
             hex(&self.private),
             hex(&self.server),
             self.name,
@@ -280,14 +280,14 @@ async fn run() -> Result<(), String> {
             };
             stored.save(&args.key)?;
             let code = DeviceCode {
-                key: libhandlr_proto::link::public_key(&stored.private)
+                key: libflankr_proto::link::public_key(&stored.private)
                     .map_err(|e| e.to_string())?,
                 name: stored.name.clone(),
             }
             .encode(&payload.server_key)
             .map_err(|e| e.to_string())?;
             eprintln!("key stored in {}", args.key.display());
-            eprintln!("Paste this code into handlr pair:");
+            eprintln!("Paste this code into flankr pair:");
             println!("{code}");
             loop {
                 match connect_once(&stored, &first).await {

@@ -1,4 +1,4 @@
-//! The methods every handlr protocol shares (plan 20261022_01, decision 7,
+//! The methods every flankr protocol shares (plan 20261022_01, decision 7,
 //! as amended; the confirmation fields are named in CHANGES.md,
 //! 2026-10-22, "Confirmations: handle, token and nonce").
 
@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 /// Protocol names, as `hello` declares them.
 pub mod protocols {
-    pub const HARNESS: &str = "handlr.harness";
-    pub const COMPANION: &str = "handlr.companion";
+    pub const HARNESS: &str = "flankr.harness";
+    pub const COMPANION: &str = "flankr.companion";
 }
 
 /// Method and notification names.
@@ -89,7 +89,7 @@ pub struct HelloParams {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HelloResult {
-    /// Always `handlr`.
+    /// Always `flankr`.
     pub server: String,
     pub server_version: String,
     pub protocol_version: u32,
@@ -474,7 +474,7 @@ pub struct AgentsSendParams {
     #[serde(default, skip_serializing_if = "SendKind::is_command")]
     pub kind: SendKind,
     /// The confirmation handle: describes the action, 3-64 of `a-z`, `0-9`
-    /// and `-`. Required by `handlr.harness`.
+    /// and `-`. Required by `flankr.harness`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
 }
@@ -814,7 +814,7 @@ pub enum SectionKind {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CardKind {
-    /// A handlr confirmation for the pane.
+    /// A flankr confirmation for the pane.
     Approval,
     /// The agent asked a question.
     Question,
@@ -1156,10 +1156,10 @@ pub struct LinkPairBeginParams {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkPairBeginResult {
-    /// The pairing URL, `handlr://<host>:<port>/pair#handlr1…`, also shown
+    /// The pairing URL, `flankr://<host>:<port>/pair#flankr1…`, also shown
     /// as the QR code.
     pub url: String,
-    /// The pairing string, `handlr1…`: the server's key and addresses.
+    /// The pairing string, `flankr1…`: the server's key and addresses.
     pub pairing: String,
     /// The addresses the pairing string carries.
     pub addresses: Vec<String>,
@@ -1172,7 +1172,7 @@ pub struct LinkPairBeginResult {
 /// `link.pair_add`: add the device whose code is `code` to `auth.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkPairAddParams {
-    /// The device code, `handlrkey1…`, made for this server's key.
+    /// The device code, `flankrkey1…`, made for this server's key.
     pub code: String,
     /// The name to pair it as. Defaults to the device's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1652,7 +1652,7 @@ mod tests {
             summary: "See docs/design/X_PLAN.md".into(),
             links: vec![Link {
                 text: "docs/design/X_PLAN.md".into(),
-                url: "http://wiki/#/src--handlr/docs/design/X_PLAN".into(),
+                url: "http://wiki/#/src--flankr/docs/design/X_PLAN".into(),
             }],
             origin: None,
             text: None,
@@ -1706,18 +1706,18 @@ mod tests {
             client: "ctl".to_string(),
         });
         round_trip(HelloResult {
-            server: "handlr".to_string(),
+            server: "flankr".to_string(),
             server_version: "0.1.0".to_string(),
             protocol_version: 1,
         });
         round_trip(AgentsListResult {
             agents: vec![AgentInfo {
                 pane_id: "w2:pZ".to_string(),
-                name: Some("the handlr agent".to_string()),
-                spoken: Some("the handlr agent".to_string()),
+                name: Some("the flankr agent".to_string()),
+                spoken: Some("the flankr agent".to_string()),
                 agent: "claude".to_string(),
-                project: Some("handlr".to_string()),
-                cwd: Some("/src/handlr".to_string()),
+                project: Some("flankr".to_string()),
+                cwd: Some("/src/flankr".to_string()),
                 workspace_id: Some("w2".to_string()),
                 tab_id: Some("w2:t1".to_string()),
                 tab_label: Some("17-hr".to_string()),
@@ -1741,12 +1741,12 @@ mod tests {
             }],
             focus: Some(FocusInfo {
                 pane_id: "w2:pZ".to_string(),
-                project: Some("handlr".to_string()),
+                project: Some("flankr".to_string()),
                 agent: Some("Claude".to_string()),
                 tab_label: Some("17-hr".to_string()),
                 tab_number: Some(17),
-                name: "the handlr agent".to_string(),
-                spoken: "the handlr agent".to_string(),
+                name: "the flankr agent".to_string(),
+                spoken: "the flankr agent".to_string(),
             }),
         });
         round_trip(AgentsListResult {
@@ -1825,7 +1825,7 @@ mod tests {
             pane_id: "w2:pZ".to_string(),
             command: "please run the tests".to_string(),
             kind: SendKind::Message,
-            handle: Some("message-claude-handlr-please-run".to_string()),
+            handle: Some("message-claude-flankr-please-run".to_string()),
         });
         round_trip(AgentsSendResult::Sent);
         round_trip(AgentsSendResult::Pending {
@@ -1843,8 +1843,8 @@ mod tests {
         });
         round_trip(AgentsInterruptResult {
             interrupted: true,
-            name: "the handlr agent".to_string(),
-            spoken: "the handlr agent".to_string(),
+            name: "the flankr agent".to_string(),
+            spoken: "the flankr agent".to_string(),
         });
         round_trip(WatchResult {
             watched: vec!["w1:p1".to_string()],
@@ -1901,13 +1901,13 @@ mod tests {
         });
         round_trip(LinkPairBeginParams {});
         round_trip(LinkPairBeginResult {
-            url: "handlr://127.0.0.1:7347/pair#handlr1abc".to_string(),
-            pairing: "handlr1abc".to_string(),
+            url: "flankr://127.0.0.1:7347/pair#flankr1abc".to_string(),
+            pairing: "flankr1abc".to_string(),
             addresses: vec!["127.0.0.1:7347".to_string()],
             warnings: vec!["no forward".to_string()],
         });
         round_trip(LinkPairAddParams {
-            code: "handlrkey1abc".to_string(),
+            code: "flankrkey1abc".to_string(),
             name: Some("s23".to_string()),
             protocols: Some(vec!["harness".to_string()]),
             replace: true,
@@ -2108,11 +2108,11 @@ mod tests {
             json!({})
         );
         let add: LinkPairAddParams =
-            serde_json::from_value(json!({"code": "handlrkey1abc"})).unwrap();
+            serde_json::from_value(json!({"code": "flankrkey1abc"})).unwrap();
         assert_eq!(
             add,
             LinkPairAddParams {
-                code: "handlrkey1abc".to_string(),
+                code: "flankrkey1abc".to_string(),
                 name: None,
                 protocols: None,
                 replace: false,

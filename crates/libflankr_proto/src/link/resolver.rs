@@ -19,7 +19,7 @@ use super::{KEY_LEN, StaticKey};
 
 /// What the handshakes pass to `local_private_key`: not a key, so a
 /// [`KeyDh`] set with it uses the [`StaticKey`].
-pub(super) const STATIC_MARKER: &[u8] = b"handlr.link/static-key";
+pub(super) const STATIC_MARKER: &[u8] = b"flankr.link/static-key";
 
 pub(super) struct KeyResolver {
     key: Arc<dyn StaticKey>,

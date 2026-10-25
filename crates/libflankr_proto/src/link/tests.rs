@@ -231,7 +231,7 @@ fn pairing_string_round_trips() {
     let server = generate_keypair().unwrap();
     let p = payload(&server);
     let s = p.encode().unwrap();
-    assert!(s.starts_with("handlr1"));
+    assert!(s.starts_with("flankr1"));
     assert_eq!(PairingPayload::decode(&s).unwrap(), p);
     assert_eq!(format!(" {s}\n").parse::<PairingPayload>().unwrap(), p);
     // Version 2: the key and the addresses, nothing secret.
@@ -270,13 +270,13 @@ fn change_one(s: &str, at: usize) -> String {
 fn a_wrong_prefix_is_refused() {
     let server = generate_keypair().unwrap();
     let s = payload(&server).encode().unwrap();
-    let t = s.replacen("handlr1", "handlr2", 1);
+    let t = s.replacen("flankr1", "flankr2", 1);
     assert_eq!(
         PairingPayload::decode(&t),
         Err(PairingStringError::BadPrefix)
     );
     assert_eq!(
-        PairingPayload::decode(&s["handlr1".len()..]),
+        PairingPayload::decode(&s["flankr1".len()..]),
         Err(PairingStringError::BadPrefix)
     );
 }
@@ -285,7 +285,7 @@ fn a_wrong_prefix_is_refused() {
 fn with_checksum(mut body: Vec<u8>) -> String {
     let sum = Blake2s256::digest(&body);
     body.extend_from_slice(&sum[..4]);
-    format!("handlr1{}", bs58::encode(&body).into_string())
+    format!("flankr1{}", bs58::encode(&body).into_string())
 }
 
 #[test]
@@ -317,11 +317,11 @@ fn an_unknown_version_is_refused() {
 fn bad_base58_and_short_payloads_are_refused() {
     // '0', 'O', 'I' and 'l' are not in the Bitcoin alphabet.
     assert_eq!(
-        PairingPayload::decode("handlr10OIl"),
+        PairingPayload::decode("flankr10OIl"),
         Err(PairingStringError::BadBase58)
     );
     assert_eq!(
-        PairingPayload::decode("handlr1"),
+        PairingPayload::decode("flankr1"),
         Err(PairingStringError::Malformed)
     );
     // Trailing bytes after the addresses.
@@ -354,7 +354,7 @@ fn the_pairing_url_names_the_remote_address_and_round_trips() {
     assert_eq!(
         url,
         format!(
-            "handlr://box.tail1234.ts.net:7347/pair#{}",
+            "flankr://box.tail1234.ts.net:7347/pair#{}",
             p.encode().unwrap()
         )
     );
@@ -370,7 +370,7 @@ fn the_pairing_url_names_the_remote_address_and_round_trips() {
     assert!(
         p.url()
             .unwrap()
-            .starts_with("handlr://127.0.0.1:7347/pair#handlr1")
+            .starts_with("flankr://127.0.0.1:7347/pair#flankr1")
     );
     assert!(!p.has_remote_address());
 
@@ -384,18 +384,18 @@ fn a_pairing_url_must_match_its_payload() {
     let p = payload(&server);
     let s = p.encode().unwrap();
     for bad in [
-        format!("handlr://other.ts.net:7347/pair#{s}"),
-        format!("handlr://box.tail1234.ts.net:7347/join#{s}"),
-        "handlr://box.tail1234.ts.net:7347/pair".to_string(),
+        format!("flankr://other.ts.net:7347/pair#{s}"),
+        format!("flankr://box.tail1234.ts.net:7347/join#{s}"),
+        "flankr://box.tail1234.ts.net:7347/pair".to_string(),
         format!(
-            "handlr://box.tail1234.ts.net:7347/pair#{}",
+            "flankr://box.tail1234.ts.net:7347/pair#{}",
             &s[..s.len() - 1]
         ),
     ] {
         assert!(PairingPayload::decode(&bad).is_err(), "{bad}");
     }
     assert_eq!(
-        PairingPayload::decode(&format!("handlr://other.ts.net:7347/pair#{s}")),
+        PairingPayload::decode(&format!("flankr://other.ts.net:7347/pair#{s}")),
         Err(PairingStringError::BadUrl)
     );
     assert_eq!(
@@ -416,7 +416,7 @@ fn a_device_code_round_trips() {
     let server = generate_keypair().unwrap();
     let d = device("s23-ultra_1.a");
     let code = d.encode(&server.public).unwrap();
-    assert!(code.starts_with("handlrkey1"), "{code}");
+    assert!(code.starts_with("flankrkey1"), "{code}");
     // About 60 characters for a short name.
     let short = device("s23").encode(&server.public).unwrap();
     assert!((60..=70).contains(&short.len()), "{} {short}", short.len());
@@ -427,7 +427,7 @@ fn a_device_code_round_trips() {
     );
     // The layout: version 1, the key, the name; the checksum covers the
     // server's key first.
-    let bytes = bs58::decode(&code["handlrkey1".len()..])
+    let bytes = bs58::decode(&code["flankrkey1".len()..])
         .into_vec()
         .unwrap();
     assert_eq!(bytes[0], 1);
@@ -470,7 +470,7 @@ fn a_mistyped_device_code_is_refused() {
     );
     assert_eq!(
         DeviceCode::decode(
-            &code.replacen("handlrkey1", "handlrkey2", 1),
+            &code.replacen("flankrkey1", "flankrkey2", 1),
             &server.public
         ),
         Err(PairingStringError::BadPrefix)
@@ -509,7 +509,7 @@ fn a_bad_device_name_is_refused() {
     sum.update(server.public);
     sum.update(&body);
     body.extend_from_slice(&sum.finalize()[..4]);
-    let code = format!("handlrkey1{}", bs58::encode(&body).into_string());
+    let code = format!("flankrkey1{}", bs58::encode(&body).into_string());
     assert_eq!(
         DeviceCode::decode(&code, &server.public),
         Err(PairingStringError::BadName)

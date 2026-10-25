@@ -1,4 +1,4 @@
-//! JSON-RPC 2.0 framing and handlr's error codes.
+//! JSON-RPC 2.0 framing and flankr's error codes.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -132,7 +132,7 @@ pub enum Incoming {
     Response(Response),
 }
 
-/// handlr's error codes (plan 20261022_01, decision 7, and the CHANGES.md
+/// flankr's error codes (plan 20261022_01, decision 7, and the CHANGES.md
 /// entry on confirmation nonces), and the JSON-RPC codes it uses.
 pub mod codes {
     pub const PARSE_ERROR: i64 = -32700;

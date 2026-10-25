@@ -1,4 +1,4 @@
-//! handlr link: Noise over any Tokio byte stream
+//! flankr link: Noise over any Tokio byte stream
 //! (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md, decisions 1–2 and
 //! the amendments of 11:58, 16:23 and 23:07 EDT).
 //!
@@ -6,17 +6,17 @@
 //!   `Noise_IK_25519_ChaChaPoly_BLAKE2s`: the client knows the server's
 //!   static key (from the pairing string), opens with the mode byte `0x02`,
 //!   and may carry its first message in the handshake. The server learns
-//!   the client's key from the device code pasted into `handlr pair`, and
+//!   the client's key from the device code pasted into `flankr pair`, and
 //!   drops a key it does not know with no reply. Any other mode byte,
 //!   `0x01` (the pairing handshake that was removed) included, closes the
 //!   connection.
-//! * The prologue is `b"handlr.link/1"` followed by the mode byte.
+//! * The prologue is `b"flankr.link/1"` followed by the mode byte.
 //! * Every Noise message is a frame: a 2-byte big-endian length, then the
 //!   message (at most 65535 bytes). After the handshake each frame's
 //!   plaintext is a flag byte (`0x00` last, `0x01` more) and a chunk of one
 //!   message. A message reassembled past 1 MiB closes the connection.
-//! * [`PairingPayload`] is the pairing string, `handlr1…`, and its URL;
-//!   [`DeviceCode`] is the device's code, `handlrkey1…`. Neither holds a
+//! * [`PairingPayload`] is the pairing string, `flankr1…`, and its URL;
+//!   [`DeviceCode`] is the device's code, `flankrkey1…`. Neither holds a
 //!   secret.
 //!
 //! The local static key is a [`StaticKey`], which does its own
@@ -51,7 +51,7 @@ pub const KEY_LEN: usize = 32;
 /// The handshake.
 pub const RECONNECT_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// The prologue, before the mode byte.
-pub const PROLOGUE_PREFIX: &[u8] = b"handlr.link/1";
+pub const PROLOGUE_PREFIX: &[u8] = b"flankr.link/1";
 
 /// The client's first byte: `IK`.
 pub const MODE_RECONNECT: u8 = 0x02;
