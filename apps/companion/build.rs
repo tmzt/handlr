@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 /// The `specialUse` reason in the manifest, for Play review: the same text
 /// as `notify::SERVICE_REASON` (a test in src/notify.rs holds them to it).
-const SERVICE_REASON: &str = "Keeps the encrypted link to the user's own handlr daemon open \
+const SERVICE_REASON: &str = "Keeps the encrypted link to the user's own flankr daemon open \
      while the app is in the background, so that coding agents' questions, approvals and \
      finished turns reach the phone.";
 
@@ -18,15 +18,15 @@ fn main() {
     themes();
     // Writes target/aarch64-linux-android/<profile>/gradle/companion/, the
     // whole Gradle project that scripts/android.sh packages.
-    libmorph_build::gradle_project("dev.tmzt.handlr")
-        .label("handlr")
-        // `handlr://<host>:<port>/pair#<pairing string>` links open the app
+    libmorph_build::gradle_project("dev.flankr.companion")
+        .label("flankr")
+        // `flankr://<host>:<port>/pair#<pairing string>` links open the app
         // and pair it (libmorph-build 0.2.2).
-        .url_scheme("handlr")
+        .url_scheme("flankr")
         .lib_name("companion")
         // libmorph asks for it after init once the manifest declares it.
         .permission("android.permission.RECORD_AUDIO")
-        // The link to handlr, over Tailscale or the LAN.
+        // The link to flankr, over Tailscale or the LAN.
         .permission("android.permission.INTERNET")
         // The launcher icon: the magenta circuit dog (icon/make_icon.py) on
         // its navy, made into every mipmap by libmorph-build 0.2.5.

@@ -11,7 +11,7 @@
 //! either way, as a span in each row it covers.
 
 use libcontrols::{DrawContext, Rect};
-use libhandlr_proto::common::Link;
+use libflankr_proto::common::Link;
 use libmsdf::drawlist::DrawList;
 
 use super::{CELL_EM, Flow, Row, Terminal, draw_row, fill, line_h, term_h};

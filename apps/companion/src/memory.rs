@@ -1,4 +1,4 @@
-//! Android's memory reports as handlr's memory grades (plan 20261022_03,
+//! Android's memory reports as flankr's memory grades (plan 20261022_03,
 //! the L3 amendments of 2026-10-24 12:21 EDT, "memory pressure in grades",
 //! and 13:45 EDT, "Android's running trim levels mapped onto the memory
 //! grades"). libmorph 0.4.1 gives `on_trim_memory(TrimLevel)` and
@@ -15,7 +15,7 @@
 //! | `RunningLow`, `Background`, `Moderate` | [`Pressure::Background`]: every closed view paged out, the open view ±1 screen |
 //! | `RunningCritical`, `Complete`, `on_low_memory` | [`Pressure::Low`]: the full drop |
 
-use handlr_companion::Pressure;
+use flankr_companion::Pressure;
 use libmorph::TrimLevel;
 
 /// The grade for `level`. `None` for a level libmorph adds later, which is
@@ -26,7 +26,7 @@ pub fn pressure_for(level: TrimLevel) -> Option<Pressure> {
         TrimLevel::RunningLow | TrimLevel::Background | TrimLevel::Moderate => Pressure::Background,
         TrimLevel::RunningCritical | TrimLevel::Complete => Pressure::Low,
         other => {
-            log::warn!("memory: a trim level handlr does not know: {other:?}");
+            log::warn!("memory: a trim level flankr does not know: {other:?}");
             return None;
         }
     })

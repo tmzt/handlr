@@ -193,9 +193,9 @@ impl SquareButton {
             // A plan question's words are plain text in their colour (the
             // colour stands in `bg`), not buttons.
             AgentHit::Suggest(
-                handlr_companion::Suggestion::Approve
-                | handlr_companion::Suggestion::Discuss
-                | handlr_companion::Suggestion::Implement,
+                flankr_companion::Suggestion::Approve
+                | flankr_companion::Suggestion::Discuss
+                | flankr_companion::Suggestion::Implement,
             ) => {
                 let px = 19.0 * s;
                 let y = rect.y + (rect.h - crate::agent::line_h(px)) * 0.5;

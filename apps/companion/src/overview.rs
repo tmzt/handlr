@@ -33,9 +33,9 @@ pub mod turn_strip;
 
 use std::time::Duration;
 
-use handlr_companion::Speaker;
+use flankr_companion::Speaker;
 use libcontrols::{DrawContext, Rect};
-use libhandlr_proto::common::AgentInfo;
+use libflankr_proto::common::AgentInfo;
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
@@ -358,7 +358,7 @@ impl Overview {
             *y += pt * s * 1.35;
         };
         self.gear = Gear::place(l.w, pad, y, TITLE_PT * s * 1.35, s);
-        heading("handlr", TITLE_PT, theme().text, &mut y);
+        heading("flankr", TITLE_PT, theme().text, &mut y);
         for line in &self.status {
             heading(line, STATUS_PT, theme().muted, &mut y);
         }
@@ -746,7 +746,7 @@ mod tests {
             confirm_id: 7,
             command: "continue".into(),
             agent: "Claude".into(),
-            project: Some("handlr".into()),
+            project: Some("flankr".into()),
             handle: Some("blue fox".into()),
             state: CardState::Waiting,
         };
@@ -1097,7 +1097,7 @@ mod tests {
         };
         o.set_dictation(Some(vec![line("Please run the tests.")]));
         o.set_card(Some(Panel {
-            lines: vec![line("Approve?"), line("\"continue\" to Claude in handlr")],
+            lines: vec![line("Approve?"), line("\"continue\" to Claude in flankr")],
             confirm: Some(7),
         }));
         // The message makes way for the question.
@@ -1159,7 +1159,7 @@ mod tests {
         let mut o = overview(2);
         let g = o.gear().rect;
         let title = &o.headings[0];
-        assert_eq!(title.text, "handlr");
+        assert_eq!(title.text, "flankr");
         assert!((g.x + g.w - (PHONE.w - PAD * 2.0)).abs() < 0.01);
         assert_eq!(g.w, Gear::SIZE * 2.0);
         assert!(g.y <= title.y + title.px && g.y + g.h >= title.y);

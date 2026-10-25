@@ -215,7 +215,7 @@ impl TurnOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use handlr_companion::Speaker;
+    use flankr_companion::Speaker;
 
     /// Two thirds of the phone, above the bottom row.
     const AREA: Rect = Rect {

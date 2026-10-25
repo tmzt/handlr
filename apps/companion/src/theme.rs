@@ -164,7 +164,7 @@ pub fn set_theme(theme: &Theme) {
 
 /// Whether the phone is in dark mode, or `None` where that is not known.
 ///
-/// TODO(libmorph): libmorph has no dark-mode API yet; handlr asked for
+/// TODO(libmorph): libmorph has no dark-mode API yet; flankr asked for
 /// `ctx.dark_mode()` and a change event (plan 20261024_05's 15:33 EDT
 /// amendment, item 5). Until then this is `None`, and *System* acts as
 /// dark; with the event, the app applies the theme again as it changes.
@@ -219,7 +219,7 @@ impl SystemBars {
 /// Gives the system bars their colours.
 ///
 /// TODO(libmorph): libmorph has no call for the system bars' colours and
-/// icons yet; handlr asked for one with its dark-mode request
+/// icons yet; flankr asked for one with its dark-mode request
 /// (`ctx.dark_mode()` and a change event, plan 20261024_05's 15:33 EDT
 /// amendment, item 5). Until then this does nothing.
 pub fn apply_system_bars(bars: SystemBars) {

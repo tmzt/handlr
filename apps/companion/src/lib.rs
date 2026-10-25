@@ -1,19 +1,19 @@
-//! handlr's companion app (docs/design/20261022_04_COMPANION_APP_PLAN.md,
+//! flankr's companion app (docs/design/20261022_04_COMPANION_APP_PLAN.md,
 //! decision 8 and step 4 of the 18:10 EDT amendment): one libmorph app for
 //! a desktop window and for Android, started as a copy of libvoicexn's
 //! `examples/voicexn` at v0.2.0.
 //!
-//! - `handlr-companion` is the client: pairing, the link, turns and
+//! - `flankr-companion` is the client: pairing, the link, turns and
 //!   confirmations. The app sends it [`Input`]s and shows its [`Event`]s.
-//! - `handlr-audio` is the voice: libvoicexn's STT and TTS, with cpal on the
+//! - `flankr-audio` is the voice: libvoicexn's STT and TTS, with cpal on the
 //!   desktop and libmorph's audio on Android. Every event is handed to it,
 //!   and its `Utterance`, `Listening` and `Speaking` go back to the client.
 //! - Keys are in libmorph's key store and secure store (`keys.rs`). Where
 //!   libmorph has neither (Linux), the desktop uses `FileKeyStore`; Android
 //!   never falls back, and shows an error instead.
 //!
-//! A tap on no control is [`Input::Tap`]. Pairing takes a `handlr://` URL,
-//! a `handlr1…` string or a `data:image/png;base64,` URL, through
+//! A tap on no control is [`Input::Tap`]. Pairing takes a `flankr://` URL,
+//! a `flankr1…` string or a `data:image/png;base64,` URL, through
 //! [`App::open_url`]: typed into the field (desktop), given as `--pair`
 //! (desktop), or pushed as `pair.txt` into the data directory (Android,
 //! the plan's 16:23 EDT amendment), which the app reads and deletes at
@@ -43,8 +43,8 @@
 //! The settings (plan 20261024_02, `settings.rs`): the gear on the
 //! overview opens them; Back, or the system Back, returns. They are kept in
 //! `settings.toml` in libmorph's data directory on every host (on macOS,
-//! `~/Library/Application Support/dev.tmzt.handlr`; a file at the old
-//! desktop place, `~/.config/handlr-companion`, is moved once), given to the client as
+//! `~/Library/Application Support/dev.flankr.companion`; a file at the old
+//! desktop place, `~/.config/flankr-companion`, is moved once), given to the client as
 //! [`Input::Settings`], and read by every control they turn off. *Unpair
 //! this device* sends [`Input::Unpair`]; once [`Event::Unpaired`] comes,
 //! the app is back on the pairing screen, and *Delete data* then removes
@@ -65,15 +65,15 @@ pub mod ui;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use handlr_audio::libvoicexn::config::SttQuant;
-use handlr_audio::libvoicexn::vad::GateState;
-use handlr_audio::{AudioConfig, AudioEvent, AudioSession};
-use handlr_companion::{
+use flankr_audio::libvoicexn::config::SttQuant;
+use flankr_audio::libvoicexn::vad::GateState;
+use flankr_audio::{AudioConfig, AudioEvent, AudioSession};
+use flankr_companion::{
     Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore, Pressure,
     Suggestion,
 };
 use libcontrols::DrawContext;
-use libhandlr_proto::common::AgentInfo;
+use libflankr_proto::common::AgentInfo;
 use libmorph::{
     AudioSetup, Frame, Key, KeyStatus, LimitsRequest, MorphApp, MorphContext, Touch, TouchPhase,
     wgpu,
@@ -111,7 +111,7 @@ const CLIENT: &str = "companion";
 
 /// The app's id: the Android package (build.rs) and the desktop's data
 /// directory's name.
-pub const APP_ID: &str = "dev.tmzt.handlr";
+pub const APP_ID: &str = "dev.flankr.companion";
 
 /// The most lines of a dictated message's text the card shows: its tail.
 const MESSAGE_LINES: usize = 8;
@@ -233,7 +233,7 @@ pub struct App {
     /// The microphone's end when the desktop has no input device: kept, and
     /// never fed.
     #[cfg(not(target_os = "android"))]
-    _mic: Option<handlr_audio::libvoicexn::capture::Mic>,
+    _mic: Option<flankr_audio::libvoicexn::capture::Mic>,
     /// The connection, for the first status line.
     link: String,
     /// The audio, for the second.
@@ -243,7 +243,7 @@ pub struct App {
     /// The confirmation being asked, or the last one, with its outcome,
     /// until the next utterance (plan 20261023_01, section 4).
     card: Option<Card>,
-    /// The device code to paste into `handlr pair`, and the server's name.
+    /// The device code to paste into `flankr pair`, and the server's name.
     code: Option<(String, String)>,
     /// A pairing note or an error, and its colour's role (looked up as it
     /// is drawn, so a theme change recolours it).
@@ -298,7 +298,7 @@ pub struct App {
     notifier: Notifier,
     /// Where the service is, as the main thread sees it.
     service: Service,
-    /// handlr is on screen.
+    /// flankr is on screen.
     visible: bool,
     /// Set by the settings screen when the alerts are turned on: the
     /// permission is asked on the next frame, with the context.
@@ -326,7 +326,7 @@ enum Service {
     Starting,
     Running,
     /// It could not start (no service on this host, or Android refused
-    /// it): not tried again until the setting changes or handlr is back on
+    /// it): not tried again until the setting changes or flankr is back on
     /// screen.
     Unavailable,
 }
@@ -363,7 +363,7 @@ fn open_link(ctx: &MorphContext, url: &str) {
     match ctx.open_link(url) {
         Ok(()) => log::info!("link: opened"),
         Err(libmorph::OpenLinkError::NotVisible) => {
-            log::warn!("link: not opened: handlr is not on screen (NotVisible)")
+            log::warn!("link: not opened: flankr is not on screen (NotVisible)")
         }
         Err(e) => log::warn!("link: not opened: {e}"),
     }
@@ -461,12 +461,12 @@ fn device_name(args: &Args) -> String {
             .and_then(|out| String::from_utf8(out.stdout).ok());
         if let Some(name) = model
             .as_deref()
-            .and_then(handlr_companion::device_name_from)
+            .and_then(flankr_companion::device_name_from)
         {
             return name;
         }
     }
-    handlr_companion::default_device_name()
+    flankr_companion::default_device_name()
 }
 
 impl App {
@@ -489,7 +489,7 @@ impl App {
     }
 
     /// The app's handling of a pairing URL, however it arrives: the field,
-    /// `--pair`, `pair.txt`, and an opened `handlr://` link. The text is
+    /// `--pair`, `pair.txt`, and an opened `flankr://` link. The text is
     /// never logged.
     pub fn open_url(&mut self, url: &str) {
         let text = url.trim();
@@ -527,7 +527,7 @@ impl App {
             output.sample_rate,
             output.channels
         );
-        let output = handlr_audio::Format {
+        let output = flankr_audio::Format {
             rate: output.sample_rate,
             channels: output.channels,
         };
@@ -756,7 +756,7 @@ impl App {
         .with_background(Box::new(background::Morph(std::rc::Rc::clone(
             &self.notify_ask,
         ))));
-        screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
+        screen.set_daemon(self.server_name.as_deref().unwrap_or("flankr"), self.online);
         screen.set_cache(self.cache);
         self.settings_screen = Some(screen);
     }
@@ -893,7 +893,7 @@ impl App {
             ("unpaired".into(), Role::Muted)
         } else {
             (
-                "unpaired on this phone; handlr lists it until it is removed from auth.toml".into(),
+                "unpaired on this phone; flankr lists it until it is removed from auth.toml".into(),
                 Role::Warn,
             )
         });
@@ -1016,7 +1016,7 @@ impl App {
 
     /// Starts the foreground service when it is wanted (*Stay connected in
     /// the background* on, and paired) and stops it when not. Called on
-    /// each frame, so only while handlr is on screen, as Android requires
+    /// each frame, so only while flankr is on screen, as Android requires
     /// of a start.
     fn sync_service(&mut self) {
         let wanted = self.settings.background && self.paired && self.companion.is_some();
@@ -1308,12 +1308,12 @@ impl App {
                 .agent_pane
                 .as_deref()
                 .and_then(|p| self.agents.iter().find(|a| a.pane_id == p))
-                .map(handlr_companion::cross::colour_of);
+                .map(flankr_companion::cross::colour_of);
             agent.set_session_colour(colour);
         }
         if let Some(screen) = &mut self.settings_screen {
             screen.set_layout(layout);
-            screen.set_daemon(self.server_name.as_deref().unwrap_or("handlr"), self.online);
+            screen.set_daemon(self.server_name.as_deref().unwrap_or("flankr"), self.online);
         }
         // Without the microphone, nothing listens: the sound line says so.
         let sound = if self.settings.microphone {
@@ -1349,7 +1349,7 @@ impl App {
         let mut code = Vec::new();
         if let Some((device_code, server)) = &self.code {
             code.push(line(
-                format!("Paste this code into handlr pair on {server}:"),
+                format!("Paste this code into flankr pair on {server}:"),
                 15.0,
                 theme().muted,
                 0.0,
@@ -1383,11 +1383,11 @@ impl App {
 
 impl MorphApp for App {
     /// The namespace of the key store and the secure store:
-    /// `libmorph.handlr-companion`, on Android and in the macOS Keychain.
-    const SECURE_STORE_ID: &'static str = "handlr-companion";
+    /// `libmorph.flankr-companion`, on Android and in the macOS Keychain.
+    const SECURE_STORE_ID: &'static str = "flankr-companion";
 
     /// The desktop's data and cache directories' name (libmorph 0.4.0):
-    /// `~/Library/Application Support/dev.tmzt.handlr` on macOS. Android
+    /// `~/Library/Application Support/dev.flankr.companion` on macOS. Android
     /// uses the package's own, whose id is the same.
     const APP_ID: &'static str = APP_ID;
 
@@ -1460,7 +1460,7 @@ impl MorphApp for App {
         self.follow_permission();
     }
 
-    /// The foreground service (libmorph 0.4.0), whether or not handlr is on
+    /// The foreground service (libmorph 0.4.0), whether or not flankr is on
     /// screen. Exit stops it and closes the app, as libmorph's `Exited`
     /// says.
     fn on_service(&mut self, ctx: &mut MorphContext, event: &libmorph::service::ServiceEvent) {
@@ -1485,7 +1485,7 @@ impl MorphApp for App {
                 "service: running; without POST_NOTIFICATIONS its notification shows only in the running apps list"
             ),
             E::Exited => {
-                log::info!("service: Exit: closing handlr");
+                log::info!("service: Exit: closing flankr");
                 self.service = Service::Off;
                 self.notifier.running(false);
                 ctx.exit();
@@ -1516,13 +1516,13 @@ impl MorphApp for App {
         self.memory_pressure(memory::LOW_MEMORY);
     }
 
-    /// A `handlr://` link opened the app (libmorph 0.3.2). Only a pairing
-    /// link (`handlr://<host>:<port>/pair#…`) is acted on; its fragment is
+    /// A `flankr://` link opened the app (libmorph 0.3.2). Only a pairing
+    /// link (`flankr://<host>:<port>/pair#…`) is acted on; its fragment is
     /// the pairing string, so nothing past the path is logged.
     fn on_open_url(&mut self, _ctx: &mut MorphContext, url: &str) {
         let before_fragment = url.split(['#', '?']).next().unwrap_or("");
         let is_pairing = before_fragment
-            .strip_prefix("handlr://")
+            .strip_prefix("flankr://")
             .is_some_and(|rest| rest.ends_with("/pair"));
         if is_pairing {
             log::info!("link: a pairing link was opened");
@@ -1579,7 +1579,7 @@ impl MorphApp for App {
             .data_dir()
             .map(std::path::Path::to_path_buf)
             .or_else(|| Some(FileKeyStore::default_dir()));
-        // The desktop's settings.toml was in ~/.config/handlr-companion
+        // The desktop's settings.toml was in ~/.config/flankr-companion
         // until libmorph 0.4.0: moved once into the data directory. Only
         // into the app's own directory, never a scripted run's `storage/`.
         #[cfg(not(target_os = "android"))]
@@ -1687,7 +1687,7 @@ impl MorphApp for App {
                     config.device_name,
                     config
                         .dictation_silence
-                        .max(handlr_companion::DICTATION_SILENCE)
+                        .max(flankr_companion::DICTATION_SILENCE)
                         .as_secs_f64()
                 );
                 let companion = Companion::spawn_tapped(config, keys, app.notifier.tap());
@@ -1710,7 +1710,7 @@ impl MorphApp for App {
             // No microphone (a Mac mini): the replies can still be heard.
             Err(e) => {
                 log::error!("audio: {e}; trying the speaker alone");
-                let silent = handlr_audio::Format {
+                let silent = flankr_audio::Format {
                     rate: 24_000,
                     channels: 1,
                 };
@@ -1746,7 +1746,7 @@ impl MorphApp for App {
         // yet: libmobile delivers it as `MobileEvent::Intent`, but libmorph
         // 0.3.1's Android runner drops that event. Once libmorph releases its
         // URL schemes (plan 20261022_07, Draft), `on_open_url` calls
-        // `open_url`, and build.rs adds `.url_scheme("handlr")`.
+        // `open_url`, and build.rs adds `.url_scheme("flankr")`.
         app
     }
 
@@ -1937,7 +1937,7 @@ fn android_main(app: libmorph::AndroidApp) {
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Info)
-            .with_tag("handlr"),
+            .with_tag("flankr"),
     );
     // Before any worker starts: rayon's default of one thread per core is
     // too many on phones that mix fast and slow cores, and STT needs 4 on

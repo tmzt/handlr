@@ -4,7 +4,7 @@
 //! while the user is speaking, what STT is hearing instead. A tap on it
 //! opens the overlay. With nothing to show, it is hidden and takes no room.
 
-use handlr_companion::Speaker;
+use flankr_companion::Speaker;
 use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 

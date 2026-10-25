@@ -3,7 +3,7 @@ name = "companion"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "handlr's companion app: a libmorph window on the desktop and on Android, on handlr-companion and handlr-audio"
+description = "flankr's companion app: a libmorph window on the desktop and on Android, on flankr-companion and flankr-audio"
 
 # Started as a copy of libvoicexn's examples/voicexn at v0.2.0
 # (32b8032082997a34190b458f79716d998a0d850a); plan 20261022_04, decision 8.
@@ -17,10 +17,10 @@ name = "companion"
 path = "src/main.rs"
 
 [dependencies]
-handlr-companion = { path = "../../crates/handlr-companion" }
-handlr-audio = { path = "../../crates/handlr-audio" }
+flankr-companion = { path = "../../crates/flankr-companion" }
+flankr-audio = { path = "../../crates/flankr-audio" }
 # `StaticKey`, which the key store's Noise key implements.
-libhandlr_proto = { path = "../../crates/libhandlr_proto", features = ["link"] }
+libflankr_proto = { path = "../../crates/libflankr_proto", features = ["link"] }
 # libmorph 0.4.1: the key store and the secure store (`secure-store`), URL
 # schemes (`on_open_url`), `open_link`, `data_dir` on every host,
 # `build_info`, and the memory hooks (`on_low_memory`, `on_trim_memory`).
@@ -33,7 +33,7 @@ libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "4de319ce57aea99297de
 # Basic Markdown, laid out as wrapped styled runs, for the settings copy
 # (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, step 2), drawn in
 # Roboto Regular, Bold and Italic (above) and the terminal face.
-handlr-markdown = { path = "../../crates/handlr-markdown" }
+flankr-markdown = { path = "../../crates/flankr-markdown" }
 # 0.8.0: the scroll pane and `ArrowLabel` for the settings screen (plan
 # 20261024_02, step 1), on the same libmsdf.
 libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "a7d0fd9c7a42576f474488889d70eb491efa1107" }
@@ -51,7 +51,7 @@ base64 = "0.22"
 
 # The desktop window: the default devices through cpal, logs to stderr.
 [target.'cfg(not(target_os = "android"))'.dependencies]
-handlr-audio = { path = "../../crates/handlr-audio", features = ["cpal"] }
+flankr-audio = { path = "../../crates/flankr-audio", features = ["cpal"] }
 env_logger = "0.11"
 
 # Android: libmorph's audio and libmobile, and libmorph's Sink and Source;
@@ -59,7 +59,7 @@ env_logger = "0.11"
 # the battery pages (libmorph 0.4.0, plan 20261024_02's Background and
 # Battery sections).
 [target.'cfg(target_os = "android")'.dependencies]
-handlr-audio = { path = "../../crates/handlr-audio", features = ["morph"] }
+flankr-audio = { path = "../../crates/flankr-audio", features = ["morph"] }
 libmorph = { git = "https://github.com/tmzt/libmorph", rev = "4e5b75c2bd49413192c4180a86b2d70d288ee699", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery"] }
 android_logger = "0.14"
 

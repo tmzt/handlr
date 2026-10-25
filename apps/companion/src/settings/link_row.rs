@@ -252,7 +252,7 @@ mod tests {
     fn a_long_status_wraps_short_of_the_button_and_the_row_grows() {
         let mut row = LinkRow::new("Battery optimization", 2.625);
         row.rect = Rect::new(0.0, 0.0, 1080.0, 52.0 * 2.625);
-        row.subtitle = Some("Optimized: Android may hold back handlr's network when idle".into());
+        row.subtitle = Some("Optimized: Android may hold back flankr's network when idle".into());
         row.action = Some("Enable".into());
         let lines = row.subtitle_lines();
         assert!(lines.len() >= 2, "{lines:?}");

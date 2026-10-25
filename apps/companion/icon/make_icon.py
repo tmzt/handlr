@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate handlr's Android launcher icon from the Gemini source image.
+"""Regenerate flankr's Android launcher icon from the Gemini source image.
 
     python3 -I apps/companion/icon/make_icon.py [--source PATH] [--hue DEG]
                                                [--background RRGGBB]

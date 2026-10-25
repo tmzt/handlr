@@ -8,17 +8,17 @@
 #   scripts/push-stt.sh [<model dir>]           # default: <models>/stt-1b-en_fr
 #   STT_QUANTS="q8_0 q4_0" scripts/push-stt.sh  # other quantizations
 #
-# <models> is $HANDLR_MODELS, or apps/companion/models. Files are staged in
-# $STAGE (default /data/local/tmp/handlr-stt) and kept there; a file already
+# <models> is $FLANKR_MODELS, or apps/companion/models. Files are staged in
+# $STAGE (default /data/local/tmp/flankr-stt) and kept there; a file already
 # staged at its full size is not pushed again, so STAGE=/data/local/tmp/voicexn-stt
 # reuses what libvoicexn's script staged.
 set -euo pipefail
 
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELS="${HANDLR_MODELS:-$APP/models}"
+MODELS="${FLANKR_MODELS:-$APP/models}"
 SRC="${1:-$MODELS/stt-1b-en_fr}"
-APP_ID=dev.tmzt.handlr
-TMP="${STAGE:-/data/local/tmp/handlr-stt}"
+APP_ID=dev.flankr.companion
+TMP="${STAGE:-/data/local/tmp/flankr-stt}"
 
 [[ -f "$SRC/config.json" ]] || { echo "error: no model in $SRC (libvoicexn's scripts/fetch-stt.sh fetches it)" >&2; exit 1; }
 # Retried: wireless adb drops large transfers now and then.

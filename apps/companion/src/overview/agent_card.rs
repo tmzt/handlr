@@ -9,13 +9,13 @@
 //! - **working:** the newest line, dim;
 //! - no session: herdr's status word, dim.
 //!
-//! A card that needs input (a question, or a handlr confirmation pending
+//! A card that needs input (a question, or a flankr confirmation pending
 //! for the pane) says so on itself, with an outline and its label in the
 //! same colour: amber for an approval, blue for a question. It never moves.
 
-use handlr_companion::CardKind;
+use flankr_companion::CardKind;
 use libcontrols::{DrawContext, Rect};
-use libhandlr_proto::common::{AgentInfo, Turn};
+use libflankr_proto::common::{AgentInfo, Turn};
 use libmsdf::drawlist::{DrawList, SdfInstance, SdfKind};
 
 use crate::agent::{Fill, Flow, Row, accent, columns, fill, line_h, one_line, wrap_hard};
@@ -28,7 +28,7 @@ pub const CHEVRON: char = '\u{203a}';
 /// What a card needs from the user.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NeedsInput {
-    /// A handlr confirmation is pending for the pane.
+    /// A flankr confirmation is pending for the pane.
     Approval,
     /// The agent asks a question.
     Question,
@@ -137,7 +137,7 @@ impl AgentCard<'_> {
     /// The session's colour: the band's (plan 20261022_03, the L3
     /// amendment of 2026-10-24 15:56 EDT, item 1).
     pub fn session_colour(&self) -> [f32; 4] {
-        theme().session(handlr_companion::cross::colour_of(self.agent))
+        theme().session(flankr_companion::cross::colour_of(self.agent))
     }
 
     /// What the card needs from the user, if anything: an approval first.
@@ -151,7 +151,7 @@ impl AgentCard<'_> {
         }
     }
 
-    /// The top line: "Claude · handlr · 17-hr".
+    /// The top line: "Claude · flankr · 17-fl".
     pub fn heading(&self) -> String {
         let a = self.agent;
         let mut parts = vec![shown_agent(&a.agent)];
@@ -289,14 +289,14 @@ pub(crate) mod tests {
     pub(crate) fn agent(pane: &str, ws: &str, tab: u32, turn: Option<Turn>) -> AgentInfo {
         AgentInfo {
             pane_id: pane.to_string(),
-            name: Some(format!("Claude in handlr, tab {tab}-hr")),
+            name: Some(format!("Claude in flankr, tab {tab}-fl")),
             spoken: None,
             agent: "claude".to_string(),
-            project: Some("handlr".to_string()),
+            project: Some("flankr".to_string()),
             cwd: None,
             workspace_id: Some(ws.to_string()),
             tab_id: None,
-            tab_label: Some(format!("{tab}-hr")),
+            tab_label: Some(format!("{tab}-fl")),
             tab_number: Some(tab),
             status: "working".to_string(),
             focused: false,
@@ -339,7 +339,7 @@ pub(crate) mod tests {
         assert_eq!(
             texts(&c),
             [
-                "Claude \u{b7} handlr \u{b7} 17-hr",
+                "Claude \u{b7} flankr \u{b7} 17-fl",
                 "Asking",
                 "Install it on the S23?"
             ]
@@ -455,14 +455,14 @@ pub(crate) mod tests {
 
     #[test]
     fn the_band_is_in_the_sessions_colour_whatever_the_theme() {
-        use libhandlr_proto::common::{AgentSessionInfo, SessionMatched};
+        use libflankr_proto::common::{AgentSessionInfo, SessionMatched};
         let mut a = agent("p1", "w1", 17, None);
         a.session = Some(AgentSessionInfo {
             session_id: Some("0b8e-session".into()),
             matched: SessionMatched::Id,
             pending_question: None,
         });
-        let index = handlr_companion::cross::session_colour("0b8e-session");
+        let index = flankr_companion::cross::session_colour("0b8e-session");
         for id in ["dark_gray", "light_black", "nord"] {
             crate::theme::testing::use_theme(id);
             let c = lay(AgentCard {
@@ -505,7 +505,7 @@ pub(crate) mod tests {
         // Its heading ends in the chevron; another's does not.
         assert_eq!(
             c.flow.rows[0].text,
-            format!("Claude \u{b7} handlr \u{b7} 17-hr {CHEVRON}")
+            format!("Claude \u{b7} flankr \u{b7} 17-fl {CHEVRON}")
         );
         assert!(!plain.flow.rows[0].text.ends_with(CHEVRON));
         assert_eq!(bar.rect.w, AgentCard::BAR * 2.0);
@@ -519,6 +519,6 @@ pub(crate) mod tests {
             agent: &numbered,
             approval: false,
         };
-        assert_eq!(card.heading(), "Claude \u{b7} handlr \u{b7} tab 17");
+        assert_eq!(card.heading(), "Claude \u{b7} flankr \u{b7} tab 17");
     }
 }

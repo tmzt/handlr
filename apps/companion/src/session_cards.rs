@@ -1,7 +1,7 @@
 //! Other sessions' cards at the bottom of the screen (plan 20261022_03,
 //! the L3 amendments of 2026-10-24 15:56, 16:00 and 16:01 EDT).
 //!
-//! The client gives the cards ([`handlr_companion::Event::SessionCards`]),
+//! The client gives the cards ([`flankr_companion::Event::SessionCards`]),
 //! newest first. The newest is drawn: a question or approval as a card
 //! whose header is in its session's colour and names it ("<agent> is
 //! asking", "<agent> needs approval") over its text; a finished turn as one
@@ -13,7 +13,7 @@
 //! agent view's pinned card, and at the bottom of the settings. A tap opens
 //! its session; a swipe down dismisses it.
 
-use handlr_companion::{SessionCard, SessionCardKind};
+use flankr_companion::{SessionCard, SessionCardKind};
 use libcontrols::{DrawContext, Rect};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;

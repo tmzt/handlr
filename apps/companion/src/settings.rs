@@ -6,7 +6,7 @@
 //!   directory (decision 5): written on every change, read at start, the
 //!   defaults when missing or unreadable. On the desktop that is libmorph's
 //!   data directory since 0.4.0; [`move_old`] brings the file over once
-//!   from `~/.config/handlr-companion`.
+//!   from `~/.config/flankr-companion`.
 //! - A toggle that is off disables its UI throughout the app (decision 4).
 //!   Each control asks [`allows`] whether it is live, so no screen keeps
 //!   its own switch: a disabled control is drawn at [`DISABLED_ALPHA`]
@@ -230,8 +230,8 @@ pub fn step_scrollbar(mode: ScrollbarVisibility, forward: bool) -> ScrollbarVisi
 
 impl Settings {
     /// What the client acts on: everything but the scrollbar.
-    pub fn to_client(&self) -> handlr_companion::Settings {
-        handlr_companion::Settings {
+    pub fn to_client(&self) -> flankr_companion::Settings {
+        flankr_companion::Settings {
             sound: self.sound,
             ding: self.ding,
             microphone: self.microphone,
@@ -390,7 +390,7 @@ pub fn allows(hit: AgentHit) -> bool {
         | AgentHit::Submit
         | AgentHit::Scratch
         | AgentHit::Clear
-        | AgentHit::Suggest(handlr_companion::Suggestion::Discuss) => s.microphone,
+        | AgentHit::Suggest(flankr_companion::Suggestion::Discuss) => s.microphone,
         _ => true,
     }
 }

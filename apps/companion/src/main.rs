@@ -2,12 +2,12 @@
 //!
 //! ```text
 //! cargo run --release -- [--models <dir>] [--quant q4k|q4_0|q8] [--voice <name>]
-//!     [--pair <pairing URL, handlr1… or data: URL>] [--keys <dir>] [--name <device name>]
+//!     [--pair <pairing URL, flankr1… or data: URL>] [--keys <dir>] [--name <device name>]
 //! ```
 //!
 //! `--models` holds `phonon-31m-en` and `stt-1b-en_fr` (default `models/`).
 //! Keys are in the login Keychain on macOS, or with `--keys`, and on other
-//! desktops, in files (`~/.config/handlr-companion/` by default).
+//! desktops, in files (`~/.config/flankr-companion/` by default).
 
 use std::process::ExitCode;
 

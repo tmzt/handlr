@@ -11,7 +11,7 @@ use std::cmp::Ordering;
 use std::time::Duration;
 
 use libcontrols::{DrawContext, Rect};
-use libhandlr_proto::common::AgentInfo;
+use libflankr_proto::common::AgentInfo;
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
@@ -259,7 +259,7 @@ impl CardGrid {
 mod tests {
     use super::*;
     use crate::overview::agent_card::tests::{agent, asking};
-    use libhandlr_proto::common::Turn;
+    use libflankr_proto::common::Turn;
 
     /// A window on the phone (1080 × 2340 at scale 2.0).
     const HALF: Rect = Rect {
@@ -326,7 +326,7 @@ mod tests {
                 .map(|(c, _)| c)
         };
         use crate::agent::accent;
-        use handlr_companion::CardKind;
+        use flankr_companion::CardKind;
         assert_eq!(outline("p3"), Some(accent(CardKind::Question)));
         assert_eq!(outline("p2"), Some(accent(CardKind::Approval)));
         assert_eq!(outline("p1"), None);

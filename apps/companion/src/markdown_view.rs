@@ -1,6 +1,6 @@
 //! Markdown in the app (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md,
 //! decision 5): a [`MarkdownView`] lays its text out with
-//! `handlr_markdown::lay_out` and draws the runs, in Roboto Regular, Bold
+//! `flankr_markdown::lay_out` and draws the runs, in Roboto Regular, Bold
 //! and Italic (BoldItalic falls back to Bold) and the terminal face for
 //! `Code`. Links are drawn as the agent view's link spans are, in the link
 //! colour and underlined, and a tap on one is
@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use handlr_markdown::{Laid, Style, lay_out};
+use flankr_markdown::{Laid, Style, lay_out};
 use libcontrols::{
     ControlAction, ControlPart, DrawContext, DrawControl, EventContext, HostedControl,
     KeyboardEvent, MouseButton, MouseEvent, Rect,

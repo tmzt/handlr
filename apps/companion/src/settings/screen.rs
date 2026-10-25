@@ -51,7 +51,7 @@ use libcontrols::{
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
-use handlr_markdown::Style;
+use flankr_markdown::Style;
 
 use super::background::{self, Background};
 use super::battery::{Battery, BatteryState, VendorPage};
@@ -325,7 +325,7 @@ impl SettingsScreen {
             vendor: None,
             android,
             no_vendor: false,
-            daemon: "handlr".to_string(),
+            daemon: "flankr".to_string(),
             online: false,
             cache: 0,
             asking: None,
@@ -408,7 +408,7 @@ impl SettingsScreen {
 
     /// Reads the battery state again, as on returning from its pages.
     /// After *Enable*: the state read again once a second, for a minute or
-    /// until handlr is exempt.
+    /// until flankr is exempt.
     fn watch_battery(&mut self, dt: f32) {
         let Some((left, since)) = self.battery_watch else {
             return;
@@ -1120,7 +1120,7 @@ impl SettingsScreen {
             self.place();
             return Some(SettingsHit::Voice(s));
         } else if target == n.optimization {
-            // *Enable* asks the system to exempt handlr; the row itself
+            // *Enable* asks the system to exempt flankr; the row itself
             // opens the list of every app's setting.
             let enable = matches!(action, ControlAction::Activated { part } if part == ACTION_PART);
             self.battery.open_optimization(!enable);
@@ -1825,13 +1825,13 @@ mod tests {
     }
 
     #[test]
-    fn the_unpair_modal_says_when_handlr_is_offline() {
+    fn the_unpair_modal_says_when_flankr_is_offline() {
         let mut s = plain();
         s.set_daemon("m4", false);
         tap_row(&mut s, "Unpair this device");
         s.tick(Duration::from_secs(1));
         let text = s.modal_text();
-        assert!(text.contains("handlr is offline"), "{text}");
+        assert!(text.contains("flankr is offline"), "{text}");
         assert!(text.contains("from m4?"), "{text}");
     }
 

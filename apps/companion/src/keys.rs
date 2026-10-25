@@ -1,5 +1,5 @@
 //! Key storage in libmorph's key store and secure store, as libmorph's key
-//! store plan (`20261022_06_KEY_STORE_PLAN.md`, section 7) has handlr use
+//! store plan (`20261022_06_KEY_STORE_PLAN.md`, section 7) has flankr use
 //! them:
 //!
 //! - this device's Noise static key is a [`NoiseStatic`] in the key store,
@@ -17,8 +17,8 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use curve25519_dalek::montgomery::MontgomeryPoint;
-use handlr_companion::{KeyStore, ServerRecord};
-use libhandlr_proto::link::StaticKey;
+use flankr_companion::{KeyStore, ServerRecord};
+use libflankr_proto::link::StaticKey;
 use libmorph::key_store::{self, KeyStoreError, SealToken, SecretKey};
 use libmorph::{SecureStore, Vault};
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ impl NoiseStatic {
 
 impl SecretKey for NoiseStatic {
     type Public = [u8; 32];
-    const KIND: &'static str = "handlr.noise.x25519.v1";
+    const KIND: &'static str = "flankr.noise.x25519.v1";
 
     fn generate(_: &SealToken) -> Self {
         let mut key = Box::new([0u8; 32]);
@@ -213,7 +213,7 @@ fn decode_server(bytes: &[u8]) -> Result<ServerRecord, String> {
 #[cfg(all(test, not(target_os = "android")))]
 mod tests {
     use super::*;
-    use libhandlr_proto::link::generate_keypair;
+    use libflankr_proto::link::generate_keypair;
 
     #[test]
     fn the_vault_key_agrees_with_snow() {

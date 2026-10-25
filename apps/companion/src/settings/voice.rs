@@ -1,5 +1,5 @@
 //! The *Voice* setting (plan 20261024_02, CHANGES.md 2026-10-24 14:58 EDT):
-//! which of Phonon's voices handlr speaks in.
+//! which of Phonon's voices flankr speaks in.
 //!
 //! - **The choices:** *Default* (Phonon's own, `None`) first, then the voices
 //!   Phonon reported on load (`AudioEvent::TtsLoaded`'s names), in
@@ -12,7 +12,7 @@
 //!   through the app's audio, while *All sound* is on. A step while
 //!   something is being said cuts it off first ([`preview`]).
 
-use handlr_audio::Action;
+use flankr_audio::Action;
 
 use super::copy;
 

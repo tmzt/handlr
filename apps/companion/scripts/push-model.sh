@@ -6,14 +6,14 @@
 #
 #   scripts/push-model.sh [<model dir>]     # default: <models>/phonon-31m-en
 #
-# <models> is $HANDLR_MODELS, or apps/companion/models.
+# <models> is $FLANKR_MODELS, or apps/companion/models.
 set -euo pipefail
 
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MODELS="${HANDLR_MODELS:-$APP/models}"
+MODELS="${FLANKR_MODELS:-$APP/models}"
 SRC="${1:-$MODELS/phonon-31m-en}"
-APP_ID=dev.tmzt.handlr
-TMP=/data/local/tmp/handlr-tts
+APP_ID=dev.flankr.companion
+TMP=/data/local/tmp/flankr-tts
 
 [[ -f "$SRC/model.q8.gguf" ]] || { echo "error: no model in $SRC (libvoicexn's scripts/fetch-model.sh fetches it)" >&2; exit 1; }
 adb shell rm -rf "$TMP"

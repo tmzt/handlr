@@ -11,9 +11,9 @@
 //! the dictation cards, and their buttons, are there. The lines those
 //! cards show are built here.
 
-use handlr_companion::{Dictation, DictationPhase};
+use flankr_companion::{Dictation, DictationPhase};
 use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Router, TextAlign};
-use libhandlr_proto::common::FocusInfo;
+use libflankr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
 use crate::theme::theme;
@@ -310,7 +310,7 @@ impl Screen {
                 .with_text_color(theme().text)
                 .with_font_size(18.0)
         };
-        let title = router.add(None, label("handlr", 32.0, theme().text, TextAlign::Center));
+        let title = router.add(None, label("flankr", 32.0, theme().text, TextAlign::Center));
         let status = [
             router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
             router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
@@ -577,7 +577,7 @@ mod tests {
             PHONE,
             View {
                 paired: true,
-                code: vec![line("handlrkey1abc")],
+                code: vec![line("flankrkey1abc")],
                 ..View::default()
             },
         );
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn the_field_shows_its_tail() {
         let mut screen = Screen::new();
-        let field = format!("handlr://m4:7347/pair#handlr1{}", "x".repeat(300));
+        let field = format!("flankr://m4:7347/pair#flankr1{}", "x".repeat(300));
         screen.set(
             PHONE,
             View {

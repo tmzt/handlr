@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use handlr_companion::Speaker;
+use flankr_companion::Speaker;
 use libcontrols::{DrawContext, Rect};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;

@@ -29,7 +29,7 @@ done
 
 APP="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORKSPACE="$(cd "$APP/.." && pwd)"
-APP_ID=dev.tmzt.handlr
+APP_ID=dev.flankr.companion
 TARGET=aarch64-linux-android
 API=29
 
@@ -73,5 +73,5 @@ echo "==> $APK"
 if [[ "$INSTALL" == 1 ]]; then
     adb install -r "$APK"
     adb shell am start -n "$APP_ID/dev.highbay.libmobile.MobileNativeActivity"
-    echo "==> logs: adb logcat -s handlr libmobile libmorph"
+    echo "==> logs: adb logcat -s flankr libmobile libmorph"
 fi

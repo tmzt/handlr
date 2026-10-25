@@ -9,7 +9,7 @@
 //! the session ([`Model::content`]):
 //!
 //! - **title:** the agent that matters most (needs you, then working, then
-//!   done), or with several, "handlr · 1 needs you, 2 working";
+//!   done), or with several, "flankr · 1 needs you, 2 working";
 //! - **text:** that agent's state as the jump line gives it: `question: …`,
 //!   `approval: …`, `working: <newest line>`, `done: <summary>`;
 //! - **all idle:** "All agents idle · n MB this session", from the client's
@@ -17,7 +17,7 @@
 //! - **updates:** at most every [`MIN_GAP`], only on a change ([`Throttle`]):
 //!   `update_text` when only the text changed, `update` when the title did.
 //!
-//! "Done" is an agent whose turn ended, from working, since handlr was last
+//! "Done" is an agent whose turn ended, from working, since flankr was last
 //! on screen; coming back to the screen clears it.
 //!
 //! Android runs none of the app's frames in the background, so the
@@ -36,8 +36,8 @@
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use handlr_companion::Event;
-use libhandlr_proto::common::{AgentInfo, Turn};
+use flankr_companion::Event;
+use libflankr_proto::common::{AgentInfo, Turn};
 
 use crate::overview::agent_card::AgentCard;
 use crate::settings::copy;
@@ -49,10 +49,10 @@ pub const MIN_GAP: Duration = Duration::from_secs(2);
 pub const LINE_MAX: usize = 120;
 
 /// The title with no agent to name: the app's own name.
-pub const APP_TITLE: &str = "handlr";
+pub const APP_TITLE: &str = "flankr";
 
 /// The `specialUse` reason, as build.rs declares it in the manifest.
-pub const SERVICE_REASON: &str = "Keeps the encrypted link to the user's own handlr daemon open \
+pub const SERVICE_REASON: &str = "Keeps the encrypted link to the user's own flankr daemon open \
      while the app is in the background, so that coding agents' questions, approvals and \
      finished turns reach the phone.";
 
@@ -104,7 +104,7 @@ pub enum AlertKind {
     Finished,
 }
 
-/// A question, an approval or a finished turn, while handlr is not on
+/// A question, an approval or a finished turn, while flankr is not on
 /// screen: its agent's pane, the agent's name, and the state's line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Alert {
@@ -164,11 +164,11 @@ fn agent_name(agent: &AgentInfo) -> String {
 #[derive(Debug, Default)]
 pub struct Model {
     agents: Vec<AgentInfo>,
-    /// The panes with a handlr confirmation waiting.
+    /// The panes with a flankr confirmation waiting.
     pending: Vec<String>,
     /// The confirmation being asked, and its command.
     confirm: Option<(u64, String)>,
-    /// The panes whose turn ended, from working, since handlr was last on
+    /// The panes whose turn ended, from working, since flankr was last on
     /// screen; the newest last.
     done: Vec<String>,
     bytes: u64,
@@ -266,7 +266,7 @@ impl Model {
             .unwrap_or_default()
     }
 
-    /// handlr is on screen: the finished turns have been seen.
+    /// flankr is on screen: the finished turns have been seen.
     pub fn seen(&mut self) {
         self.done.clear();
     }
@@ -468,7 +468,7 @@ struct Shared {
     throttle: Throttle,
     /// The service is in the foreground (`ServiceEvent::Started`).
     running: bool,
-    /// handlr is on screen.
+    /// flankr is on screen.
     visible: bool,
     /// *Alert when an agent needs you*, with the background connection on.
     alerts: bool,
@@ -529,7 +529,7 @@ impl Notifier {
     }
 
     /// The function for `Companion::spawn_tapped`: each event into the
-    /// model, and its alerts to the host while handlr is off screen with
+    /// model, and its alerts to the host while flankr is off screen with
     /// alerts on.
     pub fn tap(&self) -> impl Fn(&Event, u64) + Send + 'static {
         let shared = Arc::clone(&self.shared);
@@ -550,7 +550,7 @@ impl Notifier {
         }
     }
 
-    /// Starts the service, showing the session as it is. Only while handlr
+    /// Starts the service, showing the session as it is. Only while flankr
     /// is on screen; Android refuses it otherwise.
     pub fn start(&self) -> Result<(), String> {
         let now = self.clock.elapsed();
@@ -579,7 +579,7 @@ impl Notifier {
         });
     }
 
-    /// handlr came on screen (`true`): finished turns are seen; or left it.
+    /// flankr came on screen (`true`): finished turns are seen; or left it.
     pub fn visible(&self, visible: bool) {
         self.with(|s| {
             s.visible = visible;
@@ -698,7 +698,7 @@ mod tests {
         assert_eq!(
             m.content(),
             Content {
-                title: "handlr".into(),
+                title: "flankr".into(),
                 text: "All agents idle \u{b7} 0 MB this session".into()
             }
         );
@@ -719,7 +719,7 @@ mod tests {
         m.apply(
             &Event::Agents(vec![named(
                 "p1",
-                "Claude in handlr",
+                "Claude in flankr",
                 working("Reading src/lib.rs"),
             )]),
             0,
@@ -727,14 +727,14 @@ mod tests {
         assert_eq!(
             m.content(),
             Content {
-                title: "Claude in handlr".into(),
+                title: "Claude in flankr".into(),
                 text: "working: Reading src/lib.rs".into()
             }
         );
         m.apply(
             &Event::Agents(vec![named(
                 "p1",
-                "Claude in handlr",
+                "Claude in flankr",
                 asking("Push it?\nOr wait?"),
             )]),
             0,
@@ -764,7 +764,7 @@ mod tests {
         assert_eq!(
             m.content(),
             Content {
-                title: "handlr \u{b7} 1 needs you, 2 working".into(),
+                title: "flankr \u{b7} 1 needs you, 2 working".into(),
                 text: "question: Which one?".into()
             }
         );
@@ -783,7 +783,7 @@ mod tests {
         );
         m.apply(&Event::PendingPanes(vec!["p1".into()]), 0);
         let c = m.content();
-        assert_eq!(c.title, "handlr \u{b7} 2 needs you, 1 working");
+        assert_eq!(c.title, "flankr \u{b7} 2 needs you, 1 working");
         assert_eq!(
             c.text, "question: Which one?",
             "a question before an approval"
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn done_is_a_turn_that_ended_while_away_until_handlr_is_seen() {
+    fn done_is_a_turn_that_ended_while_away_until_flankr_is_seen() {
         let mut m = Model::default();
         m.apply(&Event::Agents(vec![named("p1", "A", working("x"))]), 0);
         let alerts = m.apply(

@@ -7,7 +7,7 @@
 //! cut (plan 20261022_03, the L3 amendment of 2026-10-24 11:54 EDT). It
 //! never sits on the user's band and never makes a card.
 
-use libhandlr_proto::common::Entry;
+use libflankr_proto::common::Entry;
 
 use super::{CELL_EM, Flow, Row, TOOL_PT, full_text, link_spans, term_h, wrap_hard};
 
@@ -63,7 +63,7 @@ impl NoticeLine {
         y: f32,
         cols: usize,
         s: f32,
-        targets: &[libhandlr_proto::common::Link],
+        targets: &[libflankr_proto::common::Link],
         flow: &mut Flow,
     ) -> f32 {
         let px = TOOL_PT * s;

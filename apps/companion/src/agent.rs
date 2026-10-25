@@ -36,10 +36,10 @@ use std::time::Duration;
 
 use std::collections::{HashMap, HashSet};
 
-use handlr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
-use handlr_companion::{AgentCard, Bookend, CardKind, Pressure, Shows, Suggestion, ViewSection};
+use flankr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
+use flankr_companion::{AgentCard, Bookend, CardKind, Pressure, Shows, Suggestion, ViewSection};
 use libcontrols::{Button, DrawContext, DrawControl, Rect};
-use libhandlr_proto::common::{Entry, EntryKind, Link, Role, Serial};
+use libflankr_proto::common::{Entry, EntryKind, Link, Role, Serial};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 #[cfg(test)]
@@ -2966,7 +2966,7 @@ impl AgentScreen {
         }
     }
 
-    /// The refresh is done ([`handlr_companion::Event::Refreshed`]): `new`
+    /// The refresh is done ([`flankr_companion::Event::Refreshed`]): `new`
     /// sections came. Its result line shows for `PULL_RESULT`: the end's
     /// state as the jump line says it, else `-- N new --`, or `-- up to
     /// date --` with nothing new (the 12:23 EDT amendment); then the view
@@ -3131,7 +3131,7 @@ impl AgentScreen {
         1.0 - ((t - BAR_HOLD.as_secs_f32()) / BAR_FADE.as_secs_f32()).clamp(0.0, 1.0)
     }
 
-    /// The Finished cards' slots ([`handlr_companion::Event::AgentView`]'s
+    /// The Finished cards' slots ([`flankr_companion::Event::AgentView`]'s
     /// `bookends`), for the section labels.
     pub fn set_bookends(&mut self, bookends: Vec<Bookend>) {
         if bookends != self.bookends {
@@ -3365,7 +3365,7 @@ impl AgentScreen {
     }
 
     /// The window on the ribbon, by index, when it changed since last
-    /// taken: for [`handlr_companion::Input::Window`].
+    /// taken: for [`flankr_companion::Input::Window`].
     pub fn take_window(&mut self) -> Option<ViewWindow> {
         // Not while the jump scroll runs: nothing is fetched on the way,
         // and landing reports the bottom, following. Nor while the thumb
@@ -4239,7 +4239,7 @@ mod tests {
     fn plan_link() -> Link {
         Link {
             text: PLAN.to_string(),
-            url: "http://w/#/src--handlr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN".to_string(),
+            url: "http://w/#/src--flankr/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN".to_string(),
         }
     }
 
