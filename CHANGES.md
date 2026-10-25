@@ -2235,3 +2235,21 @@ rebased over the pull-to-refresh change.
 10. **Session colours:** an FNV-1a hash of the session id picks one of 16
     colours, 8 hues each with a light and a dark variant. Each theme tunes its
     own, and band text is black or white by contrast (tested at 3:1 or more).
+
+
+## 2026-10-25 10:47 EDT — Plan 20261023_06, step 5: tailing and subscriptions for agy sessions
+
+Plan: [Session readers for agy and other agents, behind one agnostic trait](docs/design/20261023_06_SESSION_READERS_PLAN.md)
+(`Implemented`). Step 5 requires the S23 companion app to display the agent view
+for an agy session.
+
+Departures:
+- **`Tailer` and `Source` support record-based sessions alongside line-based ones.**
+  `session.subscribe` and `session.content` rely on `Tailer` and `Source` in
+  `src/sessions/hub.rs`. `Tailer` originally required `LineReader` and a text
+  `LineIndex`. For agy's SQLite database, `AgyReader` exposes `max_idx` and
+  `read_range`, allowing `Tailer` and `Source` to feed `Builder` and construct
+  the session outline and sections without a `LineIndex`.
+- **Change detection for SQLite.** `Tailer::check` checks for database and WAL
+  modification timestamps and compares `SELECT MAX(idx) FROM steps` to detect
+  new records, broadcasting batches to subscribers as steps occur.
