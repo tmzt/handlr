@@ -19,6 +19,60 @@
 #
 # Buttons are drawn with `fg` labels, so on a light theme they are light.
 
+# The default theme: Dark (navy), from the overview screen design mockup
+# (docs/design/20261025_03_NAVY_OVERVIEW_THEME_PLAN.md).
+[theme.dark_navy]
+name = "Dark (navy)"
+dark = true
+bg = "#0A0A1B"
+header = "#0A0A1B"
+card = "#1C1C3E"
+band = "#2C2C51"
+input = "#151530"
+overlay = [0.0, 0.0, 0.0, 0.65]
+text = "#F4F2F9"
+fg = "#F4F2F9"
+dim = "#A09FBD"
+muted = "#8584A5"
+code = "#A09FBD"
+link = "#94A7F9"
+spoken = "#94A7F9"
+accent = "#FFB340"
+question = "#94A7F9"
+green = "#86EAA1"
+red = "#EC677C"
+yellow = "#F5DC6A"
+warn = "#FF8A50"
+recording = "#FF5555"
+approve = "#1C4E30"
+deny = "#5E1E28"
+message = "#252E58"
+back = "#2C2C51"
+button = "#2E2E57"
+toggle = "#256B3E"
+scrollbar = [0.55, 0.60, 0.75, 0.4]
+placeholder = [0.95, 0.95, 0.98, 0.08]
+shimmer = [0.95, 0.95, 0.98, 0.015]
+shadow = [0.0, 0.0, 0.0, 0.6]
+# Saturated session colours (plan 20261025_03, decision 2): 8 hues, light
+# and dark, rich and saturated against navy card panels.
+session_1 = "#FF4D4D"   # red
+session_2 = "#D62839"   # crimson
+session_3 = "#FF7A00"   # orange
+session_4 = "#D95700"   # deep amber
+session_5 = "#FFD13B"   # yellow
+session_6 = "#C49A00"   # gold
+session_7 = "#2DD4BF"   # teal
+session_8 = "#0F766E"   # deep teal
+session_9 = "#38D9A9"   # emerald green
+session_10 = "#1B9E77"  # forest green
+session_11 = "#5C7CFA"  # periwinkle blue
+session_12 = "#3B5BDB"  # cobalt
+session_13 = "#9775FA"  # violet
+session_14 = "#7048E8"  # deep violet
+session_15 = "#F783AC"  # pink
+session_16 = "#D6336C"  # magenta
+
 # The colours the app had before themes, exactly (as numbers, since most
 # are not n/255).
 [theme.dark_gray]
@@ -50,15 +104,10 @@ message = [0.20, 0.32, 0.55, 1.0]
 back = [0.30, 0.30, 0.36, 1.0]
 button = [0.24, 0.25, 0.31, 1.0]
 toggle = [0.22, 0.62, 0.36, 1.0]
-# libcontrols' scroll indicator, as the settings drew it.
 scrollbar = [0.55, 0.62, 0.70, 0.5]
 placeholder = [0.94, 0.95, 0.96, 0.06]
 shimmer = [0.94, 0.95, 0.96, 0.013333333]
 shadow = [0.0, 0.0, 0.0, 0.55]
-# Session colours (plan 20261022_03, the L3 amendment of 2026-10-24
-# 15:56 EDT): 8 hues, each light and dark, all reading on bg and card.
-# A session takes session_<n> by a hash of its id; a band's text is
-# black or white, whichever contrasts more.
 session_1 = "#FF8A8A"   # red, light
 session_2 = "#C0404A"   # red, dark
 session_3 = "#FFB370"   # orange, light
@@ -87,39 +136,6 @@ band = "#242424"
 input = "#0C0C0C"
 back = "#3A3A3A"
 button = "#2C2C2C"
-
-# The launcher icon's navy (#0F0F26), with its magenta.
-[theme.dark_navy]
-name = "Dark (navy)"
-dark = true
-bg = "#0F0F26"
-header = "#0A0A1C"
-card = "#1C1C40"
-band = "#2C2C54"
-input = "#151532"
-text = "#ECEAF6"
-fg = "#F4F2FA"
-dim = "#8584A8"
-muted = "#A09FC0"
-code = "#FFD580"
-link = "#FF7AE0"
-spoken = "#C79BFF"
-accent = "#FF4FD8"
-question = "#8FA8FF"
-green = "#5CED9A"
-red = "#FF5C7A"
-yellow = "#FFD166"
-warn = "#FF9E6B"
-recording = "#FF4F6E"
-approve = "#1F6B4A"
-deny = "#7A2240"
-message = "#5A2A86"
-back = "#38386A"
-button = "#2E2E5A"
-toggle = "#C2399E"
-scrollbar = "#A09FC080"
-placeholder = "#F4F2FA0F"
-shimmer = "#F4F2FA03"
 
 # White surfaces, black text: the light default, so it sets every role.
 # Text colours are darkened for white; buttons are pale, for black labels.

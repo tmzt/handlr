@@ -656,7 +656,7 @@ mod tests {
         assert_eq!(s.chosen(&themes, false).id, "light_black");
         assert_eq!(
             s.chosen(&themes, true).id,
-            "dark_gray",
+            "dark_navy",
             "a light id is not a dark theme"
         );
         let s = Settings {

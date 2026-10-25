@@ -362,9 +362,10 @@ mod tests {
     fn dark_gray_is_the_colours_before_themes_exactly() {
         let themes = Themes::shipped();
         let gray = themes.find("dark_gray").expect("shipped");
+        let navy = themes.find("dark_navy").expect("shipped");
         assert_eq!(gray.name, "Dark (gray)");
         assert!(gray.dark);
-        assert_eq!(themes.first(true).id, "dark_gray", "the dark default");
+        assert_eq!(themes.first(true).id, "dark_navy", "the dark default");
         assert_eq!(themes.first(false).id, "light_black", "the light default");
         for &(name, value, role) in OLD {
             assert_eq!(gray.colors.get(role), value, "{name} as {role:?}");
@@ -377,7 +378,7 @@ mod tests {
         {
             assert!(OLD.iter().any(|o| o.2 == role), "{role:?}");
         }
-        assert_eq!(theme(), gray.colors, "in force at start");
+        assert_eq!(theme(), navy.colors, "in force at start");
     }
 
     #[test]
@@ -387,9 +388,9 @@ mod tests {
         assert_eq!(
             names,
             [
+                "Dark (navy)",
                 "Dark (gray)",
                 "Dark (black)",
-                "Dark (navy)",
                 "Light (black text)",
                 "Light (paper)",
                 "Solarized Dark",
@@ -437,8 +438,8 @@ mod tests {
             nord.colors.bg,
             [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 1.0]
         );
-        let gray = shipped.find("dark_gray").unwrap().colors;
-        assert_eq!(nord.colors.fg, gray.fg, "from the dark default, not Nord's");
+        let navy = shipped.find("dark_navy").unwrap().colors;
+        assert_eq!(nord.colors.fg, navy.fg, "from the dark default, not Nord's");
         assert!(themes.find("broken").is_none() && themes.find("undecided").is_none());
         // No file, or a file that is not TOML: the shipped themes.
         assert_eq!(Themes::load(None), shipped);
@@ -468,17 +469,17 @@ mod tests {
     #[test]
     fn session_colours_are_inherited_unless_a_theme_sets_its_own() {
         let themes = Themes::shipped();
-        let gray = themes.find("dark_gray").unwrap().colors;
+        let navy = themes.find("dark_navy").unwrap().colors;
         let light = themes.find("light_black").unwrap().colors;
         // Both defaults set all 16, each its own.
         for i in 0..16 {
-            assert_ne!(gray.session(i), light.session(i), "session_{}", i + 1);
+            assert_ne!(navy.session(i), light.session(i), "session_{}", i + 1);
         }
         // Themes without their own take their kind's default's.
         for (id, default) in [
-            ("dark_black", gray),
-            ("dark_navy", gray),
-            ("high_contrast", gray),
+            ("dark_black", navy),
+            ("dark_gray", themes.find("dark_gray").unwrap().colors),
+            ("high_contrast", navy),
             ("light_paper", light),
         ] {
             let c = themes.find(id).unwrap().colors;
@@ -496,7 +497,7 @@ mod tests {
             "tokyo_night",
         ] {
             let t = themes.find(id).unwrap();
-            let default = if t.dark { gray } else { light };
+            let default = if t.dark { navy } else { light };
             assert!(
                 (0..16).all(|i| t.colors.session(i) != default.session(i)),
                 "{id}"
@@ -546,6 +547,6 @@ mod tests {
         assert_eq!(theme(), light.colors);
         assert_eq!(current_id(), "light_black");
         set_theme(themes.first(true));
-        assert_eq!(current_id(), "dark_gray");
+        assert_eq!(current_id(), "dark_navy");
     }
 }

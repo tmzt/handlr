@@ -1659,7 +1659,7 @@ mod tests {
             [
                 ("System".to_string(), true),
                 ("Light (black text)".to_string(), true),
-                ("Dark (gray)".to_string(), true),
+                ("Dark (navy)".to_string(), true),
             ]
         );
         let mut seen = Vec::new();
@@ -1708,7 +1708,7 @@ mod tests {
     fn the_theme_rows_step_with_wrapping_and_apply_at_once() {
         use crate::settings::put_theme_in_force;
         use crate::theme::testing::{draw_context, use_theme};
-        use_theme("dark_gray");
+        use_theme("dark_navy");
         let themes = theme::themes();
         let ctx = draw_context();
         let mut s = plain();
@@ -1752,7 +1752,7 @@ mod tests {
         assert!(!t.dark);
         assert_eq!(t.name, *s.option_shown("Light theme").unwrap().0);
         assert_eq!(theme(), t.colors);
-        use_theme("dark_gray");
+        use_theme("dark_navy");
     }
 
     #[test]
@@ -1773,7 +1773,7 @@ mod tests {
         assert_eq!(loaded, saved);
         assert_eq!(loaded.appearance, super::super::Appearance::Light);
         assert_eq!(loaded.light_theme.as_deref(), Some("light_paper"));
-        assert_eq!(loaded.dark_theme.as_deref(), Some("dark_black"));
+        assert_eq!(loaded.dark_theme.as_deref(), Some("dark_gray"));
         // A new screen with them shows them.
         let mut again = SettingsScreen::new(loaded, Box::new(NoBattery), false);
         again.set_layout(PHONE);
@@ -1783,7 +1783,7 @@ mod tests {
         );
         assert_eq!(
             again.option_shown("Dark theme"),
-            Some(("Dark (black)".to_string(), false)),
+            Some(("Dark (gray)".to_string(), false)),
             "kept, and dim with Always light"
         );
     }
