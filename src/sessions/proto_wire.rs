@@ -252,6 +252,17 @@ impl<'a> Message<'a> {
         }
     }
 
+    /// Walk a path to a byte slice: `path[..len-1]` as messages, last as bytes.
+    pub fn path_bytes(&self, path: &[u32]) -> Result<Option<&'a [u8]>, ProtoError> {
+        let Some((&last, prefix)) = path.split_last() else {
+            return Ok(None);
+        };
+        match self.path_message(prefix)? {
+            Some(m) => m.bytes(last),
+            None => Ok(None),
+        }
+    }
+
     /// Walk a path to a varint field: `path[..len-1]` as messages, last as varint.
     pub fn path_varint(&self, path: &[u32]) -> Result<Option<u64>, ProtoError> {
         let Some((&last, prefix)) = path.split_last() else {

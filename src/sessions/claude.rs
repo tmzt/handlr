@@ -884,7 +884,7 @@ mod tests {
         let s = Sessions::with_home(&fixture("home"));
         assert_eq!(s.reader_for("claude").unwrap().kind(), "claude_code");
         assert_eq!(s.reader_for("codex").unwrap().kind(), "codex");
-        assert!(s.reader_for("agy").is_none());
+        assert_eq!(s.reader_for("agy").unwrap().kind(), "agy");
         assert!(s.reader_for("shell").is_none());
     }
 

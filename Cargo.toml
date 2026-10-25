@@ -36,6 +36,8 @@ qrcodeurl = { path = "crates/qrcodeurl" }
 handlr-speech = { path = "crates/handlr-speech" }
 # ADDITIONAL_PROMPTS.md (src/prompts.rs, plan 20261023_05), v0.2.0.
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
+# agy session reader (src/sessions/agy.rs, plan 20261023_06).
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 # Paused time for the confirmation broker's timers.

@@ -11,6 +11,7 @@
 //! through [`redact::redact`] first: [`Item::entry`], [`pending`],
 //! [`turn`] and [`context`] all redact.
 
+pub mod agy;
 pub mod claude;
 pub mod codex;
 pub mod context;
@@ -351,7 +352,7 @@ fn parse_lines<R: LineReader + ?Sized>(reader: &R, bytes: &[u8]) -> (Vec<Item>, 
 /// Give each tool result its call's tool name, and redact a result whose
 /// call names a path under `.private/` or a `.env` file whole: its text is
 /// that file's contents.
-fn link_results(items: &mut [Item]) {
+pub(crate) fn link_results(items: &mut [Item]) {
     let calls: HashMap<String, (Option<String>, bool)> = items
         .iter()
         .filter(|i| i.kind == EntryKind::ToolUse)
@@ -382,10 +383,11 @@ pub struct SessionRead {
     pub items: Vec<Item>,
 }
 
-/// The session readers, by agent name (decision 3).
+/// The session readers, by agent name (decision 3; plan 20261023_06, decision 4).
 pub struct Sessions {
     pub claude: claude::ClaudeCode,
     pub codex: codex::Codex,
+    pub agy: agy::AgyReader,
     /// Where the approval journals are kept (plan 20261023_03, A4):
     /// `.local/state/handlr/sessions` under the home.
     pub state: PathBuf,
@@ -405,12 +407,17 @@ impl Sessions {
     }
 
     /// The readers for the files under `home` (`.claude/projects`,
-    /// `.codex/sessions`), with the approval journals in
-    /// `.local/state/handlr/sessions` under it.
+    /// `.codex/sessions`, `.gemini/antigravity-cli/conversations`), with the
+    /// approval journals in `.local/state/handlr/sessions` under it.
     pub fn with_home(home: &Path) -> Self {
         Sessions {
             claude: claude::ClaudeCode::new(home.join(".claude").join("projects")),
             codex: codex::Codex::new(home.join(".codex").join("sessions")),
+            agy: agy::AgyReader::new(
+                home.join(".gemini")
+                    .join("antigravity-cli")
+                    .join("conversations"),
+            ),
             state: home
                 .join(".local")
                 .join("state")
@@ -419,12 +426,13 @@ impl Sessions {
         }
     }
 
-    /// The reader for an agent: `claude` is Claude Code, `codex` is Codex;
-    /// any other agent has none.
+    /// The reader for an agent: `claude` is Claude Code, `codex` is Codex,
+    /// `agy` is Antigravity CLI; any other agent has none.
     pub fn reader_for(&self, agent: &str) -> Option<&dyn SessionReader> {
         match agent {
             "claude" => Some(&self.claude),
             "codex" => Some(&self.codex),
+            "agy" => Some(&self.agy),
             _ => None,
         }
     }
