@@ -18,6 +18,7 @@ pub mod hub;
 pub mod journal;
 pub mod links;
 pub mod pending;
+pub mod proto_wire;
 pub mod redact;
 pub mod sections;
 pub mod turn;
