@@ -1,9 +1,9 @@
-//! handlr-audio without handlr: it hears an utterance and says it back,
+//! flankr-audio without flankr: it hears an utterance and says it back,
 //! through the same `Event`s and `Input`s the companion uses, to check the
 //! devices and the models.
 //!
 //! ```text
-//! cargo run -p handlr-audio --features cpal --release --example echo -- \
+//! cargo run -p flankr-audio --features cpal --release --example echo -- \
 //!     [--models <dir>] [--quant q4k|q4_0|q8] [--voice <name>] \
 //!     [--vocab-file <path>] [--vocabulary <a,b,…>] [--say <text>] \
 //!     [--stop-after-ms <n>] [--input-wav <file>]
@@ -30,10 +30,10 @@ use std::process::ExitCode;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use handlr_audio::libvoicexn::capture::Mic;
-use handlr_audio::libvoicexn::config::SttQuant;
-use handlr_audio::{AudioConfig, AudioEvent, AudioSession, Format};
-use handlr_companion::{Event, Input};
+use flankr_audio::libvoicexn::capture::Mic;
+use flankr_audio::libvoicexn::config::SttQuant;
+use flankr_audio::{AudioConfig, AudioEvent, AudioSession, Format};
+use flankr_companion::{Event, Input};
 
 const TICK: Duration = Duration::from_millis(20);
 

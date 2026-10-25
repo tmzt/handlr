@@ -3,7 +3,7 @@
 //!
 //! An [`AudioSession`] owns libvoicexn's TTS and STT workers, the earshot
 //! gate behind the STT worker, and the speaker's ring. It joins them to
-//! `handlr-companion`:
+//! `flankr-companion`:
 //!
 //! - [`AudioSession::handle`] takes the companion's [`Event`]s: `Say` is
 //!   spoken, `StopSpeaking` stops Phonon and flushes the ring, `Arm` arms
@@ -14,7 +14,7 @@
 //!   runs; [`AudioEvent::TtsLoaded`] names the voices there are.
 //! - [`AudioSession::poll`] gives [`AudioEvent`]s. Those in
 //!   [`AudioEvent::Input`] (`Utterance`, `Listening`, `Speaking`) go to
-//!   [`Companion::send`](handlr_companion::Companion::send); the others are
+//!   [`Companion::send`](flankr_companion::Companion::send); the others are
 //!   for the front end to show or log.
 //!
 //! The devices are joined through two callbacks, [`Mic::push`] and
@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 
-use handlr_companion::{Event, FileKeyStore};
+use flankr_companion::{Event, FileKeyStore};
 use libvoicexn::capture::Mic;
 use libvoicexn::config::{SttConfig, TtsConfig};
 use libvoicexn::stt::SttWorker;
@@ -70,7 +70,7 @@ impl AudioConfig {
     /// libvoicexn's layout under `models`: `phonon-31m-en` and
     /// `stt-1b-en_fr`, with the platform's defaults and the `VOICEXN_*`
     /// overrides, and the vocabulary next to the companion's keys
-    /// (`~/.config/handlr-companion/vocab.txt`).
+    /// (`~/.config/flankr-companion/vocab.txt`).
     pub fn new(models: impl AsRef<Path>) -> Self {
         let models = models.as_ref();
         Self {

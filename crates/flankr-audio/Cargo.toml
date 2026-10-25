@@ -1,15 +1,15 @@
 [package]
-name = "handlr-audio"
+name = "flankr-audio"
 version = "0.1.0"
 edition = "2021"
-description = "Audio for the companion front ends: libvoicexn speech in and out, joined to handlr-companion"
+description = "Audio for the companion front ends: libvoicexn speech in and out, joined to flankr-companion"
 
-# Built with `-p handlr-audio` only: the root manifest leaves it out of
+# Built with `-p flankr-audio` only: the root manifest leaves it out of
 # `default-members`, so the root build never compiles xn, ptts or cpal
 # (docs/design/20261022_04_COMPANION_APP_PLAN.md, 18:10 EDT amendment).
 
 [dependencies]
-handlr-companion = { path = "../handlr-companion" }
+flankr-companion = { path = "../flankr-companion" }
 # libvoicexn v0.2.0: Phonon TTS, Kyutai STT, the earshot gate and the boost.
 libvoicexn = { git = "https://github.com/tmzt/libvoicexn", rev = "32b8032082997a34190b458f79716d998a0d850a", features = ["stt-moshi-xn", "vad-earshot", "stt-moshi-xn-boost"] }
 log = "0.4"

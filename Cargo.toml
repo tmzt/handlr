@@ -50,17 +50,17 @@ rqrr = { version = "0.11", default-features = false }
 [workspace]
 members = [
     ".",
+    "crates/flankr-audio",
     "crates/flankr-companion",
     "crates/flankr-markdown",
     "crates/flankr-speech",
-    "crates/handlr-audio",
     "crates/libflankr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",
     "crates/libinfer/libinfer-gemini",
     "crates/qrcodeurl"
 ]
-# handlr-audio is built with -p only: it compiles libvoicexn's ML stack
+# flankr-audio is built with -p only: it compiles libvoicexn's ML stack
 # (docs/design/20261022_04_COMPANION_APP_PLAN.md, 18:10 EDT amendment).
 default-members = [
     ".",

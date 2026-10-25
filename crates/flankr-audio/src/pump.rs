@@ -1,4 +1,4 @@
-//! The mapping between libvoicexn's workers and `handlr-companion`, kept
+//! The mapping between libvoicexn's workers and `flankr-companion`, kept
 //! pure: no threads, devices or models, so it is tested on its own.
 //!
 //! - [`Event::Say`], [`Event::StopSpeaking`], [`Event::Arm`] and
@@ -6,9 +6,9 @@
 //!   [`Event::Ding`] one for the speaker.
 //! - [`SttEvent`]s and [`TtsEvent`]s become [`AudioEvent`]s, among them
 //!   [`Input::Utterance`], [`Input::Listening`] and [`Input::Speaking`] for
-//!   [`Companion::send`](handlr_companion::Companion::send).
+//!   [`Companion::send`](flankr_companion::Companion::send).
 
-use handlr_companion::{Event, Input};
+use flankr_companion::{Event, Input};
 use libvoicexn::stt::{SttEvent, SttRequest};
 use libvoicexn::tts::{TtsEvent, TtsRequest};
 use libvoicexn::vad::GateState;
@@ -64,7 +64,7 @@ pub fn stt_request(action: &Action) -> Option<SttRequest> {
 /// to the front end.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioEvent {
-    /// For [`Companion::send`](handlr_companion::Companion::send):
+    /// For [`Companion::send`](flankr_companion::Companion::send):
     /// `Utterance`, `Listening` or `Speaking`.
     Input(Input),
     /// The STT model is loaded; [`Event::Arm`] works from here.
@@ -240,7 +240,7 @@ impl Pump {
 /// without repeats. Line breaks inside a phrase become spaces; empty
 /// phrases, and phrases that would read as comments, are left out.
 pub fn vocab_text(words: &[String]) -> (String, usize) {
-    let mut text = String::from("# The companion's vocabulary, written by handlr-audio.\n# libvoicexn reads it when the STT model loads.\n");
+    let mut text = String::from("# The companion's vocabulary, written by flankr-audio.\n# libvoicexn reads it when the STT model loads.\n");
     let mut seen = std::collections::HashSet::new();
     for word in words {
         let phrase = word
@@ -513,7 +513,7 @@ mod tests {
     #[test]
     fn write_vocab_creates_the_folder_and_replaces_the_file() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("handlr-companion").join("vocab.txt");
+        let path = dir.path().join("flankr-companion").join("vocab.txt");
         assert_eq!(
             write_vocab(&path, &["claude".into(), "hr".into()]).unwrap(),
             2
