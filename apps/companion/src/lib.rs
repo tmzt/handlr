@@ -926,6 +926,9 @@ impl App {
         match hit {
             AgentHit::Back => self.close_agent(),
             AgentHit::Message => self.send(Input::StartDictation),
+            // Dim and inert until libmorph's text input is wired in
+            // (`settings::TEXT_INPUT`); a tap never reaches here before.
+            AgentHit::Keyboard => log::info!("keyboard: no text input yet"),
             AgentHit::Reply => {
                 if let Some(agent) = &mut self.agent {
                     agent.begin_reply();

@@ -237,6 +237,9 @@ pub enum AgentHit {
     Back,
     /// Take a message to this agent.
     Message,
+    /// The keyboard glyph left of record: type a message (plan
+    /// 20261022_03, the L3 amendment on the keyboard glyph).
+    Keyboard,
     Approve(u64),
     Deny(u64),
     /// A suggested response, in the row above the buttons or a card.
@@ -5005,16 +5008,28 @@ mod tests {
             a.hit(f.back.x + 10.0, f.back.y + 10.0),
             Some(AgentHit::Back)
         );
-        assert_eq!(f.buttons.len(), 2);
-        // Play at the bottom left, the message button at the bottom right.
+        assert_eq!(f.buttons.len(), 3);
+        // Play at the bottom left, the message button at the bottom right,
+        // the keyboard glyph just left of it.
         let play = f.buttons[0].rect;
         assert_eq!(f.buttons[0].hit, AgentHit::ReadAloud);
         assert!((play.x - PAD * PHONE.scale).abs() < 0.5);
-        let mic = f.buttons[1].rect;
-        assert_eq!(f.buttons[1].hit, AgentHit::Message);
+        let keys = &f.buttons[1];
+        let mic = f.buttons[2].rect;
+        assert_eq!(f.buttons[2].hit, AgentHit::Message);
         assert!((mic.y - play.y).abs() < 0.5);
         assert!((mic.x + mic.w - (PHONE.w - PAD * PHONE.scale)).abs() < 0.5);
         assert!(mic.y + mic.h <= PHONE.h - PHONE.bottom);
+        assert_eq!(keys.hit, AgentHit::Keyboard);
+        assert_eq!(
+            (keys.rect.w, keys.rect.h),
+            (mic.w, mic.h),
+            "record's hit box"
+        );
+        assert!(keys.rect.x + keys.rect.w < mic.x, "left of record");
+        assert_eq!(keys.bg[3], 0.0, "no background");
+        // Dim and inert until text input exists.
+        assert!(!crate::settings::allows(AgentHit::Keyboard));
     }
 
     #[test]
@@ -5194,7 +5209,10 @@ mod tests {
         a.set_dictation(None);
         assert!(a.replying_to().is_none());
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(hits, [AgentHit::ReadAloud, AgentHit::Message]);
+        assert_eq!(
+            hits,
+            [AgentHit::ReadAloud, AgentHit::Keyboard, AgentHit::Message]
+        );
     }
 
     #[test]
@@ -6726,6 +6744,15 @@ mod tests {
                 assert_eq!(tap(&mut a, yes), Some(AgentHit::Suggest(Suggestion::Yes)));
             }
         }
+        // The keyboard glyph is dim and inert without text input.
+        let keys = a.rect_of(AgentHit::Keyboard).unwrap();
+        let mut list = DrawList::new();
+        a.draw(&mut list, &DrawContext::default(), None);
+        assert!(
+            (alpha_in(&list, keys) - DISABLED_ALPHA).abs() < 1e-6,
+            "keyboard dim without text input"
+        );
+        assert_eq!(tap(&mut a, keys), None, "keyboard inert without text input");
         settings::set_current(Settings::default());
     }
 

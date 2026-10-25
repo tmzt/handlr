@@ -32,6 +32,10 @@ impl ControlRow {
             row.push(square(AgentHit::Clear, (x0 + x1 - sq) * 0.5, theme().back));
             row.push(square(AgentHit::Submit, x1 - sq, theme().approve));
         } else {
+            // The keyboard glyph, left of record with record's hit box and
+            // no background.
+            let gap = 12.0 * s;
+            row.push(square(AgentHit::Keyboard, x1 - 2.0 * sq - gap, [0.0; 4]));
             row.push(square(AgentHit::Message, x1 - sq, theme().message));
         }
         row

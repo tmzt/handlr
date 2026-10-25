@@ -382,6 +382,8 @@ pub fn set_current(settings: Settings) {
 pub fn allows(hit: AgentHit) -> bool {
     let s = current();
     match hit {
+        // Typing needs no microphone, only text input.
+        AgentHit::Keyboard => TEXT_INPUT,
         AgentHit::ReadAloud | AgentHit::Replay(_) => s.sound,
         AgentHit::Message
         | AgentHit::Reply
@@ -398,6 +400,11 @@ pub fn allows(hit: AgentHit) -> bool {
 pub fn allows_on_overview(hit: AgentHit) -> bool {
     allows(hit) && (hit != AgentHit::Message || current().general_agent)
 }
+
+/// Whether the app can show the soft keyboard. Not until libmorph's text
+/// input (its plan 20261024_06, awaiting the owner) is released and wired
+/// in; until then the keyboard glyph is dim and inert.
+pub const TEXT_INPUT: bool = false;
 
 /// Draws everything pushed to `list` since `start` at
 /// [`DISABLED_ALPHA`] of its opacity.

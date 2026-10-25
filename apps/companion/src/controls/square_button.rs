@@ -40,6 +40,37 @@ fn draw_glyph(
     draw_row(list, ctx, term, &row, pos);
 }
 
+/// A keyboard drawn as strokes in `rect`, with no background: an outline
+/// and three rows of keys, the last a space bar. The faces have no
+/// keyboard character.
+fn keyboard_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
+    let w = rect.w * 0.62;
+    let h = w * 0.62;
+    let x = rect.x + (rect.w - w) * 0.5;
+    let y = rect.y + (rect.h - h) * 0.5;
+    let t = 1.8 * s;
+    for (a, b) in [
+        ([x, y], [x + w, y]),
+        ([x + w, y], [x + w, y + h]),
+        ([x + w, y + h], [x, y + h]),
+        ([x, y + h], [x, y]),
+    ] {
+        list.push_line(a, b, t, color);
+    }
+    let key = w * 0.09;
+    let cols = 6;
+    let step = (w - 2.0 * key) / cols as f32;
+    for row in 0..2 {
+        let ky = y + h * (0.22 + 0.24 * row as f32);
+        for c in 0..cols {
+            let kx = x + key + step * c as f32 + (step - key) * 0.5;
+            fill(list, Rect::new(kx, ky, key, key), color, key * 0.25);
+        }
+    }
+    let bar = Rect::new(x + w * 0.28, y + h * 0.72, w * 0.44, key);
+    fill(list, bar, color, key * 0.25);
+}
+
 /// Draws `b` at `rect`: the take-a-message button as a white record dot on
 /// blue, the play button as its glyph (bright when `read_aloud`), and the
 /// rest as labelled buttons. A button the settings turn off (plan
@@ -106,6 +137,7 @@ impl SquareButton {
     ) {
         let px = 26.0 * s;
         match b.hit {
+            AgentHit::Keyboard => keyboard_glyph(list, rect, s, theme().fg),
             AgentHit::Message | AgentHit::Reply => {
                 fill(list, rect, b.bg, 10.0 * s);
                 let d = DOT * s;

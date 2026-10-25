@@ -1017,6 +1017,9 @@ mod tests {
         open(&mut o);
         let play = o.rect_of(AgentHit::ReadAloud).unwrap();
         let record = o.rect_of(AgentHit::Message).unwrap();
+        let keys = o.rect_of(AgentHit::Keyboard).unwrap();
+        assert_eq!((keys.w, keys.h), (record.w, record.h), "record's hit box");
+        assert!(keys.x + keys.w < record.x, "left of record");
         assert_eq!(
             tap(&mut o, record.x + 5.0, record.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::Message))
@@ -1173,10 +1176,16 @@ mod tests {
         let ctx = DrawContext::default();
         let play = o.rect_of(AgentHit::ReadAloud).unwrap();
         let record = o.rect_of(AgentHit::Message).unwrap();
+        let keys = o.rect_of(AgentHit::Keyboard).unwrap();
         let mut list = DrawList::new();
         o.draw(&mut list, &ctx, None);
         assert_eq!(alpha_in(&list, play), 1.0);
         assert_eq!(alpha_in(&list, record), 1.0);
+        assert!(
+            (alpha_in(&list, keys) - settings::DISABLED_ALPHA).abs() < 1e-6,
+            "keyboard is dim without text input"
+        );
+        assert_eq!(tap(&mut o, keys.x + 5.0, keys.y + 5.0), None);
 
         for (settings, off) in [
             (with(false, true, true), AgentHit::ReadAloud),
