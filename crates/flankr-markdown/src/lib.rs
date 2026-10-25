@@ -1,4 +1,4 @@
-//! `handlr-markdown`: basic CommonMark laid out as wrapped lines of styled
+//! `flankr-markdown`: basic CommonMark laid out as wrapped lines of styled
 //! runs, with links and no HTML
 //! (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, decisions 1–4).
 //!

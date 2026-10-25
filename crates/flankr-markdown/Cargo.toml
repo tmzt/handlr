@@ -1,5 +1,5 @@
 [package]
-name = "handlr-markdown"
+name = "flankr-markdown"
 version = "0.1.0"
 edition = "2024"
 description = "Basic CommonMark laid out as wrapped lines of styled runs, with links and no HTML"

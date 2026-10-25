@@ -50,10 +50,10 @@ rqrr = { version = "0.11", default-features = false }
 [workspace]
 members = [
     ".",
+    "crates/flankr-markdown",
     "crates/flankr-speech",
     "crates/handlr-audio",
     "crates/handlr-companion",
-    "crates/handlr-markdown",
     "crates/libflankr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",
@@ -64,9 +64,9 @@ members = [
 # (docs/design/20261022_04_COMPANION_APP_PLAN.md, 18:10 EDT amendment).
 default-members = [
     ".",
+    "crates/flankr-markdown",
     "crates/flankr-speech",
     "crates/handlr-companion",
-    "crates/handlr-markdown",
     "crates/libflankr_proto",
     "crates/libherdr",
     "crates/libinfer/libinfer",

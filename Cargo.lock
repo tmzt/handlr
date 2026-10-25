@@ -1324,6 +1324,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d45db016d36b838f563236e9193d0ee6ce38f3f68b6c94e914b4929c96bbb890"
 
 [[package]]
+name = "flankr-markdown"
+version = "0.1.0"
+dependencies = [
+ "pulldown-cmark",
+]
+
+[[package]]
 name = "flankr-speech"
 version = "0.1.0"
 
@@ -1760,13 +1767,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml 0.8.23",
-]
-
-[[package]]
-name = "handlr-markdown"
-version = "0.1.0"
-dependencies = [
- "pulldown-cmark",
 ]
 
 [[package]]
