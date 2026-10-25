@@ -5,6 +5,7 @@
 //! inline message, it expands the card being responded to with the same
 //! buttons in place, hiding the global ones").
 
+use flankr_companion::PromptMode;
 use libcontrols::Rect;
 
 use super::{
@@ -23,6 +24,7 @@ pub struct DictationCard;
 impl DictationCard {
     pub fn lay_out(
         lines: &[Line],
+        mode: PromptMode,
         replying: Option<&AgentCard>,
         x: f32,
         w: f32,
@@ -49,6 +51,114 @@ impl DictationCard {
             }
         }
         let head = rows.len();
+
+        let controls = if replying.is_some() {
+            BUTTON_H * s + pad
+        } else {
+            0.0
+        };
+
+        if mode == PromptMode::Keyboard {
+            let (input_line, head_lines) = match lines.split_last() {
+                Some((last, rest)) => (Some(last), rest),
+                None => (None, lines),
+            };
+
+            for line in head_lines {
+                let px = line.size * s;
+                for (i, t) in wrap_hard(&line.text, columns(inner_w, px))
+                    .into_iter()
+                    .enumerate()
+                {
+                    let gap = if i == 0 { line.gap.min(8.0) * s } else { 0.0 };
+                    rows.push((t, px, line.color, gap));
+                }
+            }
+
+            let box_pad_x = 10.0 * s;
+            let box_pad_y = 8.0 * s;
+            let box_inner_w = inner_w - 2.0 * box_pad_x;
+            let px = input_line.map_or(20.0 * s, |l| l.size * s);
+            let input_text = input_line.map_or("", |l| l.text.as_str());
+            let input_color = input_line.map_or(theme().muted, |l| l.color);
+            let mut input_rows = wrap_hard(input_text, columns(box_inner_w, px));
+            if input_rows.is_empty() {
+                input_rows.push(String::new());
+            }
+            if input_rows.len() > DICTATION_LINES {
+                let skip = input_rows.len() - DICTATION_LINES;
+                input_rows.drain(..skip);
+            }
+            let input_text_h = input_rows.len() as f32 * line_h(px);
+            let box_h = input_text_h + 2.0 * box_pad_y;
+            let gap_before_box = if !rows.is_empty() { 8.0 * s } else { 0.0 };
+
+            let rows_h: f32 = rows.iter().map(|(_, px, _, gap)| line_h(*px) + gap).sum();
+            let h = rows_h + gap_before_box + box_h + 2.0 * pad + controls;
+            let top = bottom - h;
+            let mut flow = Flow::default();
+
+            if let Some(card) = replying {
+                flow.fills.push(Fill {
+                    rect: Rect::new(x + 3.0 * s, top + 4.0 * s, w, h),
+                    color: theme().shadow,
+                    radius: 10.0 * s,
+                });
+                flow.fills.push(Fill {
+                    rect: Rect::new(x, top, w, h),
+                    color: theme().card,
+                    radius: 10.0 * s,
+                });
+                flow.fills.push(Fill {
+                    rect: Rect::new(x, top, EDGE * s, h),
+                    color: accent(card.kind),
+                    radius: 3.0 * s,
+                });
+                flow.buttons = ControlRow::lay_out(inner_x, x + w - pad, bottom - pad, s, true);
+            } else {
+                flow.fills.push(Fill {
+                    rect: Rect::new(x, top, w, h),
+                    color: theme().card,
+                    radius: 10.0 * s,
+                });
+            }
+
+            let mut y = top + pad;
+            for (text, px, color, gap) in rows {
+                y += gap;
+                flow.rows.push(Row {
+                    text,
+                    x: inner_x,
+                    y,
+                    px,
+                    color,
+                    mono: false,
+                });
+                y += line_h(px);
+            }
+
+            let box_y = y + gap_before_box;
+            flow.fills.push(Fill {
+                rect: Rect::new(inner_x, box_y, inner_w, box_h),
+                color: theme().input,
+                radius: 8.0 * s,
+            });
+
+            for (i, text) in input_rows.into_iter().enumerate() {
+                flow.rows.push(Row {
+                    text,
+                    x: inner_x + box_pad_x,
+                    y: box_y + box_pad_y + i as f32 * line_h(px),
+                    px,
+                    color: input_color,
+                    mono: false,
+                });
+            }
+
+            flow.height = h;
+            return flow;
+        }
+
         let mut said: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
         for line in lines {
             let px = line.size * s;
@@ -65,11 +175,6 @@ impl DictationCard {
             said[skip].3 = said[skip].3.max(10.0 * s);
         }
         rows.extend(said.into_iter().skip(skip));
-        let controls = if replying.is_some() {
-            BUTTON_H * s + pad
-        } else {
-            0.0
-        };
         let h: f32 = rows
             .iter()
             .map(|(_, px, _, gap)| line_h(*px) + gap)

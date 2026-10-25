@@ -1313,7 +1313,11 @@ impl App {
         };
         if let Some(agent) = &mut self.agent {
             agent.set_layout(layout);
-            agent.set_dictation(self.dictation.as_ref().map(dictation_lines));
+            agent.set_dictation(
+                self.dictation
+                    .as_ref()
+                    .map(|d| (dictation_lines(d), d.mode).into()),
+            );
             // The band in its session's colour.
             let colour = self
                 .agent_pane
@@ -1344,7 +1348,11 @@ impl App {
                 lines: c.lines(),
                 confirm: c.asks().then_some(c.confirm_id),
             }));
-            o.set_dictation(self.dictation.as_ref().map(|d| message_lines(d, &layout)));
+            o.set_dictation(
+                self.dictation
+                    .as_ref()
+                    .map(|d| (message_lines(d, &layout), d.mode).into()),
+            );
             o.set_play(self.read_aloud, self.speaking, self.viewed);
             self.lay_out_session_cards(layout);
             return;

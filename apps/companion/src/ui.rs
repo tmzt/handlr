@@ -11,7 +11,7 @@
 //! the dictation cards, and their buttons, are there. The lines those
 //! cards show are built here.
 
-use flankr_companion::{Dictation, DictationPhase};
+use flankr_companion::{Dictation, DictationPhase, PromptMode};
 use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Router, TextAlign};
 use libflankr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
@@ -30,6 +30,28 @@ pub struct Line {
     pub color: [f32; 4],
     /// Space before the line, in points.
     pub gap: f32,
+}
+
+/// A prompt card's lines and input mode.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DictationPrompt {
+    pub lines: Vec<Line>,
+    pub mode: PromptMode,
+}
+
+impl From<Vec<Line>> for DictationPrompt {
+    fn from(lines: Vec<Line>) -> Self {
+        DictationPrompt {
+            lines,
+            mode: PromptMode::Voice,
+        }
+    }
+}
+
+impl From<(Vec<Line>, PromptMode)> for DictationPrompt {
+    fn from((lines, mode): (Vec<Line>, PromptMode)) -> Self {
+        DictationPrompt { lines, mode }
+    }
 }
 
 /// Splits `text` into lines of at most `max` characters at spaces.
@@ -213,12 +235,11 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
         ));
     }
     if d.text.is_empty() {
-        lines.push(line(
-            "(say your message)".to_string(),
-            20.0,
-            theme().muted,
-            8.0,
-        ));
+        let placeholder = match d.mode {
+            PromptMode::Voice => "(say your message)",
+            PromptMode::Keyboard => "Type your message",
+        };
+        lines.push(line(placeholder.to_string(), 20.0, theme().muted, 8.0));
     } else {
         lines.push(line(d.text.clone(), 20.0, theme().text, 8.0));
     }
@@ -679,6 +700,7 @@ mod tests {
     fn dictation(target: Option<FocusInfo>) -> Dictation {
         Dictation {
             active: true,
+            mode: PromptMode::Voice,
             text: "Please run the tests.".into(),
             target,
             focus_moved: None,
@@ -725,6 +747,12 @@ mod tests {
         };
         assert_eq!(texts(&empty)[0], "Waiting for your approval");
         assert_eq!(texts(&empty)[2], "(say your message)");
+        let kbd_empty = Dictation {
+            text: String::new(),
+            mode: PromptMode::Keyboard,
+            ..dictation(Some(claude()))
+        };
+        assert_eq!(texts(&kbd_empty)[2], "Type your message");
         // A tab without a label shows its number.
         let numbered = FocusInfo {
             tab_label: None,

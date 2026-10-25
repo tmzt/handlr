@@ -48,7 +48,7 @@ use libmsdf::font::{GlyphStyle, TerminalShaper};
 
 use crate::controls::{ControlRow, SquareButton};
 use crate::theme::{theme, with_alpha};
-use crate::ui::{Layout, Line};
+use crate::ui::{DictationPrompt, Layout};
 
 mod dictation_card;
 mod input_box;
@@ -1837,9 +1837,9 @@ pub struct AgentScreen {
     /// down, scrolling back).
     fling: f32,
     hits: Vec<(AgentHit, Rect)>,
-    /// The dictation card's lines (as the main screen gives them), while a
+    /// The dictation card's prompt (as the main screen gives it), while a
     /// message is taken.
-    dictation: Option<Vec<Line>>,
+    dictation: Option<DictationPrompt>,
     /// The play button is on: replies are read aloud.
     read_aloud: bool,
     /// Something is being said: the play button skips it.
@@ -2518,14 +2518,14 @@ impl AgentScreen {
 
     /// The dictation card, or `None` once the message is sent or cleared.
     /// While it shows, the controls are send, cancel and record.
-    pub fn set_dictation(&mut self, lines: Option<Vec<Line>>) {
-        if lines == self.dictation {
+    pub fn set_dictation(&mut self, prompt: Option<DictationPrompt>) {
+        if prompt == self.dictation {
             return;
         }
-        if lines.is_none() {
+        if prompt.is_none() {
             self.reply = None;
         }
-        self.dictation = lines;
+        self.dictation = prompt;
         self.settle();
     }
 
@@ -2745,8 +2745,9 @@ impl AgentScreen {
         });
         // The message being taken, pinned above the buttons: on its own
         // card, or in the card it replies to with the controls.
-        let dictation = self.dictation.as_ref().map(|lines| {
-            let flow = DictationCard::lay_out(lines, replying, pad, l.w - 2.0 * pad, above, s);
+        let dictation = self.dictation.as_ref().map(|d| {
+            let flow =
+                DictationCard::lay_out(&d.lines, d.mode, replying, pad, l.w - 2.0 * pad, above, s);
             above -= flow.height + 8.0 * s;
             flow
         });
@@ -4097,6 +4098,7 @@ pub(crate) fn button(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::Line;
 
     const PHONE: Layout = Layout {
         w: 1080.0,
@@ -4902,7 +4904,7 @@ mod tests {
                 gap: 8.0,
             },
         ];
-        a.set_dictation(Some(lines));
+        a.set_dictation(Some(lines.into()));
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
         assert_eq!(
             hits,
@@ -4917,6 +4919,35 @@ mod tests {
         a.set_dictation(None);
         assert!(a.rect_of(AgentHit::Message).is_some());
         assert!(a.frame().dictation.is_none());
+    }
+
+    #[test]
+    fn keyboard_prompt_card_has_shaded_input_area() {
+        use flankr_companion::PromptMode;
+        let mut a = screen(
+            conversation(3),
+            vec![card(CardKind::Finished, 12, true)],
+            Some(0),
+        );
+        let lines = vec![
+            crate::ui::Line {
+                text: "Message for Claude".into(),
+                size: 18.0,
+                color: theme().fg,
+                gap: 4.0,
+            },
+            crate::ui::Line {
+                text: "Type your message".into(),
+                size: 20.0,
+                color: theme().muted,
+                gap: 8.0,
+            },
+        ];
+        a.set_dictation(Some((lines, PromptMode::Keyboard).into()));
+        let card = a.frame().dictation.clone().expect("keyboard prompt card");
+        assert!(card.fills.iter().any(|f| f.color == theme().card));
+        assert!(card.fills.iter().any(|f| f.color == theme().input));
+        assert!(card.rows.iter().any(|r| r.text == "Type your message"));
     }
 
     #[test]
@@ -5163,7 +5194,7 @@ mod tests {
             Some(0),
         );
         assert!(a.frame().pin.is_some());
-        a.set_dictation(Some(said("please go on")));
+        a.set_dictation(Some(said("please go on").into()));
         let f = a.frame().clone();
         let hits: Vec<AgentHit> = f.buttons.iter().map(|b| b.hit).collect();
         assert_eq!(
@@ -5191,7 +5222,7 @@ mod tests {
             Some(0),
         );
         a.begin_reply();
-        a.set_dictation(Some(said("yes, the second one")));
+        a.set_dictation(Some(said("yes, the second one").into()));
         let f = a.frame().clone();
         assert!(f.buttons.is_empty(), "the screen's row is hidden");
         let card = f.dictation.expect("the card replied to");

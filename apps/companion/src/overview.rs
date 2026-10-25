@@ -34,6 +34,7 @@ pub mod turn_strip;
 
 use std::time::Duration;
 
+use flankr_companion::PromptMode;
 use flankr_companion::Speaker;
 use libcontrols::{DrawContext, Rect};
 use libflankr_proto::common::AgentInfo;
@@ -47,7 +48,7 @@ use crate::controls::scroll::Touched;
 use crate::controls::{ControlRow, SquareButton};
 use crate::settings;
 use crate::theme::theme;
-use crate::ui::{Layout, Line, wrap};
+use crate::ui::{DictationPrompt, Layout, Line, wrap};
 pub use card_grid::CardGrid;
 pub use gear::Gear;
 pub use panel_shader::{PanelInstance, PanelShader};
@@ -116,7 +117,7 @@ pub struct Overview {
     strip: TurnStrip,
     overlay: TurnOverlay,
     card: Option<Panel>,
-    dictation: Option<Vec<Line>>,
+    dictation: Option<DictationPrompt>,
     read_aloud: bool,
     speaking: bool,
     /// An agent view has been opened: play reads its replies.
@@ -233,10 +234,10 @@ impl Overview {
         self.cross_bottom
     }
 
-    /// The dictation card's lines, while a message is taken.
-    pub fn set_dictation(&mut self, lines: Option<Vec<Line>>) {
-        if lines != self.dictation {
-            self.dictation = lines;
+    /// The dictation card's prompt, while a message is taken.
+    pub fn set_dictation(&mut self, prompt: Option<DictationPrompt>) {
+        if prompt != self.dictation {
+            self.dictation = prompt;
             self.settle();
         }
     }
@@ -399,14 +400,30 @@ impl Overview {
         // While a confirmation asks, the message makes way for it.
         let asking = self.card.as_ref().is_some_and(|c| c.confirm.is_some());
         self.dictation_shown = false;
-        if let Some(lines) = self.dictation.as_ref().filter(|_| !asking) {
-            let p = panel(lines, None, pad, l.w - 2.0 * pad, above, s);
+        if let Some(prompt) = self.dictation.as_ref().filter(|_| !asking) {
+            let p = panel(
+                &prompt.lines,
+                None,
+                prompt.mode == PromptMode::Keyboard,
+                pad,
+                l.w - 2.0 * pad,
+                above,
+                s,
+            );
             above -= p.height + 8.0 * s;
             panels.push(p);
             self.dictation_shown = true;
         }
         if let Some(card) = &self.card {
-            let p = panel(&card.lines, card.confirm, pad, l.w - 2.0 * pad, above, s);
+            let p = panel(
+                &card.lines,
+                card.confirm,
+                false,
+                pad,
+                l.w - 2.0 * pad,
+                above,
+                s,
+            );
             above -= p.height + 8.0 * s;
             panels.push(p);
         }
@@ -654,11 +671,109 @@ impl Overview {
 }
 
 /// `lines` on a card `w` wide from `x`, its bottom at `bottom`, with
-/// Approve and Deny under them when `confirm` is given.
-fn panel(lines: &[Line], confirm: Option<u64>, x: f32, w: f32, bottom: f32, s: f32) -> Flow {
+/// Approve and Deny under them when `confirm` is given. In keyboard mode,
+/// the input line sits inside a shaded input area.
+fn panel(
+    lines: &[Line],
+    confirm: Option<u64>,
+    is_keyboard: bool,
+    x: f32,
+    w: f32,
+    bottom: f32,
+    s: f32,
+) -> Flow {
     let pad = PAD * s;
     let inner_x = x + pad;
     let inner_w = w - 2.0 * pad;
+    let actions = if confirm.is_some() {
+        ACTION_H * s + pad
+    } else {
+        0.0
+    };
+
+    if is_keyboard {
+        let (input_line, head_lines) = match lines.split_last() {
+            Some((last, rest)) => (Some(last), rest),
+            None => (None, lines),
+        };
+
+        let mut rows: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
+        for (n, line) in head_lines.iter().enumerate() {
+            let px = line.size * s;
+            for (i, t) in wrap(&line.text, columns(inner_w, px))
+                .into_iter()
+                .enumerate()
+            {
+                let gap = if i == 0 && n > 0 {
+                    line.gap.min(8.0) * s
+                } else {
+                    0.0
+                };
+                rows.push((t, px, line.color, gap));
+            }
+        }
+
+        let box_pad_x = 10.0 * s;
+        let box_pad_y = 8.0 * s;
+        let box_inner_w = inner_w - 2.0 * box_pad_x;
+        let px = input_line.map_or(20.0 * s, |l| l.size * s);
+        let input_text = input_line.map_or("", |l| l.text.as_str());
+        let input_color = input_line.map_or(theme().muted, |l| l.color);
+        let mut input_rows = wrap(input_text, columns(box_inner_w, px));
+        if input_rows.is_empty() {
+            input_rows.push(String::new());
+        }
+        let input_text_h = input_rows.len() as f32 * line_h(px);
+        let box_h = input_text_h + 2.0 * box_pad_y;
+        let gap_before_box = if !rows.is_empty() { 8.0 * s } else { 0.0 };
+
+        let rows_h: f32 = rows.iter().map(|(_, px, _, gap)| line_h(*px) + gap).sum();
+        let h = rows_h + gap_before_box + box_h + 2.0 * pad + actions;
+        let top = bottom - h;
+        let mut flow = Flow::default();
+
+        flow.fills.push(Fill {
+            rect: Rect::new(x, top, w, h),
+            color: theme().card,
+            radius: 10.0 * s,
+        });
+
+        let mut y = top + pad;
+        for (text, px, color, gap) in rows {
+            y += gap;
+            flow.rows.push(Row {
+                text,
+                x: inner_x,
+                y,
+                px,
+                color,
+                mono: false,
+            });
+            y += line_h(px);
+        }
+
+        let box_y = y + gap_before_box;
+        flow.fills.push(Fill {
+            rect: Rect::new(inner_x, box_y, inner_w, box_h),
+            color: theme().input,
+            radius: 8.0 * s,
+        });
+
+        for (i, text) in input_rows.into_iter().enumerate() {
+            flow.rows.push(Row {
+                text,
+                x: inner_x + box_pad_x,
+                y: box_y + box_pad_y + i as f32 * line_h(px),
+                px,
+                color: input_color,
+                mono: false,
+            });
+        }
+
+        flow.height = h;
+        return flow;
+    }
+
     let mut rows: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
     for (n, line) in lines.iter().enumerate() {
         let px = line.size * s;
@@ -674,11 +789,6 @@ fn panel(lines: &[Line], confirm: Option<u64>, x: f32, w: f32, bottom: f32, s: f
             rows.push((t, px, line.color, gap));
         }
     }
-    let actions = if confirm.is_some() {
-        ACTION_H * s + pad
-    } else {
-        0.0
-    };
     let h = rows
         .iter()
         .map(|(_, px, _, gap)| line_h(*px) + gap)
@@ -943,12 +1053,15 @@ mod tests {
             Some("< Claude is running the tests.")
         );
         // Above the confirmation and dictation cards' place.
-        o.set_dictation(Some(vec![Line {
-            text: "Taking a message".into(),
-            size: 15.0,
-            color: theme().muted,
-            gap: 28.0,
-        }]));
+        o.set_dictation(Some(
+            vec![Line {
+                text: "Taking a message".into(),
+                size: 15.0,
+                color: theme().muted,
+                gap: 28.0,
+            }]
+            .into(),
+        ));
         let card = &o.panels[0].fills[0].rect;
         let strip = o.strip().rect();
         assert!(strip.y + strip.h <= card.y);
@@ -1082,12 +1195,15 @@ mod tests {
         assert!(o.overlay().is_open(), "the row leaves it open");
         // Taking a message: the dictation card and send are live too, the
         // sheet ending above the card.
-        o.set_dictation(Some(vec![Line {
-            text: "Taking a message".into(),
-            size: 15.0,
-            color: theme().muted,
-            gap: 28.0,
-        }]));
+        o.set_dictation(Some(
+            vec![Line {
+                text: "Taking a message".into(),
+                size: 15.0,
+                color: theme().muted,
+                gap: 28.0,
+            }]
+            .into(),
+        ));
         let card = o.panels[0].fills[0].rect;
         let sheet = o.overlay().rect();
         assert!(sheet.y + sheet.h <= card.y);
@@ -1122,12 +1238,15 @@ mod tests {
         );
         // Taking a message: cancel in the middle, send at the right, and
         // the dictation card above them.
-        o.set_dictation(Some(vec![Line {
-            text: "Taking a message".into(),
-            size: 15.0,
-            color: theme().muted,
-            gap: 28.0,
-        }]));
+        o.set_dictation(Some(
+            vec![Line {
+                text: "Taking a message".into(),
+                size: 15.0,
+                color: theme().muted,
+                gap: 28.0,
+            }]
+            .into(),
+        ));
         let send = o.rect_of(AgentHit::Submit).unwrap();
         assert!(send.x + send.w > 980.0);
         assert!(o.rect_of(AgentHit::Clear).is_some());
@@ -1146,7 +1265,7 @@ mod tests {
             color: theme().text,
             gap: 4.0,
         };
-        o.set_dictation(Some(vec![line("Please run the tests.")]));
+        o.set_dictation(Some(vec![line("Please run the tests.")].into()));
         o.set_card(Some(Panel {
             lines: vec![line("Approve?"), line("\"continue\" to Claude in flankr")],
             confirm: Some(7),
@@ -1167,6 +1286,31 @@ mod tests {
         }));
         assert!(o.rect_of(AgentHit::Approve(7)).is_none());
         assert_eq!(o.panels.len(), 2);
+    }
+
+    #[test]
+    fn overview_keyboard_prompt_card_has_shaded_input_area() {
+        let mut o = overview(1);
+        let lines = vec![
+            Line {
+                text: "Message for Claude".into(),
+                size: 18.0,
+                color: theme().text,
+                gap: 4.0,
+            },
+            Line {
+                text: "Type your message".into(),
+                size: 20.0,
+                color: theme().muted,
+                gap: 8.0,
+            },
+        ];
+        o.set_dictation(Some((lines, PromptMode::Keyboard).into()));
+        assert_eq!(o.panels.len(), 1);
+        let panel = &o.panels[0];
+        assert!(panel.fills.iter().any(|f| f.color == theme().card));
+        assert!(panel.fills.iter().any(|f| f.color == theme().input));
+        assert!(panel.rows.iter().any(|r| r.text == "Type your message"));
     }
 
     #[test]
@@ -1265,12 +1409,15 @@ mod tests {
         }
         // The dictation card, without the microphone.
         settings::set_current(with(true, false, true));
-        o.set_dictation(Some(vec![Line {
-            text: "Taking a message".into(),
-            size: 15.0,
-            color: theme().muted,
-            gap: 28.0,
-        }]));
+        o.set_dictation(Some(
+            vec![Line {
+                text: "Taking a message".into(),
+                size: 15.0,
+                color: theme().muted,
+                gap: 28.0,
+            }]
+            .into(),
+        ));
         let mut list = DrawList::new();
         o.draw(&mut list, &ctx, None);
         let card = o.panels[0].fills[0].rect;
