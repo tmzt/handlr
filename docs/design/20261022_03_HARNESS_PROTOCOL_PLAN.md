@@ -1615,3 +1615,9 @@ The owner directed (2026-10-25): "ime should be shown when text area focused unl
    - Physical typing (`Key::Character`, `Key::Backspace`, etc.) edits the prompt card buffer directly.
    - The on-screen soft keyboard (IME) is suppressed while an external keyboard is active.
 
+## Amendment — 2026-10-25 23:41 EDT: 3-line 12pt text area in keyboard prompt card (living section L3)
+
+The owner directed (2026-10-25): "good but its still one line, should be 3, about 12pt font".
+1. **Dimensions:** The keyboard prompt card's `TextArea` is sized for at least 3 lines of text (`line_count = input_rows.len().max(3)`), maintaining a 3-line minimum input box.
+2. **Typography:** The prompt text uses ~12pt font (`12.0 * s` px) instead of the larger dictation heading font.
+

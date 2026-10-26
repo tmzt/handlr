@@ -2311,5 +2311,13 @@ Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/desig
 - Soft keyboard dismissal (`TextInputEvent::Dismissed`) retains the prompt card without clearing it.
 - External physical keyboard keystrokes edit the prompt card directly and suppress the soft keyboard.
 
+## 2026-10-25 23:41 EDT — 3-line 12pt text area in keyboard prompt card
+
+Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md)
+(living section L3).
+
+- The prompt card's `TextArea` is sized for at least 3 lines of text (`input_rows.len().max(3)`).
+- The keyboard prompt uses ~12pt font (`12.0 * s` px) for both the placeholder and typed text.
+
 
 
