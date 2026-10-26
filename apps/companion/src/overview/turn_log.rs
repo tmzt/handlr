@@ -10,11 +10,12 @@
 use std::time::Duration;
 
 use flankr_companion::Speaker;
+use flankr_markdown::{DEFAULT_MARKDOWN_THRESHOLD_PCT, Style, is_markdown, lay_out};
 use libcontrols::{DrawContext, Rect};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
-use crate::agent::{PAD, Row, line_h};
+use crate::agent::{CELL_EM, PAD, Row, line_h};
 use crate::controls::scroll::{Scroll, Touched};
 use crate::theme::theme;
 use crate::ui::wrap;
@@ -104,32 +105,102 @@ impl TurnLog {
         let w = self.viewport.w - 2.0 * pad;
         let mut rows = Vec::new();
         let mut y = 4.0 * s;
-        let partial = self.partial.as_ref().map(|p| {
-            (
-                format!("> {}\u{2026}", p.trim()),
-                Self::USER_PT,
-                theme().muted,
-            )
-        });
-        let lines = self.lines.iter().map(|(speaker, text)| match speaker {
-            Speaker::User => (format!("> {text}"), Self::USER_PT, theme().text),
-            Speaker::Gemini => (format!("< {text}"), Self::GEMINI_PT, theme().spoken),
-        });
-        for (text, pt, color) in lines.chain(partial) {
-            let px = pt * s;
+
+        for (speaker, text) in &self.lines {
             y += 8.0 * s;
+            match speaker {
+                Speaker::User => {
+                    let text = format!("> {text}");
+                    let px = Self::USER_PT * s;
+                    for t in wrap(&text, (w / (px * 0.5)).max(8.0) as usize) {
+                        rows.push(Row {
+                            text: t,
+                            x: self.viewport.x + pad,
+                            y,
+                            px,
+                            color: theme().text,
+                            mono: false,
+                        });
+                        y += line_h(px);
+                    }
+                }
+                Speaker::Gemini => {
+                    let px = Self::GEMINI_PT * s;
+                    let lh = line_h(px);
+                    if is_markdown(text, DEFAULT_MARKDOWN_THRESHOLD_PCT) {
+                        let measure = |t: &str, style: Style| -> f32 {
+                            let count = t.chars().count() as f32;
+                            if style == Style::Code {
+                                count * px * CELL_EM
+                            } else {
+                                count * px * 0.55
+                            }
+                        };
+                        let laid = lay_out(text, w, &measure);
+                        for line in laid.lines {
+                            y += line.gap_before * lh;
+                            let mut rx = self.viewport.x + pad + line.indent;
+                            for run in line.runs {
+                                let mono = run.style == Style::Code;
+                                let run_w = if mono {
+                                    run.text.chars().count() as f32 * px * CELL_EM
+                                } else {
+                                    run.text.chars().count() as f32 * px * 0.55
+                                };
+                                let color = if run.dim {
+                                    theme().muted
+                                } else if mono {
+                                    theme().code
+                                } else {
+                                    theme().spoken
+                                };
+                                rows.push(Row {
+                                    text: run.text,
+                                    x: rx,
+                                    y,
+                                    px,
+                                    color,
+                                    mono,
+                                });
+                                rx += run_w;
+                            }
+                            y += lh;
+                        }
+                    } else {
+                        let text = format!("< {text}");
+                        for t in wrap(&text, (w / (px * 0.5)).max(8.0) as usize) {
+                            rows.push(Row {
+                                text: t,
+                                x: self.viewport.x + pad,
+                                y,
+                                px,
+                                color: theme().spoken,
+                                mono: false,
+                            });
+                            y += lh;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(partial) = &self.partial {
+            y += 8.0 * s;
+            let text = format!("> {}\u{2026}", partial.trim());
+            let px = Self::USER_PT * s;
             for t in wrap(&text, (w / (px * 0.5)).max(8.0) as usize) {
                 rows.push(Row {
                     text: t,
                     x: self.viewport.x + pad,
                     y,
                     px,
-                    color,
+                    color: theme().muted,
                     mono: false,
                 });
                 y += line_h(px);
             }
         }
+
         self.height = y + 8.0 * s;
         self.rows = rows;
         self.scroll.set_extent(self.height, self.viewport.h);
@@ -273,5 +344,27 @@ mod tests {
         assert!(l.rows()[0].text.contains(&format!("{}", KEPT / 2)));
         l.push(Speaker::User, "  ".into());
         assert_eq!(l.lines.len(), KEPT);
+    }
+
+    #[test]
+    fn gemini_markdown_turn_renders_markdown_styling() {
+        let mut l = log();
+        l.push(
+            Speaker::Gemini,
+            "Here is the plan:\n\n```rust\nfn main() {}\n```\n- Step 1\n- Step 2".into(),
+        );
+        let rows = l.rows();
+        assert!(
+            rows.iter().any(|r| r.mono),
+            "code block should have mono: true"
+        );
+        assert!(
+            rows.iter().any(|r| r.mono && r.color == theme().code),
+            "code block should have theme().code color"
+        );
+        assert!(
+            rows.iter().any(|r| r.text.contains("Step 1")),
+            "bullet list should render Step 1"
+        );
     }
 }

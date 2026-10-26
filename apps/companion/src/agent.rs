@@ -38,6 +38,7 @@ use std::collections::{HashMap, HashSet};
 
 use flankr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
 use flankr_companion::{AgentCard, Bookend, CardKind, Pressure, Shows, Suggestion, ViewSection};
+use flankr_markdown::{DEFAULT_MARKDOWN_THRESHOLD_PCT, Laid, Style, is_markdown, lay_out};
 use libcontrols::{Button, DrawContext, DrawControl, Rect, TextArea};
 use libflankr_proto::common::{Entry, EntryKind, Link, Role, Serial};
 use libmorph::TouchPhase;
@@ -736,6 +737,146 @@ fn replay_button(key: u64, x: f32, y: f32, s: f32) -> FlowButton {
 /// The replay button's width and height, in points.
 const REPLAY_W: f32 = 28.0;
 
+/// Emits `laid` Markdown into `flow` at `(x, y)` in `px`-pixel type.
+/// Returns the y after the last line.
+pub(crate) fn emit_laid_markdown(
+    laid: &Laid,
+    x: f32,
+    y: f32,
+    px: f32,
+    s: f32,
+    targets: &mut Vec<Link>,
+    flow: &mut Flow,
+) -> f32 {
+    let lh = line_h(px);
+    let mut cy = y;
+
+    // Track contiguous code block lines to draw a shaded background panel
+    let mut code_panel: Option<(f32, f32, f32, f32)> = None;
+
+    let flush_code_panel = |panel: &mut Option<(f32, f32, f32, f32)>, flow: &mut Flow| {
+        if let Some((sx, sy, mw, ey)) = panel.take() {
+            flow.fills.push(Fill {
+                rect: Rect::new(
+                    sx - 4.0 * s,
+                    sy - 2.0 * s,
+                    mw + 8.0 * s,
+                    (ey - sy) + 4.0 * s,
+                ),
+                color: theme().input,
+                radius: 4.0 * s,
+            });
+        }
+    };
+
+    for line in &laid.lines {
+        cy += line.gap_before * lh;
+        let mut cx = x + line.indent;
+        let is_code_line =
+            !line.runs.is_empty() && line.runs.iter().all(|r| r.style == Style::Code);
+
+        let line_start_x = cx;
+        let mut line_w = 0.0;
+
+        for run in &line.runs {
+            let mono = run.style == Style::Code;
+            let run_w = if mono {
+                run.text.chars().count() as f32 * px * CELL_EM
+            } else {
+                run.text.chars().count() as f32 * px * 0.55
+            };
+            line_w += run_w;
+            let row_idx = flow.rows.len();
+            let color = if run.link.is_some() {
+                theme().link
+            } else if run.dim {
+                theme().dim
+            } else if mono {
+                theme().code
+            } else {
+                theme().fg
+            };
+
+            if let Some(link_idx) = run.link
+                && let Some(url) = laid.links.get(link_idx)
+            {
+                let link_obj = Link {
+                    text: run.text.clone(),
+                    url: url.clone(),
+                };
+                let target_idx = match targets.iter().position(|t| t == &link_obj) {
+                    Some(i) => i,
+                    None => {
+                        targets.push(link_obj);
+                        targets.len() - 1
+                    }
+                };
+                flow.links.push(LinkSpan {
+                    row: row_idx,
+                    start: 0,
+                    end: run.text.chars().count(),
+                    link: target_idx,
+                });
+            }
+
+            flow.rows.push(Row {
+                text: run.text.clone(),
+                x: cx,
+                y: cy,
+                px,
+                color,
+                mono,
+            });
+            cx += run_w;
+        }
+
+        if is_code_line {
+            match &mut code_panel {
+                Some((_, _, max_w, end_y)) => {
+                    *max_w = (*max_w).max(line_w);
+                    *end_y = cy + lh;
+                }
+                None => {
+                    code_panel = Some((line_start_x, cy, line_w, cy + lh));
+                }
+            }
+        } else {
+            flush_code_panel(&mut code_panel, flow);
+        }
+
+        cy += lh;
+    }
+    flush_code_panel(&mut code_panel, flow);
+
+    cy
+}
+
+/// Lays out `md` text as CommonMark at `(x, y)` wrapped to `w` pixels at type
+/// size `pt` and scale `s`. Returns the y after the last line.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub(crate) fn lay_out_markdown(
+    md: &str,
+    x: f32,
+    y: f32,
+    w: f32,
+    pt: f32,
+    s: f32,
+    targets: &mut Vec<Link>,
+    flow: &mut Flow,
+) -> f32 {
+    let px = pt * s;
+    let measure = |text: &str, style: Style| -> f32 {
+        let count = text.chars().count() as f32;
+        if style == Style::Code {
+            count * px * CELL_EM
+        } else {
+            count * px * 0.55
+        }
+    };
+    let laid = lay_out(md, w, &measure);
+    emit_laid_markdown(&laid, x, y, px, s, targets, flow)
+}
+
 /// A live card's block at `y`, `w` wide from `x`: its fills, rows and
 /// buttons, and its height. Its text as `form` says. Its links are marked
 /// by their index in `targets`.
@@ -747,7 +888,7 @@ fn card_block(
     w: f32,
     s: f32,
     form: CardForm,
-    targets: &[Link],
+    targets: &mut Vec<Link>,
     flow: &mut Flow,
 ) -> f32 {
     let pad = CARD_PAD * s;
@@ -756,6 +897,153 @@ fn card_block(
     let (title_px, text_px) = (TITLE_PT * s, CARD_PT * s);
     let label_px = TOOL_PT * s;
     let cols = columns(inner_w, text_px);
+
+    let (source, is_md) = match form {
+        CardForm::Short { .. } => ("", false),
+        CardForm::Expanded { context, .. } => {
+            let src = context.unwrap_or(&card.text).trim();
+            (src, is_markdown(src, DEFAULT_MARKDOWN_THRESHOLD_PCT))
+        }
+        CardForm::Text { .. } => {
+            let src = card.text.trim();
+            (src, is_markdown(src, DEFAULT_MARKDOWN_THRESHOLD_PCT))
+        }
+    };
+
+    if is_md {
+        let measure = |t: &str, style: Style| -> f32 {
+            let count = t.chars().count() as f32;
+            if style == Style::Code {
+                count * text_px * CELL_EM
+            } else {
+                count * text_px * 0.55
+            }
+        };
+        let laid = lay_out(source, inner_w, &measure);
+        let lh = line_h(text_px);
+        let md_lines_h: f32 = laid.lines.iter().map(|l| (1.0 + l.gap_before) * lh).sum();
+
+        let mut extra_parts: Vec<Part> = Vec::new();
+        if let CardForm::Expanded { .. } = form {
+            for p in &card.points {
+                let wrapped = wrap_hard(p.trim(), cols.saturating_sub(2).max(1));
+                for (i, l) in wrapped.into_iter().enumerate() {
+                    let lead = if i == 0 { BULLET } else { "  " };
+                    extra_parts.push(Part::Point(format!("{lead}{l}")));
+                }
+            }
+            if let Some(spoken) = card
+                .spoken
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                extra_parts.push(Part::Label);
+                extra_parts.extend(wrap_hard(spoken, cols).into_iter().map(Part::Spoken));
+            }
+        }
+        let extra_h: f32 = extra_parts
+            .iter()
+            .map(|p| match p {
+                Part::Label => line_h(label_px) + 4.0 * s,
+                _ => line_h(text_px),
+            })
+            .sum();
+        let lines_h = md_lines_h + extra_h;
+
+        let acts = actions(card);
+        let mut h = pad + line_h(title_px) + 4.0 * s + lines_h + pad;
+        if !acts.is_empty() {
+            h += ACTION_H * s + pad * 0.5;
+        }
+        let panel = Rect::new(x, y, w, h);
+        flow.fills.push(Fill {
+            rect: Rect::new(x + 3.0 * s, y + 4.0 * s, w, h),
+            color: theme().shadow,
+            radius: 10.0 * s,
+        });
+        flow.fills.push(Fill {
+            rect: panel,
+            color: theme().card,
+            radius: 10.0 * s,
+        });
+        flow.fills.push(Fill {
+            rect: Rect::new(x, y, EDGE * s, h),
+            color: accent(card.kind),
+            radius: 3.0 * s,
+        });
+        let mut ty = y + pad;
+        flow.rows.push(Row {
+            text: card.title.clone(),
+            x: inner_x,
+            y: ty,
+            px: title_px,
+            color: accent(card.kind),
+            mono: false,
+        });
+        ty += line_h(title_px) + 4.0 * s;
+
+        let first_text = flow.rows.len();
+        ty = emit_laid_markdown(&laid, inner_x, ty, text_px, s, targets, flow);
+
+        for p in extra_parts {
+            let (text, px, color) = match p {
+                Part::Point(t) | Part::Spoken(t) => (t, text_px, theme().fg),
+                Part::Label => {
+                    flow.rows.push(Row {
+                        text: SPOKEN.to_string(),
+                        x: inner_x,
+                        y: ty + 4.0 * s,
+                        px: label_px,
+                        color: theme().dim,
+                        mono: false,
+                    });
+                    if let CardForm::Expanded {
+                        key, sound: true, ..
+                    } = form
+                    {
+                        let lx = inner_x + (SPOKEN.len() as f32 + 1.0) * label_px * 0.5;
+                        flow.buttons.push(replay_button(key, lx, ty + 4.0 * s, s));
+                    }
+                    ty += line_h(label_px) + 4.0 * s;
+                    continue;
+                }
+                Part::Body(_) => continue,
+            };
+            flow.rows.push(Row {
+                text,
+                x: inner_x,
+                y: ty,
+                px,
+                color,
+                mono: false,
+            });
+            ty += line_h(text_px);
+        }
+
+        link_spans::mark(flow, first_text, &card.links, targets);
+
+        if !acts.is_empty() {
+            let gap = 12.0 * s;
+            let n = acts.len().max(2) as f32;
+            let bw = (inner_w - gap * (n - 1.0)) / n;
+            for (i, (hit, label, bg)) in acts.into_iter().enumerate() {
+                flow.buttons.push(FlowButton {
+                    hit,
+                    rect: Rect::new(
+                        inner_x + i as f32 * (bw + gap),
+                        ty + pad * 0.5,
+                        bw,
+                        ACTION_H * s,
+                    ),
+                    label,
+                    bg,
+                });
+            }
+        }
+        return h;
+    }
+
     let (parts, cut) = match form {
         CardForm::Text { max_lines } => {
             let mut lines = wrap_hard(card.text.trim(), cols);
@@ -953,7 +1241,7 @@ fn lay_out_card(
     pinned: bool,
     y: f32,
     pen: Pen,
-    targets: &[Link],
+    targets: &mut Vec<Link>,
     flow: &mut Flow,
     state: &BlockState,
 ) -> f32 {
@@ -1150,7 +1438,7 @@ pub fn lay_out_flow_in(
         kept: keep,
         ..Flow::default()
     };
-    let targets = link_spans::targets(
+    let mut targets = link_spans::targets(
         entries
             .iter()
             .map(|e| &e.links[..])
@@ -1192,7 +1480,7 @@ pub fn lay_out_flow_in(
                 pinned == Some(next_card),
                 y,
                 pen,
-                &targets,
+                &mut targets,
                 &mut flow,
                 &BlockState::default(),
             );
@@ -1267,8 +1555,8 @@ pub fn lay_out_block_as(
             flow.targets = targets;
         }
         Shows::Card(card) => {
-            let targets = link_spans::targets([&card.links[..]]);
-            y = lay_out_card(card, pinned, y, pen, &targets, &mut flow, state);
+            let mut targets = link_spans::targets([&card.links[..]]);
+            y = lay_out_card(card, pinned, y, pen, &mut targets, &mut flow, state);
             flow.targets = targets;
             let cols = if card.live {
                 columns(pen.text_w - EDGE * s - 2.0 * CARD_PAD * s, CARD_PT * s)
@@ -2896,8 +3184,17 @@ impl AgentScreen {
             };
             // The full card, laid out once to know its height.
             let mut full = Flow::default();
-            let targets = &self.flow.targets;
-            let h = card_block(card, pad, 0.0, l.w - 2.0 * pad, s, form, targets, &mut full);
+            let mut targets = self.flow.targets.clone();
+            let h = card_block(
+                card,
+                pad,
+                0.0,
+                l.w - 2.0 * pad,
+                s,
+                form,
+                &mut targets,
+                &mut full,
+            );
             full_top = above - h;
             if compact {
                 let bar = Rect::new(pad, above - BAR_H * s, l.w - 2.0 * pad, BAR_H * s);
@@ -2936,9 +3233,10 @@ impl AgentScreen {
                     l.w - 2.0 * pad,
                     s,
                     form,
-                    targets,
+                    &mut targets,
                     &mut flow,
                 );
+                flow.targets = targets;
                 pin = Some(Pinned {
                     compact: false,
                     rect: Rect::new(pad, full_top, l.w - 2.0 * pad, h),
@@ -7576,5 +7874,76 @@ mod tests {
         }
         assert_eq!(a.labels_alpha(), 0.0);
         assert!(a.section_labels().is_empty());
+    }
+
+    #[test]
+    fn card_with_markdown_above_threshold_renders_markdown_styling() {
+        let mut md_card = card(CardKind::Approval, 0, true);
+        md_card.text =
+            "Here is the plan:\n\n```rust\nfn main() {}\n```\n- Point 1\n- Point 2".to_string();
+        let flow = lay_out_flow(&[], &[md_card], None, 1080.0, 2.0);
+        assert!(
+            flow.rows.iter().any(|r| r.mono),
+            "code block should have mono: true"
+        );
+        assert!(
+            flow.rows.iter().any(|r| r.mono && r.color == theme().code),
+            "code block should have theme().code color"
+        );
+        assert!(
+            flow.rows.iter().any(|r| r.text.contains("Point 1")),
+            "bullet list should render Point 1"
+        );
+        assert!(
+            flow.fills.iter().any(|f| f.color == theme().input),
+            "code block should have shaded background panel in theme().input"
+        );
+    }
+
+    #[test]
+    fn card_with_markdown_links_are_tapped_and_indexed() {
+        let mut md_card = card(CardKind::Question, 0, true);
+        md_card.text =
+            "Review the spec at [Design Doc](https://example.com/spec) and approve.".to_string();
+        let flow = lay_out_flow(&[], &[md_card.clone()], None, 1080.0, 2.0);
+        assert!(
+            flow.targets
+                .iter()
+                .any(|l| l.url == "https://example.com/spec"),
+            "markdown link should be added to flow targets"
+        );
+        assert!(
+            flow.links
+                .iter()
+                .any(|ls| flow.targets[ls.link].url == "https://example.com/spec"),
+            "flow should have LinkSpan pointing to the link target"
+        );
+
+        let a = screen(vec![], vec![md_card], None);
+        let link_idx = a
+            .flow
+            .targets
+            .iter()
+            .position(|l| l.url == "https://example.com/spec")
+            .unwrap();
+        assert_eq!(
+            a.link(link_idx).map(|l| l.url.as_str()),
+            Some("https://example.com/spec")
+        );
+    }
+
+    #[test]
+    fn plain_text_card_below_threshold_renders_as_terminal_rows() {
+        let mut plain_card = card(CardKind::Approval, 0, true);
+        plain_card.text = "Shall I go on with the implementation of the feature?".to_string();
+        let flow = lay_out_flow(&[], &[plain_card], None, 1080.0, 2.0);
+        assert!(
+            !flow.rows.iter().any(|r| r.mono),
+            "plain text card rows should not be mono"
+        );
+        assert!(
+            !flow.fills.iter().any(|f| f.color == theme().input),
+            "plain text card should not have code block shaded panels"
+        );
     }
 }
