@@ -38,7 +38,7 @@ use std::collections::{HashMap, HashSet};
 
 use flankr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
 use flankr_companion::{AgentCard, Bookend, CardKind, Pressure, Shows, Suggestion, ViewSection};
-use libcontrols::{Button, DrawContext, DrawControl, Rect};
+use libcontrols::{Button, DrawContext, DrawControl, Rect, TextArea};
 use libflankr_proto::common::{Entry, EntryKind, Link, Role, Serial};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
@@ -281,11 +281,12 @@ pub struct FlowButton {
 }
 
 /// The flow laid out at one width, in content coordinates.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct Flow {
     pub rows: Vec<Row>,
     pub fills: Vec<Fill>,
     pub buttons: Vec<FlowButton>,
+    pub text_area: Option<TextArea>,
     /// The top of each entry.
     pub entry_y: Vec<f32>,
     /// The top of each card.
@@ -301,6 +302,31 @@ pub struct Flow {
     /// Areas a tap folds or expands: a tool section, a diff or a summary
     /// card, the whole block ([`AgentHit::Fold`]).
     pub taps: Vec<(AgentHit, Rect)>,
+}
+
+impl PartialEq for Flow {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.fills == other.fills
+            && self.buttons == other.buttons
+            && self.entry_y == other.entry_y
+            && self.card_y == other.card_y
+            && self.height == other.height
+            && self.links == other.links
+            && self.targets == other.targets
+            && self.kept == other.kept
+            && self.taps == other.taps
+            && match (&self.text_area, &other.text_area) {
+                (None, None) => true,
+                (Some(a), Some(b)) => {
+                    a.rect == b.rect
+                        && a.text() == b.text()
+                        && a.cursor() == b.cursor()
+                        && a.is_active() == b.is_active()
+                }
+                _ => false,
+            }
+    }
 }
 
 /// What a block is laid out with besides its section: its key (the packed
@@ -3974,11 +4000,25 @@ impl AgentScreen {
         }
         if let Some(d) = &self.frame.dictation {
             let start = list.instances.len();
-            for f in &d.fills {
-                fill(list, f.rect, f.color, f.radius);
-            }
-            for r in &d.rows {
-                ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+            if let Some(ta) = &d.text_area {
+                for f in &d.fills {
+                    if f.rect != ta.rect {
+                        fill(list, f.rect, f.color, f.radius);
+                    }
+                }
+                for r in &d.rows {
+                    if !ta.rect.contains([r.x, r.y]) {
+                        ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+                    }
+                }
+                ta.draw(list, ctx);
+            } else {
+                for f in &d.fills {
+                    fill(list, f.rect, f.color, f.radius);
+                }
+                for r in &d.rows {
+                    ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+                }
             }
             // Without the microphone, the dictation card is dim.
             if !crate::settings::current().microphone {

@@ -36,7 +36,7 @@ use std::time::Duration;
 
 use flankr_companion::PromptMode;
 use flankr_companion::Speaker;
-use libcontrols::{DrawContext, Rect};
+use libcontrols::{DrawContext, DrawControl, Rect, TextArea};
 use libflankr_proto::common::AgentInfo;
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
@@ -631,11 +631,25 @@ impl Overview {
         let microphone = settings::current().microphone;
         for (i, p) in self.panels.iter().enumerate() {
             let start = list.instances.len();
-            for f in &p.fills {
-                fill(list, f.rect, f.color, f.radius);
-            }
-            for r in &p.rows {
-                ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+            if let Some(ta) = &p.text_area {
+                for f in &p.fills {
+                    if f.rect != ta.rect {
+                        fill(list, f.rect, f.color, f.radius);
+                    }
+                }
+                for r in &p.rows {
+                    if !ta.rect.contains([r.x, r.y]) {
+                        ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+                    }
+                }
+                ta.draw(list, ctx);
+            } else {
+                for f in &p.fills {
+                    fill(list, f.rect, f.color, f.radius);
+                }
+                for r in &p.rows {
+                    ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+                }
             }
             // The dictation card without the microphone: dim.
             if i == 0 && self.dictation_shown && !microphone {
@@ -753,8 +767,23 @@ fn panel(
         }
 
         let box_y = y + gap_before_box;
+        let box_rect = Rect::new(inner_x, box_y, inner_w, box_h);
+        let is_placeholder = input_text == "Type your message";
+        let actual_text = if is_placeholder { "" } else { input_text };
+
+        let text_area = TextArea::new(actual_text, box_rect)
+            .with_padding([box_pad_x, box_pad_y])
+            .with_font_size(px)
+            .with_text_color(theme().text)
+            .with_bg(theme().input)
+            .with_corner_radius(8.0 * s)
+            .with_placeholder("Type your message")
+            .with_active(true);
+        text_area.set_cursor(actual_text.len());
+        flow.text_area = Some(text_area);
+
         flow.fills.push(Fill {
-            rect: Rect::new(inner_x, box_y, inner_w, box_h),
+            rect: box_rect,
             color: theme().input,
             radius: 8.0 * s,
         });
@@ -1311,6 +1340,9 @@ mod tests {
         assert!(panel.fills.iter().any(|f| f.color == theme().card));
         assert!(panel.fills.iter().any(|f| f.color == theme().input));
         assert!(panel.rows.iter().any(|r| r.text == "Type your message"));
+        assert!(panel.text_area.is_some());
+        let ta = panel.text_area.as_ref().unwrap();
+        assert!(ta.is_active());
     }
 
     #[test]

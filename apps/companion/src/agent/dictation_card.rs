@@ -6,7 +6,7 @@
 //! buttons in place, hiding the global ones").
 
 use flankr_companion::PromptMode;
-use libcontrols::Rect;
+use libcontrols::{Rect, TextArea};
 
 use super::{
     AgentCard, BUTTON_H, CARD_PT, DICTATION_LINES, EDGE, Fill, Flow, PAD, PIN_LINES, Row, TITLE_PT,
@@ -138,8 +138,23 @@ impl DictationCard {
             }
 
             let box_y = y + gap_before_box;
+            let box_rect = Rect::new(inner_x, box_y, inner_w, box_h);
+            let is_placeholder = input_text == "Type your message";
+            let actual_text = if is_placeholder { "" } else { input_text };
+
+            let text_area = TextArea::new(actual_text, box_rect)
+                .with_padding([box_pad_x, box_pad_y])
+                .with_font_size(px)
+                .with_text_color(theme().text)
+                .with_bg(theme().input)
+                .with_corner_radius(8.0 * s)
+                .with_placeholder("Type your message")
+                .with_active(true);
+            text_area.set_cursor(actual_text.len());
+            flow.text_area = Some(text_area);
+
             flow.fills.push(Fill {
-                rect: Rect::new(inner_x, box_y, inner_w, box_h),
+                rect: box_rect,
                 color: theme().input,
                 radius: 8.0 * s,
             });

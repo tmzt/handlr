@@ -1925,7 +1925,8 @@ impl MorphApp for App {
             ..DrawContext::new(Some(font(self.roboto).atlas), Some(&self.shaper))
         };
         // libcontrols' own colours that the app draws: the settings' scroll
-        // indicator, in the theme.
+        // indicator and the insertion cursor, in the theme.
+        draw.theme.accent_color = theme().accent;
         draw.theme.scroll.indicator_color = theme().scrollbar;
         let term = Terminal {
             shaper: &self.terminal,
