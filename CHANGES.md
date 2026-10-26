@@ -2301,5 +2301,15 @@ Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/desig
 - The prompt card displays "Type your message" placeholder in keyboard mode instead of "(say your message)".
 - In keyboard mode, the input text / placeholder renders inside a shaded input area (`theme().input`), distinct from the card container and buttons.
 
+## 2026-10-25 23:34 EDT — Prompt card text area focus, IME lifecycle, and external keyboard
+
+Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md)
+(living section L3).
+
+- The prompt card's `TextArea` is registered in `AgentHit::TextArea` on overview and agent view screens.
+- Tapping the `TextArea` sets the cursor from the tap position and requests the soft keyboard if not dismissed and external keyboard is inactive.
+- Soft keyboard dismissal (`TextInputEvent::Dismissed`) retains the prompt card without clearing it.
+- External physical keyboard keystrokes edit the prompt card directly and suppress the soft keyboard.
+
 
 

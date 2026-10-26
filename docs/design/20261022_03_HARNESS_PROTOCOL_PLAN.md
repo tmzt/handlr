@@ -1606,3 +1606,12 @@ The owner approved (2026-10-25): in keyboard mode, the prompt card displays
    inset below the target line and above the controls, on both the overview
    and agent view screens.
 
+## Amendment — 2026-10-25 23:34 EDT: prompt card text area focus, IME lifecycle, and external keyboard (living section L3)
+
+The owner directed (2026-10-25): "ime should be shown when text area focused unless dismissed or external kbd active".
+1. **Focus & Tap:** Tapping the shaded input `TextArea` on the prompt card focuses it and positions the insertion cursor. If the IME was previously dismissed, tapping the text area reactivates it (unless an external physical keyboard is active).
+2. **IME Dismissal:** On soft keyboard dismissal (`TextInputEvent::Dismissed`), the prompt card remains open in its current state instead of being cleared or destroyed. The IME stays hidden until the text area is tapped again.
+3. **External Keyboard:** When an external keyboard is active (desktop by default, or upon receipt of physical keystrokes on Android):
+   - Physical typing (`Key::Character`, `Key::Backspace`, etc.) edits the prompt card buffer directly.
+   - The on-screen soft keyboard (IME) is suppressed while an external keyboard is active.
+
