@@ -1,7 +1,7 @@
 ---
 title: Markdown detection in agent output and automatic switch to rich rendering
 date: 2026-10-26
-status: In implementation
+status: Implemented
 covers:
   - "Heuristic detection of Markdown formatting in agent output text and conversation turns"
   - "A scoring metric computing Markdown feature density and character coverage against a configurable percentage threshold"
@@ -168,4 +168,11 @@ None.
 ## Amendment — 2026-10-26 12:58 EDT: approved, implementation has started
 
 The owner approved the plan on 2026-10-26 ("approve and implement"). Implementation has started with step 1 in `crates/flankr-markdown`; this document is now immutable except on explicit instruction.
+
+## Amendment — 2026-10-26 13:25 EDT: implemented
+
+All steps of the plan are implemented:
+- Step 1: `crates/flankr-markdown` detection heuristics, scoring metric, and unit tests (`690eeaf`).
+- Step 2: `apps/companion` agent card automatic Markdown rendering with styled runs, fenced code panel backgrounds, and interactive link spans (`e15cbd3`).
+- Step 3: `apps/companion` General Agent conversation turn log (`TurnLog` / `TurnOverlay`) automatic Markdown rendering (`e15cbd3`).
 
