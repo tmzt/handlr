@@ -239,3 +239,21 @@ The owner (2026-10-26): "the n3w b7ttin replqces the original tap to talk and ho
 2. **2-second hold opens overlay:**
    - Pressing and holding the centre button (`AgentHit::GeneralAgent`) for 2.0 seconds (`Duration::from_secs(2)`) opens the `TurnOverlay` sheet.
    - Lifting before 2.0 seconds acts as a standard tap, triggering general agent talk/listening.
+
+## Amendment — 2026-10-26 01:14 EDT: pinned card for responses, expanded overlay with input area, and normal message input fix
+
+On the owner's instruction: "if general agent responses are rendered as cards they should be pinned cards. the current multi-turn card should have the input area and turns above it when expanded. we also broke the normal message input is no longer showing its input card."
+
+1. **General agent responses as pinned cards:**
+   - Rather than an edge-to-edge flat strip, general agent responses are rendered as a pinned card (with card margin padding, `10.0 * s` corner radius, `theme().card` background, `✦ Gemini` accent indicator, and response text).
+   - The card sits pinned above the bottom control row (and above session cards) on both the overview and agent screens.
+   - Tapping the pinned card expands it into the multi-turn overlay sheet.
+
+2. **Expanded overlay with input area and turns:**
+   - Inside `TurnOverlay`, the multi-line text input area (3-line 12pt `TextArea` with input background and IME elevation) or voice prompt sits pinned at the bottom of the sheet.
+   - The scrollable conversation history (`TurnLog`) is placed above the input area.
+
+3. **Normal message input card restoration:**
+   - Clear lingering dictation state when general agent turns start, cancel, or complete, so subsequent normal dictation or keyboard prompt requests are not blocked.
+   - Ensure the normal message `DictationCard` / panel layout on `AgentScreen` and `OverviewScreen` displays cleanly above the bottom row without occlusion or overlap.
+

@@ -310,3 +310,19 @@ yet.
 - a button submit is approved once, with no question, whichever of the
   question and the answer arrives first;
 - a silence submit is still asked.
+
+## Amendment — 2026-10-26 01:14 EDT: text filter removes symbols instead of rejecting; threshold logic
+
+On the owner's instruction: "also, the text filter should remove symbols not reject the in0ut unless its above a certain threshold, and single symbol followed by space (such as period or comma) shpuldnt trigger that threshold".
+
+This amends the 01:58 EDT amendment on the strict symbol filter for `validate_arbitrary_command` and `validate_message`:
+
+1. **Remove symbols instead of rejecting input:**
+   - Unallowed symbols are stripped from the input text rather than immediately rejecting the entire input.
+   - Allowed characters remain: ASCII letters, digits, spaces, and the punctuation `. , ' ? :`.
+
+2. **Threshold rejection for excessive symbols:**
+   - Input is rejected if the number of threshold-triggering symbols exceeds 3.
+   - **Threshold exception:** An isolated single symbol followed by a space (or trailing at the end of the input), such as `. `, `, `, `! `, `? `, `: `, or `- `, is treated as standard speech transcription / sentence punctuation and does **not** count toward the threshold.
+   - Embedded symbols (such as `/` in paths or `-` in CLI flags) or runs of symbols (e.g. `!@#$%`, `---`, `...`) do count toward the threshold. When the count exceeds 3, the input is rejected.
+

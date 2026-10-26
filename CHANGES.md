@@ -2345,6 +2345,20 @@ Plan: [The general agent as a realtime chat, from its own centre button](docs/de
 - Tapping empty background or grid space on the overview no longer triggers voice listening; the centre button alone triggers general agent talk.
 - Holding the centre button for 2.0 seconds opens the `TurnOverlay` conversation sheet across screens.
 
+## 2026-10-26 01:14 EDT — Text filter removes symbols with threshold; general agent pinned card & expanded input
+
+Plans:
+- [The bulk input and dictation mode](docs/design/20261023_02_BULK_INPUT_PLAN.md).
+- [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- `validate_arbitrary_command` and `validate_message` remove unallowed symbols rather than rejecting input outright.
+- Single symbols followed by a space (or at the end of the text) do not count toward the symbol rejection threshold.
+- Rejection occurs only when threshold-triggering symbols exceed 3.
+- General agent responses are rendered as a pinned card above the bottom controls row.
+- `TurnOverlay` expanded sheet includes the text input area at the bottom with turns scrollable above it.
+- Restored normal message input card display and lifecycle so taking an agent message is not blocked.
+
+
 
 
 
