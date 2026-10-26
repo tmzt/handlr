@@ -792,7 +792,11 @@ pub(crate) fn emit_laid_markdown(
             } else if run.dim {
                 theme().dim
             } else if mono {
-                theme().code
+                if let Some(dc) = diff_colour(&run.text) {
+                    dc
+                } else {
+                    theme().code
+                }
             } else {
                 theme().fg
             };
@@ -1361,7 +1365,7 @@ fn lay_out_entry(
     expanded: bool,
     y: f32,
     pen: Pen,
-    targets: &[Link],
+    targets: &mut Vec<Link>,
     flow: &mut Flow,
 ) -> f32 {
     let s = pen.s;
@@ -1375,6 +1379,28 @@ fn lay_out_entry(
         y += 4.0 * s;
         flow.entry_y.push(y);
         return y + NoticeLine::lay_out(e, origin, pen.pad, y, pen.cols(TOOL_PT), s, targets, flow);
+    }
+    let full = full_text(e);
+    if e.role != Role::User
+        && e.kind == EntryKind::Text
+        && is_markdown(full, DEFAULT_MARKDOWN_THRESHOLD_PCT)
+    {
+        let gap = 10.0 * s;
+        y += gap;
+        flow.entry_y.push(y);
+        let first_row = flow.rows.len();
+        let ly = lay_out_markdown(
+            full.trim(),
+            pen.pad,
+            y,
+            pen.text_w,
+            TEXT_PT,
+            s,
+            targets,
+            flow,
+        );
+        link_spans::mark(flow, first_row, &e.links, targets);
+        return ly;
     }
     let (lines, band, _) = entry_lines(e, expanded, |pt| pen.cols(pt));
     let gap = match (e.role, e.kind) {
@@ -1494,7 +1520,7 @@ pub fn lay_out_flow_in(
             .checked_sub(1)
             .and_then(|p| entries.get(p))
             .is_some_and(NoticeLine::compacts);
-        y = lay_out_entry(e, previous_compacts, false, y, pen, &targets, &mut flow);
+        y = lay_out_entry(e, previous_compacts, false, y, pen, &mut targets, &mut flow);
         prune(&mut flow, at, top, y);
     }
     flow.height = y + 16.0 * s;
@@ -1536,8 +1562,7 @@ pub fn lay_out_block_as(
     let mut folds = false;
     match shows {
         Shows::Entries(entries) => {
-            flow.targets = link_spans::targets(entries.iter().map(|e| &e.links[..]));
-            let targets = std::mem::take(&mut flow.targets);
+            let mut targets = link_spans::targets(entries.iter().map(|e| &e.links[..]));
             let mut previous_compacts = after_compact;
             for e in entries {
                 y = lay_out_entry(
@@ -1546,7 +1571,7 @@ pub fn lay_out_block_as(
                     state.expanded,
                     y,
                     pen,
-                    &targets,
+                    &mut targets,
                     &mut flow,
                 );
                 previous_compacts = NoticeLine::compacts(e);
@@ -4891,7 +4916,7 @@ mod tests {
             entry(
                 Role::Assistant,
                 EntryKind::Text,
-                "Fixed:\n```diff\n-a\n+b\n```\n- a bullet",
+                "Fixed the issue in src/a.rs.",
             ),
         ];
         let flow = lay_out_flow(&entries, &[], None, 1080.0, 2.0);
@@ -4925,17 +4950,39 @@ mod tests {
         assert_eq!(colour("+new"), theme().green);
         // An error, red.
         assert_eq!(colour("! exit status 1"), theme().red);
-        // In a reply, diff lines only inside a fence; a bullet stays plain.
-        assert_eq!(colour("-a"), theme().red);
-        assert_eq!(colour("+b"), theme().green);
-        assert_eq!(colour("- a bullet"), theme().fg);
-        assert_eq!(colour("```diff"), theme().dim);
+        assert_eq!(colour("Fixed the issue in src/a.rs."), theme().fg);
         // Nothing runs past the phone's width.
         for r in &flow.rows {
             assert!(r.mono, "{r:?}");
             let cols = term_columns(1080.0 - 2.0 * PAD * 2.0 - 16.0, r.px);
             assert!(r.text.chars().count() <= cols + 1, "{r:?}");
         }
+    }
+
+    #[test]
+    fn assistant_reply_with_markdown_renders_rich_markdown_and_diff_highlighting() {
+        let entries = vec![entry(
+            Role::Assistant,
+            EntryKind::Text,
+            "Fixed:\n```diff\n-a\n+b\n```\n- a bullet",
+        )];
+        let flow = lay_out_flow(&entries, &[], None, 1080.0, 2.0);
+        let colour = |text: &str| {
+            flow.rows
+                .iter()
+                .find(|r| r.text.trim() == text)
+                .unwrap_or_else(|| panic!("no row {text:?} in {:?}", flow.rows))
+                .color
+        };
+        assert_eq!(colour("Fixed:"), theme().fg);
+        assert_eq!(colour("-a"), theme().red);
+        assert_eq!(colour("+b"), theme().green);
+        assert!(flow.rows.iter().any(|r| r.text.starts_with('•')));
+        assert_eq!(colour("a bullet"), theme().fg);
+        assert!(
+            flow.fills.iter().any(|f| f.color == theme().input),
+            "fenced code panel should be drawn"
+        );
     }
 
     #[test]
