@@ -20,10 +20,17 @@ pub const SYMBOL_THRESHOLD: usize = 0;
 
 /// Characters permitted in an arbitrary command, in addition to ASCII
 /// alphanumerics and spaces.
-const EXTRA_ALLOWED_CHARS: &[char] = &['.', ',', '\'', '?', ':'];
+const EXTRA_ALLOWED_CHARS: &[char] = &['.', ',', '\'', '?', ':', '_'];
+
+fn is_allowed_char(c: char, allow_multiline: bool) -> bool {
+    c.is_ascii_alphanumeric()
+        || c == ' '
+        || (allow_multiline && (c == '\n' || c == '\r' || c == '\t'))
+        || EXTRA_ALLOWED_CHARS.contains(&c)
+}
 
 fn is_allowed_arbitrary_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == ' ' || EXTRA_ALLOWED_CHARS.contains(&c)
+    is_allowed_char(c, false)
 }
 
 /// Count symbols that trigger the rejection threshold.
@@ -37,7 +44,7 @@ pub fn count_triggering_symbols(s: &str) -> usize {
     let chars: Vec<char> = s.chars().collect();
     let mut count = 0;
     for (i, &c) in chars.iter().enumerate() {
-        if !c.is_alphanumeric() && !c.is_whitespace() {
+        if !c.is_alphanumeric() && !c.is_whitespace() && c != '_' {
             // An apostrophe in a contraction (e.g. don't, it's) does not trigger the threshold.
             if c == '\''
                 && i > 0
@@ -65,7 +72,7 @@ pub fn count_triggering_symbols(s: &str) -> usize {
 pub fn first_triggering_symbol(s: &str) -> Option<char> {
     let chars: Vec<char> = s.chars().collect();
     for (i, &c) in chars.iter().enumerate() {
-        if !c.is_alphanumeric() && !c.is_whitespace() {
+        if !c.is_alphanumeric() && !c.is_whitespace() && c != '_' {
             if c == '\''
                 && i > 0
                 && chars[i - 1].is_alphabetic()
@@ -94,6 +101,12 @@ pub fn filter_symbols(s: &str) -> String {
     s.chars()
         .filter(|&c| is_allowed_arbitrary_char(c))
         .collect()
+}
+
+/// Remove unallowed symbols from message or general agent text, keeping ASCII
+/// alphanumeric characters, spaces, newlines, tabs, and allowed punctuation (`. , ' ? :`).
+pub fn filter_message_symbols(s: &str) -> String {
+    s.chars().filter(|&c| is_allowed_char(c, true)).collect()
 }
 
 /// Validate a free-form command for an agent with `allow_arbitrary_commands`.
@@ -188,6 +201,53 @@ pub fn validate_message(text: &str) -> Result<String, String> {
     if len > MAX_MESSAGE_LEN {
         return Err(format!(
             "Message rejected: {len} characters exceeds the {MAX_MESSAGE_LEN} character limit."
+        ));
+    }
+    Ok(cleaned.to_string())
+}
+
+/// Validate general agent chat input (plan 20261024_03 as amended):
+/// characters outside the whitelist are stripped, up to [`SYMBOL_THRESHOLD`]
+/// triggering symbols allowed, at most [`MAX_MESSAGE_LEN`] characters.
+/// Line breaks and tabs are preserved for multi-line inputs, and sentence
+/// punctuation is preserved.
+pub fn validate_general_input(text: &str) -> Result<String, String> {
+    if let Some(bad) = text
+        .chars()
+        .find(|c| c.is_control() && *c != '\n' && *c != '\r' && *c != '\t')
+    {
+        return Err(format!(
+            "Input rejected: control characters (found {bad:?}) are not permitted."
+        ));
+    }
+
+    let trigger_count = count_triggering_symbols(text);
+    if trigger_count > SYMBOL_THRESHOLD {
+        let bad = first_triggering_symbol(text).unwrap_or('?');
+        return Err(format!(
+            "Input rejected: too many symbols (found '{bad}', limit is {SYMBOL_THRESHOLD})."
+        ));
+    }
+
+    let filtered = filter_message_symbols(text);
+    let mut lines = Vec::new();
+    for line in filtered.lines() {
+        let folded = line
+            .split(' ')
+            .filter(|w| !w.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(folded);
+    }
+    let joined = lines.join("\n");
+    let cleaned = joined.trim();
+    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err("Input cannot be empty.".to_string());
+    }
+    let len = cleaned.chars().count();
+    if len > MAX_MESSAGE_LEN {
+        return Err(format!(
+            "Input rejected: {len} characters exceeds the {MAX_MESSAGE_LEN} character limit."
         ));
     }
     Ok(cleaned.to_string())
@@ -507,6 +567,26 @@ mod tests {
             "x\u{85}y",
         ] {
             let err = validate_message(bad).unwrap_err();
+            assert!(err.contains("control characters"), "{bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_validate_general_input_accepts_multiline_and_preserves_punctuation() {
+        assert_eq!(
+            validate_general_input("line one\nline two\nline three.").unwrap(),
+            "line one\nline two\nline three."
+        );
+        assert_eq!(
+            validate_general_input("line one\r\nline two?").unwrap(),
+            "line one\nline two?"
+        );
+        assert_eq!(
+            validate_general_input("Claude_Continue Send").unwrap(),
+            "Claude_Continue Send"
+        );
+        for bad in ["clear\u{1b}[2J", "x\u{85}y", "a\x00b", "a\x07b"] {
+            let err = validate_general_input(bad).unwrap_err();
             assert!(err.contains("control characters"), "{bad:?}: {err}");
         }
     }

@@ -535,13 +535,8 @@ pub(super) async fn turn_start(
     let daemon = Arc::clone(&conn.daemon);
     let principal = conn.principal().clone();
     let session = Arc::clone(conn.session());
-    let text = params.text.trim().to_string();
-    if text.is_empty() {
-        return Err(ErrorObject::new(
-            codes::INVALID_PARAMS,
-            "turn.start needs some text",
-        ));
-    }
+    let text = crate::commands::validate_general_input(&params.text)
+        .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
     let turn_id = params.turn_id;
 
     // A new turn ends the voice-turn confirmations still pending, as
