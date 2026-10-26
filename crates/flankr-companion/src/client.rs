@@ -2747,13 +2747,27 @@ impl State {
     }
 
     fn start_dictation(&mut self, out: &mut Vec<Output>) {
+        if let Some(d) = &self.dictation {
+            if !d.general_agent && d.mode == PromptMode::Voice {
+                return;
+            }
+        }
+        self.dictation = None;
         self.start_dictation_with(Vec::new(), out);
     }
 
     fn start_text_prompt(&mut self, out: &mut Vec<Output>) {
-        if self.dictation.is_some() {
-            return;
+        if let Some(d) = &self.dictation {
+            if !d.general_agent && d.mode == PromptMode::Keyboard {
+                return;
+            }
         }
+        let existing_parts = self
+            .dictation
+            .take()
+            .filter(|d| !d.general_agent)
+            .map(|d| d.parts)
+            .unwrap_or_default();
         let fixed_pane = self.view.as_ref().map(|v| v.pane_id.clone());
         let target = match &fixed_pane {
             Some(pane_id) => self.target_for(pane_id),
@@ -2762,7 +2776,7 @@ impl State {
         self.dictation = Some(Dictating {
             mode: PromptMode::Keyboard,
             fixed_pane,
-            parts: Vec::new(),
+            parts: existing_parts,
             target,
             refresh_target: self.online(),
             phase: DictationPhase::Collecting,
@@ -2784,9 +2798,12 @@ impl State {
             log::info!("dictation: the general agent is off");
             return;
         }
-        if self.dictation.is_some() {
-            return;
+        if let Some(d) = &self.dictation {
+            if d.general_agent && d.mode == mode {
+                return;
+            }
         }
+        self.dictation = None;
         if mode == PromptMode::Voice && !self.settings.microphone {
             log::info!("dictation: the microphone is off");
             return;
@@ -2813,9 +2830,12 @@ impl State {
 
     /// Take a message whose first parts are `parts`, already in it.
     fn start_dictation_with(&mut self, parts: Vec<String>, out: &mut Vec<Output>) {
-        if self.dictation.is_some() {
-            return;
+        if let Some(d) = &self.dictation {
+            if !d.general_agent && d.mode == PromptMode::Voice && d.parts == parts {
+                return;
+            }
         }
+        self.dictation = None;
         if !self.settings.microphone {
             log::info!("dictation: the microphone is off");
             return;
@@ -2924,6 +2944,7 @@ impl State {
             d.quiet_from = None;
             if d.parts.is_empty() {
                 out.push(event(Event::Say("The message is empty.".to_string())));
+                self.dictation = None;
                 self.show_dictation(out);
                 return;
             }
@@ -3936,6 +3957,10 @@ impl State {
             out.push(event(Event::Say(stopped_sentence(&stopped))));
         }
         out.push(event(Event::TurnEnded { outcome, stopped }));
+        if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
+            self.dictation = None;
+            self.show_dictation(out);
+        }
         if let Some(text) = self.deferred.take() {
             self.start_turn(text, out);
         }
