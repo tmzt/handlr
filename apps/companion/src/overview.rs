@@ -568,7 +568,17 @@ impl Overview {
                     self.back();
                     None
                 }
-                Target::Sheet => None,
+                Target::Sheet => {
+                    if self
+                        .overlay
+                        .text_area_rect()
+                        .is_some_and(|r| r.contains([x, y]))
+                    {
+                        Some(OverviewHit::Bottom(AgentHit::GeneralAgentTextArea))
+                    } else {
+                        None
+                    }
+                }
                 Target::Gear => self.gear.contains(x, y).then_some(OverviewHit::Settings),
                 Target::Other => match self.hit(x, y) {
                     // Nothing to read until a view has been opened.

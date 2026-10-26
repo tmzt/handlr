@@ -89,9 +89,17 @@ impl TurnStrip {
         self.rect
     }
 
+    /// The card within the horizontal area.
+    pub fn card_rect(&self) -> Rect {
+        let s = self.scale;
+        let pad = PAD * s;
+        let r = self.rect;
+        Rect::new(r.x + pad, r.y + 2.0 * s, r.w - 2.0 * pad, r.h - 4.0 * s)
+    }
+
     /// Whether `(x, y)` is on it while it shows.
     pub fn contains(&self, x: f32, y: f32) -> bool {
-        self.visible() && self.rect.contains([x, y])
+        self.visible() && self.card_rect().contains([x, y])
     }
 
     pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
@@ -99,30 +107,28 @@ impl TurnStrip {
             return;
         };
         let s = self.scale;
-        let r = self.rect;
-        let pad = PAD * s;
-        let card = Rect::new(r.x + pad, r.y + 2.0 * s, r.w - 2.0 * pad, r.h - 4.0 * s);
+        let card = self.card_rect();
         // Card background and left accent edge.
-        fill(list, card, theme().card, 8.0 * s);
+        fill(list, card, theme().card, 10.0 * s);
         fill(
             list,
             Rect::new(card.x, card.y, 4.0 * s, card.h),
             theme().accent,
-            2.0 * s,
+            3.0 * s,
         );
         // Header: "✦ Gemini" at top left, "^" at top right.
         let header_px = 11.0 * s;
         ctx.draw_text(
             list,
             "\u{2726} Gemini",
-            [card.x + 10.0 * s, card.y + 5.0 * s],
+            [card.x + 12.0 * s, card.y + 6.0 * s],
             header_px,
             theme().accent,
         );
         ctx.draw_text(
             list,
             "^",
-            [card.x + card.w - 16.0 * s, card.y + 4.0 * s],
+            [card.x + card.w - 18.0 * s, card.y + 5.0 * s],
             header_px,
             theme().dim,
         );
@@ -132,7 +138,7 @@ impl TurnStrip {
         ctx.draw_text(
             list,
             &text,
-            [card.x + 10.0 * s, card.y + 20.0 * s],
+            [card.x + 12.0 * s, card.y + 22.0 * s],
             px,
             theme().fg,
         );
@@ -185,5 +191,18 @@ mod tests {
         assert!(!t.contains(540.0, 1990.0));
         let mut list = DrawList::new();
         t.draw(&mut list, &DrawContext::default());
+    }
+
+    #[test]
+    fn card_rect_has_padding_and_hit_inside_only() {
+        let mut t = TurnStrip::new();
+        let r = Rect::new(0.0, 2000.0, 1080.0, TurnStrip::HEIGHT * 2.0);
+        t.set_rect(r, 2.0);
+        t.push(Speaker::Gemini, "Hello");
+        let card = t.card_rect();
+        assert!(card.x > r.x);
+        assert!(card.w < r.w);
+        assert!(t.contains(card.x + 10.0, card.y + 10.0));
+        assert!(!t.contains(r.x + 2.0, card.y + 10.0));
     }
 }

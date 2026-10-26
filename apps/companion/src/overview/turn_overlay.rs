@@ -20,6 +20,7 @@ use super::turn_log::TurnLog;
 use crate::agent::fill;
 use crate::controls::scroll::Touched;
 use crate::theme::theme;
+use libcontrols::{DrawControl, TextArea};
 
 /// A finger on the sheet, watched for a swipe down.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,6 +43,7 @@ pub struct TurnOverlay {
     area: Rect,
     scale: f32,
     swipe: Option<Swipe>,
+    text_area: Option<TextArea>,
 }
 
 impl Default for TurnOverlay {
@@ -59,6 +61,9 @@ impl TurnOverlay {
     /// it, in points.
     pub const HANDLE_H: f32 = 28.0;
     pub const CLOSE_DRAG: f32 = 48.0;
+    /// Height of the input area at the bottom of the expanded sheet.
+    pub const INPUT_H: f32 = 64.0;
+    pub const INPUT_PAD: f32 = 10.0;
 
     pub fn new() -> Self {
         TurnOverlay {
@@ -68,6 +73,7 @@ impl TurnOverlay {
             area: Rect::default(),
             scale: 1.0,
             swipe: None,
+            text_area: None,
         }
     }
 
@@ -84,10 +90,53 @@ impl TurnOverlay {
         self.area = area;
         self.scale = s;
         let handle = Self::HANDLE_H * s;
-        self.log.set_viewport(
-            Rect::new(area.x, area.y + handle, area.w, (area.h - handle).max(0.0)),
-            s,
+        let input_h = Self::INPUT_H * s;
+        let pad = Self::INPUT_PAD * s;
+        let input_area_h = input_h + 2.0 * pad;
+        let log_h = (area.h - handle - input_area_h).max(0.0);
+        self.log
+            .set_viewport(Rect::new(area.x, area.y + handle, area.w, log_h), s);
+        let box_rect = Rect::new(
+            area.x + pad,
+            area.y + handle + log_h + pad,
+            area.w - 2.0 * pad,
+            input_h,
         );
+        let current_text = self
+            .text_area
+            .as_ref()
+            .map(|ta| ta.text())
+            .unwrap_or_default();
+        let ta = TextArea::new(current_text, box_rect)
+            .with_padding([10.0 * s, 8.0 * s])
+            .with_font_size(12.0 * s)
+            .with_text_color(theme().text)
+            .with_bg(theme().input)
+            .with_corner_radius(8.0 * s)
+            .with_placeholder("Ask Gemini...")
+            .with_active(true);
+        self.text_area = Some(ta);
+    }
+
+    pub fn set_input_text(&mut self, text: &str) {
+        if let Some(ta) = &mut self.text_area {
+            ta.set_text(text);
+            ta.set_cursor(text.len());
+        }
+    }
+
+    pub fn input_text(&self) -> String {
+        self.text_area
+            .as_ref()
+            .map(|ta| ta.text())
+            .unwrap_or_default()
+    }
+
+    pub fn text_area_rect(&self) -> Option<Rect> {
+        let drop = self.drop();
+        self.text_area
+            .as_ref()
+            .map(|ta| Rect::new(ta.rect.x, ta.rect.y + drop, ta.rect.w, ta.rect.h))
     }
 
     /// Starts it sliding up. Returns whether it was closed.
@@ -143,6 +192,14 @@ impl TurnOverlay {
     /// the log's.
     pub fn touch(&mut self, id: u64, phase: TouchPhase, x: f32, y: f32, now: Duration) -> Touched {
         if phase == TouchPhase::Started {
+            if let Some(ta_rect) = self.text_area_rect()
+                && ta_rect.contains([x, y])
+            {
+                if let Some(ta) = &self.text_area {
+                    ta.set_cursor_from_pos([x, y - self.drop()]);
+                }
+                return Touched::Tap;
+            }
             let handle = y < self.rect().y + Self::HANDLE_H * self.scale;
             self.swipe = Some(Swipe {
                 id,
@@ -150,6 +207,15 @@ impl TurnOverlay {
                 handle,
                 at_top: self.log.scroll().offset() <= 0.0,
             });
+        }
+        if let Some(ta_rect) = self.text_area_rect()
+            && ta_rect.contains([x, y])
+        {
+            return if phase == TouchPhase::Ended {
+                Touched::Tap
+            } else {
+                Touched::Nothing
+            };
         }
         let Some(swipe) = self.swipe.filter(|w| w.id == id) else {
             return Touched::Nothing;
@@ -209,6 +275,14 @@ impl TurnOverlay {
         );
         fill(list, handle, theme().band, hh * 0.5);
         self.log.draw_moved(list, ctx, self.drop());
+        if let Some(ta) = &self.text_area {
+            let drop = self.drop();
+            let moved = Rect::new(ta.rect.x, ta.rect.y + drop, ta.rect.w, ta.rect.h);
+            fill(list, moved, theme().input, 8.0 * s);
+            let mut ta_moved = ta.clone();
+            ta_moved.rect = moved;
+            ta_moved.draw(list, ctx);
+        }
     }
 }
 
@@ -332,5 +406,25 @@ mod tests {
         settle(&mut o);
         o.draw(&mut list, &ctx, 1080.0);
         assert!(!list.instances.is_empty());
+    }
+
+    #[test]
+    fn text_area_positioned_at_bottom_and_takes_input() {
+        let mut o = overlay(3);
+        o.open();
+        settle(&mut o);
+        let ta_rect = o.text_area_rect().expect("text area placed");
+        assert!(ta_rect.y > AREA.y + TurnOverlay::HANDLE_H * 2.0);
+        assert!(ta_rect.y + ta_rect.h <= AREA.y + AREA.h);
+        let touch_res = o.touch(
+            1,
+            TouchPhase::Started,
+            ta_rect.x + 10.0,
+            ta_rect.y + 10.0,
+            Duration::ZERO,
+        );
+        assert_eq!(touch_res, Touched::Tap);
+        o.set_input_text("Hello Gemini");
+        assert_eq!(o.input_text(), "Hello Gemini");
     }
 }

@@ -648,6 +648,9 @@ impl App {
                 }
                 if !d.active {
                     self.ime_dismissed = false;
+                    self.overview.overlay_mut().set_input_text("");
+                } else if d.general_agent {
+                    self.overview.overlay_mut().set_input_text(&d.text);
                 }
                 self.dictation = d.active.then_some(d);
             }
@@ -950,6 +953,10 @@ impl App {
             AgentHit::GeneralAgent => {
                 if self.overview.overlay().is_open() {
                     self.overview.close_overlay();
+                    if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
+                        ctx.stop_text_input();
+                        self.send(Input::Clear);
+                    }
                 } else {
                     self.send(Input::StartGeneralAgentPrompt(
                         flankr_companion::PromptMode::Voice,
@@ -962,14 +969,34 @@ impl App {
                     self.send(Input::StartGeneralAgentPrompt(
                         flankr_companion::PromptMode::Keyboard,
                     ));
+                    if !self.external_kbd {
+                        let text = self.overview.overlay().input_text();
+                        let mut options = libmorph::TextInputOptions::default();
+                        options.multiline = true;
+                        options.action = libmorph::TextAction::None;
+                        ctx.start_text_input(&text, &options);
+                    }
                 } else {
                     self.send(Input::StartTextPrompt);
+                    if !self.external_kbd {
+                        let mut options = libmorph::TextInputOptions::default();
+                        options.multiline = true;
+                        options.action = libmorph::TextAction::None;
+                        ctx.start_text_input("", &options);
+                    }
                 }
+            }
+            AgentHit::GeneralAgentTextArea => {
+                self.ime_dismissed = false;
+                self.send(Input::StartGeneralAgentPrompt(
+                    flankr_companion::PromptMode::Keyboard,
+                ));
                 if !self.external_kbd {
+                    let text = self.overview.overlay().input_text();
                     let mut options = libmorph::TextInputOptions::default();
                     options.multiline = true;
                     options.action = libmorph::TextAction::None;
-                    ctx.start_text_input("", &options);
+                    ctx.start_text_input(&text, &options);
                 }
             }
             AgentHit::TextArea => {
@@ -1317,6 +1344,20 @@ impl App {
                     if touch.y < self.overview.overlay().rect().y =>
                 {
                     self.overview.close_overlay();
+                    if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
+                        ctx.stop_text_input();
+                        self.send(Input::Clear);
+                    }
+                }
+                crate::controls::scroll::Touched::Tap => {
+                    if self
+                        .overview
+                        .overlay()
+                        .text_area_rect()
+                        .is_some_and(|r| r.contains([touch.x, touch.y]))
+                    {
+                        self.agent_hit(ctx, AgentHit::GeneralAgentTextArea);
+                    }
                 }
                 _ => {}
             }
@@ -1432,6 +1473,7 @@ impl App {
             agent.set_dictation(
                 self.dictation
                     .as_ref()
+                    .filter(|d| !d.general_agent)
                     .map(|d| (dictation_lines(d), d.mode).into()),
             );
             // The band in its session's colour.
@@ -1443,10 +1485,13 @@ impl App {
             agent.set_session_colour(colour);
             let s = layout.scale.max(1.0);
             let row_bottom = layout.h - layout.bottom - 16.0 * s;
-            let strip_y = row_bottom
-                - crate::agent::BUTTON_H * s
-                - 12.0 * s
-                - crate::overview::TurnStrip::HEIGHT * s;
+            let strip_h = if self.overview.strip_shown() {
+                crate::overview::TurnStrip::HEIGHT * s
+            } else {
+                0.0
+            };
+            agent.set_strip_height(strip_h);
+            let strip_y = agent.strip_bottom() - strip_h;
             self.overview.strip_mut().set_rect(
                 libcontrols::Rect::new(
                     0.0,
@@ -1489,6 +1534,7 @@ impl App {
             o.set_dictation(
                 self.dictation
                     .as_ref()
+                    .filter(|d| !d.general_agent)
                     .map(|d| (message_lines(d, &layout), d.mode).into()),
             );
             o.set_play(self.read_aloud, self.speaking, self.viewed);
@@ -2043,6 +2089,9 @@ impl MorphApp for App {
                     _ctx.stop_text_input();
                     let mut text = d.text.clone();
                     text.pop();
+                    if d.general_agent {
+                        self.overview.overlay_mut().set_input_text(&text);
+                    }
                     self.send(Input::SetText(text));
                     return KeyStatus::Handled;
                 }
@@ -2051,6 +2100,9 @@ impl MorphApp for App {
                     _ctx.stop_text_input();
                     let mut text = d.text.clone();
                     text.push('\n');
+                    if d.general_agent {
+                        self.overview.overlay_mut().set_input_text(&text);
+                    }
                     self.send(Input::SetText(text));
                     return KeyStatus::Handled;
                 }
@@ -2059,6 +2111,9 @@ impl MorphApp for App {
                     _ctx.stop_text_input();
                     let mut text = d.text.clone();
                     text.push(c);
+                    if d.general_agent {
+                        self.overview.overlay_mut().set_input_text(&text);
+                    }
                     self.send(Input::SetText(text));
                     return KeyStatus::Handled;
                 }
@@ -2077,6 +2132,10 @@ impl MorphApp for App {
         // The Gemini turns' overlay closes on Back from anywhere.
         if self.overview.overlay().is_open() && matches!(key, Key::Back | Key::Escape) {
             self.overview.close_overlay();
+            if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
+                _ctx.stop_text_input();
+                self.send(Input::Clear);
+            }
             return KeyStatus::Handled;
         }
         // The system Back closes the agent view.
@@ -2118,6 +2177,9 @@ impl MorphApp for App {
         log::info!("companion: on_text_input: {event:?}");
         match event {
             libmorph::TextInputEvent::Changed(text) => {
+                if self.overview.overlay().is_open() {
+                    self.overview.overlay_mut().set_input_text(text);
+                }
                 self.send(Input::SetText(text.clone()));
             }
             libmorph::TextInputEvent::Action(_) => {

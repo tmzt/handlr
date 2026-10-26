@@ -275,6 +275,8 @@ pub enum AgentHit {
     Replay(u64),
     /// The prompt card's text area (plan 20261022_03, living section L3).
     TextArea,
+    /// The general agent multi-turn overlay's text area.
+    GeneralAgentTextArea,
 }
 
 /// A button, in the flow or on the screen.
@@ -1564,6 +1566,8 @@ pub struct Frame {
     /// Where other sessions' cards end, above the pinned card (plan
     /// 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT, item 2).
     pub cross_bottom: f32,
+    /// Where the general agent turn strip sits, above the bottom row or dictation.
+    pub strip_bottom: f32,
 }
 
 /// The one-line "jump to end" message below the scrollback, while
@@ -1960,6 +1964,8 @@ pub struct AgentScreen {
     session_colour: Option<u8>,
     /// The height other sessions' cards take above the pinned card.
     cross_h: f32,
+    /// The height the general agent turn strip takes.
+    strip_h: f32,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -2010,6 +2016,27 @@ impl AgentScreen {
     /// what is under the flow.
     pub fn cross_bottom(&self) -> f32 {
         self.frame.cross_bottom
+    }
+
+    /// The top of the active dictation card, if showing.
+    pub fn dictation_top(&self) -> Option<f32> {
+        self.frame
+            .dictation
+            .as_ref()
+            .and_then(|d| d.fills.first().map(|f| f.rect.y))
+    }
+
+    /// The height the general agent turn strip takes.
+    pub fn set_strip_height(&mut self, h: f32) {
+        if (h - self.strip_h).abs() > 0.01 {
+            self.strip_h = h;
+            self.settle();
+        }
+    }
+
+    /// Where the general agent turn strip sits: above the bottom row or dictation.
+    pub fn strip_bottom(&self) -> f32 {
+        self.frame.strip_bottom
     }
 
     /// *All sound* on or off: summary cards' replay buttons show or go.
@@ -2815,6 +2842,10 @@ impl AgentScreen {
             above -= flow.height + 8.0 * s;
             flow
         });
+        let strip_bottom = above;
+        if self.strip_h > 0.0 {
+            above -= self.strip_h + 8.0 * s;
+        }
         let mut full_top = above;
         let mut pin = None;
         // While a message is taken, the pinned card collapses above it
@@ -2942,6 +2973,7 @@ impl AgentScreen {
             typed,
             jump,
             cross_bottom,
+            strip_bottom,
         }
     }
 
