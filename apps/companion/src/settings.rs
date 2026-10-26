@@ -383,7 +383,7 @@ pub fn allows(hit: AgentHit) -> bool {
     let s = current();
     match hit {
         // Typing needs no microphone, only text input.
-        AgentHit::Keyboard => TEXT_INPUT,
+        AgentHit::Keyboard | AgentHit::TextArea => TEXT_INPUT,
         AgentHit::ReadAloud | AgentHit::Replay(_) => s.sound,
         AgentHit::Message
         | AgentHit::Reply

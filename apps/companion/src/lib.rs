@@ -316,6 +316,11 @@ pub struct App {
     agent_pane: Option<String>,
     /// The display's scale, as last laid out.
     scale: f32,
+    /// Whether the soft keyboard was dismissed by the user while the text prompt is open.
+    ime_dismissed: bool,
+    /// An external physical keyboard is active (always true on desktop, or set on Android
+    /// when physical keystrokes are received).
+    external_kbd: bool,
 }
 
 /// The foreground service, as the app knows it.
@@ -632,6 +637,9 @@ impl App {
                 if d.active != self.dictation.is_some() {
                     log::info!("dictation: {}", if d.active { "on" } else { "off" });
                 }
+                if !d.active {
+                    self.ime_dismissed = false;
+                }
                 self.dictation = d.active.then_some(d);
             }
             Event::AgentView {
@@ -931,11 +939,28 @@ impl App {
             AgentHit::Back => self.close_agent(),
             AgentHit::Message => self.send(Input::StartDictation),
             AgentHit::Keyboard => {
+                self.ime_dismissed = false;
                 self.send(Input::StartTextPrompt);
-                let mut options = libmorph::TextInputOptions::default();
-                options.multiline = true;
-                options.action = libmorph::TextAction::None;
-                ctx.start_text_input("", &options);
+                if !self.external_kbd {
+                    let mut options = libmorph::TextInputOptions::default();
+                    options.multiline = true;
+                    options.action = libmorph::TextAction::None;
+                    ctx.start_text_input("", &options);
+                }
+            }
+            AgentHit::TextArea => {
+                self.ime_dismissed = false;
+                if !self.external_kbd {
+                    let text = self
+                        .dictation
+                        .as_ref()
+                        .map(|d| d.text.as_str())
+                        .unwrap_or("");
+                    let mut options = libmorph::TextInputOptions::default();
+                    options.multiline = true;
+                    options.action = libmorph::TextAction::None;
+                    ctx.start_text_input(text, &options);
+                }
             }
             AgentHit::Reply => {
                 if let Some(agent) = &mut self.agent {
@@ -1018,11 +1043,13 @@ impl App {
             }
             AgentHit::Submit => {
                 ctx.stop_text_input();
+                self.ime_dismissed = false;
                 self.send(Input::Submit);
             }
             AgentHit::Scratch => self.send(Input::Scratch),
             AgentHit::Clear => {
                 ctx.stop_text_input();
+                self.ime_dismissed = false;
                 self.send(Input::Clear);
             }
         }
@@ -1691,6 +1718,8 @@ impl MorphApp for App {
             session_cards: SessionCards::new(),
             agent_pane: None,
             scale: 1.0,
+            ime_dismissed: false,
+            external_kbd: cfg!(not(target_os = "android")),
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
@@ -1811,6 +1840,29 @@ impl MorphApp for App {
         for event in sounds {
             self.on_audio(event);
         }
+        let is_keyboard_prompt = self
+            .dictation
+            .as_ref()
+            .is_some_and(|d| d.mode == flankr_companion::PromptMode::Keyboard);
+        if is_keyboard_prompt && !self.ime_dismissed && !self.external_kbd {
+            if !ctx.text_input_active() {
+                let text = self
+                    .dictation
+                    .as_ref()
+                    .map(|d| d.text.as_str())
+                    .unwrap_or("");
+                let mut options = libmorph::TextInputOptions::default();
+                options.multiline = true;
+                options.action = libmorph::TextAction::None;
+                ctx.start_text_input(text, &options);
+            }
+        } else if (!is_keyboard_prompt || self.ime_dismissed || self.external_kbd)
+            && ctx.text_input_active()
+            && self.dictation.is_none()
+        {
+            ctx.stop_text_input();
+        }
+
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
         if let Some(screen) = &mut self.settings_screen {
@@ -1858,7 +1910,39 @@ impl MorphApp for App {
         if self.dictation.is_some() && matches!(key, Key::Back | Key::Escape) {
             _ctx.stop_text_input();
             self.send(Input::Clear);
+            self.ime_dismissed = false;
             return KeyStatus::Handled;
+        }
+        if let Some(d) = &self.dictation
+            && d.mode == flankr_companion::PromptMode::Keyboard
+        {
+            match key {
+                Key::Character('\u{8}' | '\u{7f}') => {
+                    self.external_kbd = true;
+                    _ctx.stop_text_input();
+                    let mut text = d.text.clone();
+                    text.pop();
+                    self.send(Input::SetText(text));
+                    return KeyStatus::Handled;
+                }
+                Key::Character('\r' | '\n') => {
+                    self.external_kbd = true;
+                    _ctx.stop_text_input();
+                    let mut text = d.text.clone();
+                    text.push('\n');
+                    self.send(Input::SetText(text));
+                    return KeyStatus::Handled;
+                }
+                Key::Character(c) if !c.is_control() => {
+                    self.external_kbd = true;
+                    _ctx.stop_text_input();
+                    let mut text = d.text.clone();
+                    text.push(c);
+                    self.send(Input::SetText(text));
+                    return KeyStatus::Handled;
+                }
+                _ => {}
+            }
         }
         // The system Back cancels the settings' modal, or closes them.
         if matches!(key, Key::Back | Key::Escape)
@@ -1912,10 +1996,11 @@ impl MorphApp for App {
             }
             libmorph::TextInputEvent::Action(_) => {
                 ctx.stop_text_input();
+                self.ime_dismissed = false;
                 self.send(Input::Submit);
             }
             libmorph::TextInputEvent::Dismissed => {
-                self.send(Input::Clear);
+                self.ime_dismissed = true;
             }
             _ => {}
         }

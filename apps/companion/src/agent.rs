@@ -269,6 +269,8 @@ pub enum AgentHit {
     /// A summary card's play button: say its spoken text again. The packed
     /// serial of its card.
     Replay(u64),
+    /// The prompt card's text area (plan 20261022_03, living section L3).
+    TextArea,
 }
 
 /// A button, in the flow or on the screen.
@@ -3464,6 +3466,9 @@ impl AgentScreen {
             for b in &d.buttons {
                 self.hits.push((b.hit, b.rect));
             }
+            if let Some(ta) = &d.text_area {
+                self.hits.push((AgentHit::TextArea, ta.rect));
+            }
         }
         for g in &self.frame.suggestions {
             self.hits.push((g.hit, g.rect));
@@ -3520,6 +3525,13 @@ impl AgentScreen {
 
     /// The control at `(x, y)`, if any.
     pub fn hit(&self, x: f32, y: f32) -> Option<AgentHit> {
+        if let Some(d) = &self.frame.dictation
+            && let Some(ta) = &d.text_area
+            && ta.rect.contains([x, y])
+        {
+            ta.set_cursor_from_pos([x, y]);
+            return Some(AgentHit::TextArea);
+        }
         self.hits
             .iter()
             .find(|(_, rect)| rect.contains([x, y]))
@@ -4020,8 +4032,8 @@ impl AgentScreen {
                     ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
                 }
             }
-            // Without the microphone, the dictation card is dim.
-            if !crate::settings::current().microphone {
+            // Without the microphone, the dictation card is dim (voice only).
+            if !crate::settings::current().microphone && d.text_area.is_none() {
                 crate::settings::dim_since(list, start);
             }
             for b in &d.buttons {
@@ -5018,6 +5030,39 @@ mod tests {
         let ta = card.text_area.as_ref().unwrap();
         assert!(ta.font_size.unwrap() < 20.0 * a.scale());
         assert!(card.rows.len() >= 6);
+    }
+
+    #[test]
+    fn tapping_text_area_hits_text_area_and_positions_cursor() {
+        use flankr_companion::PromptMode;
+        let mut a = screen(
+            conversation(3),
+            vec![card(CardKind::Finished, 12, true)],
+            Some(0),
+        );
+        let lines = vec![
+            crate::ui::Line {
+                text: "Message for Claude".into(),
+                size: 18.0,
+                color: theme().fg,
+                gap: 4.0,
+            },
+            crate::ui::Line {
+                text: "Hello world".into(),
+                size: 20.0,
+                color: theme().fg,
+                gap: 8.0,
+            },
+        ];
+        a.set_dictation(Some((lines, PromptMode::Keyboard).into()));
+        let card = a.frame().dictation.clone().expect("keyboard prompt card");
+        let ta = card.text_area.as_ref().unwrap();
+        let rect = ta.rect;
+        assert_eq!(
+            a.hit(rect.x + 10.0, rect.y + 10.0),
+            Some(AgentHit::TextArea)
+        );
+        assert!(a.rect_of(AgentHit::TextArea).is_some());
     }
 
     #[test]

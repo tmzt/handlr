@@ -459,12 +459,25 @@ impl Overview {
             .iter()
             .chain(self.panels.iter().flat_map(|p| &p.buttons))
             .map(|b| (b.hit, b.rect))
+            .chain(
+                self.panels
+                    .iter()
+                    .filter_map(|p| p.text_area.as_ref().map(|ta| (AgentHit::TextArea, ta.rect))),
+            )
             .collect();
         self.dirty = true;
     }
 
     /// The control at `(x, y)`, if any.
     pub fn hit(&self, x: f32, y: f32) -> Option<AgentHit> {
+        for p in &self.panels {
+            if let Some(ta) = &p.text_area
+                && ta.rect.contains([x, y])
+            {
+                ta.set_cursor_from_pos([x, y]);
+                return Some(AgentHit::TextArea);
+            }
+        }
         self.hits
             .iter()
             .find(|(_, r)| r.contains([x, y]))
@@ -651,8 +664,8 @@ impl Overview {
                     ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
                 }
             }
-            // The dictation card without the microphone: dim.
-            if i == 0 && self.dictation_shown && !microphone {
+            // The dictation card without the microphone: dim (voice only).
+            if i == 0 && self.dictation_shown && !microphone && p.text_area.is_none() {
                 settings::dim_since(list, start);
             }
             for b in &p.buttons {
@@ -1402,6 +1415,34 @@ mod tests {
         let ta = panel.text_area.as_ref().unwrap();
         assert!(ta.font_size.unwrap() < 20.0 * o.scale());
         assert!(panel.rows.len() >= 6);
+    }
+
+    #[test]
+    fn tapping_text_area_hits_text_area_and_positions_cursor() {
+        let mut o = overview(1);
+        let lines = vec![
+            Line {
+                text: "Message for Claude".into(),
+                size: 18.0,
+                color: theme().text,
+                gap: 4.0,
+            },
+            Line {
+                text: "Hello world".into(),
+                size: 20.0,
+                color: theme().text,
+                gap: 8.0,
+            },
+        ];
+        o.set_dictation(Some((lines, PromptMode::Keyboard).into()));
+        let panel = &o.panels[0];
+        let ta = panel.text_area.as_ref().unwrap();
+        let rect = ta.rect;
+        assert_eq!(
+            o.hit(rect.x + 10.0, rect.y + 10.0),
+            Some(AgentHit::TextArea)
+        );
+        assert!(o.rect_of(AgentHit::TextArea).is_some());
     }
 
     #[test]
