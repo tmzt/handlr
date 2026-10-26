@@ -429,16 +429,16 @@ impl Screen {
             let (text, color) = if view.field.is_empty() && !view.field_focused {
                 (PLACEHOLDER.to_string(), theme().muted)
             } else {
-                // The tail, with a caret while focused.
+                // The tail of the entered text.
                 let room = layout
                     .columns_in(field_w - 8.0 * s, Layout::FIELD_SIZE * 1.3)
                     .saturating_sub(1);
                 let chars: Vec<char> = view.field.chars().collect();
                 let tail: String = chars[chars.len().saturating_sub(room)..].iter().collect();
-                let caret = if view.field_focused { "|" } else { "" };
-                (format!("{tail}{caret}"), theme().text)
+                (tail, theme().text)
             };
-            edit.set_text(text);
+            edit.set_text(&text);
+            edit.state.set_cursor(text.len());
             edit.text_color = Some(color);
             edit.font_size = Some(Layout::FIELD_SIZE * s);
             edit.corner_radius = Some(8.0 * s);

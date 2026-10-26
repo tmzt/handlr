@@ -1599,8 +1599,8 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libcontrols"
-version = "0.8.0"
-source = "git+https://github.com/tmzt/libcontrols?rev=a7d0fd9c7a42576f474488889d70eb491efa1107#a7d0fd9c7a42576f474488889d70eb491efa1107"
+version = "0.9.0"
+source = "git+https://github.com/tmzt/libcontrols?rev=733de40fdb27f11461b5abfa74f3ad9b0ad41e2b#733de40fdb27f11461b5abfa74f3ad9b0ad41e2b"
 dependencies = [
  "libmsdf",
 ]
