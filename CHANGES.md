@@ -2385,6 +2385,15 @@ Plan: [The general agent as a realtime chat, from its own centre button](docs/de
 - Active visual state is displayed whenever recognition is active regardless of whether the prompt/chat card or overlay is visible or collapsed.
 - The outer button dimensions remain fixed at `BUTTON_H * s` to prevent layout movement.
 
+## 2026-10-26 12:09 EDT — Centre button idle state in neutral background, activating only when pressed
+
+Plan: [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- The centre button starts in an idle state using the neutral button background (`theme().back`) with the Gemini star `✦` drawn in the accent colour (`theme().accent`).
+- The button activates into its accent background (`theme().accent`) with the inner breathing pulse ring and alternating dingbat stars (`✦`, `✧`, `✶`, `✻`) only when pressed / when voice recognition is actively listening for the general agent.
+- Deactivating (submitting or clearing) returns the centre button to the neutral idle state.
+
+
 
 
 
