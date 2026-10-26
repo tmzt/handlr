@@ -247,7 +247,7 @@ impl SquareButton {
             AgentHit::GeneralAgent if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);
                 let px = 24.0 * s;
-                draw_glyph(list, ctx, term, GEMINI_GLYPH, "*", rect, px, theme().fg);
+                draw_glyph(list, ctx, term, GEMINI_GLYPH, "*", rect, px, theme().accent);
             }
             // A plan question's words are plain text in their colour (the
             // colour stands in `bg`), not buttons.

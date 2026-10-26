@@ -55,11 +55,11 @@ impl ControlRow {
             row.push(square(AgentHit::Clear, (x0 + x1 - sq) * 0.5, theme().back));
             row.push(square(AgentHit::Submit, x1 - sq, theme().approve));
         } else {
-            // The centre button: general agent (Gemini) in the Gemini accent.
+            // The centre button: general agent (Gemini) idle in neutral background.
             row.push(square(
                 AgentHit::GeneralAgent,
                 (x0 + x1 - sq) * 0.5,
-                theme().accent,
+                theme().back,
             ));
             // The keyboard glyph, left of record with record's hit box and
             // no background.
@@ -93,5 +93,12 @@ mod tests {
         assert_eq!(dictating_buttons[1].label, "listening");
         assert_eq!(dictating_buttons[1].rect.w, BUTTON_H);
         assert_eq!(dictating_buttons[2].hit, AgentHit::Submit);
+
+        // Idle state: general_agent_listening is false, centre button is idle with theme().back
+        let idle_buttons = ControlRow::lay_out(10.0, 390.0, 500.0, 1.0, false, false);
+        assert_eq!(idle_buttons.len(), 4);
+        assert_eq!(idle_buttons[1].hit, AgentHit::GeneralAgent);
+        assert_eq!(idle_buttons[1].label, "");
+        assert_eq!(idle_buttons[1].bg, theme().back);
     }
 }
