@@ -265,4 +265,20 @@ The owner (2026-10-26): "the filter applies to general wnd session input".
    - Both voice STT turns and multi-line text submissions in `turn.start` are filtered with the text filter (`validate_message`): disallowed symbols are removed, and inputs with excessive threshold-triggering symbols are rejected.
    - Newlines and tabs are preserved to support multi-line turns.
 
+## Amendment — 2026-10-26 11:41 EDT: active voice recognition indicator on centre button
+
+The owner (2026-10-26): "center button should show a pulsing and growing/shrinking (button same size) or glyph alternates with dingbats symbol when voice recognition is active for general agent regardless of whether input/chat card is shown".
+
+1. **Active recognition feedback:**
+   - When voice recognition is active for the general agent (microphone listening / streaming STT active), the centre button provides continuous dynamic visual feedback.
+   - This active visual state applies regardless of whether the prompt/chat card or overlay is pinned, expanded, or hidden.
+
+2. **Fixed button geometry:**
+   - The outer button bounds remain fixed at standard size (`BUTTON_H * s`), ensuring control row layout stability with no jumping or shifting.
+
+3. **Visual animation:**
+   - Active recognition is rendered via an inner pulsing animation (an inner ring or glyph scaling and modulating opacity) or alternating the central glyph between the Gemini star `✦` and Unicode dingbats/sparkle symbols (`✧`, `✹`, `✻`, `•`) across animation ticks.
+   - Tapping the active button stops/finalizes listening; a 2.0-second hold opens the `TurnOverlay` conversation sheet.
+
+
 

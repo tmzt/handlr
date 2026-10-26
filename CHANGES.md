@@ -2377,6 +2377,15 @@ Plan: [Session readers for agy and other agents, behind one agnostic trait](docs
 - agy SQLite status 5 and 3 are recognized as completed steps; running status 2 and status 5 are not misclassified as errors.
 - `src/sessions/sections.rs` guards against treating exit code 0 as an error.
 
+## 2026-10-26 11:41 EDT — Centre button active voice recognition pulsing and glyph feedback
+
+Plan: [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- When voice recognition is active for the general agent, the centre button provides continuous dynamic feedback: pulsing / growing-shrinking inner ring or glyph, or alternating with dingbat sparkle symbols.
+- Active visual state is displayed whenever recognition is active regardless of whether the prompt/chat card or overlay is visible or collapsed.
+- The outer button dimensions remain fixed at `BUTTON_H * s` to prevent layout movement.
+
+
 
 
 
