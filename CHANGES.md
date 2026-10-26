@@ -2403,6 +2403,16 @@ Plan: [The general agent as a realtime chat, from its own centre button](docs/de
 - `TurnOverlay::draw` uses logical width on agent view matching overview, and touch/drag events inside the sheet invalidate the view for smooth scrolling and dismiss interactions.
 - Pinned response card tapping on agent screen opens the conversation overlay sheet with proper hit testing.
 
+## 2026-10-26 12:35 EDT — Immediate voice activation, Gemini pinned card on press, unified pinned card layout, and turn reactivation
+
+Plan: [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- Centre button press immediately starts voice recognition, starts dynamic button animation, and displays the Gemini pinned card (`Listening…`) on both Overview and Agent screens on touch down without waiting for release.
+- Overview pinned card layout matches Agent screen: Gemini card sits pinned directly above the bottom row / dictation panels, with other sessions' cards and grid cards above it.
+- TurnStrip displays `Listening…` immediately when voice recognition is active before partial speech arrives.
+- Turn completion, silence submission, and cancellation cleanly reset listening and dictation state, allowing immediate reactivation for subsequent turns when the button is pressed from idle.
+
+
 
 
 

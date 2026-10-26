@@ -280,5 +280,22 @@ The owner (2026-10-26): "center button should show a pulsing and growing/shrinki
    - Active recognition is rendered via an inner pulsing animation (an inner ring or glyph scaling and modulating opacity) or alternating the central glyph between the Gemini star `✦` and Unicode dingbats/sparkle symbols (`✧`, `✹`, `✻`, `•`) across animation ticks.
    - Tapping the active button stops/finalizes listening; a 2.0-second hold opens the `TurnOverlay` conversation sheet.
 
+## Amendment — 2026-10-26 12:35 EDT: immediate voice activation, Gemini card on press, unified pinned card layout, and turn reactivation
+
+The owner (2026-10-26): "tapping the general wg3nt butyon should be immediate start voice recognition, the animatiin,and sgow the Gemini card on any screen. if oinned cards work differently on overview thst should be chsnged and relevant plans updated. pressing the agent button after its returned to idle should activate it fir anither turn".
+
+1. **Immediate activation on press:**
+   - Pressing the centre button when idle immediately starts voice recognition, immediately triggers the dynamic pulsing/sparkle animation on the button, and immediately displays the Gemini pinned card (`TurnStrip`) showing `Listening…` on both Overview and Agent screens.
+   - Activation occurs immediately on `TouchPhase::Started` rather than waiting for touch release; a 2.0-second hold opens the overlay sheet.
+
+2. **Gemini pinned card layout unified across screens:**
+   - On the Overview screen, the pinned Gemini card (`TurnStrip`) follows the same layout model as pinned cards on the Agent screen: sitting directly pinned above the bottom row / normal dictation panel, with other sessions' cards (`cross_cards`) and scrollable grid viewport positioned above it.
+   - While actively listening before speech is detected, the card displays `✦ Gemini \n Listening…` in muted text, immediately switching to streaming partial speech transcripts when speech begins.
+
+3. **Clean reactivation after returning to idle:**
+   - When a turn completes (VAD silence submission, cancellation, or `TurnEnded`), general agent dictation and listening states are cleared cleanly.
+   - Pressing the centre button from the idle state cleanly activates another turn without stale dictation or turn state blocking initiation.
+
+
 
 
