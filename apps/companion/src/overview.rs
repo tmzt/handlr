@@ -556,11 +556,10 @@ impl Overview {
                 None
             }
             Touched::Tap => match target {
-                Target::Grid => Some(
-                    self.grid
-                        .pane_at(x, y)
-                        .map_or(OverviewHit::Tap, |p| OverviewHit::Agent(p.to_string())),
-                ),
+                Target::Grid => self
+                    .grid
+                    .pane_at(x, y)
+                    .map(|p| OverviewHit::Agent(p.to_string())),
                 Target::Strip => {
                     self.open_turns();
                     None
@@ -569,7 +568,7 @@ impl Overview {
                     self.back();
                     None
                 }
-                Target::Sheet => Some(OverviewHit::Tap),
+                Target::Sheet => None,
                 Target::Gear => self.gear.contains(x, y).then_some(OverviewHit::Settings),
                 Target::Other => match self.hit(x, y) {
                     // Nothing to read until a view has been opened.
@@ -577,7 +576,7 @@ impl Overview {
                     // Turned off in the settings: no tap.
                     Some(hit) if !settings::allows_on_overview(hit) => None,
                     Some(hit) => Some(OverviewHit::Bottom(hit)),
-                    None => Some(OverviewHit::Tap),
+                    None => None,
                 },
             },
         }
@@ -1061,12 +1060,9 @@ mod tests {
             tap(&mut o, yes.x + 5.0, yes.y + dy + 5.0),
             Some(OverviewHit::Agent("p2".into()))
         );
-        // Between the cards is no card: a tap.
+        // Between the cards is no card: no hit.
         let r = o.grid().card_rect("p1").unwrap();
-        assert_eq!(
-            tap(&mut o, r.x + r.w + 4.0, r.y + 10.0),
-            Some(OverviewHit::Tap)
-        );
+        assert_eq!(tap(&mut o, r.x + r.w + 4.0, r.y + 10.0), None);
     }
 
     /// Some turns of the conversation.
@@ -1118,10 +1114,7 @@ mod tests {
         assert!(!o.strip().visible());
         let full = o.grid().viewport();
         // A tap where the strip would be is a card's place, not the strip.
-        assert_eq!(
-            tap(&mut o, 540.0, full.y + full.h - 10.0),
-            Some(OverviewHit::Tap)
-        );
+        assert_eq!(tap(&mut o, 540.0, full.y + full.h - 10.0), None);
         assert!(!o.overlay().is_open());
         o.push_turn(Speaker::User, "what is claude doing".into());
         assert!(!o.strip().visible(), "the strip is Gemini's");
@@ -1197,10 +1190,7 @@ mod tests {
         // A card under it is not a tap away.
         let under = o.grid().card_rect("p5").unwrap();
         assert!(sheet.contains([under.x + 5.0, under.y + 5.0]));
-        assert_eq!(
-            tap(&mut o, under.x + 5.0, under.y + 5.0),
-            Some(OverviewHit::Tap)
-        );
+        assert_eq!(tap(&mut o, under.x + 5.0, under.y + 5.0), None);
         // It never opens by itself: Gemini speaking leaves it closed.
         let mut o = overview(2);
         talk(&mut o, 3);
@@ -1589,10 +1579,10 @@ mod tests {
         settings::set_current(with(true, true, false));
         o.settings_changed();
         assert!(!o.overlay().is_open());
-        // The cards take the strip's room, and a tap there is no strip.
+        // The cards take the strip's room, and tapping there does not open the strip.
         let grid = o.grid().viewport();
         assert!(grid.y + grid.h >= strip.y + strip.h - 0.01);
-        assert!(tap(&mut o, 540.0, strip.y + strip.h * 0.5).is_some());
+        tap(&mut o, 540.0, strip.y + strip.h * 0.5);
         assert!(!o.overlay().is_open());
         // Gemini's lines come in hidden, and show again with it on.
         o.push_turn(Speaker::Gemini, "Still here.".into());

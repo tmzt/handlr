@@ -321,6 +321,15 @@ pub struct App {
     /// An external physical keyboard is active (always true on desktop, or set on Android
     /// when physical keystrokes are received).
     external_kbd: bool,
+    /// A touch held on the centre button, watched for opening the overlay after 2 seconds.
+    center_hold: Option<CenterHold>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CenterHold {
+    id: u64,
+    start: Duration,
+    opened: bool,
 }
 
 /// The foreground service, as the app knows it.
@@ -1179,7 +1188,7 @@ impl App {
             }
             AudioEvent::SttLoaded { load_ms } => {
                 log::info!("audio: STT loaded in {load_ms} ms");
-                self.sound = "tap to talk".into();
+                self.sound = "ready".into();
             }
             AudioEvent::SttLoadFailed(e) => {
                 log::error!("audio: STT: {e}");
@@ -1207,7 +1216,7 @@ impl App {
             AudioEvent::Partial(text) => self.overview.set_partial(Some(text)),
             AudioEvent::Gate(state) => {
                 self.sound = match state {
-                    GateState::Idle => "tap to talk",
+                    GateState::Idle => "ready",
                     GateState::Armed => "listening\u{2026}",
                     GateState::Open => "hearing",
                     GateState::Closing => "finishing",
@@ -1245,6 +1254,44 @@ impl App {
     /// pairing screen, only a touch's end counts.
     fn touch(&mut self, ctx: &mut MorphContext, touch: Touch) {
         let now = self.started.elapsed();
+        if let Some(hold) = self.center_hold.as_mut()
+            && hold.id == touch.id
+        {
+            match touch.phase {
+                TouchPhase::Ended => {
+                    let opened = hold.opened;
+                    self.center_hold = None;
+                    if !opened {
+                        self.agent_hit(ctx, AgentHit::GeneralAgent);
+                    }
+                    return;
+                }
+                TouchPhase::Cancelled => {
+                    self.center_hold = None;
+                    return;
+                }
+                _ => return,
+            }
+        }
+
+        if touch.phase == TouchPhase::Started {
+            let on_center = if let Some(agent) = &self.agent {
+                agent.hit(touch.x, touch.y) == Some(AgentHit::GeneralAgent)
+            } else if !self.pairing() {
+                self.overview.hit(touch.x, touch.y) == Some(AgentHit::GeneralAgent)
+            } else {
+                false
+            };
+            if on_center {
+                self.center_hold = Some(CenterHold {
+                    id: touch.id,
+                    start: now,
+                    opened: false,
+                });
+                return;
+            }
+        }
+
         // Another session's card, over whichever screen is shown.
         let s = self.scale();
         match self
@@ -1781,6 +1828,7 @@ impl MorphApp for App {
             scale: 1.0,
             ime_dismissed: false,
             external_kbd: cfg!(not(target_os = "android")),
+            center_hold: None,
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
@@ -1926,6 +1974,17 @@ impl MorphApp for App {
 
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
+        if let Some(hold) = &mut self.center_hold {
+            let elapsed = self.started.elapsed();
+            if !hold.opened && elapsed.saturating_sub(hold.start) >= Duration::from_secs(2) {
+                hold.opened = true;
+                self.overview.open_turns();
+                self.overview.invalidate();
+                if let Some(agent) = &mut self.agent {
+                    agent.invalidate();
+                }
+            }
+        }
         if let Some(screen) = &mut self.settings_screen {
             screen.tick(dt);
         } else if let Some(agent) = &mut self.agent {
