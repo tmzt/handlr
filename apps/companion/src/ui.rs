@@ -213,20 +213,41 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
         color,
         gap,
     };
-    let (state, color) = match (d.phase, d.submit_in) {
-        (DictationPhase::Collecting, Some(n)) => {
-            (format!("Submitting in {n} s\u{2026}"), theme().warn)
+    let (state, color) = if d.general_agent {
+        match (d.phase, d.submit_in) {
+            (DictationPhase::Collecting, Some(n)) => {
+                (format!("Submitting in {n} s\u{2026}"), theme().warn)
+            }
+            (DictationPhase::Collecting, None) => ("\u{2726} Gemini".to_string(), theme().accent),
+            (DictationPhase::Submitting, _) => ("Submitting\u{2026}".to_string(), theme().muted),
+            (DictationPhase::Confirming, _) => {
+                ("Waiting for your approval".to_string(), theme().muted)
+            }
         }
-        (DictationPhase::Collecting, None) => ("Taking a message".to_string(), theme().muted),
-        (DictationPhase::Submitting, _) => ("Submitting\u{2026}".to_string(), theme().muted),
-        (DictationPhase::Confirming, _) => ("Waiting for your approval".to_string(), theme().muted),
+    } else {
+        match (d.phase, d.submit_in) {
+            (DictationPhase::Collecting, Some(n)) => {
+                (format!("Submitting in {n} s\u{2026}"), theme().warn)
+            }
+            (DictationPhase::Collecting, None) => ("Taking a message".to_string(), theme().muted),
+            (DictationPhase::Submitting, _) => ("Submitting\u{2026}".to_string(), theme().muted),
+            (DictationPhase::Confirming, _) => {
+                ("Waiting for your approval".to_string(), theme().muted)
+            }
+        }
     };
-    let target = match &d.target {
-        Some(t) if t.agent.is_some() => (format!("Message for {}", focus_words(t)), theme().text),
-        _ => (
-            "No agent focused \u{2014} say \u{2018}focus \u{2026}\u{2019}".to_string(),
-            theme().warn,
-        ),
+    let target = if d.general_agent {
+        ("General agent chat".to_string(), theme().text)
+    } else {
+        match &d.target {
+            Some(t) if t.agent.is_some() => {
+                (format!("Message for {}", focus_words(t)), theme().text)
+            }
+            _ => (
+                "No agent focused \u{2014} say \u{2018}focus \u{2026}\u{2019}".to_string(),
+                theme().warn,
+            ),
+        }
     };
     let mut lines = vec![
         line(state, 15.0, color, 28.0),
@@ -245,9 +266,11 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
         PromptMode::Keyboard => 12.0,
     };
     if d.text.is_empty() {
-        let placeholder = match d.mode {
-            PromptMode::Voice => "(say your message)",
-            PromptMode::Keyboard => "Type your message",
+        let placeholder = match (d.general_agent, d.mode) {
+            (true, PromptMode::Voice) => "(ask Gemini)",
+            (true, PromptMode::Keyboard) => "Ask Gemini\u{2026}",
+            (false, PromptMode::Voice) => "(say your message)",
+            (false, PromptMode::Keyboard) => "Type your message",
         };
         lines.push(line(placeholder.to_string(), size, theme().muted, 8.0));
     } else {
@@ -718,6 +741,7 @@ mod tests {
             focus_moved: None,
             phase: DictationPhase::Collecting,
             submit_in: None,
+            general_agent: false,
         }
     }
 
@@ -765,6 +789,15 @@ mod tests {
             ..dictation(Some(claude()))
         };
         assert_eq!(texts(&kbd_empty)[2], "Type your message");
+        let ga = Dictation {
+            text: "Hello".into(),
+            general_agent: true,
+            ..dictation(None)
+        };
+        let ga_lines = texts(&ga);
+        assert_eq!(ga_lines[0], "\u{2726} Gemini");
+        assert_eq!(ga_lines[1], "General agent chat");
+        assert_eq!(ga_lines[2], "Hello");
         // A tab without a label shows its number.
         let numbered = FocusInfo {
             tab_label: None,

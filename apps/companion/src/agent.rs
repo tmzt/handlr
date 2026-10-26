@@ -112,6 +112,8 @@ const BACK_GLYPH: &str = "\u{2039}";
 /// shows while a reply is being read (no ⏭ in the face: play and a bar).
 pub(crate) const PLAY_GLYPH: &str = "\u{25B6}";
 pub(crate) const SKIP_GLYPH: &str = "\u{25B6}\u{2502}";
+/// The general agent's glyph (✦), from the terminal face.
+pub(crate) const GEMINI_GLYPH: &str = "\u{2726}";
 /// Lines of a folded tool result shown: one, or a diff's or an error's
 /// first few.
 const DIFF_LINES: usize = 4;
@@ -237,6 +239,8 @@ pub enum AgentHit {
     Back,
     /// Take a message to this agent.
     Message,
+    /// The centre button: trigger the general agent chat (Gemini).
+    GeneralAgent,
     /// The keyboard glyph left of record: type a message (plan
     /// 20261022_03, the L3 amendment on the keyboard glyph).
     Keyboard,
@@ -5189,15 +5193,17 @@ mod tests {
             a.hit(f.back.x + 10.0, f.back.y + 10.0),
             Some(AgentHit::Back)
         );
-        assert_eq!(f.buttons.len(), 3);
-        // Play at the bottom left, the message button at the bottom right,
-        // the keyboard glyph just left of it.
+        assert_eq!(f.buttons.len(), 4);
+        // Play at the bottom left, general agent in the centre, the message
+        // button at the bottom right, the keyboard glyph just left of it.
         let play = f.buttons[0].rect;
         assert_eq!(f.buttons[0].hit, AgentHit::ReadAloud);
         assert!((play.x - PAD * PHONE.scale).abs() < 0.5);
-        let keys = &f.buttons[1];
-        let mic = f.buttons[2].rect;
-        assert_eq!(f.buttons[2].hit, AgentHit::Message);
+        let center = &f.buttons[1];
+        assert_eq!(center.hit, AgentHit::GeneralAgent);
+        let keys = &f.buttons[2];
+        let mic = f.buttons[3].rect;
+        assert_eq!(f.buttons[3].hit, AgentHit::Message);
         assert!((mic.y - play.y).abs() < 0.5);
         assert!((mic.x + mic.w - (PHONE.w - PAD * PHONE.scale)).abs() < 0.5);
         assert!(mic.y + mic.h <= PHONE.h - PHONE.bottom);
@@ -5438,7 +5444,12 @@ mod tests {
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
         assert_eq!(
             hits,
-            [AgentHit::ReadAloud, AgentHit::Keyboard, AgentHit::Message]
+            [
+                AgentHit::ReadAloud,
+                AgentHit::GeneralAgent,
+                AgentHit::Keyboard,
+                AgentHit::Message
+            ]
         );
     }
 

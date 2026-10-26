@@ -273,7 +273,7 @@ impl Overview {
 
     /// Whether the strip shows: a line of Gemini's, and the general agent
     /// on (plan 20261024_02, decision 4).
-    fn strip_shown(&self) -> bool {
+    pub fn strip_shown(&self) -> bool {
         self.strip.visible() && settings::current().general_agent
     }
 
@@ -317,8 +317,20 @@ impl Overview {
         &self.strip
     }
 
+    pub fn strip_mut(&mut self) -> &mut TurnStrip {
+        &mut self.strip
+    }
+
     pub fn overlay(&self) -> &TurnOverlay {
         &self.overlay
+    }
+
+    pub fn overlay_mut(&mut self) -> &mut TurnOverlay {
+        &mut self.overlay
+    }
+
+    pub fn close_overlay(&mut self) -> bool {
+        self.overlay.close()
     }
 
     pub fn log(&self) -> &TurnLog {
@@ -1305,6 +1317,13 @@ mod tests {
             tap(&mut o, record.x + 5.0, record.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::Message))
         );
+        // Centre button: General agent is in the middle.
+        let ga = o.rect_of(AgentHit::GeneralAgent).unwrap();
+        assert!(ga.x > play.x && ga.x + ga.w < record.x);
+        assert_eq!(
+            tap(&mut o, ga.x + 5.0, ga.y + 5.0),
+            Some(OverviewHit::Bottom(AgentHit::GeneralAgent))
+        );
         // Play does nothing until a view has been opened.
         assert_eq!(tap(&mut o, play.x + 5.0, play.y + 5.0), None);
         o.set_play(false, false, true);
@@ -1312,8 +1331,8 @@ mod tests {
             tap(&mut o, play.x + 5.0, play.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::ReadAloud))
         );
-        // Taking a message: cancel in the middle, send at the right, and
-        // the dictation card above them.
+        // Taking a message: cancel ('X') replaces the general agent button in
+        // the middle, send at the right, and the dictation card above them.
         o.set_dictation(Some(
             vec![Line {
                 text: "Taking a message".into(),
@@ -1326,6 +1345,7 @@ mod tests {
         let send = o.rect_of(AgentHit::Submit).unwrap();
         assert!(send.x + send.w > 980.0);
         assert!(o.rect_of(AgentHit::Clear).is_some());
+        assert!(o.rect_of(AgentHit::GeneralAgent).is_none());
         assert!(o.rect_of(AgentHit::Message).is_none());
         let card = &o.panels[0].fills[0].rect;
         assert!(card.y + card.h <= send.y);

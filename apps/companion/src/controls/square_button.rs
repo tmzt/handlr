@@ -6,8 +6,8 @@ use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 
 use crate::agent::{
-    AgentHit, CANCEL_GLYPH, CELL_EM, DOT, FlowButton, PLAY_GLYPH, Row, SEND_GLYPH, SKIP_GLYPH,
-    Terminal, button, draw_row, fill, term_h,
+    AgentHit, CANCEL_GLYPH, CELL_EM, DOT, FlowButton, GEMINI_GLYPH, PLAY_GLYPH, Row, SEND_GLYPH,
+    SKIP_GLYPH, Terminal, button, draw_row, fill, term_h,
 };
 use crate::settings;
 use crate::theme::theme;
@@ -189,6 +189,11 @@ impl SquareButton {
             AgentHit::Clear if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);
                 draw_glyph(list, ctx, term, CANCEL_GLYPH, "x", rect, px, theme().fg);
+            }
+            AgentHit::GeneralAgent if b.label.is_empty() => {
+                fill(list, rect, b.bg, 10.0 * s);
+                let px = 24.0 * s;
+                draw_glyph(list, ctx, term, GEMINI_GLYPH, "*", rect, px, theme().fg);
             }
             // A plan question's words are plain text in their colour (the
             // colour stands in `bg`), not buttons.

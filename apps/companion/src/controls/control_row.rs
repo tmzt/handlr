@@ -32,6 +32,12 @@ impl ControlRow {
             row.push(square(AgentHit::Clear, (x0 + x1 - sq) * 0.5, theme().back));
             row.push(square(AgentHit::Submit, x1 - sq, theme().approve));
         } else {
+            // The centre button: general agent (Gemini) in the Gemini accent.
+            row.push(square(
+                AgentHit::GeneralAgent,
+                (x0 + x1 - sq) * 0.5,
+                theme().accent,
+            ));
             // The keyboard glyph, left of record with record's hit box and
             // no background.
             let gap = 12.0 * s;

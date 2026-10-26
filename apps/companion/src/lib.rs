@@ -938,9 +938,24 @@ impl App {
         match hit {
             AgentHit::Back => self.close_agent(),
             AgentHit::Message => self.send(Input::StartDictation),
+            AgentHit::GeneralAgent => {
+                if self.overview.overlay().is_open() {
+                    self.overview.close_overlay();
+                } else {
+                    self.send(Input::StartGeneralAgentPrompt(
+                        flankr_companion::PromptMode::Voice,
+                    ));
+                }
+            }
             AgentHit::Keyboard => {
                 self.ime_dismissed = false;
-                self.send(Input::StartTextPrompt);
+                if self.overview.overlay().is_open() {
+                    self.send(Input::StartGeneralAgentPrompt(
+                        flankr_companion::PromptMode::Keyboard,
+                    ));
+                } else {
+                    self.send(Input::StartTextPrompt);
+                }
                 if !self.external_kbd {
                     let mut options = libmorph::TextInputOptions::default();
                     options.multiline = true;
@@ -1245,6 +1260,30 @@ impl App {
             }
             return;
         }
+        if self.overview.overlay().is_shown() {
+            match self
+                .overview
+                .overlay_mut()
+                .touch(touch.id, touch.phase, touch.x, touch.y, now)
+            {
+                crate::controls::scroll::Touched::Tap
+                    if touch.y < self.overview.overlay().rect().y =>
+                {
+                    self.overview.close_overlay();
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.agent.is_some()
+            && self.overview.strip_shown()
+            && self.overview.strip().contains(touch.x, touch.y)
+        {
+            if touch.phase == TouchPhase::Ended {
+                self.overview.open_turns();
+            }
+            return;
+        }
         if let Some(agent) = &mut self.agent {
             if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
                 self.agent_hit(ctx, hit);
@@ -1355,6 +1394,28 @@ impl App {
                 .and_then(|p| self.agents.iter().find(|a| a.pane_id == p))
                 .map(flankr_companion::cross::colour_of);
             agent.set_session_colour(colour);
+            let s = layout.scale.max(1.0);
+            let row_bottom = layout.h - layout.bottom - 16.0 * s;
+            let strip_y = row_bottom
+                - crate::agent::BUTTON_H * s
+                - 12.0 * s
+                - crate::overview::TurnStrip::HEIGHT * s;
+            self.overview.strip_mut().set_rect(
+                libcontrols::Rect::new(
+                    0.0,
+                    strip_y,
+                    layout.w,
+                    crate::overview::TurnStrip::HEIGHT * s,
+                ),
+                s,
+            );
+            let sheet_top = (layout.h * (1.0 - crate::overview::TurnOverlay::SHARE))
+                .max(layout.top)
+                .min(row_bottom);
+            self.overview.overlay_mut().set_area(
+                libcontrols::Rect::new(0.0, sheet_top, layout.w, row_bottom - sheet_top),
+                s,
+            );
         }
         if let Some(screen) = &mut self.settings_screen {
             screen.set_layout(layout);
@@ -1869,6 +1930,7 @@ impl MorphApp for App {
             screen.tick(dt);
         } else if let Some(agent) = &mut self.agent {
             agent.tick(dt);
+            self.overview.tick(dt);
         } else {
             self.overview.tick(dt);
         }
@@ -1951,6 +2013,11 @@ impl MorphApp for App {
             if !screen.back() {
                 self.close_settings();
             }
+            return KeyStatus::Handled;
+        }
+        // The Gemini turns' overlay closes on Back from anywhere.
+        if self.overview.overlay().is_open() && matches!(key, Key::Back | Key::Escape) {
+            self.overview.close_overlay();
             return KeyStatus::Handled;
         }
         // The system Back closes the agent view.
@@ -2052,6 +2119,20 @@ impl MorphApp for App {
         if drew && shown != Shown::Pairing {
             let s = ctx.scale_factor();
             self.session_cards.draw(&mut self.list, &draw, s);
+            if self.overview.strip_shown()
+                && self.agent.is_some()
+                && !self.overview.overlay().is_shown()
+            {
+                self.overview.strip().draw(&mut self.list, &draw);
+            }
+            if settings::current().general_agent
+                && self.agent.is_some()
+                && self.overview.overlay().is_shown()
+            {
+                self.overview
+                    .overlay()
+                    .draw(&mut self.list, &draw, frame.size.0 as f32);
+            }
         }
         let (w, h) = frame.size;
         let s = ctx.scale_factor();

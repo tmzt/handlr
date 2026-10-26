@@ -8,7 +8,7 @@ use flankr_companion::Speaker;
 use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 
-use crate::agent::{PAD, columns, fill, line_h, one_line};
+use crate::agent::{PAD, columns, fill, one_line};
 use crate::theme::theme;
 
 /// The strip: what it shows and where.
@@ -28,9 +28,9 @@ impl Default for TurnStrip {
 }
 
 impl TurnStrip {
-    /// The strip's height and its type size, in points.
-    pub const HEIGHT: f32 = 36.0;
-    pub const PT: f32 = 15.0;
+    /// The pinned card's height and its type size, in points.
+    pub const HEIGHT: f32 = 48.0;
+    pub const PT: f32 = 13.0;
 
     pub fn new() -> Self {
         TurnStrip {
@@ -101,17 +101,41 @@ impl TurnStrip {
         let s = self.scale;
         let r = self.rect;
         let pad = PAD * s;
-        let px = Self::PT * s;
-        // A hairline above, so it reads as apart from the cards.
+        let card = Rect::new(r.x + pad, r.y + 2.0 * s, r.w - 2.0 * pad, r.h - 4.0 * s);
+        // Card background and left accent edge.
+        fill(list, card, theme().card, 8.0 * s);
         fill(
             list,
-            Rect::new(r.x + pad, r.y, r.w - 2.0 * pad, 1.0),
-            theme().band,
-            0.0,
+            Rect::new(card.x, card.y, 4.0 * s, card.h),
+            theme().accent,
+            2.0 * s,
         );
-        let text = one_line(&line, columns(r.w - 2.0 * pad, px));
-        let y = r.y + (r.h - line_h(px)) * 0.5;
-        ctx.draw_text(list, &text, [r.x + pad, y], px, theme().dim);
+        // Header: "✦ Gemini" at top left, "^" at top right.
+        let header_px = 11.0 * s;
+        ctx.draw_text(
+            list,
+            "\u{2726} Gemini",
+            [card.x + 10.0 * s, card.y + 5.0 * s],
+            header_px,
+            theme().accent,
+        );
+        ctx.draw_text(
+            list,
+            "^",
+            [card.x + card.w - 16.0 * s, card.y + 4.0 * s],
+            header_px,
+            theme().dim,
+        );
+        // Body text: latest turn or partial transcript.
+        let px = Self::PT * s;
+        let text = one_line(&line, columns(card.w - 28.0 * s, px));
+        ctx.draw_text(
+            list,
+            &text,
+            [card.x + 10.0 * s, card.y + 20.0 * s],
+            px,
+            theme().fg,
+        );
     }
 }
 
