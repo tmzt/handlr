@@ -1,7 +1,7 @@
 ---
 title: The general agent as a realtime chat, from its own centre button
 date: 2026-10-24
-status: Draft
+status: In implementation
 covers:
   - "Splitting the controls: a centre button for the general agent
     (Gemini), apart from the record and submit flow that messages coding
@@ -207,3 +207,22 @@ closes it", and its placement "on the overview and in the agent view".
 Step 4's tests also cover the tap's single exchange, the long press's
 continuous chat and its closing, the X during dictation and during an
 utterance, and the button on both screens.
+
+## Amendment — 2026-10-26 00:30 EDT: multi-turn chat as a pinned card and overlay, realtime voice with short VAD silence, and multi-line text input
+
+The owner (2026-10-26): "plan a mulyi turn chat for generwl agent as a pinned card normally and expanded as an overlay, with a multi line text or voice input, voice should be more realtime with a short vad silence ending the turn. a center button on every screen triggers it unlees replaced with the x to close the prompt input card. plan and implement".
+
+1. **The centre button on every screen:**
+   - In `ControlRow` on all screens (overview and agent view), placed at `(x0 + x1 - sq) * 0.5`.
+   - While a prompt input card is open (voice dictation or keyboard `TextArea`), the centre button is drawn as the X button (`AgentHit::Clear`) with `theme().back` to cancel/dismiss the input.
+   - When no prompt input card is active, the centre button is the General Agent button (`AgentHit::GeneralAgent`) in the Gemini accent (`theme().accent`). Tapping it triggers the general agent chat session.
+
+2. **The pinned card and expanded overlay:**
+   - **Normally a pinned card:** The multi-turn chat is drawn as a pinned card above the bottom controls row (and above session cards), showing the newest turn snippet, listening status, or Gemini response with an accent indicator.
+   - **Expanded overlay:** Tapping the pinned card expands it into the `TurnOverlay` sheet (~2/3 screen height) displaying the complete scrollable conversation history (`TurnLog`). Swiping down, tapping the dimmed background, or pressing Android Back collapses it back to the pinned card.
+
+3. **Realtime voice and multi-line text inputs:**
+   - **Realtime voice:** Kyutai streaming STT streams partial transcripts into the active turn. Unlike coding agent dictation (which uses 8.0 s silence), general agent voice turns finalize on a short VAD silence (~1.0 s of silence after speech ends) to immediately conclude the user turn and trigger Gemini's streaming reply and TTS playback. Barge-in interrupts ongoing speech.
+   - **Multi-line text input:** The general agent chat can also be addressed via the 3-line 12pt shaded `TextArea` prompt card with IME inset elevation. Submitting appends the text turn to the conversation.
+
+Implementation has started; this document is now immutable except on explicit instruction.

@@ -2329,5 +2329,15 @@ Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/desig
 - Tapping to toggle expansion while the message is open records a user override (`pin_overridden`).
 - Closing the message restores the previous expansion state if not overridden, or preserves the user override if modified.
 
+## 2026-10-26 00:30 EDT — General agent multi-turn chat as pinned card and overlay, realtime voice with short VAD silence, and centre button on every screen
+
+Plan: [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- Centre button in `ControlRow` placed on every screen (overview and agent view): displays 'X' (`AgentHit::Clear`) when prompt input is active, and Gemini accent button (`AgentHit::GeneralAgent`) when idle.
+- Multi-turn general agent chat presented normally as a pinned card above the bottom controls row, expanding into `TurnOverlay` on tap.
+- Voice input uses realtime streaming STT with short VAD silence (~1.0s) ending the turn to immediately trigger Gemini's streaming response and TTS playback.
+- Multi-line text input supported via the 3-line 12pt `TextArea` prompt card directed to the general agent.
+
+
 
 
