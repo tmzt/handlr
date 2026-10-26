@@ -58,6 +58,8 @@ pub enum Input {
     StartDictation,
     /// Start taking a typed text prompt (plan 20261022_03, living section L3).
     StartTextPrompt,
+    /// Start taking a general agent prompt (plan 20261024_03, the 00:30 EDT amendment).
+    StartGeneralAgentPrompt(PromptMode),
     /// Set the current prompt text after an edit.
     SetText(String),
     /// The Submit button: submit the message now.
@@ -302,6 +304,8 @@ pub const TICK: Duration = Duration::from_millis(250);
 /// The silence that submits a dictated message by default, and the least
 /// it may be set to (plan 20261023_02, the 01:57 EDT amendment).
 pub const DICTATION_SILENCE: Duration = Duration::from_secs(8);
+/// The short silence that submits a general agent voice turn (plan 20261024_03, the 00:30 EDT amendment).
+pub const GENERAL_AGENT_SILENCE: Duration = Duration::from_millis(1000);
 /// The longest dictated message, in characters (decision 1).
 pub const MESSAGE_CAP: usize = 4000;
 /// The countdown shown before a silence submits, in seconds.
@@ -359,6 +363,8 @@ pub struct Dictation {
     /// Seconds left before the silence submits, for the last
     /// [`COUNTDOWN_SECS`].
     pub submit_in: Option<u32>,
+    /// Whether this prompt goes to the general agent (Gemini).
+    pub general_agent: bool,
 }
 
 impl Dictation {
@@ -371,6 +377,7 @@ impl Dictation {
             focus_moved: None,
             phase: DictationPhase::Collecting,
             submit_in: None,
+            general_agent: false,
         }
     }
 }
@@ -910,6 +917,8 @@ struct Dictating {
     /// A Submit (by the button when `true`) waiting for speech that STT has
     /// not given back yet.
     submit_waiting: Option<bool>,
+    /// Whether this prompt goes to the general agent (Gemini).
+    general_agent: bool,
 }
 
 /// The waiting Submit, if any.
@@ -1635,6 +1644,7 @@ impl State {
             Input::Deny => self.answer(false, None, &mut out),
             Input::StartDictation => self.start_dictation(&mut out),
             Input::StartTextPrompt => self.start_text_prompt(&mut out),
+            Input::StartGeneralAgentPrompt(mode) => self.start_general_agent_prompt(mode, &mut out),
             Input::SetText(text) => {
                 if let Some(d) = self.dictation.as_mut() {
                     d.parts = if text.is_empty() {
@@ -2658,6 +2668,7 @@ impl State {
             focus_moved,
             phase: d.phase,
             submit_in,
+            general_agent: d.general_agent,
         }
     }
 
@@ -2696,7 +2707,12 @@ impl State {
             && !d.parts.is_empty()
             && self.quiet()
             && d.read_back == ReadBack::No;
-        running.then_some(d.quiet_from? + self.silence)
+        let silence = if d.general_agent {
+            GENERAL_AGENT_SILENCE
+        } else {
+            self.silence
+        };
+        running.then_some(d.quiet_from? + silence)
     }
 
     fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
@@ -2755,11 +2771,44 @@ impl State {
             quiet_from: None,
             read_back: ReadBack::No,
             submit_waiting: None,
+            general_agent: false,
         });
         if self.online() {
             self.ask_list(out);
         }
         self.show_dictation(out);
+    }
+
+    fn start_general_agent_prompt(&mut self, mode: PromptMode, out: &mut Vec<Output>) {
+        if !self.settings.general_agent {
+            log::info!("dictation: the general agent is off");
+            return;
+        }
+        if self.dictation.is_some() {
+            return;
+        }
+        if mode == PromptMode::Voice && !self.settings.microphone {
+            log::info!("dictation: the microphone is off");
+            return;
+        }
+        self.dictation = Some(Dictating {
+            mode,
+            fixed_pane: None,
+            parts: Vec::new(),
+            target: None,
+            refresh_target: false,
+            phase: DictationPhase::Collecting,
+            confirm_id: None,
+            own_approval: true,
+            quiet_from: None,
+            read_back: ReadBack::No,
+            submit_waiting: None,
+            general_agent: true,
+        });
+        self.show_dictation(out);
+        if mode == PromptMode::Voice {
+            out.push(event(Event::Arm));
+        }
     }
 
     /// Take a message whose first parts are `parts`, already in it.
@@ -2789,6 +2838,7 @@ impl State {
             quiet_from: None,
             read_back: ReadBack::No,
             submit_waiting: None,
+            general_agent: false,
         });
         if self.online() {
             self.ask_list(out);
@@ -2867,6 +2917,20 @@ impl State {
         if unheard {
             log::info!("dictation: submit waits for what was said");
             d.submit_waiting = Some(by_button);
+            return;
+        }
+        if d.general_agent {
+            d.submit_waiting = None;
+            d.quiet_from = None;
+            if d.parts.is_empty() {
+                out.push(event(Event::Say("The message is empty.".to_string())));
+                self.show_dictation(out);
+                return;
+            }
+            let text = d.text();
+            self.dictation = None;
+            self.show_dictation(out);
+            self.start_turn(text, out);
             return;
         }
         d.submit_waiting = None;
@@ -8743,5 +8807,56 @@ mod tests {
         let cards = cards_of(&out).expect("cards");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].kind, crate::cross::SessionCardKind::Question);
+    }
+
+    #[test]
+    fn general_agent_text_prompt_submits_to_turn() {
+        let mut s = online();
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+        let d = dictation_of(&out).expect("dictation card");
+        assert!(d.active);
+        assert!(d.general_agent);
+        assert_eq!(d.mode, PromptMode::Keyboard);
+        s.input(Input::SetText("explain the architecture".into()));
+        let out = s.input(Input::Submit);
+        // The dictation card goes away.
+        assert_eq!(dictation_of(&out), Some(Dictation::off()));
+        // A turn is started.
+        assert!(events(&out).contains(&Event::Conversation {
+            speaker: Speaker::User,
+            text: "explain the architecture".into(),
+        }));
+        let turn = requests(&out, wire::methods::TURN_START);
+        assert_eq!(turn.len(), 1);
+        assert_eq!(turn[0].params["text"], "explain the architecture");
+    }
+
+    #[test]
+    fn general_agent_voice_prompt_short_silence_submits() {
+        let mut s = online();
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        assert!(events(&out).contains(&Event::Arm));
+        let d = dictation_of(&out).expect("dictation card");
+        assert!(d.active);
+        assert!(d.general_agent);
+
+        // Speak from t=10.0 to t=12.0.
+        speak(&mut s, 10.0, 12.0, "what is handlr");
+        // At 12.9 s (0.9 s of silence), not submitted yet.
+        assert!(requests(&s.input(Input::Tick(secs(12.9))), wire::methods::TURN_START).is_empty());
+        // At 13.0 s (1.0 s of silence = GENERAL_AGENT_SILENCE), submitted.
+        let out = s.input(Input::Tick(secs(13.0)));
+        let turn = requests(&out, wire::methods::TURN_START);
+        assert_eq!(turn.len(), 1);
+        assert_eq!(turn[0].params["text"], "what is handlr");
+    }
+
+    #[test]
+    fn general_agent_prompt_clear() {
+        let mut s = online();
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+        assert!(dictation_of(&out).unwrap().active);
+        let out = s.input(Input::Clear);
+        assert_eq!(dictation_of(&out), Some(Dictation::off()));
     }
 }
