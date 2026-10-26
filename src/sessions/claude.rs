@@ -203,7 +203,8 @@ impl LineReader for ClaudeCode {
                     }
                     Some("tool_result") => {
                         let body = result_text(b.get("content"));
-                        let error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+                        let error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true)
+                            && super::parse_command_exit_code(&body) != Some(0);
                         let text = if error {
                             format!("error: {body}")
                         } else {

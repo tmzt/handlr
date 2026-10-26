@@ -378,11 +378,7 @@ fn decode_step(idx: u64, step_type: i64, status: i64, payload: &[u8]) -> Vec<Ite
                     _ => String::new(),
                 },
             };
-            let text = if status != 3 && !output.starts_with("error:") {
-                format!("error: {output}")
-            } else {
-                output
-            };
+            let text = decode_agy_tool_output(status, &output);
             vec![Item {
                 pos: idx,
                 ts,
@@ -444,6 +440,58 @@ pub fn format_rfc3339(secs: u64) -> String {
     )
 }
 
+/// Extract clean command output body from an agy command execution envelope.
+pub fn extract_agy_command_output(output: &str) -> String {
+    if output.contains("No output from the command.") {
+        return String::new();
+    }
+    if let Some(pos) = output.find("Command output:\n") {
+        return output[pos + "Command output:\n".len()..].to_string();
+    }
+    if let Some(pos) = output.find("Command output:\r\n") {
+        return output[pos + "Command output:\r\n".len()..].to_string();
+    }
+    if let Some(pos) = output.find("Command exited with code ") {
+        let after_line = output[pos..]
+            .find('\n')
+            .map_or("", |p| &output[pos + p + 1..]);
+        let trimmed = after_line.trim_start();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    output.to_string()
+}
+
+/// Decode an agy tool result into clean output text (plan 20261023_06 amendment).
+pub fn decode_agy_tool_output(status: i64, output: &str) -> String {
+    if let Some(code) = super::parse_command_exit_code(output) {
+        let body = extract_agy_command_output(output);
+        if code == 0 {
+            return body;
+        } else {
+            return if body.is_empty() {
+                format!("error: Command exited with code {code}")
+            } else {
+                format!("error: Command exited with code {code}\n{body}")
+            };
+        }
+    }
+
+    if output.starts_with("error:") {
+        return output.to_string();
+    }
+    if output.contains("Encountered error in step execution:") {
+        let text = output.trim();
+        return format!("error: {text}");
+    }
+    if (status == 6 || status == 7) && !output.trim().is_empty() {
+        return format!("error: {}", output.trim());
+    }
+
+    output.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +512,46 @@ mod tests {
     fn rfc3339_formatting() {
         assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(format_rfc3339(951_868_800), "2000-03-01T00:00:00Z");
+    }
+
+    #[test]
+    fn exit_code_zero_unwraps_command_output_and_is_not_an_error() {
+        let envelope = "Created At: 2026-10-26T10:00:00Z\nCompleted At: 2026-10-26T10:00:01Z\nCommand exited with code 0.\n\nCommand output:\nOn branch main\nall clean";
+        // Status 5 (older agy), 3 (newer agy), and 2 (running) all decode cleanly
+        for status in [2, 3, 5] {
+            let decoded = decode_agy_tool_output(status, envelope);
+            assert_eq!(decoded, "On branch main\nall clean");
+            assert!(!decoded.starts_with("error:"));
+        }
+
+        let empty = "Created At: 2026-10-26T10:00:00Z\nCompleted At: 2026-10-26T10:00:01Z\nCommand exited with code 0.\n\nNo output from the command.";
+        let decoded = decode_agy_tool_output(3, empty);
+        assert_eq!(decoded, "");
+        assert!(!decoded.starts_with("error:"));
+    }
+
+    #[test]
+    fn non_zero_exit_code_becomes_error() {
+        let envelope = "Created At: 2026-10-26T10:00:00Z\nCompleted At: 2026-10-26T10:00:01Z\nCommand exited with code 1.\n\nCommand output:\ncargo build failed";
+        let decoded = decode_agy_tool_output(5, envelope);
+        assert_eq!(
+            decoded,
+            "error: Command exited with code 1\ncargo build failed"
+        );
+        assert!(decoded.starts_with("error:"));
+    }
+
+    #[test]
+    fn other_tool_errors_become_error() {
+        let err = "Encountered error in step execution: target content not found in the file";
+        let decoded = decode_agy_tool_output(5, err);
+        assert!(decoded.starts_with("error: Encountered error in step execution:"));
+
+        let cancelled = decode_agy_tool_output(6, "task aborted");
+        assert_eq!(cancelled, "error: task aborted");
+
+        let ok_tool = decode_agy_tool_output(5, "file contents here");
+        assert_eq!(ok_tool, "file contents here");
     }
 
     #[test]

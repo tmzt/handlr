@@ -123,6 +123,26 @@ pub fn cut(s: &str, max: usize) -> String {
     }
 }
 
+/// Parse an exit code from command execution output or task summaries, such as
+/// `Command exited with code <N>` or `(exit code <N>)`.
+pub fn parse_command_exit_code(text: &str) -> Option<i32> {
+    if let Some(pos) = text.find("Command exited with code ") {
+        let after = &text[pos + "Command exited with code ".len()..];
+        let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(code) = num_str.parse::<i32>() {
+            return Some(code);
+        }
+    }
+    if let Some(pos) = text.find("(exit code ") {
+        let after = &text[pos + "(exit code ".len()..];
+        let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(code) = num_str.parse::<i32>() {
+            return Some(code);
+        }
+    }
+    None
+}
+
 /// How a session was found (16:23 EDT amendment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -636,6 +656,31 @@ mod tests {
         assert_eq!(cut("", 3), "");
         let long = "x".repeat(600);
         assert_eq!(cut(&long, ENTRY_SUMMARY_MAX).chars().count(), 500);
+    }
+
+    #[test]
+    fn parse_command_exit_codes() {
+        assert_eq!(
+            parse_command_exit_code("Command exited with code 0.\n\noutput"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_command_exit_code("Command exited with code 1.\n\nerror"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_command_exit_code("Command exited with code 101."),
+            Some(101)
+        );
+        assert_eq!(
+            parse_command_exit_code("Background command completed (exit code 0)"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_command_exit_code("Background command completed (exit code 2)"),
+            Some(2)
+        );
+        assert_eq!(parse_command_exit_code("Just normal output"), None);
     }
 
     #[test]

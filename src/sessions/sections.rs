@@ -515,8 +515,11 @@ fn finished_card(file: u32, reply: &Placed, live: bool, linker: &Linker) -> Sect
 }
 
 /// A tool result the reader marked as an error (plan 20261022_03,
-/// decision 2).
+/// decision 2; plan 20261023_06 amendment).
 pub fn is_error(summary: &str) -> bool {
+    if super::parse_command_exit_code(summary) == Some(0) {
+        return false;
+    }
     summary.starts_with("error: ")
 }
 
@@ -524,6 +527,9 @@ pub fn is_error(summary: &str) -> bool {
 /// FAILED`, a count such as `2 failed` (pytest, jest, go), or a line
 /// starting `FAIL` (jest, go).
 pub fn fails_tests(summary: &str) -> bool {
+    if super::parse_command_exit_code(summary) == Some(0) {
+        return false;
+    }
     if summary.contains("test result: FAILED") {
         return true;
     }
@@ -592,4 +598,24 @@ pub fn merged(built: impl IntoIterator<Item = Section>, cards: Vec<Section>) -> 
         all.insert(c.serial.to_u64(), c);
     }
     all.into_values().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exit_code_zero_is_not_an_error_or_test_failure() {
+        assert!(!is_error("Command exited with code 0."));
+        assert!(!is_error("error: completed (exit code 0)"));
+        assert!(!fails_tests(
+            "Command exited with code 0.\n\n0 failed, 5 passed"
+        ));
+
+        assert!(is_error("error: something broke"));
+        assert!(is_error("error: Command exited with code 1\nfailed"));
+        assert!(fails_tests("test result: FAILED. 1 failed"));
+        assert!(fails_tests("FAIL src/main.rs"));
+        assert!(fails_tests("1 failed, 4 passed"));
+    }
 }
