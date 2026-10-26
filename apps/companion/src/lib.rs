@@ -1309,7 +1309,7 @@ impl App {
             h: h as f32,
             scale: ctx.scale_factor(),
             top: safe.top,
-            bottom: safe.bottom,
+            bottom: safe.bottom + ctx.keyboard_inset(),
         };
         if let Some(agent) = &mut self.agent {
             agent.set_layout(layout);
