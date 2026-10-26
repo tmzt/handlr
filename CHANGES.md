@@ -2393,6 +2393,17 @@ Plan: [The general agent as a realtime chat, from its own centre button](docs/de
 - The button activates into its accent background (`theme().accent`) with the inner breathing pulse ring and alternating dingbat stars (`✦`, `✧`, `✶`, `✻`) only when pressed / when voice recognition is actively listening for the general agent.
 - Deactivating (submitting or clearing) returns the centre button to the neutral idle state.
 
+## 2026-10-26 12:21 EDT — Cross-session General Agent UI and state unified across screens
+
+Plan: [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- General agent conversation turns, partial STT speech, voice recognition listening state, and prompt input text are shared cross-session across all screens (overview and agent views).
+- Invalidation on general agent updates (`Event::Conversation`, `Event::Dictation`, `AudioEvent::Partial`) triggers immediate redraw for both the overview and active agent view.
+- Layout order fix: overview layout is settled before the active agent screen sets the pinned card (`TurnStrip`) and overlay (`TurnOverlay`) bounds, preventing overview grid coordinates from overwriting agent screen placement.
+- `TurnOverlay::draw` uses logical width on agent view matching overview, and touch/drag events inside the sheet invalidate the view for smooth scrolling and dismiss interactions.
+- Pinned response card tapping on agent screen opens the conversation overlay sheet with proper hit testing.
+
+
 
 
 
