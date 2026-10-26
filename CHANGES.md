@@ -2419,6 +2419,14 @@ Plan: [Markdown detection in agent output and automatic switch to rich rendering
 - Added draft plan `docs/design/20261026_01_MARKDOWN_DETECTION_AND_RENDERING_PLAN.md` to detect Markdown formatting usage exceeding a percentage threshold in output text (e.g. 15%) and switch from plain monospace terminal row wrapping to rich CommonMark rendering (`flankr-markdown::lay_out`).
 - Defined `MarkdownScore` metrics, structural vs inline weighting, false-positive guards against terminal commands/flags, and integration in `apps/companion` agent view and turn overlay.
 
+## 2026-10-26 13:33 EDT — Markdown rendering for assistant summary blocks and replies
+
+Plan: [Markdown detection in agent output and automatic switch to rich rendering](docs/design/20261026_01_MARKDOWN_DETECTION_AND_RENDERING_PLAN.md).
+
+- Following the owner's instruction ("the last summary block should have been rendered in markdown"), assistant reply entries (`SectionKind::Text` / `lay_out_entry`) exceeding the Markdown percentage threshold (default 15%) automatically switch to rich CommonMark layout (`flankr-markdown::lay_out`).
+- Prose renders in proportional typography, list items render with bullets and indentation, diff lines in fenced blocks render syntax-highlighted in green and red, code blocks render with shaded background panels in `theme().input`, and Markdown links are registered into interactive link spans.
+- Assistant replies below the threshold remain in terminal monospace row layout.
+
 
 
 
