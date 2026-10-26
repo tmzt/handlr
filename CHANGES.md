@@ -2412,6 +2412,14 @@ Plan: [The general agent as a realtime chat, from its own centre button](docs/de
 - TurnStrip displays `Listening…` immediately when voice recognition is active before partial speech arrives.
 - Turn completion, silence submission, and cancellation cleanly reset listening and dictation state, allowing immediate reactivation for subsequent turns when the button is pressed from idle.
 
+## 2026-10-26 12:52 EDT — Plan: Markdown detection in agent output and automatic switch to rich rendering
+
+Plan: [Markdown detection in agent output and automatic switch to rich rendering](docs/design/20261026_01_MARKDOWN_DETECTION_AND_RENDERING_PLAN.md).
+
+- Added draft plan `docs/design/20261026_01_MARKDOWN_DETECTION_AND_RENDERING_PLAN.md` to detect Markdown formatting usage exceeding a percentage threshold in output text (e.g. 15%) and switch from plain monospace terminal row wrapping to rich CommonMark rendering (`flankr-markdown::lay_out`).
+- Defined `MarkdownScore` metrics, structural vs inline weighting, false-positive guards against terminal commands/flags, and integration in `apps/companion` agent view and turn overlay.
+
+
 
 
 
