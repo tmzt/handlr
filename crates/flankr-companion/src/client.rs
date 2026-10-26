@@ -2747,20 +2747,22 @@ impl State {
     }
 
     fn start_dictation(&mut self, out: &mut Vec<Output>) {
-        if let Some(d) = &self.dictation {
-            if !d.general_agent && d.mode == PromptMode::Voice {
-                return;
-            }
+        if let Some(d) = &self.dictation
+            && !d.general_agent
+            && d.mode == PromptMode::Voice
+        {
+            return;
         }
         self.dictation = None;
         self.start_dictation_with(Vec::new(), out);
     }
 
     fn start_text_prompt(&mut self, out: &mut Vec<Output>) {
-        if let Some(d) = &self.dictation {
-            if !d.general_agent && d.mode == PromptMode::Keyboard {
-                return;
-            }
+        if let Some(d) = &self.dictation
+            && !d.general_agent
+            && d.mode == PromptMode::Keyboard
+        {
+            return;
         }
         let existing_parts = self
             .dictation
@@ -2798,15 +2800,19 @@ impl State {
             log::info!("dictation: the general agent is off");
             return;
         }
-        if let Some(d) = &self.dictation {
-            if d.general_agent && d.mode == mode {
-                return;
-            }
-        }
         self.dictation = None;
+        self.shown = Dictation::off();
         if mode == PromptMode::Voice && !self.settings.microphone {
             log::info!("dictation: the microphone is off");
             return;
+        }
+        if let Some(turn) = self.turn.as_mut() {
+            out.push(event(Event::StopSpeaking));
+            if !turn.tapped {
+                turn.tapped = true;
+                let params = wire::TurnInterruptParams { turn_id: turn.id };
+                out.push(self.request(wire::methods::TURN_INTERRUPT, params, Sent::Interrupt));
+            }
         }
         self.dictation = Some(Dictating {
             mode,
@@ -2830,10 +2836,12 @@ impl State {
 
     /// Take a message whose first parts are `parts`, already in it.
     fn start_dictation_with(&mut self, parts: Vec<String>, out: &mut Vec<Output>) {
-        if let Some(d) = &self.dictation {
-            if !d.general_agent && d.mode == PromptMode::Voice && d.parts == parts {
-                return;
-            }
+        if let Some(d) = &self.dictation
+            && !d.general_agent
+            && d.mode == PromptMode::Voice
+            && d.parts == parts
+        {
+            return;
         }
         self.dictation = None;
         if !self.settings.microphone {
@@ -8883,5 +8891,28 @@ mod tests {
         assert!(dictation_of(&out).unwrap().active);
         let out = s.input(Input::Clear);
         assert_eq!(dictation_of(&out), Some(Dictation::off()));
+    }
+
+    #[test]
+    fn general_agent_prompt_reactivates_cleanly() {
+        let mut s = online();
+        // First turn starts:
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        assert!(events(&out).contains(&Event::Arm));
+        assert!(dictation_of(&out).unwrap().active);
+
+        // Turn cancelled or cleared:
+        let out = s.input(Input::Clear);
+        assert_eq!(dictation_of(&out), Some(Dictation::off()));
+
+        // Second turn activates immediately without blockage:
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        assert!(events(&out).contains(&Event::Arm));
+        assert!(dictation_of(&out).unwrap().active);
+
+        // Repeated press also restarts voice prompt cleanly:
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        assert!(events(&out).contains(&Event::Arm));
+        assert!(dictation_of(&out).unwrap().active);
     }
 }
