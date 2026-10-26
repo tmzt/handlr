@@ -1621,3 +1621,11 @@ The owner directed (2026-10-25): "good but its still one line, should be 3, abou
 1. **Dimensions:** The keyboard prompt card's `TextArea` is sized for at least 3 lines of text (`line_count = input_rows.len().max(3)`), maintaining a 3-line minimum input box.
 2. **Typography:** The prompt text uses ~12pt font (`12.0 * s` px) instead of the larger dictation heading font.
 
+## Amendment — 2026-10-25 23:55 EDT: expanding message collapses pinned cards with state memory and user override (living section L3)
+
+The owner directed (2026-10-25): "expand message on a sesdion can collapse pinned cards (but they should remember previous state and user can override and that should be remrmbered too)".
+1. **Pinned Card Visibility During Message:** Taking a message on a session (not replying directly to the pinned card) retains the pinned card above the message prompt card rather than removing it.
+2. **Automatic Collapse with Memory:** Opening a message collapses an expanded pinned card (`pin_expanded = false`) to conserve vertical space while preserving its prior expansion state (`pin_saved_expanded`).
+3. **User Override:** The user may tap the pinned card to toggle its expansion while the message is active, marking it as user-overridden (`pin_overridden = true`).
+4. **Restoration:** When message mode closes, the pinned card's previous expansion state is restored if not overridden; if the user overrode it, the user's override is preserved.
+

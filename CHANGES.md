@@ -2319,5 +2319,15 @@ Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/desig
 - The prompt card's `TextArea` is sized for at least 3 lines of text (`input_rows.len().max(3)`).
 - The keyboard prompt uses ~12pt font (`12.0 * s` px) for both the placeholder and typed text.
 
+## 2026-10-25 23:55 EDT — Expanding message collapses pinned cards with state memory and user override
+
+Plan: [The handlr.harness protocol, session peek and the MCP adapter](docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md)
+(living section L3).
+
+- Taking a message in an agent session retains the pinned card above the message prompt card rather than removing it.
+- Opening a message collapses an expanded pinned card, recording its previous state in `pin_saved_expanded`.
+- Tapping to toggle expansion while the message is open records a user override (`pin_overridden`).
+- Closing the message restores the previous expansion state if not overridden, or preserves the user override if modified.
+
 
 
