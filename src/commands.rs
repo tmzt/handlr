@@ -14,6 +14,10 @@
 /// Maximum length of an arbitrary (non allow-listed) command.
 pub const MAX_ARBITRARY_COMMAND_LEN: usize = 256;
 
+/// Maximum number of threshold-triggering symbols permitted before an
+/// arbitrary command or message is rejected.
+pub const SYMBOL_THRESHOLD: usize = 0;
+
 /// Characters permitted in an arbitrary command, in addition to ASCII
 /// alphanumerics and spaces.
 const EXTRA_ALLOWED_CHARS: &[char] = &['.', ',', '\'', '?', ':'];
@@ -22,16 +26,85 @@ fn is_allowed_arbitrary_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == ' ' || EXTRA_ALLOWED_CHARS.contains(&c)
 }
 
+/// Count symbols that trigger the rejection threshold.
+///
+/// A single symbol followed by a space (or trailing sentence punctuation at the
+/// end of the text), such as `. `, `, `, `! `, `? `, `: `, or `- `, does not
+/// trigger the threshold.
+/// Embedded symbols (not followed by space, such as in paths or flags) or runs
+/// of consecutive symbols do trigger the threshold.
+pub fn count_triggering_symbols(s: &str) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut count = 0;
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() && !c.is_whitespace() {
+            // An apostrophe in a contraction (e.g. don't, it's) does not trigger the threshold.
+            if c == '\''
+                && i > 0
+                && chars[i - 1].is_alphabetic()
+                && i + 1 < chars.len()
+                && chars[i + 1].is_alphabetic()
+            {
+                continue;
+            }
+            let is_sentence_end =
+                (i + 1 == chars.len()) && matches!(c, '.' | '?' | '!' | ',' | ':');
+            let followed_by_space =
+                is_sentence_end || (i + 1 < chars.len() && chars[i + 1].is_whitespace());
+            let preceded_by_symbol =
+                i > 0 && !chars[i - 1].is_alphanumeric() && !chars[i - 1].is_whitespace();
+            if !followed_by_space || preceded_by_symbol {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// Find the first symbol that triggers the threshold, if any.
+pub fn first_triggering_symbol(s: &str) -> Option<char> {
+    let chars: Vec<char> = s.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_alphanumeric() && !c.is_whitespace() {
+            if c == '\''
+                && i > 0
+                && chars[i - 1].is_alphabetic()
+                && i + 1 < chars.len()
+                && chars[i + 1].is_alphabetic()
+            {
+                continue;
+            }
+            let is_sentence_end =
+                (i + 1 == chars.len()) && matches!(c, '.' | '?' | '!' | ',' | ':');
+            let followed_by_space =
+                is_sentence_end || (i + 1 < chars.len() && chars[i + 1].is_whitespace());
+            let preceded_by_symbol =
+                i > 0 && !chars[i - 1].is_alphanumeric() && !chars[i - 1].is_whitespace();
+            if !followed_by_space || preceded_by_symbol {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// Remove unallowed symbols from the text, keeping ASCII alphanumeric
+/// characters, spaces, and allowed punctuation (`. , ' ? :`).
+pub fn filter_symbols(s: &str) -> String {
+    s.chars()
+        .filter(|&c| is_allowed_arbitrary_char(c))
+        .collect()
+}
+
 /// Validate a free-form command for an agent with `allow_arbitrary_commands`.
 ///
 /// Returns the cleaned command (surrounding whitespace and trailing sentence
-/// punctuation removed) or a human-readable rejection reason that is surfaced
-/// back to the model as the tool error.
+/// punctuation removed, and unallowed symbols stripped) or a human-readable
+/// rejection reason that is surfaced back to the model as the tool error.
 ///
-/// Rejects, in order: non-ASCII text, embedded control characters (which would
-/// otherwise inject a second line of input into the pane), `/` and `-` (so a
-/// spoken phrase can never become a slash command or a CLI flag), empty or
-/// overlong strings, and anything outside the character whitelist.
+/// Rejects: non-ASCII text, embedded control characters (which would otherwise
+/// inject a second line of input into the pane), excessive threshold-triggering
+/// symbols (over [`SYMBOL_THRESHOLD`]), and empty or overlong strings.
 pub fn validate_arbitrary_command(cmd: &str) -> Result<String, String> {
     let trimmed = cmd.trim();
 
@@ -48,14 +121,18 @@ pub fn validate_arbitrary_command(cmd: &str) -> Result<String, String> {
             bad
         ));
     }
-    if trimmed.contains('/') || trimmed.contains('-') {
+
+    let trigger_count = count_triggering_symbols(trimmed);
+    if trigger_count > SYMBOL_THRESHOLD {
+        let bad = first_triggering_symbol(trimmed).unwrap_or('?');
         return Err(format!(
-            "Arbitrary command '{}' rejected: '/' and '-' are not permitted in arbitrary commands.",
-            trimmed
+            "Arbitrary command '{trimmed}' rejected: too many symbols (found '{bad}', limit is {SYMBOL_THRESHOLD})."
         ));
     }
 
-    let cleaned = trimmed.trim_end_matches(['.', ',']).trim();
+    let filtered = filter_symbols(trimmed);
+    let folded = filtered.split_whitespace().collect::<Vec<_>>().join(" ");
+    let cleaned = folded.trim_end_matches(['.', ',']).trim();
     if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
         return Err("Arbitrary command cannot be empty.".to_string());
     }
@@ -66,12 +143,6 @@ pub fn validate_arbitrary_command(cmd: &str) -> Result<String, String> {
             MAX_ARBITRARY_COMMAND_LEN
         ));
     }
-    if let Some(bad) = cleaned.chars().find(|c| !is_allowed_arbitrary_char(*c)) {
-        return Err(format!(
-            "Arbitrary command '{}' rejected: character '{}' is not permitted. Only letters, digits, spaces and . , ' ? : are allowed.",
-            cleaned, bad
-        ));
-    }
 
     Ok(cleaned.to_string())
 }
@@ -80,23 +151,31 @@ pub fn validate_arbitrary_command(cmd: &str) -> Result<String, String> {
 /// amended at 01:58 EDT).
 pub const MAX_MESSAGE_LEN: usize = 4000;
 
-/// Validate a dictated message (plan 20261023_02, decision 6, as amended at
-/// 01:58 EDT): the same strict characters as an arbitrary command (ASCII
-/// letters, digits, spaces and `. , ' ? :`), at most [`MAX_MESSAGE_LEN`]
-/// characters.
+/// Validate a dictated message (plan 20261023_02, decision 6, as amended):
+/// characters outside the whitelist are stripped, up to [`SYMBOL_THRESHOLD`]
+/// triggering symbols allowed, at most [`MAX_MESSAGE_LEN`] characters.
 ///
 /// Returns the cleaned message (runs of spaces folded to one, surrounding
-/// space and trailing `.` and `,` removed) or the reason it was refused,
-/// naming the offending character. Line breaks, tabs and every other
-/// control character are refused, never folded, so a message is always one
-/// line of input.
+/// space and trailing `.` and `,` removed) or the reason it was refused. Line
+/// breaks, tabs and every other control character are refused, never folded,
+/// so a message is always one line of input.
 pub fn validate_message(text: &str) -> Result<String, String> {
     if let Some(bad) = text.chars().find(|c| c.is_control()) {
         return Err(format!(
             "Message rejected: control characters (found {bad:?}) are not permitted."
         ));
     }
-    let folded = text
+
+    let trigger_count = count_triggering_symbols(text);
+    if trigger_count > SYMBOL_THRESHOLD {
+        let bad = first_triggering_symbol(text).unwrap_or('?');
+        return Err(format!(
+            "Message rejected: too many symbols (found '{bad}', limit is {SYMBOL_THRESHOLD})."
+        ));
+    }
+
+    let filtered = filter_symbols(text);
+    let folded = filtered
         .split(' ')
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
@@ -109,11 +188,6 @@ pub fn validate_message(text: &str) -> Result<String, String> {
     if len > MAX_MESSAGE_LEN {
         return Err(format!(
             "Message rejected: {len} characters exceeds the {MAX_MESSAGE_LEN} character limit."
-        ));
-    }
-    if let Some(bad) = cleaned.chars().find(|c| !is_allowed_arbitrary_char(*c)) {
-        return Err(format!(
-            "Message rejected: the character '{bad}' is not permitted. Only letters, digits, spaces and . , ' ? : are allowed."
         ));
     }
     Ok(cleaned.to_string())
@@ -301,11 +375,28 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_arbitrary_command_rejects_slash_and_dash() {
+    fn test_validate_arbitrary_command_removes_symbols_and_rejects_excessive_symbols() {
+        // Single symbols followed by space are removed without triggering threshold.
+        assert_eq!(
+            validate_arbitrary_command("hello! world").unwrap(),
+            "hello world"
+        );
+        assert_eq!(
+            validate_arbitrary_command("don't stop - keep going").unwrap(),
+            "don't stop keep going"
+        );
+        assert_eq!(
+            validate_arbitrary_command("step 1; step 2: done.").unwrap(),
+            "step 1 step 2: done"
+        );
+
+        // Runs or embedded symbols (such as paths or flags) trigger the threshold and are rejected.
         let err = validate_arbitrary_command("cat /etc/passwd").unwrap_err();
-        assert!(err.contains("'/' and '-' are not permitted"));
+        assert!(err.contains("too many symbols"), "got: {err}");
         let err = validate_arbitrary_command("cargo test --all").unwrap_err();
-        assert!(err.contains("'/' and '-' are not permitted"));
+        assert!(err.contains("too many symbols"), "got: {err}");
+        let err = validate_arbitrary_command("!@#$%^&*()").unwrap_err();
+        assert!(err.contains("too many symbols"), "got: {err}");
     }
 
     #[test]
@@ -323,28 +414,6 @@ mod tests {
         assert!(err.contains("control characters"), "got: {err}");
         let err = validate_arbitrary_command("clear\u{1b}[2J").unwrap_err();
         assert!(err.contains("control characters"), "got: {err}");
-    }
-
-    #[test]
-    fn test_validate_arbitrary_command_rejects_shell_metacharacters() {
-        for injection in [
-            "run tests; rm everything",
-            "run tests && quit",
-            "run tests | tee out",
-            "echo $HOME",
-            "echo `whoami`",
-            "run tests > out.txt",
-            "run tests (again)",
-            "run tests {x}",
-            "run tests \\ more",
-            "run tests \"quoted\"",
-        ] {
-            let err = validate_arbitrary_command(injection).unwrap_err_or_panic(injection);
-            assert!(
-                err.contains("is not permitted"),
-                "expected rejection for {injection:?}, got: {err}"
-            );
-        }
     }
 
     #[test]
@@ -380,21 +449,52 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_message_refuses_slash_anywhere_and_names_the_character() {
+    fn test_validate_message_removes_symbols_and_rejects_excessive_symbols() {
+        // Single symbols followed by space (such as period, comma, exclamation, hyphen)
+        // do not trigger the threshold and are kept or removed cleanly.
+        assert_eq!(
+            validate_message("Hello! This is a test, with punctuation. Is it ready?").unwrap(),
+            "Hello This is a test, with punctuation. Is it ready?"
+        );
+        assert_eq!(
+            validate_message("run tests - now").unwrap(),
+            "run tests now"
+        );
+        assert_eq!(
+            validate_message("first; then second: done.").unwrap(),
+            "first then second: done"
+        );
+
+        // Embedded symbols not followed by space (such as paths, flags, quotes) trigger the threshold and are rejected.
         let err = validate_message("/compact").unwrap_err();
-        assert!(err.contains("the character '/'"), "{err}");
+        assert!(err.contains("too many symbols"), "got: {err}");
         let err = validate_message("look in src/main.rs please").unwrap_err();
-        assert!(err.contains("the character '/'"), "{err}");
+        assert!(err.contains("too many symbols"), "got: {err}");
         let err = validate_message("use cargo test --all").unwrap_err();
-        assert!(err.contains("the character '-'"), "{err}");
+        assert!(err.contains("too many symbols"), "got: {err}");
         let err = validate_message("say \"hi\"").unwrap_err();
-        assert!(err.contains("the character '\"'"), "{err}");
-        let err = validate_message("caf\u{e9} au lait").unwrap_err();
-        assert!(err.contains("the character '\u{e9}'"), "{err}");
-        for bad in [";", "&", "|", "$", "`", ">", "(", "!"] {
-            let err = validate_message(&format!("run tests {bad} now")).unwrap_err();
-            assert!(err.contains(&format!("'{bad}'")), "{bad}: {err}");
-        }
+        assert!(err.contains("too many symbols"), "got: {err}");
+    }
+
+    #[test]
+    fn test_count_triggering_symbols() {
+        // Normal sentence with period and comma: 0 triggering symbols.
+        assert_eq!(
+            count_triggering_symbols("Hello, this is a test. Here is another sentence."),
+            0
+        );
+        // Exclamation, question mark, colon followed by space: 0 triggering symbols.
+        assert_eq!(
+            count_triggering_symbols("Hey! Look at this: is it ready? Yes!"),
+            0
+        );
+        // Contractions with apostrophe: 0 triggering symbols.
+        assert_eq!(count_triggering_symbols("don't stop, it's fine."), 0);
+        // Single hyphen followed by space: 0 triggering symbols.
+        assert_eq!(count_triggering_symbols("item 1 - item 2"), 0);
+        // Runs of symbols or symbols without space: trigger threshold.
+        assert_eq!(count_triggering_symbols("cat /etc/passwd/root"), 3);
+        assert_eq!(count_triggering_symbols("cargo test --all"), 2);
     }
 
     #[test]
@@ -493,18 +593,5 @@ mod tests {
         let req = parse_confirmation_request("Are you sure?").expect("is a confirmation request");
         assert_eq!(req.command, None);
         assert_eq!(req.pane_id, None);
-    }
-
-    /// Small helper so the injection table above reads cleanly.
-    trait UnwrapErrOrPanic {
-        fn unwrap_err_or_panic(self, ctx: &str) -> String;
-    }
-    impl UnwrapErrOrPanic for Result<String, String> {
-        fn unwrap_err_or_panic(self, ctx: &str) -> String {
-            match self {
-                Ok(v) => panic!("expected {ctx:?} to be rejected, but it was accepted as {v:?}"),
-                Err(e) => e,
-            }
-        }
     }
 }

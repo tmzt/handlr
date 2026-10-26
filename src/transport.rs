@@ -1236,11 +1236,7 @@ mod tests {
             )
             .await;
         assert!(slash_res.is_err());
-        assert!(
-            slash_res
-                .unwrap_err()
-                .contains("'/' and '-' are not permitted")
-        );
+        assert!(slash_res.unwrap_err().contains("too many symbols"));
 
         // Attempting a command with hyphen '-' must be rejected
         let dash_res = executor
@@ -1250,11 +1246,7 @@ mod tests {
             )
             .await;
         assert!(dash_res.is_err());
-        assert!(
-            dash_res
-                .unwrap_err()
-                .contains("'/' and '-' are not permitted")
-        );
+        assert!(dash_res.unwrap_err().contains("too many symbols"));
 
         // Non-ASCII command must be rejected
         let non_ascii_res = executor
