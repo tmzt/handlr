@@ -121,7 +121,7 @@ fn message_lines(d: &Dictation, layout: &Layout) -> Vec<Line> {
     dictation_lines(d)
         .into_iter()
         .map(|l| {
-            if l.text != d.text {
+            if l.text != d.text || d.mode == flankr_companion::PromptMode::Keyboard {
                 return l;
             }
             let lines = wrap(&l.text, layout.columns(l.size));
@@ -932,7 +932,10 @@ impl App {
             AgentHit::Message => self.send(Input::StartDictation),
             AgentHit::Keyboard => {
                 self.send(Input::StartTextPrompt);
-                ctx.start_text_input("", &libmorph::TextInputOptions::default());
+                let mut options = libmorph::TextInputOptions::default();
+                options.multiline = true;
+                options.action = libmorph::TextAction::None;
+                ctx.start_text_input("", &options);
             }
             AgentHit::Reply => {
                 if let Some(agent) = &mut self.agent {

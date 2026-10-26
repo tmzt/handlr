@@ -16,6 +16,38 @@ use crate::controls::ControlRow;
 use crate::theme::theme;
 use crate::ui::Line;
 
+/// Drops font size as the text wraps onto more lines so that the multi-line
+/// message fits comfortably in the input card.
+fn fit_font_size(text: &str, base_pt: f32, box_w: f32, s: f32) -> (f32, Vec<String>) {
+    let sizes = [base_pt, 18.0, 16.0, 14.0, 12.0];
+    for &pt in &sizes {
+        if pt > base_pt {
+            continue;
+        }
+        let px = pt * s;
+        let mut rows = wrap_hard(text, columns(box_w, px));
+        if rows.is_empty() {
+            rows.push(String::new());
+        }
+        let max_lines = match pt as usize {
+            20.. => 2,
+            18.. => 3,
+            15.. => 4,
+            13.. => 6,
+            _ => usize::MAX,
+        };
+        if rows.len() <= max_lines || pt == 12.0 {
+            return (pt, rows);
+        }
+    }
+    let pt = 12.0;
+    let mut rows = wrap_hard(text, columns(box_w, pt * s));
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    (pt, rows)
+}
+
 /// The message being taken, as a block whose bottom is at `bottom`: its
 /// lines on their own card, or, `replying`, under that card's title and
 /// text with the control row inside it.
@@ -78,17 +110,11 @@ impl DictationCard {
             let box_pad_x = 10.0 * s;
             let box_pad_y = 8.0 * s;
             let box_inner_w = inner_w - 2.0 * box_pad_x;
-            let px = input_line.map_or(20.0 * s, |l| l.size * s);
             let input_text = input_line.map_or("", |l| l.text.as_str());
             let input_color = input_line.map_or(theme().muted, |l| l.color);
-            let mut input_rows = wrap_hard(input_text, columns(box_inner_w, px));
-            if input_rows.is_empty() {
-                input_rows.push(String::new());
-            }
-            if input_rows.len() > DICTATION_LINES {
-                let skip = input_rows.len() - DICTATION_LINES;
-                input_rows.drain(..skip);
-            }
+            let base_pt = input_line.map_or(20.0, |l| l.size);
+            let (fit_pt, input_rows) = fit_font_size(input_text, base_pt, box_inner_w, s);
+            let px = fit_pt * s;
             let input_text_h = input_rows.len() as f32 * line_h(px);
             let box_h = input_text_h + 2.0 * box_pad_y;
             let gap_before_box = if !rows.is_empty() { 8.0 * s } else { 0.0 };
@@ -175,12 +201,16 @@ impl DictationCard {
         }
 
         let mut said: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
-        for line in lines {
-            let px = line.size * s;
-            for (i, t) in wrap_hard(&line.text, columns(inner_w, px))
-                .into_iter()
-                .enumerate()
-            {
+        for (n, line) in lines.iter().enumerate() {
+            let is_last = n == lines.len() - 1;
+            let (fit_pt, line_rows) = if is_last && line.size >= 18.0 {
+                fit_font_size(&line.text, line.size, inner_w, s)
+            } else {
+                let px = line.size * s;
+                (line.size, wrap_hard(&line.text, columns(inner_w, px)))
+            };
+            let px = fit_pt * s;
+            for (i, t) in line_rows.into_iter().enumerate() {
                 let gap = if i == 0 { line.gap.min(8.0) * s } else { 0.0 };
                 said.push((t, px, line.color, gap));
             }

@@ -687,6 +687,38 @@ impl Overview {
 /// `lines` on a card `w` wide from `x`, its bottom at `bottom`, with
 /// Approve and Deny under them when `confirm` is given. In keyboard mode,
 /// the input line sits inside a shaded input area.
+/// Drops font size as the text wraps onto more lines so that the multi-line
+/// message fits comfortably in the input card.
+fn fit_font_size(text: &str, base_pt: f32, box_w: f32, s: f32) -> (f32, Vec<String>) {
+    let sizes = [base_pt, 18.0, 16.0, 14.0, 12.0];
+    for &pt in &sizes {
+        if pt > base_pt {
+            continue;
+        }
+        let px = pt * s;
+        let mut rows = wrap(text, columns(box_w, px));
+        if rows.is_empty() {
+            rows.push(String::new());
+        }
+        let max_lines = match pt as usize {
+            20.. => 2,
+            18.. => 3,
+            15.. => 4,
+            13.. => 6,
+            _ => usize::MAX,
+        };
+        if rows.len() <= max_lines || pt == 12.0 {
+            return (pt, rows);
+        }
+    }
+    let pt = 12.0;
+    let mut rows = wrap(text, columns(box_w, pt * s));
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    (pt, rows)
+}
+
 fn panel(
     lines: &[Line],
     confirm: Option<u64>,
@@ -730,13 +762,11 @@ fn panel(
         let box_pad_x = 10.0 * s;
         let box_pad_y = 8.0 * s;
         let box_inner_w = inner_w - 2.0 * box_pad_x;
-        let px = input_line.map_or(20.0 * s, |l| l.size * s);
         let input_text = input_line.map_or("", |l| l.text.as_str());
         let input_color = input_line.map_or(theme().muted, |l| l.color);
-        let mut input_rows = wrap(input_text, columns(box_inner_w, px));
-        if input_rows.is_empty() {
-            input_rows.push(String::new());
-        }
+        let base_pt = input_line.map_or(20.0, |l| l.size);
+        let (fit_pt, input_rows) = fit_font_size(input_text, base_pt, box_inner_w, s);
+        let px = fit_pt * s;
         let input_text_h = input_rows.len() as f32 * line_h(px);
         let box_h = input_text_h + 2.0 * box_pad_y;
         let gap_before_box = if !rows.is_empty() { 8.0 * s } else { 0.0 };
@@ -805,11 +835,15 @@ fn panel(
 
     let mut rows: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
     for (n, line) in lines.iter().enumerate() {
-        let px = line.size * s;
-        for (i, t) in wrap(&line.text, columns(inner_w, px))
-            .into_iter()
-            .enumerate()
-        {
+        let is_last = n == lines.len() - 1;
+        let (fit_pt, line_rows) = if is_last && line.size >= 18.0 {
+            fit_font_size(&line.text, line.size, inner_w, s)
+        } else {
+            let px = line.size * s;
+            (line.size, wrap(&line.text, columns(inner_w, px)))
+        };
+        let px = fit_pt * s;
+        for (i, t) in line_rows.into_iter().enumerate() {
             let gap = if i == 0 && n > 0 {
                 line.gap.min(8.0) * s
             } else {
@@ -1343,6 +1377,31 @@ mod tests {
         assert!(panel.text_area.is_some());
         let ta = panel.text_area.as_ref().unwrap();
         assert!(ta.is_active());
+    }
+
+    #[test]
+    fn keyboard_prompt_multiline_drops_font_size_to_fit() {
+        let mut o = overview(1);
+        let long_text = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6";
+        let lines = vec![
+            Line {
+                text: "Message for Claude".into(),
+                size: 18.0,
+                color: theme().text,
+                gap: 4.0,
+            },
+            Line {
+                text: long_text.into(),
+                size: 20.0,
+                color: theme().text,
+                gap: 8.0,
+            },
+        ];
+        o.set_dictation(Some((lines, PromptMode::Keyboard).into()));
+        let panel = &o.panels[0];
+        let ta = panel.text_area.as_ref().unwrap();
+        assert!(ta.font_size.unwrap() < 20.0 * o.scale());
+        assert!(panel.rows.len() >= 6);
     }
 
     #[test]

@@ -4991,6 +4991,36 @@ mod tests {
     }
 
     #[test]
+    fn agent_keyboard_prompt_multiline_drops_font_size_to_fit() {
+        use flankr_companion::PromptMode;
+        let mut a = screen(
+            conversation(3),
+            vec![card(CardKind::Finished, 12, true)],
+            Some(0),
+        );
+        let long_text = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6";
+        let lines = vec![
+            crate::ui::Line {
+                text: "Message for Claude".into(),
+                size: 18.0,
+                color: theme().fg,
+                gap: 4.0,
+            },
+            crate::ui::Line {
+                text: long_text.into(),
+                size: 20.0,
+                color: theme().fg,
+                gap: 8.0,
+            },
+        ];
+        a.set_dictation(Some((lines, PromptMode::Keyboard).into()));
+        let card = a.frame().dictation.clone().expect("keyboard prompt card");
+        let ta = card.text_area.as_ref().unwrap();
+        assert!(ta.font_size.unwrap() < 20.0 * a.scale());
+        assert!(card.rows.len() >= 6);
+    }
+
+    #[test]
     fn the_scrollback_grid_is_the_terminal_face_s() {
         use libmsdf::drawlist::AtlasSet;
         use libmsdf::font::{FontAtlas, NOTO_SANS_MONO_ATLAS, TERMINAL_SYMBOLS_ATLAS};

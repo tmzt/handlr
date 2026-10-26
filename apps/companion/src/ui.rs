@@ -54,21 +54,27 @@ impl From<(Vec<Line>, PromptMode)> for DictationPrompt {
     }
 }
 
-/// Splits `text` into lines of at most `max` characters at spaces.
+/// Splits `text` into lines of at most `max` characters at spaces, preserving newlines.
 pub fn wrap(text: &str, max: usize) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > max {
-            lines.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
+    let max = max.max(1);
+    if text.trim().is_empty() {
+        return Vec::new();
     }
-    if !line.is_empty() {
-        lines.push(line);
+    let mut lines = Vec::new();
+    for para in text.split('\n') {
+        let mut line = String::new();
+        for word in para.split_whitespace() {
+            if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > max {
+                lines.push(std::mem::take(&mut line));
+            }
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(word);
+        }
+        if !line.is_empty() || (para.is_empty() && !lines.is_empty()) {
+            lines.push(line);
+        }
     }
     lines
 }
@@ -550,6 +556,8 @@ mod tests {
         assert_eq!(wrap("one two three four", 9), ["one two", "three", "four"]);
         assert_eq!(wrap("  ", 9), Vec::<String>::new());
         assert_eq!(wrap("unbreakable", 4), ["unbreakable"]);
+        assert_eq!(wrap("one\ntwo", 9), ["one", "two"]);
+        assert_eq!(wrap("one\n\ntwo", 9), ["one", "", "two"]);
     }
 
     #[test]
