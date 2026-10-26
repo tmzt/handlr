@@ -17,6 +17,8 @@ pub struct TurnStrip {
     gemini: Option<String>,
     /// What STT is hearing, before it is an utterance.
     partial: Option<String>,
+    /// Whether voice recognition is active.
+    listening: bool,
     rect: Rect,
     scale: f32,
 }
@@ -36,6 +38,7 @@ impl TurnStrip {
         TurnStrip {
             gemini: None,
             partial: None,
+            listening: false,
             rect: Rect::default(),
             scale: 1.0,
         }
@@ -65,12 +68,25 @@ impl TurnStrip {
         self.line() != before
     }
 
+    /// Whether voice recognition is active: shows "Listening…" if no partial
+    /// is heard yet.
+    pub fn set_listening(&mut self, listening: bool) -> bool {
+        if self.listening == listening {
+            return false;
+        }
+        let before = self.line();
+        self.listening = listening;
+        self.line() != before
+    }
+
     /// The line shown, as the turn log writes it, uncut; none while hidden.
     pub fn line(&self) -> Option<String> {
-        match (&self.partial, &self.gemini) {
-            (Some(p), _) => Some(format!("> {}\u{2026}", p.trim())),
-            (None, Some(g)) => Some(format!("< {g}")),
-            (None, None) => None,
+        if let Some(p) = &self.partial {
+            Some(format!("> {}\u{2026}", p.trim()))
+        } else if self.listening {
+            Some("Listening\u{2026}".to_string())
+        } else {
+            self.gemini.as_ref().map(|g| format!("< {g}"))
         }
     }
 
@@ -132,15 +148,20 @@ impl TurnStrip {
             header_px,
             theme().dim,
         );
-        // Body text: latest turn or partial transcript.
+        // Body text: latest turn, partial transcript, or listening indicator.
         let px = Self::PT * s;
         let text = one_line(&line, columns(card.w - 28.0 * s, px));
+        let color = if self.listening && self.partial.is_none() {
+            theme().muted
+        } else {
+            theme().fg
+        };
         ctx.draw_text(
             list,
             &text,
             [card.x + 12.0 * s, card.y + 22.0 * s],
             px,
-            theme().fg,
+            color,
         );
     }
 }
@@ -204,5 +225,27 @@ mod tests {
         assert!(card.w < r.w);
         assert!(t.contains(card.x + 10.0, card.y + 10.0));
         assert!(!t.contains(r.x + 2.0, card.y + 10.0));
+    }
+
+    #[test]
+    fn listening_shows_immediately_and_switches_to_partial() {
+        let mut t = TurnStrip::new();
+        assert!(!t.visible());
+        // Immediate activation:
+        assert!(t.set_listening(true));
+        assert!(t.visible());
+        assert_eq!(t.line().as_deref(), Some("Listening\u{2026}"));
+
+        // Partial speech arrives:
+        assert!(t.set_partial(Some("hello gemini".into())));
+        assert_eq!(t.line().as_deref(), Some("> hello gemini\u{2026}"));
+
+        // Partial speech ends, Gemini replies:
+        t.set_partial(None);
+        t.set_listening(false);
+        assert!(!t.visible());
+        t.push(Speaker::Gemini, "Hello! How can I help?");
+        assert!(t.visible());
+        assert_eq!(t.line().as_deref(), Some("< Hello! How can I help?"));
     }
 }

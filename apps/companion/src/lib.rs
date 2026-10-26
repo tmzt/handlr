@@ -330,6 +330,7 @@ struct CenterHold {
     id: u64,
     start: Duration,
     opened: bool,
+    started_listening: bool,
 }
 
 /// The foreground service, as the app knows it.
@@ -628,7 +629,14 @@ impl App {
                 log::info!("confirmation {confirm_id}: {outcome}");
                 self.set_card(confirm_id, CardState::Done(outcome));
             }
-            Event::TurnEnded { outcome, .. } => log::info!("turn: {outcome}"),
+            Event::TurnEnded { outcome, .. } => {
+                log::info!("turn: {outcome}");
+                self.overview.set_listening(false);
+                self.overview.invalidate();
+                if let Some(agent) = &mut self.agent {
+                    agent.invalidate();
+                }
+            }
             Event::Error(e) => {
                 log::warn!("companion: {e}");
                 self.note = Some((e, Role::Warn));
@@ -655,8 +663,14 @@ impl App {
                 if !d.active {
                     self.ime_dismissed = false;
                     self.overview.overlay_mut().set_input_text("");
+                    self.overview.set_listening(false);
                 } else if d.general_agent {
                     self.overview.overlay_mut().set_input_text(&d.text);
+                    if d.mode == flankr_companion::PromptMode::Voice {
+                        self.overview.set_listening(true);
+                    } else {
+                        self.overview.set_listening(false);
+                    }
                 }
                 self.dictation = d.active.then_some(d);
                 self.overview.invalidate();
@@ -976,6 +990,12 @@ impl App {
                     self.overview.close_overlay();
                     if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
                         ctx.stop_text_input();
+                        self.dictation = None;
+                        self.overview.set_listening(false);
+                        self.overview.invalidate();
+                        if let Some(agent) = &mut self.agent {
+                            agent.invalidate();
+                        }
                         self.send(Input::Clear);
                     }
                 } else if self
@@ -983,8 +1003,29 @@ impl App {
                     .as_ref()
                     .is_some_and(|d| d.general_agent && d.active)
                 {
+                    self.dictation = None;
+                    self.overview.set_listening(false);
+                    self.overview.invalidate();
+                    if let Some(agent) = &mut self.agent {
+                        agent.invalidate();
+                    }
                     self.send(Input::Clear);
                 } else {
+                    self.dictation = Some(flankr_companion::Dictation {
+                        active: true,
+                        mode: flankr_companion::PromptMode::Voice,
+                        text: String::new(),
+                        target: None,
+                        focus_moved: None,
+                        phase: flankr_companion::DictationPhase::Collecting,
+                        submit_in: None,
+                        general_agent: true,
+                    });
+                    self.overview.set_listening(true);
+                    self.overview.invalidate();
+                    if let Some(agent) = &mut self.agent {
+                        agent.invalidate();
+                    }
                     self.send(Input::StartGeneralAgentPrompt(
                         flankr_companion::PromptMode::Voice,
                     ));
@@ -1237,6 +1278,7 @@ impl App {
                     }
                     Input::Listening(false) => {
                         self.overview.set_partial(None);
+                        self.overview.set_listening(false);
                         self.overview.invalidate();
                         if let Some(agent) = &mut self.agent {
                             agent.invalidate();
@@ -1326,8 +1368,9 @@ impl App {
             match touch.phase {
                 TouchPhase::Ended => {
                     let opened = hold.opened;
+                    let started_listening = hold.started_listening;
                     self.center_hold = None;
-                    if !opened {
+                    if !opened && !started_listening {
                         self.agent_hit(ctx, AgentHit::GeneralAgent);
                     }
                     return;
@@ -1349,10 +1392,39 @@ impl App {
                 false
             };
             if on_center {
+                let currently_listening = self.dictation.as_ref().is_some_and(|d| {
+                    d.general_agent && d.active && d.mode == flankr_companion::PromptMode::Voice
+                });
+                let started_listening =
+                    if !currently_listening && !self.overview.overlay().is_open() {
+                        // Activate immediately on press: start voice recognition, animation, and Gemini card!
+                        self.dictation = Some(flankr_companion::Dictation {
+                            active: true,
+                            mode: flankr_companion::PromptMode::Voice,
+                            text: String::new(),
+                            target: None,
+                            focus_moved: None,
+                            phase: flankr_companion::DictationPhase::Collecting,
+                            submit_in: None,
+                            general_agent: true,
+                        });
+                        self.overview.set_listening(true);
+                        self.overview.invalidate();
+                        if let Some(agent) = &mut self.agent {
+                            agent.invalidate();
+                        }
+                        self.send(Input::StartGeneralAgentPrompt(
+                            flankr_companion::PromptMode::Voice,
+                        ));
+                        true
+                    } else {
+                        false
+                    };
                 self.center_hold = Some(CenterHold {
                     id: touch.id,
                     start: now,
                     opened: false,
+                    started_listening,
                 });
                 return;
             }

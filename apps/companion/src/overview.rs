@@ -282,6 +282,14 @@ impl Overview {
         }
     }
 
+    /// Whether voice recognition is active for the general agent.
+    pub fn set_listening(&mut self, listening: bool) {
+        let shown = self.strip.visible();
+        if self.strip.set_listening(listening) {
+            self.strip_changed(shown);
+        }
+    }
+
     /// Whether the strip shows: a line of Gemini's, and the general agent
     /// on (plan 20261024_02, decision 4).
     pub fn strip_shown(&self) -> bool {
@@ -458,31 +466,40 @@ impl Overview {
             panels.push(p);
         }
         self.panels = panels;
-        // Other sessions' cards above them, at the bottom of the cards'
-        // room.
-        self.cross_bottom = above;
-        if self.cross_h > 0.0 {
-            above -= self.cross_h + 8.0 * s;
-        }
+        let overlay_bottom = above.max(top);
 
-        // The strip above them while it shows, and the cards on the rest.
-        let bottom = above.max(top);
+        // The pinned Gemini strip sits above the panels / bottom row.
         let strip_h = if self.strip_shown() {
             TurnStrip::HEIGHT * s
         } else {
             0.0
         };
-        let cards_bottom = (bottom - strip_h).max(top);
+        let strip_bottom = above;
+        if strip_h > 0.0 {
+            above -= strip_h;
+        }
         self.strip
-            .set_rect(Rect::new(0.0, cards_bottom, l.w, bottom - cards_bottom), s);
+            .set_rect(Rect::new(0.0, strip_bottom - strip_h, l.w, strip_h), s);
+
+        // Other sessions' cards above the strip.
+        self.cross_bottom = above;
+        if self.cross_h > 0.0 {
+            above -= self.cross_h + 8.0 * s;
+        }
+
+        let cards_bottom = above.max(top);
         self.grid
             .set_viewport(Rect::new(0.0, top, l.w, cards_bottom - top), s);
 
         // The overlay, over the cards and the strip: two thirds of the
         // screen, or what there is under the status lines.
-        let sheet_top = (l.h * (1.0 - TurnOverlay::SHARE)).max(top).min(bottom);
-        self.overlay
-            .set_area(Rect::new(0.0, sheet_top, l.w, bottom - sheet_top), s);
+        let sheet_top = (l.h * (1.0 - TurnOverlay::SHARE))
+            .max(top)
+            .min(overlay_bottom);
+        self.overlay.set_area(
+            Rect::new(0.0, sheet_top, l.w, overlay_bottom - sheet_top),
+            s,
+        );
 
         self.hits = self
             .buttons
