@@ -1966,6 +1966,8 @@ pub struct AgentScreen {
     cross_h: f32,
     /// The height the general agent turn strip takes.
     strip_h: f32,
+    /// Whether voice recognition is active for the general agent.
+    general_agent_listening: bool,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -2612,6 +2614,15 @@ impl AgentScreen {
         self.settle();
     }
 
+    /// Whether voice recognition is active for the general agent.
+    pub fn set_general_agent_listening(&mut self, listening: bool) {
+        if self.general_agent_listening != listening {
+            self.general_agent_listening = listening;
+            self.flow_stale = true;
+            self.dirty = true;
+        }
+    }
+
     /// A message is to be taken in reply to a card: the pinned card when it
     /// asks, else the newest live question.
     pub fn begin_reply(&mut self) {
@@ -2803,7 +2814,14 @@ impl AgentScreen {
         let buttons = if replying.is_some() {
             Vec::new()
         } else {
-            ControlRow::lay_out(pad, l.w - pad, row_bottom, s, dictating)
+            ControlRow::lay_out(
+                pad,
+                l.w - pad,
+                row_bottom,
+                s,
+                dictating,
+                self.general_agent_listening,
+            )
         };
         let back = Rect::new(0.0, l.top, BACK_W * s, HEADER_H * s);
         let mut above = if replying.is_some() {

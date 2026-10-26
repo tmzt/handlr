@@ -140,7 +140,8 @@ impl DictationCard {
                     color: accent(card.kind),
                     radius: 3.0 * s,
                 });
-                flow.buttons = ControlRow::lay_out(inner_x, x + w - pad, bottom - pad, s, true);
+                flow.buttons =
+                    ControlRow::lay_out(inner_x, x + w - pad, bottom - pad, s, true, false);
             } else {
                 flow.fills.push(Fill {
                     rect: Rect::new(x, top, w, h),
@@ -244,7 +245,7 @@ impl DictationCard {
                 color: accent(card.kind),
                 radius: 3.0 * s,
             });
-            flow.buttons = ControlRow::lay_out(inner_x, x + w - pad, bottom - pad, s, true);
+            flow.buttons = ControlRow::lay_out(inner_x, x + w - pad, bottom - pad, s, true, false);
         } else {
             flow.fills.push(Fill {
                 rect: Rect::new(x, top, w, h),

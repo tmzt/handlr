@@ -141,6 +141,8 @@ pub struct Overview {
     cross_bottom: f32,
     /// Whether the custom GPU panel shader is rendering the navy panels.
     pub shader_panels: bool,
+    /// Whether voice recognition is active for the general agent.
+    general_agent_listening: bool,
 }
 
 impl Default for Overview {
@@ -178,6 +180,7 @@ impl Overview {
             cross_h: 0.0,
             cross_bottom: 0.0,
             shader_panels: false,
+            general_agent_listening: false,
         }
     }
 
@@ -238,6 +241,14 @@ impl Overview {
     pub fn set_dictation(&mut self, prompt: Option<DictationPrompt>) {
         if prompt != self.dictation {
             self.dictation = prompt;
+            self.settle();
+        }
+    }
+
+    /// Whether voice recognition is active for the general agent.
+    pub fn set_general_agent_listening(&mut self, listening: bool) {
+        if self.general_agent_listening != listening {
+            self.general_agent_listening = listening;
             self.settle();
         }
     }
@@ -406,7 +417,14 @@ impl Overview {
         // The bottom row, then the cards above it.
         let row_bottom = l.h - l.bottom - 16.0 * s;
         let dictating = self.dictation.is_some();
-        self.buttons = ControlRow::lay_out(pad, l.w - pad, row_bottom, s, dictating);
+        self.buttons = ControlRow::lay_out(
+            pad,
+            l.w - pad,
+            row_bottom,
+            s,
+            dictating,
+            self.general_agent_listening,
+        );
         let mut above = row_bottom - BUTTON_H * s - 12.0 * s;
         let mut panels = Vec::new();
         // While a confirmation asks, the message makes way for it.

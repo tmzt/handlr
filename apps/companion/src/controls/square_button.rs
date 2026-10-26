@@ -40,6 +40,57 @@ fn draw_glyph(
     draw_row(list, ctx, term, &row, pos);
 }
 
+/// The general agent button in active voice recognition mode:
+/// fixed outer button size, inner pulsing glow ring, and glyph alternating
+/// between the Gemini star and dingbats symbols.
+fn draw_general_agent_listening(
+    list: &mut DrawList,
+    ctx: &DrawContext,
+    term: Option<&Terminal>,
+    rect: Rect,
+    bg: [f32; 4],
+    s: f32,
+) {
+    // Outer button keeps the exact same size.
+    fill(list, rect, bg, 10.0 * s);
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let millis = now.as_millis();
+
+    // 1. Pulsing / growing and shrinking inner ring (oscillates with ~1200ms period).
+    let phase = ((millis % 1200) as f32 / 1200.0 * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+    let ring_pad = (2.0 + (1.0 - phase) * 6.0) * s;
+    let ring_rect = Rect::new(
+        rect.x + ring_pad,
+        rect.y + ring_pad,
+        rect.w - 2.0 * ring_pad,
+        rect.h - 2.0 * ring_pad,
+    );
+    let glow_alpha = 0.20 + 0.35 * phase;
+    fill(
+        list,
+        ring_rect,
+        [1.0, 1.0, 1.0, glow_alpha],
+        (8.0 - phase * 2.0) * s,
+    );
+
+    // 2. Glyph alternates with dingbats symbols across animation steps (~300ms each).
+    const DINGBATS: &[(&str, &str)] = &[
+        (GEMINI_GLYPH, "*"), // ✦ (Black four-pointed star)
+        ("\u{2727}", "*"),   // ✧ (White four-pointed star)
+        ("\u{2736}", "*"),   // ✶ (Six-pointed black star)
+        ("\u{273B}", "*"),   // ✻ (Teardrop-spoked asterisk)
+    ];
+    let step = ((millis / 300) % (DINGBATS.len() as u128)) as usize;
+    let (glyph, fallback) = DINGBATS[step];
+
+    // Inner glyph gently grows and shrinks in sync with the pulse.
+    let px = (21.0 + phase * 6.0) * s;
+    draw_glyph(list, ctx, term, glyph, fallback, rect, px, theme().fg);
+}
+
 /// A keyboard drawn as strokes in `rect`, with no background: an outline
 /// and three rows of keys, the last a space bar. The faces have no
 /// keyboard character.
@@ -189,6 +240,9 @@ impl SquareButton {
             AgentHit::Clear if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);
                 draw_glyph(list, ctx, term, CANCEL_GLYPH, "x", rect, px, theme().fg);
+            }
+            AgentHit::GeneralAgent if b.label == "listening" => {
+                draw_general_agent_listening(list, ctx, term, rect, b.bg, s);
             }
             AgentHit::GeneralAgent if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);

@@ -957,6 +957,12 @@ impl App {
                         ctx.stop_text_input();
                         self.send(Input::Clear);
                     }
+                } else if self
+                    .dictation
+                    .as_ref()
+                    .is_some_and(|d| d.general_agent && d.active)
+                {
+                    self.send(Input::Clear);
                 } else {
                     self.send(Input::StartGeneralAgentPrompt(
                         flankr_companion::PromptMode::Voice,
@@ -1468,8 +1474,12 @@ impl App {
             top: safe.top,
             bottom: safe.bottom + ctx.keyboard_inset(),
         };
+        let ga_listening = self.dictation.as_ref().is_some_and(|d| {
+            d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
+        });
         if let Some(agent) = &mut self.agent {
             agent.set_layout(layout);
+            agent.set_general_agent_listening(ga_listening);
             agent.set_dictation(
                 self.dictation
                     .as_ref()
@@ -1522,6 +1532,7 @@ impl App {
         if !self.pairing() {
             let o = &mut self.overview;
             o.set_layout(layout);
+            o.set_general_agent_listening(ga_listening);
             let note = self
                 .note
                 .as_ref()
@@ -2228,6 +2239,15 @@ impl MorphApp for App {
             }
             if let Some(screen) = &mut self.settings_screen {
                 screen.invalidate();
+            }
+        }
+        let ga_listening = self.dictation.as_ref().is_some_and(|d| {
+            d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
+        });
+        if ga_listening {
+            self.overview.invalidate();
+            if let Some(agent) = &mut self.agent {
+                agent.invalidate();
             }
         }
         let drew = match (&mut self.settings_screen, &mut self.agent) {
