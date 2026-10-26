@@ -226,3 +226,16 @@ The owner (2026-10-26): "plan a mulyi turn chat for generwl agent as a pinned ca
    - **Multi-line text input:** The general agent chat can also be addressed via the 3-line 12pt shaded `TextArea` prompt card with IME inset elevation. Submitting appends the text turn to the conversation.
 
 Implementation has started; this document is now immutable except on explicit instruction.
+
+## Amendment — 2026-10-26 00:52 EDT: centre button replaces overview tap-to-talk; 2 s hold opens overlay
+
+The owner (2026-10-26): "the n3w b7ttin replqces the original tap to talk and holding theccenter button for 2s should open the overlay".
+
+1. **Replaces overview tap-to-talk:**
+   - Tapping empty grid space or background on the overview no longer sends `Input::Tap` or triggers speech listening.
+   - Talking to the general agent is triggered solely via the dedicated centre button (`AgentHit::GeneralAgent`).
+   - The status line when idle reads "ready" rather than "tap to talk".
+
+2. **2-second hold opens overlay:**
+   - Pressing and holding the centre button (`AgentHit::GeneralAgent`) for 2.0 seconds (`Duration::from_secs(2)`) opens the `TurnOverlay` sheet.
+   - Lifting before 2.0 seconds acts as a standard tap, triggering general agent talk/listening.

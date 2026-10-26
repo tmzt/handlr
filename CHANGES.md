@@ -2338,6 +2338,13 @@ Plan: [The general agent as a realtime chat, from its own centre button](docs/de
 - Voice input uses realtime streaming STT with short VAD silence (~1.0s) ending the turn to immediately trigger Gemini's streaming response and TTS playback.
 - Multi-line text input supported via the 3-line 12pt `TextArea` prompt card directed to the general agent.
 
+## 2026-10-26 00:52 EDT — Centre button replaces overview tap-to-talk; 2 s hold opens overlay
+
+Plan: [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- Tapping empty background or grid space on the overview no longer triggers voice listening; the centre button alone triggers general agent talk.
+- Holding the centre button for 2.0 seconds opens the `TurnOverlay` conversation sheet across screens.
+
 
 
 
