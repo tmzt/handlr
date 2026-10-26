@@ -641,7 +641,13 @@ impl App {
                 self.pending = panes;
                 self.overview.set_agents(self.agents.clone(), &self.pending);
             }
-            Event::Conversation { speaker, text } => self.overview.push_turn(speaker, text),
+            Event::Conversation { speaker, text } => {
+                self.overview.push_turn(speaker, text);
+                self.overview.invalidate();
+                if let Some(agent) = &mut self.agent {
+                    agent.invalidate();
+                }
+            }
             Event::Dictation(d) => {
                 if d.active != self.dictation.is_some() {
                     log::info!("dictation: {}", if d.active { "on" } else { "off" });
@@ -653,6 +659,10 @@ impl App {
                     self.overview.overlay_mut().set_input_text(&d.text);
                 }
                 self.dictation = d.active.then_some(d);
+                self.overview.invalidate();
+                if let Some(agent) = &mut self.agent {
+                    agent.invalidate();
+                }
             }
             Event::AgentView {
                 name,
@@ -732,6 +742,17 @@ impl App {
         agent.set_sound(self.settings.sound);
         agent.set_read_aloud(self.read_aloud);
         agent.set_speaking(self.speaking);
+        let ga_listening = self.dictation.as_ref().is_some_and(|d| {
+            d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
+        });
+        agent.set_general_agent_listening(ga_listening);
+        let s = self.scale();
+        let strip_h = if self.overview.strip_shown() {
+            crate::overview::TurnStrip::HEIGHT * s
+        } else {
+            0.0
+        };
+        agent.set_strip_height(strip_h);
         self.agent = Some(agent);
         self.viewed = true;
     }
@@ -1214,7 +1235,13 @@ impl App {
                             self.card = None;
                         }
                     }
-                    Input::Listening(false) => self.overview.set_partial(None),
+                    Input::Listening(false) => {
+                        self.overview.set_partial(None);
+                        self.overview.invalidate();
+                        if let Some(agent) = &mut self.agent {
+                            agent.invalidate();
+                        }
+                    }
                     _ => {}
                 }
                 self.send(input);
@@ -1246,7 +1273,13 @@ impl App {
                 log::error!("audio: TTS: {e}");
                 self.sound = format!("TTS model missing: {e}");
             }
-            AudioEvent::Partial(text) => self.overview.set_partial(Some(text)),
+            AudioEvent::Partial(text) => {
+                self.overview.set_partial(Some(text));
+                self.overview.invalidate();
+                if let Some(agent) = &mut self.agent {
+                    agent.invalidate();
+                }
+            }
             AudioEvent::Gate(state) => {
                 self.sound = match state {
                     GateState::Idle => "ready",
@@ -1354,6 +1387,10 @@ impl App {
                         ctx.stop_text_input();
                         self.send(Input::Clear);
                     }
+                    self.overview.invalidate();
+                    if let Some(agent) = &mut self.agent {
+                        agent.invalidate();
+                    }
                 }
                 crate::controls::scroll::Touched::Tap => {
                     if self
@@ -1365,7 +1402,12 @@ impl App {
                         self.agent_hit(ctx, AgentHit::GeneralAgentTextArea);
                     }
                 }
-                _ => {}
+                _ => {
+                    self.overview.invalidate();
+                    if let Some(agent) = &mut self.agent {
+                        agent.invalidate();
+                    }
+                }
             }
             return;
         }
@@ -1375,6 +1417,10 @@ impl App {
         {
             if touch.phase == TouchPhase::Ended {
                 self.overview.open_turns();
+                self.overview.invalidate();
+                if let Some(agent) = &mut self.agent {
+                    agent.invalidate();
+                }
             }
             return;
         }
@@ -1477,48 +1523,14 @@ impl App {
         let ga_listening = self.dictation.as_ref().is_some_and(|d| {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
         });
-        if let Some(agent) = &mut self.agent {
-            agent.set_layout(layout);
-            agent.set_general_agent_listening(ga_listening);
-            agent.set_dictation(
-                self.dictation
-                    .as_ref()
-                    .filter(|d| !d.general_agent)
-                    .map(|d| (dictation_lines(d), d.mode).into()),
-            );
-            // The band in its session's colour.
-            let colour = self
-                .agent_pane
-                .as_deref()
-                .and_then(|p| self.agents.iter().find(|a| a.pane_id == p))
-                .map(flankr_companion::cross::colour_of);
-            agent.set_session_colour(colour);
-            let s = layout.scale.max(1.0);
-            let row_bottom = layout.h - layout.bottom - 16.0 * s;
-            let strip_h = if self.overview.strip_shown() {
-                crate::overview::TurnStrip::HEIGHT * s
-            } else {
-                0.0
-            };
-            agent.set_strip_height(strip_h);
-            let strip_y = agent.strip_bottom() - strip_h;
-            self.overview.strip_mut().set_rect(
-                libcontrols::Rect::new(
-                    0.0,
-                    strip_y,
-                    layout.w,
-                    crate::overview::TurnStrip::HEIGHT * s,
-                ),
-                s,
-            );
-            let sheet_top = (layout.h * (1.0 - crate::overview::TurnOverlay::SHARE))
-                .max(layout.top)
-                .min(row_bottom);
-            self.overview.overlay_mut().set_area(
-                libcontrols::Rect::new(0.0, sheet_top, layout.w, row_bottom - sheet_top),
-                s,
-            );
-        }
+        let s = layout.scale.max(1.0);
+        let row_bottom = layout.h - layout.bottom - 16.0 * s;
+        let strip_h = if self.overview.strip_shown() {
+            crate::overview::TurnStrip::HEIGHT * s
+        } else {
+            0.0
+        };
+
         if let Some(screen) = &mut self.settings_screen {
             screen.set_layout(layout);
             screen.set_daemon(self.server_name.as_deref().unwrap_or("flankr"), self.online);
@@ -1537,7 +1549,7 @@ impl App {
                 .note
                 .as_ref()
                 .map(|(t, r)| (t.clone(), theme().get(*r)));
-            o.set_status(vec![self.link.clone(), sound], note);
+            o.set_status(vec![self.link.clone(), sound.clone()], note);
             o.set_card(self.card.as_ref().map(|c| Panel {
                 lines: c.lines(),
                 confirm: c.asks().then_some(c.confirm_id),
@@ -1549,10 +1561,43 @@ impl App {
                     .map(|d| (message_lines(d, &layout), d.mode).into()),
             );
             o.set_play(self.read_aloud, self.speaking, self.viewed);
-            self.lay_out_session_cards(layout);
-            return;
         }
         self.lay_out_session_cards(layout);
+
+        if let Some(agent) = &mut self.agent {
+            agent.set_layout(layout);
+            agent.set_general_agent_listening(ga_listening);
+            agent.set_dictation(
+                self.dictation
+                    .as_ref()
+                    .filter(|d| !d.general_agent)
+                    .map(|d| (dictation_lines(d), d.mode).into()),
+            );
+            // The band in its session's colour.
+            let colour = self
+                .agent_pane
+                .as_deref()
+                .and_then(|p| self.agents.iter().find(|a| a.pane_id == p))
+                .map(flankr_companion::cross::colour_of);
+            agent.set_session_colour(colour);
+            agent.set_strip_height(strip_h);
+            let strip_y = agent.strip_bottom() - strip_h;
+            self.overview
+                .strip_mut()
+                .set_rect(libcontrols::Rect::new(0.0, strip_y, layout.w, strip_h), s);
+            let sheet_top = (layout.h * (1.0 - crate::overview::TurnOverlay::SHARE))
+                .max(layout.top)
+                .min(row_bottom);
+            self.overview.overlay_mut().set_area(
+                libcontrols::Rect::new(0.0, sheet_top, layout.w, row_bottom - sheet_top),
+                s,
+            );
+            return;
+        }
+
+        if !self.pairing() {
+            return;
+        }
 
         let line = |text: String, size: f32, color, gap| Line {
             text,
@@ -2046,7 +2091,10 @@ impl MorphApp for App {
             screen.tick(dt);
         } else if let Some(agent) = &mut self.agent {
             agent.tick(dt);
-            self.overview.tick(dt);
+            let moved = self.overview.tick(dt);
+            if moved {
+                agent.invalidate();
+            }
         } else {
             self.overview.tick(dt);
         }
@@ -2260,6 +2308,7 @@ impl MorphApp for App {
         if drew && shown != Shown::Pairing {
             let s = ctx.scale_factor();
             self.session_cards.draw(&mut self.list, &draw, s);
+            let logical_w = frame.size.0 as f32 / s;
             if self.overview.strip_shown()
                 && self.agent.is_some()
                 && !self.overview.overlay().is_shown()
@@ -2272,7 +2321,7 @@ impl MorphApp for App {
             {
                 self.overview
                     .overlay()
-                    .draw(&mut self.list, &draw, frame.size.0 as f32);
+                    .draw(&mut self.list, &draw, logical_w);
             }
         }
         let (w, h) = frame.size;
