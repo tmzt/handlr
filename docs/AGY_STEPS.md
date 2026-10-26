@@ -48,3 +48,27 @@ field numbers below are its fields, nested with dots.
 A response with a reply (20.1) has no tool calls; narration (20.3) comes
 with them. Statuses other than 3 in type 132 (6 and 7) look like failed or
 cancelled calls; which is which is left for the reader's step.
+
+## 2026-10-26 11:32 EDT — exit codes and SQLite status variations in type 132
+
+In earlier agy versions (steps 0 to 6282 in the reference database), `status`
+is `5` for finished steps; in later versions, `status` is `3`. Status `2`
+denotes in-progress/running steps. Both 3 and 5 are normal completed steps.
+
+For `run_command` and command executions, the payload string carries an
+envelope:
+```text
+Created At: ...
+Completed At: ...
+Command exited with code <N>.
+
+Command output:
+<actual command output>
+```
+or `No output from the command.`.
+
+`Command exited with code 0.` is a successful tool execution, not an error,
+and maps to the unwrapped command output body without `error:` prefix.
+Non-zero exit codes (such as `Command exited with code 1.`) are marked with
+`error: ` prefix to correctly trigger the broke card and failure indicators.
+

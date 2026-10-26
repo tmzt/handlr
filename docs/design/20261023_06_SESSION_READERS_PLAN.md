@@ -229,3 +229,14 @@ Every step is built and verified:
   read all active agy panes directly from SQLite WAL without blocking.
 
 `status` is set to `Implemented`.
+
+## Amendment — 2026-10-26 11:32 EDT: exit code 0 is a successful tool call, not an error
+
+This amends step 4 and `AGY_STEPS.md` regarding tool results and status mapping.
+
+1. **Exit code 0 is not a failure:** A tool result from command execution (such as agy's `run_command`) containing `Command exited with code 0.` is a successful tool call. It must not be prefixed with `error:` or generate a `CardKind::Broke` ("Something broke") card, regardless of SQLite status integers.
+2. **Mapped like in Claude:** When an agy tool result represents a command execution wrapped in an envelope (`Created At: ... \n Completed At: ... \n Command exited with code 0. \n\n Command output: ...`), the output is unwrapped to the actual command output (or empty string if `No output from the command.`), matching Claude's raw tool result presentation.
+3. **Failures and non-zero exit codes:** Non-zero exit codes (such as `Command exited with code 1.`) represent failed execution and are prefixed with `error:` so they accurately trigger `is_error` and produce a `Broke` card.
+4. **Tool result status codes:** agy SQLite status 5 (used in earlier conversations) and 3 (used in later conversations) both denote completed steps. Only status 6 (cancelled) and 7 (failed), or explicit error text (`Encountered error in step execution:`, `error:`), denote failures when not overridden by exit code 0.
+5. **Guard in sections:** `src/sessions/sections.rs` (`is_error`) explicitly guards that tool result summaries reporting exit code 0 are never treated as errors.
+

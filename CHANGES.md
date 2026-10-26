@@ -2367,6 +2367,17 @@ Plans:
 - Text filter (stripping unallowed symbols, threshold enforcement for excessive triggering symbols, and length validation) applies uniformly to general agent turns (`turn.start`) as well as session messages (`validate_message`).
 - Multi-line support: line breaks (`\n`, `\r\n`) and tabs are permitted and preserved in message and general agent input so multi-line prompt submissions are retained.
 
+## 2026-10-26 11:32 EDT — Tool results with exit code 0 mapped to successful calls, not Broke
+
+Plan: [Session readers for agy and other agents, behind one agnostic trait](docs/design/20261023_06_SESSION_READERS_PLAN.md).
+
+- Tool execution results reporting `Command exited with code 0.` are treated as successful tool calls, matching Claude's behavior. They are never prefixed with `error:` or reported as `CardKind::Broke` ("Something broke").
+- agy command output envelopes (`Created At: ... \n Completed At: ... \n Command exited with code 0. \n\n Command output:\n...`) are unwrapped to the command output body (or empty string when no output was produced).
+- Non-zero exit codes (`Command exited with code <N>`) are marked with `error: ` and correctly report broken/failed cards.
+- agy SQLite status 5 and 3 are recognized as completed steps; running status 2 and status 5 are not misclassified as errors.
+- `src/sessions/sections.rs` guards against treating exit code 0 as an error.
+
+
 
 
 
