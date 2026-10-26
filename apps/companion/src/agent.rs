@@ -1877,6 +1877,12 @@ pub struct AgentScreen {
     /// The pinned card shows all its text (owner, 2026-10-23: "clicking an
     /// abbreviated question should expand the text and card").
     pin_expanded: bool,
+    /// The expansion state before a message started, restored when the
+    /// message closes if not overridden by the user.
+    pin_saved_expanded: Option<bool>,
+    /// The user explicitly toggled expand on the pinned card while a message
+    /// was active: this override is remembered after the message closes.
+    pin_overridden: bool,
     /// The sections the user expanded (tool calls, diffs, summary cards),
     /// by packed serial, while the view is open.
     expanded: HashSet<u64>,
@@ -2168,6 +2174,8 @@ impl AgentScreen {
         // A different pinned card starts folded.
         if self.pinned_card().map(|c| (c.kind, c.text.clone())) != pin_was {
             self.pin_expanded = false;
+            self.pin_saved_expanded = None;
+            self.pin_overridden = false;
         }
         self.refresh_blocks();
         self.hold(keep);
@@ -2550,8 +2558,24 @@ impl AgentScreen {
         if prompt == self.dictation {
             return;
         }
-        if prompt.is_none() {
+        let starting = prompt.is_some() && self.dictation.is_none();
+        let ending = prompt.is_none() && self.dictation.is_some();
+        if starting {
+            if self.pin_saved_expanded.is_none() {
+                self.pin_saved_expanded = Some(self.pin_expanded);
+                self.pin_overridden = false;
+                self.pin_expanded = false;
+            }
+        } else if ending {
             self.reply = None;
+            if !self.pin_overridden {
+                if let Some(was) = self.pin_saved_expanded.take() {
+                    self.pin_expanded = was;
+                }
+            } else {
+                self.pin_saved_expanded = None;
+            }
+            self.pin_overridden = false;
         }
         self.dictation = prompt;
         self.settle();
@@ -2613,7 +2637,15 @@ impl AgentScreen {
     /// Shows all of the pinned card's text, or folds it to its first lines.
     pub fn toggle_expand(&mut self) {
         self.pin_expanded = !self.pin_expanded;
+        if self.dictation.is_some() {
+            self.pin_overridden = true;
+        }
         self.settle();
+    }
+
+    /// Whether the pinned card is currently expanded.
+    pub fn pin_expanded(&self) -> bool {
+        self.pin_expanded
     }
 
     /// Whether the pinned card's text is longer than its first lines.
@@ -2781,8 +2813,10 @@ impl AgentScreen {
         });
         let mut full_top = above;
         let mut pin = None;
-        // While a message is taken, the pinned card makes way for it.
-        if let Some(card) = self.pinned_card().filter(|_| !dictating) {
+        // While a message is taken, the pinned card collapses above it
+        // (unless the message is taking a reply in that card itself).
+        let is_replying_to_pin = replying.is_some_and(|r| self.pinned_card() == Some(r));
+        if let Some(card) = self.pinned_card().filter(|_| !is_replying_to_pin) {
             // Expanded, as many lines as leave the flow 120 pt; else the
             // first PIN_LINES.
             let view_top = header.y + header.h;
@@ -5323,11 +5357,57 @@ mod tests {
         }
         let mid = f.buttons[1].rect;
         assert!((mid.x + mid.w * 0.5 - PHONE.w * 0.5).abs() < 0.5);
-        // The pinned card makes way; the flow ends above the message.
-        assert!(f.pin.is_none());
+        // The pinned card collapses above the message card.
+        assert!(f.pin.is_some());
+        let pin = f.pin.expect("the pinned card");
         let card = f.dictation.expect("the message card");
-        assert!(f.viewport.y + f.viewport.h <= card.fills[0].rect.y);
+        assert!(pin.rect.y + pin.rect.h <= card.fills[0].rect.y);
+        assert!(f.viewport.y + f.viewport.h <= pin.rect.y);
         assert!(card.buttons.is_empty());
+    }
+
+    #[test]
+    fn message_collapses_pinned_card_with_state_memory_and_user_override() {
+        let live = finished(&["Point 1", "Point 2"], Some("Summary line"));
+        let mut a = screen(conversation(3), vec![live], Some(0));
+        assert!(a.frame().pin.is_some());
+        assert!(!a.pin_expanded());
+
+        // 1. Expand the pinned card
+        a.toggle_expand();
+        assert!(a.pin_expanded());
+
+        // 2. Open a message: collapses the pinned card, remembering it was expanded
+        a.set_dictation(Some(said("hello").into()));
+        assert!(!a.pin_expanded());
+        assert!(a.frame().pin.is_some());
+
+        // 3. Close the message without user override: restores expanded
+        a.set_dictation(None);
+        assert!(a.pin_expanded());
+
+        // 4. Open a message again: collapses again
+        a.set_dictation(Some(said("hello").into()));
+        assert!(!a.pin_expanded());
+
+        // 5. User explicitly overrides by toggling expand while message is open
+        a.toggle_expand();
+        assert!(a.pin_expanded());
+
+        // 6. Close the message: user override is remembered (stays expanded)
+        a.set_dictation(None);
+        assert!(a.pin_expanded());
+
+        // 7. Collapse it, open message (already collapsed), toggle expand and collapse:
+        a.toggle_expand();
+        assert!(!a.pin_expanded());
+        a.set_dictation(Some(said("hello").into()));
+        assert!(!a.pin_expanded());
+        a.toggle_expand(); // override -> expanded
+        a.toggle_expand(); // override -> collapsed
+        assert!(!a.pin_expanded());
+        a.set_dictation(None);
+        assert!(!a.pin_expanded());
     }
 
     #[test]
