@@ -1,7 +1,7 @@
 ---
 title: Markdown detection in agent output and automatic switch to rich rendering
 date: 2026-10-26
-status: Draft
+status: In implementation
 covers:
   - "Heuristic detection of Markdown formatting in agent output text and conversation turns"
   - "A scoring metric computing Markdown feature density and character coverage against a configurable percentage threshold"
@@ -164,3 +164,8 @@ threshold, text remains in the fast terminal row layout.
 ## 4. Open questions for the owner
 
 None.
+
+## Amendment — 2026-10-26 12:58 EDT: approved, implementation has started
+
+The owner approved the plan on 2026-10-26 ("approve and implement"). Implementation has started with step 1 in `crates/flankr-markdown`; this document is now immutable except on explicit instruction.
+
