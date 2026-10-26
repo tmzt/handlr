@@ -2358,6 +2358,16 @@ Plans:
 - `TurnOverlay` expanded sheet includes the text input area at the bottom with turns scrollable above it.
 - Restored normal message input card display and lifecycle so taking an agent message is not blocked.
 
+## 2026-10-26 01:40 EDT — Text filter applied to general agent and session input
+
+Plans:
+- [The bulk input and dictation mode](docs/design/20261023_02_BULK_INPUT_PLAN.md).
+- [The general agent as a realtime chat, from its own centre button](docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md).
+
+- Text filter (stripping unallowed symbols, threshold enforcement for excessive triggering symbols, and length validation) applies uniformly to general agent turns (`turn.start`) as well as session messages (`validate_message`).
+- Multi-line support: line breaks (`\n`, `\r\n`) and tabs are permitted and preserved in message and general agent input so multi-line prompt submissions are retained.
+
+
 
 
 

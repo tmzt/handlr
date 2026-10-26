@@ -257,3 +257,12 @@ On the owner's instruction: "if general agent responses are rendered as cards th
    - Clear lingering dictation state when general agent turns start, cancel, or complete, so subsequent normal dictation or keyboard prompt requests are not blocked.
    - Ensure the normal message `DictationCard` / panel layout on `AgentScreen` and `OverviewScreen` displays cleanly above the bottom row without occlusion or overlap.
 
+## Amendment — 2026-10-26 01:40 EDT: text filter applies to general agent input
+
+The owner (2026-10-26): "the filter applies to general wnd session input".
+
+1. **Validation of general agent inputs:**
+   - Both voice STT turns and multi-line text submissions in `turn.start` are filtered with the text filter (`validate_message`): disallowed symbols are removed, and inputs with excessive threshold-triggering symbols are rejected.
+   - Newlines and tabs are preserved to support multi-line turns.
+
+

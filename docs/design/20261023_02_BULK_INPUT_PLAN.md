@@ -326,3 +326,15 @@ This amends the 01:58 EDT amendment on the strict symbol filter for `validate_ar
    - **Threshold exception:** An isolated single symbol followed by a space (or trailing at the end of the input), such as `. `, `, `, `! `, `? `, `: `, or `- `, is treated as standard speech transcription / sentence punctuation and does **not** count toward the threshold.
    - Embedded symbols (such as `/` in paths or `-` in CLI flags) or runs of symbols (e.g. `!@#$%`, `---`, `...`) do count toward the threshold. When the count exceeds 3, the input is rejected.
 
+## Amendment — 2026-10-26 01:40 EDT: text filter applies to both general agent and session input
+
+The owner (2026-10-26): "the filter applies to general wnd session input".
+
+1. **Uniform application:**
+   - The symbol removal, threshold rejection, and length checks apply uniformly to both session messages (`validate_message`) and general agent chat turns (`turn.start`).
+   - Disallowed symbols are stripped from both inputs; excessive threshold-triggering symbols (limit of 0 for command execution / 3 for free text) reject the turn or message.
+
+2. **Multi-line support:**
+   - Newlines (`\n`, `\r\n`) and tabs are preserved in messages and general agent input so multi-line text input (from the 3-line `TextArea` and desktop entry) is retained rather than rejected as a control character or flattened.
+
+
