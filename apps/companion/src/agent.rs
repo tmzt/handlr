@@ -5028,8 +5028,9 @@ mod tests {
         a.set_dictation(Some((lines, PromptMode::Keyboard).into()));
         let card = a.frame().dictation.clone().expect("keyboard prompt card");
         let ta = card.text_area.as_ref().unwrap();
-        assert!(ta.font_size.unwrap() < 20.0 * a.scale());
+        assert!(ta.font_size.unwrap() <= 12.0 * a.scale());
         assert!(card.rows.len() >= 6);
+        assert!(ta.rect.h >= 3.0 * (12.0 * 1.3 * a.scale()));
     }
 
     #[test]

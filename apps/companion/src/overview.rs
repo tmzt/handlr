@@ -703,9 +703,10 @@ impl Overview {
 /// Drops font size as the text wraps onto more lines so that the multi-line
 /// message fits comfortably in the input card.
 fn fit_font_size(text: &str, base_pt: f32, box_w: f32, s: f32) -> (f32, Vec<String>) {
-    let sizes = [base_pt, 18.0, 16.0, 14.0, 12.0];
+    let base = base_pt.min(12.0);
+    let sizes = [base, 11.0, 10.0];
     for &pt in &sizes {
-        if pt > base_pt {
+        if pt > base {
             continue;
         }
         let px = pt * s;
@@ -714,17 +715,15 @@ fn fit_font_size(text: &str, base_pt: f32, box_w: f32, s: f32) -> (f32, Vec<Stri
             rows.push(String::new());
         }
         let max_lines = match pt as usize {
-            20.. => 2,
-            18.. => 3,
-            15.. => 4,
-            13.. => 6,
+            12.. => 3,
+            11.. => 4,
             _ => usize::MAX,
         };
-        if rows.len() <= max_lines || pt == 12.0 {
+        if rows.len() <= max_lines || pt <= 10.0 {
             return (pt, rows);
         }
     }
-    let pt = 12.0;
+    let pt = 10.0;
     let mut rows = wrap(text, columns(box_w, pt * s));
     if rows.is_empty() {
         rows.push(String::new());
@@ -777,10 +776,11 @@ fn panel(
         let box_inner_w = inner_w - 2.0 * box_pad_x;
         let input_text = input_line.map_or("", |l| l.text.as_str());
         let input_color = input_line.map_or(theme().muted, |l| l.color);
-        let base_pt = input_line.map_or(20.0, |l| l.size);
+        let base_pt = input_line.map_or(12.0, |l| l.size.min(12.0));
         let (fit_pt, input_rows) = fit_font_size(input_text, base_pt, box_inner_w, s);
         let px = fit_pt * s;
-        let input_text_h = input_rows.len() as f32 * line_h(px);
+        let line_count = input_rows.len().max(3);
+        let input_text_h = line_count as f32 * line_h(px);
         let box_h = input_text_h + 2.0 * box_pad_y;
         let gap_before_box = if !rows.is_empty() { 8.0 * s } else { 0.0 };
 
@@ -1413,8 +1413,9 @@ mod tests {
         o.set_dictation(Some((lines, PromptMode::Keyboard).into()));
         let panel = &o.panels[0];
         let ta = panel.text_area.as_ref().unwrap();
-        assert!(ta.font_size.unwrap() < 20.0 * o.scale());
+        assert!(ta.font_size.unwrap() <= 12.0 * o.scale());
         assert!(panel.rows.len() >= 6);
+        assert!(ta.rect.h >= 3.0 * (12.0 * 1.3 * o.scale()));
     }
 
     #[test]

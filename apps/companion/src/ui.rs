@@ -240,14 +240,18 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
             2.0,
         ));
     }
+    let size = match d.mode {
+        PromptMode::Voice => 20.0,
+        PromptMode::Keyboard => 12.0,
+    };
     if d.text.is_empty() {
         let placeholder = match d.mode {
             PromptMode::Voice => "(say your message)",
             PromptMode::Keyboard => "Type your message",
         };
-        lines.push(line(placeholder.to_string(), 20.0, theme().muted, 8.0));
+        lines.push(line(placeholder.to_string(), size, theme().muted, 8.0));
     } else {
-        lines.push(line(d.text.clone(), 20.0, theme().text, 8.0));
+        lines.push(line(d.text.clone(), size, theme().text, 8.0));
     }
     lines
 }
