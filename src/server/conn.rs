@@ -903,7 +903,14 @@ async fn call(
             let principal = conn.principal();
             let checked = policy::check(principal, &daemon.agents, &agent, &pane_id, &p.command)
                 .map_err(|denied| ErrorObject::new(codes::NOT_PERMITTED, denied.to_string()))?;
-            if checked.require_confirmation {
+            let by_tap = tapped(conn, &p);
+            if by_tap {
+                log::info!(
+                    "Command '{}' for pane '{pane_id}' confirmed by the tap",
+                    checked.command
+                );
+            }
+            if checked.require_confirmation && !by_tap {
                 let confirm_id = daemon
                     .broker
                     .request(
@@ -1133,6 +1140,17 @@ async fn call(
     }
 }
 
+/// Whether `agents.send` comes with the user's approval already: `confirmed`
+/// from a companion (plan 20261023_02, the 2026-10-27 13:25 EDT amendment),
+/// trusted exactly as far as it could approve the confirmation itself: its
+/// own message (a voice-turn confirmation), or a command when it may
+/// approve. From any other client the flag is ignored.
+fn tapped(conn: &Conn, p: &common::AgentsSendParams) -> bool {
+    p.confirmed
+        && conn.is_companion()
+        && (p.kind == common::SendKind::Message || conn.principal().can_approve)
+}
+
 /// `agents.send` with `kind: "message"` (plan 20261023_02, decisions 5 and
 /// 6): checked by `policy::check_message`, then always a confirmation,
 /// whose handle is settled as a voice turn's is. A companion's own message
@@ -1163,6 +1181,18 @@ async fn send_message(
         root.as_deref(),
     )
     .map_err(|denied| ErrorObject::new(codes::NOT_PERMITTED, denied.to_string()))?;
+    if tapped(conn, &p) {
+        log::info!(
+            "Message for pane '{pane_id}' confirmed by the tap ({} characters)",
+            checked.command.len()
+        );
+        daemon
+            .client
+            .run_command(pane_id, &checked.command)
+            .await
+            .map_err(herdr_unavailable)?;
+        return ok(common::AgentsSendResult::Sent);
+    }
     let names = daemon.names(snap);
     let named = names.get(pane_id);
     let spoken = named

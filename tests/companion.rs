@@ -1137,6 +1137,38 @@ async fn a_message_is_confirmed_once_and_sent_as_dictated() {
 }
 
 #[tokio::test]
+async fn a_tapped_send_is_its_own_approval() {
+    // Plan 20261023_02, the 2026-10-27 13:25 EDT amendment.
+    let env = start(confirming()).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let mut tapped = message("claude", "yes");
+    tapped["confirmed"] = json!(true);
+    let r = c.call("agents.send", tapped).await;
+    assert_eq!(r["result"]["status"], "sent", "{r}");
+    let (commands, _) = mock_logs(&env.daemon).await;
+    assert_eq!(commands.last().map(|(_, t)| t.as_str()), Some("yes"));
+    // The checks still run.
+    let mut bad = message("claude", "/status please");
+    bad["confirmed"] = json!(true);
+    let r = c.call("agents.send", bad).await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+    // A local companion may not approve a command, so its tap still asks.
+    let r = c
+        .call(
+            "agents.send",
+            json!({"pane_id": "claude", "command": "continue", "confirmed": true}),
+        )
+        .await;
+    assert_eq!(r["result"]["status"], "pending", "{r}");
+    // From a harness client the flag is ignored.
+    let (mut harness, _) = Client::unix(&env.socket, "flankr.harness", "h").await;
+    let mut from_harness = message("claude", "please go on");
+    from_harness["confirmed"] = json!(true);
+    let r = harness.call("agents.send", from_harness).await;
+    assert_eq!(r["result"]["status"], "pending", "{r}");
+}
+
+#[tokio::test]
 async fn a_denied_message_sends_nothing() {
     let env = start(confirming()).await;
     let (mut c, _) = Client::companion(&env).await;
