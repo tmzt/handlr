@@ -72,6 +72,7 @@ pub fn question_in(reply: &Item) -> Option<PendingQuestion> {
         about_plan,
         plan,
         links: Vec::new(),
+        answers: Vec::new(),
     })
 }
 

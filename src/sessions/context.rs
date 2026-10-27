@@ -264,6 +264,7 @@ mod tests {
             about_plan: false,
             plan: None,
             links: vec![],
+            answers: vec![],
         };
         let block = AgentContext::new("Claude", "p1", "blocked", &items, Some(q));
         let text = block.render();
@@ -286,6 +287,7 @@ mod tests {
                     about_plan: false,
                     plan: None,
                     links: vec![],
+                    answers: vec![],
                 };
                 AgentContext::new(
                     &format!("Agent {a}"),
