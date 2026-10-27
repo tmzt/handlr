@@ -3049,12 +3049,17 @@ impl State {
                 "the silence"
             }
         );
-        let params = serde_json::json!({
+        let mut params = serde_json::json!({
             "pane_id": target.pane_id,
             "text": text,
             "kind": common::SendKind::Message,
             "handle": message_handle(&target, &text),
         });
+        // The Submit button is the approval (plan 20261023_02, the 13:25
+        // EDT amendment); a submit by silence keeps its own approval.
+        if by_button {
+            params["confirmed"] = serde_json::json!(true);
+        }
         self.interact(&target.pane_id);
         out.push(self.request(methods::AGENTS_SEND, params, Sent::Message));
         self.show_dictation(out);
@@ -3127,6 +3132,10 @@ impl State {
         if kind == common::SendKind::Message {
             params["kind"] = serde_json::json!(kind);
         }
+        // The tap is the approval (plan 20261023_02, the 13:25 EDT
+        // amendment). An older daemon ignores it and asks, and the tap is
+        // matched to that confirmation below, as before.
+        params["confirmed"] = serde_json::json!(true);
         self.tapped.push(Tapped {
             pane_id: pane_id.clone(),
             text: text.to_string(),
@@ -6335,6 +6344,8 @@ mod tests {
         let out = s.input(Input::Submit);
         let send = message_send(&out).expect("agents.send");
         assert_eq!(send.params["pane_id"], "w2:pZ");
+        // The Submit button is the approval.
+        assert_eq!(send.params["confirmed"], true);
     }
 
     #[test]
@@ -6343,19 +6354,20 @@ mod tests {
         let out = s.input(Input::Respond(Suggestion::Continue));
         let sends = requests(&out, "agents.send");
         assert_eq!(sends.len(), 1, "{out:?}");
-        // A command: no kind, so the daemon reads it as one.
+        // A command: no kind, so the daemon reads it as one; confirmed, since
+        // the tap is the approval (plan 20261023_02, the 13:25 EDT amendment).
         assert_eq!(
             sends[0].params,
             json!({"pane_id": "w2:pZ", "text": "continue",
-                   "handle": "reply-claude-flankr-cont"})
+                   "handle": "reply-claude-flankr-cont", "confirmed": true})
         );
         let out = s.input(Input::Respond(Suggestion::Yes));
         assert_eq!(
             requests(&out, "agents.send")[0].params,
             json!({"pane_id": "w2:pZ", "text": "Yes, go on", "kind": "message",
-                   "handle": "reply-claude-flankr-yes"})
+                   "handle": "reply-claude-flankr-yes", "confirmed": true})
         );
-        // The tap is the approval: its question is answered, not asked.
+        // An older daemon asks anyway: its question is answered, not asked.
         let id = requests(&out, "agents.send")[0].id.clone();
         s.incoming(response(id, json!({"status": "pending", "confirm_id": 9})));
         let out = s.incoming(note(
