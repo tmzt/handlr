@@ -30,6 +30,8 @@ const WAIT: Duration = Duration::from_secs(5);
 /// The engine's script, keyed on the user's text:
 /// * `send <command> to <target>`: `run_command`, then a short reply;
 /// * `send <command> to <target> as <handle>`: the same, with that handle;
+/// * `send <command>`: `send_agent_command` with no agent;
+/// * `focus project <target>`: `focus_project`;
 /// * `... then slow`: the same, then a call that never ends in time;
 /// * `watch <target> then slow`: `watch_pane`, then the slow call;
 /// * `slow`: only the slow call;
@@ -48,7 +50,23 @@ impl MockHandler for Script {
             None => (text, text == "slow"),
         };
         let mut reply = format!("You said {text}.");
-        if let Some(rest) = text.strip_prefix("send ") {
+        if let Some(target) = text.strip_prefix("focus project ") {
+            executor
+                .execute_tool("focus_project", &json!({"agent": target}))
+                .await?;
+            reply = "Focused.".to_string();
+        } else if let Some(command) = text
+            .strip_prefix("send ")
+            .filter(|rest| !rest.contains(" to "))
+        {
+            executor
+                .execute_tool(
+                    "send_agent_command",
+                    &json!({"text": command, "handle": "h"}),
+                )
+                .await?;
+            reply = "Sent.".to_string();
+        } else if let Some(rest) = text.strip_prefix("send ") {
             let (command, target) = rest.split_once(" to ").expect("send <command> to <target>");
             let mut args = json!({"pane_id": target, "command": command});
             if let Some((target, handle)) = target.split_once(" as ") {
@@ -1184,6 +1202,53 @@ async fn messages_are_always_confirmed_and_strictly_filtered() {
             .contains("allow_messages"),
         "{r}"
     );
+}
+
+async fn focused_target(daemon: &Daemon) -> Option<String> {
+    match daemon.client.transport() {
+        HerdrTransport::Mock { state } => state.read().await.focused_target.clone(),
+        _ => unreachable!("tests use the mock"),
+    }
+}
+
+#[tokio::test]
+async fn the_current_agent_comes_from_the_open_session_or_focus_project() {
+    let env = start(direct("")).await;
+    if let HerdrTransport::Mock { state } = env.daemon.client.transport() {
+        state.write().await.focused_target = None;
+    }
+    let (mut c, _) = Client::companion(&env).await;
+
+    // No current agent yet: an unnamed send is refused, nothing is sent.
+    let r = c.call("turn.start", turn(1, "send continue")).await;
+    assert_eq!(r["result"]["outcome"], "error", "{r}");
+    assert!(mock_logs(&env.daemon).await.0.is_empty());
+
+    // From the agent view: the open session is the current agent.
+    let r = c
+        .call(
+            "turn.start",
+            json!({"turn_id": 2, "text": "send continue", "session": "p1"}),
+        )
+        .await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    assert_eq!(
+        mock_logs(&env.daemon).await.0,
+        [("p1".to_string(), "continue".to_string())]
+    );
+    assert_eq!(focused_target(&env.daemon).await, None);
+
+    // focus_project leaves herdr alone without tab_follows_focus ...
+    let r = c.call("turn.start", turn(3, "focus project claude")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    assert_eq!(focused_target(&env.daemon).await, None);
+    // ... and moves it with it.
+    let r = c
+        .call("client.options", json!({"tab_follows_focus": true}))
+        .await;
+    assert!(r.get("error").is_none(), "{r}");
+    c.call("turn.start", turn(4, "focus project claude")).await;
+    assert_eq!(focused_target(&env.daemon).await.as_deref(), Some("p1"));
 }
 
 #[tokio::test]

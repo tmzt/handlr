@@ -38,7 +38,9 @@ use crate::core::principal::Principal;
 use crate::llm::read_key_file;
 use crate::llm::{LlmOptions, LlmService, Profile, Use};
 use crate::reasoning::{Message, ReasoningEngine, SessionManager};
-use crate::transport::{HerdrContextContributor, HerdrToolExecutor, TurnLog, VoiceTurn};
+use crate::transport::{
+    CurrentAgent, HerdrContextContributor, HerdrToolExecutor, TurnLog, VoiceTurn,
+};
 
 /// The model entry an interrupted turn leaves in the history.
 pub const INTERRUPTED_ENTRY: &str = "[interrupted by user]";
@@ -142,6 +144,10 @@ pub struct Session {
     turn: Mutex<Option<Running>>,
     /// The pane the conversation last addressed (18:03 EDT amendment).
     current: Mutex<Option<String>>,
+    /// The conversation's current agent (plan 20261027_04, decision 3
+    /// and the 11:25 EDT amendment): the session open on the phone, from
+    /// `turn.start`'s `session`, or the agent `focus_project` picked.
+    pub(super) current_agent: CurrentAgent,
     serial: AtomicU64,
 }
 
@@ -180,6 +186,7 @@ impl Session {
             id: id.to_string(),
             turn: Mutex::new(None),
             current: Mutex::new(None),
+            current_agent: CurrentAgent::default(),
             serial: AtomicU64::new(0),
         }
     }
@@ -463,6 +470,13 @@ pub(super) async fn turn_start(
         .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
     let turn_id = params.turn_id;
 
+    // A turn from the agent view makes its open session the current agent
+    // (plan 20261027_04, decision 3).
+    let opened = params.session.as_deref().map(str::trim);
+    if let Some(pane_id) = opened.filter(|p| !p.is_empty()) {
+        *session.current_agent.lock().unwrap() = Some(pane_id.to_string());
+    }
+
     // A new turn ends the voice-turn confirmations still pending, as
     // denied (plan 01's lifetime rule, plan 02's 12:06 EDT amendment).
     daemon.broker.end_voice_turns(&principal.id);
@@ -696,7 +710,8 @@ async fn work(
     let contributor = HerdrContextContributor::new(daemon.client.clone(), daemon.agents.clone())
         .with_watches(Arc::clone(&daemon.watches))
         .with_naming(daemon.naming.clone())
-        .with_sessions(Arc::clone(&daemon.sessions));
+        .with_sessions(Arc::clone(&daemon.sessions))
+        .with_current_agent(Arc::clone(&session.current_agent));
     if let Err(e) = contributor.contribute(&mut messages).await {
         log::warn!("The herdr context could not be added: {e}");
     }
@@ -713,7 +728,8 @@ async fn work(
             broker: Arc::clone(&daemon.broker),
             log: Arc::clone(&log),
             utterance: Some(text.clone()),
-        });
+        })
+        .with_current_agent(Arc::clone(&session.current_agent), conn.tab_follows_focus());
     // Subscribed before any confirmation can be opened, so no resolution
     // is missed.
     let mut events = daemon.broker.subscribe();

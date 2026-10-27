@@ -96,6 +96,10 @@ pub(super) struct Conn {
     /// summaries go on (plan 20261024_02, decision 7, as amended at
     /// 11:37 EDT). On when the connection opens.
     general_agent: std::sync::atomic::AtomicBool,
+    /// A companion's `client.options` `tab_follows_focus`: the general
+    /// agent's `focus_project` also moves herdr's focus (plan 20261027_04,
+    /// the 11:20 and 11:25 EDT amendments). Off when the connection opens.
+    tab_follows_focus: std::sync::atomic::AtomicBool,
     /// When the client last asked anything but a ping.
     last_request: Mutex<std::time::Instant>,
     /// Session subscriptions, by id (plan 20261023_03).
@@ -178,6 +182,11 @@ impl Conn {
             || (self.is_companion()
                 && self.last_request.lock().unwrap().elapsed() >= ASLEEP_AFTER
                 && self.subscriptions.lock().unwrap().is_empty())
+    }
+
+    pub(super) fn tab_follows_focus(&self) -> bool {
+        self.tab_follows_focus
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(super) fn spoken_output(&self) -> bool {
@@ -331,6 +340,7 @@ async fn serve<S>(
         spoken_output: std::sync::atomic::AtomicBool::new(false),
         background: std::sync::atomic::AtomicBool::new(false),
         general_agent: std::sync::atomic::AtomicBool::new(true),
+        tab_follows_focus: std::sync::atomic::AtomicBool::new(false),
         last_request: Mutex::new(std::time::Instant::now()),
         subscriptions: Mutex::new(HashMap::new()),
         next_subscription: std::sync::atomic::AtomicU64::new(0),
@@ -878,6 +888,8 @@ async fn call(
                 .store(p.background, std::sync::atomic::Ordering::Relaxed);
             conn.general_agent
                 .store(p.general_agent, std::sync::atomic::Ordering::Relaxed);
+            conn.tab_follows_focus
+                .store(p.tab_follows_focus, std::sync::atomic::Ordering::Relaxed);
             ok(common::Empty {})
         }
         methods::AGENTS_SEND => {

@@ -55,6 +55,12 @@ pub struct VoiceTurn {
     pub utterance: Option<String>,
 }
 
+/// The conversation's current agent, a pane id (plan 20261027_04,
+/// decision 3 and the 11:25 EDT amendment): the session open on the
+/// phone, or the agent `focus_project` last picked. Shared by a
+/// conversation's turns.
+pub type CurrentAgent = Arc<Mutex<Option<String>>>;
+
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
 pub struct HerdrToolExecutor {
     pub client: HerdrClient,
@@ -68,6 +74,12 @@ pub struct HerdrToolExecutor {
     /// When set, a confirmation-required command opens a voice-turn
     /// confirmation; otherwise it is refused.
     pub voice_turn: Option<VoiceTurn>,
+    /// When set, `focus_project` sets it and `send_agent_command` without
+    /// an agent goes to it.
+    pub current_agent: Option<CurrentAgent>,
+    /// `focus_project` also moves herdr's focus (`client.options`
+    /// `tab_follows_focus`).
+    pub tab_follows_focus: bool,
 }
 
 impl HerdrToolExecutor {
@@ -79,7 +91,69 @@ impl HerdrToolExecutor {
             principal: Principal::local("flankr"),
             naming: None,
             voice_turn: None,
+            current_agent: None,
+            tab_follows_focus: false,
         }
+    }
+
+    pub fn with_current_agent(mut self, current: CurrentAgent, tab_follows_focus: bool) -> Self {
+        self.current_agent = Some(current);
+        self.tab_follows_focus = tab_follows_focus;
+        self
+    }
+
+    /// The current agent's pane id, if there is one.
+    fn current(&self) -> Option<String> {
+        self.current_agent
+            .as_ref()
+            .and_then(|c| c.lock().unwrap().clone())
+    }
+
+    /// `focus_project`: `agent` becomes the current agent; herdr's focus
+    /// moves to it only with `tab_follows_focus`.
+    async fn execute_focus_project(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let Some(current) = &self.current_agent else {
+            return Err("Focusing a project is not available in this session.".to_string());
+        };
+        let requested = args
+            .get("agent")
+            .or_else(|| args.get("target_id"))
+            .or_else(|| args.get("pane_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if requested.is_empty() {
+            return Err("'focus_project' requires an 'agent'.".to_string());
+        }
+        let snapshot = self
+            .client
+            .list_panes()
+            .await
+            .map_err(|e| format!("herdr is not answering: {e}"))?;
+        let pane_id = self.resolve(&snapshot, requested)?;
+        *current.lock().unwrap() = Some(pane_id.clone());
+        self.addressed(&pane_id);
+        let agent = agents::agents(&snapshot)
+            .into_iter()
+            .find(|a| crate::watch::pane_ids_match(&a.pane_id, &pane_id));
+        let moved = if self.tab_follows_focus {
+            self.client.focus(&pane_id).await.map_err(|e| {
+                format!("The project is current, but herdr's focus did not move: {e}")
+            })?;
+            true
+        } else {
+            false
+        };
+        log::info!("focus_project: '{pane_id}' is current (herdr focus moved: {moved})");
+        Ok(serde_json::json!({
+            "current_agent": pane_id,
+            "agent": agent.as_ref().map(|a| a.agent.clone()),
+            "project": agent.as_ref().and_then(|a| a.project.clone()),
+            "herdr_focus_moved": moved,
+        }))
     }
 
     pub fn with_principal(mut self, principal: Principal) -> Self {
@@ -189,12 +263,19 @@ impl HerdrToolExecutor {
             .or_else(|| args.get("cmd"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let requested = args
+        let named = args
             .get("agent")
             .or_else(|| args.get("pane_id"))
             .or_else(|| args.get("target_id"))
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string);
+        // Left out, the current agent (the 11:25 EDT amendment, item 2).
+        let Some(requested) = named.or_else(|| self.current()) else {
+            return Err("Which agent? Name one, or focus a project first".to_string());
+        };
+        let requested = requested.as_str();
 
         let snapshot = match self.client.list_panes().await {
             Ok(snapshot) => Some(snapshot),
@@ -403,6 +484,7 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
             crate::reasoning::SEND_AGENT_COMMAND | "run_command" | "send_command" => {
                 self.execute_send_agent_command(args).await
             }
+            crate::reasoning::FOCUS_PROJECT => self.execute_focus_project(args).await,
             "focus" => self.execute_focus(name, args).await,
             _ => self
                 .client
@@ -425,6 +507,9 @@ pub struct HerdrContextContributor {
     /// When set, the context has an `### Agent sessions` section read from
     /// the agents' own transcripts (plan 20261022_03, decision 7).
     pub sessions: Option<Arc<Sessions>>,
+    /// When set, the context names the conversation's current agent (plan
+    /// 20261027_04, the 11:25 EDT amendment).
+    pub current_agent: Option<CurrentAgent>,
 }
 
 impl HerdrContextContributor {
@@ -435,7 +520,53 @@ impl HerdrContextContributor {
             watches: None,
             naming: None,
             sessions: None,
+            current_agent: None,
         }
+    }
+
+    pub fn with_current_agent(mut self, current: CurrentAgent) -> Self {
+        self.current_agent = Some(current);
+        self
+    }
+
+    /// The `### Current agent` section.
+    fn current_agent_section(&self, snapshot: &serde_json::Value) -> Option<String> {
+        let current = self.current_agent.as_ref()?.lock().unwrap().clone();
+        let mut section = String::from("### Current agent\n");
+        let Some(pane_id) = current else {
+            section.push_str(
+                "None: name the agent in `send_agent_command`, or call `focus_project` when the \
+                 user picks an agent or a project.\n\n",
+            );
+            return Some(section);
+        };
+        let found = agents::agents(snapshot)
+            .into_iter()
+            .find(|a| crate::watch::pane_ids_match(&a.pane_id, &pane_id));
+        let Some(agent) = found else {
+            section.push_str(&format!(
+                "Pane {pane_id}, which herdr no longer has. Ask which agent the user means.\n\n"
+            ));
+            return Some(section);
+        };
+        let spoken = self
+            .naming
+            .as_ref()
+            .and_then(|naming| {
+                Names::from_snapshot(snapshot, naming)
+                    .get(&agent.pane_id)
+                    .map(|n| n.spoken.clone())
+            })
+            .unwrap_or_else(|| crate::core::naming::capitalise(&agent.agent));
+        section.push_str(&format!(
+            "Current agent: {spoken} (pane {}, project {}, cwd {}). The user means this agent \
+             unless they name another; `send_agent_command` without `agent` goes to it, and \
+             `focus_project` changes it.\n\n",
+            agent.pane_id,
+            agent.project.as_deref().unwrap_or("unknown"),
+            agent.cwd.as_deref().unwrap_or("unknown"),
+        ));
+        Some(section)
     }
 
     pub fn with_sessions(mut self, sessions: Arc<Sessions>) -> Self {
@@ -799,6 +930,10 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         }
 
+        if let Some(section) = self.current_agent_section(&snapshot) {
+            content.push_str(&section);
+        }
+
         // 4. Inject as a system instruction/turn
         messages.push(libinfer::Message {
             role: "system".to_string(),
@@ -1089,6 +1224,106 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not configured"), "{err}");
+    }
+
+    async fn focused_target(client: &HerdrClient) -> Option<String> {
+        match client.transport() {
+            HerdrTransport::Mock { state } => state.read().await.focused_target.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_focus_project_sets_the_current_agent_and_herdr_focus_only_when_asked() {
+        let client = session_mock().await;
+        if let HerdrTransport::Mock { state } = client.transport() {
+            state.write().await.focused_target = None;
+        }
+        let current = CurrentAgent::default();
+        let agents = vec![AgentConfig::new(
+            "claude",
+            vec!["continue".to_string()],
+            false,
+        )];
+        let executor = HerdrToolExecutor::new(client.clone(), agents.clone())
+            .with_current_agent(Arc::clone(&current), false);
+
+        // Without a current agent, an unnamed send is refused.
+        let err = executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "text": "continue", "handle": "h" }),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err, "Which agent? Name one, or focus a project first");
+
+        let res = executor
+            .execute_tool("focus_project", &json!({ "agent": "p1" }))
+            .await
+            .unwrap();
+        assert_eq!(res["current_agent"], "p1");
+        assert_eq!(res["herdr_focus_moved"], false);
+        assert_eq!(current.lock().unwrap().as_deref(), Some("p1"));
+        assert_eq!(focused_target(&client).await, None, "herdr left alone");
+
+        // Now an unnamed send goes to it.
+        executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "text": "continue", "handle": "h" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            command_log(&client).await,
+            [("p1".to_string(), "continue".to_string())]
+        );
+
+        // With tab_follows_focus, herdr's focus moves too.
+        let following = HerdrToolExecutor::new(client.clone(), agents)
+            .with_current_agent(Arc::clone(&current), true);
+        let res = following
+            .execute_tool("focus_project", &json!({ "agent": "p2" }))
+            .await
+            .unwrap();
+        assert_eq!(res["herdr_focus_moved"], true);
+        assert_eq!(current.lock().unwrap().as_deref(), Some("p2"));
+        assert_eq!(focused_target(&client).await.as_deref(), Some("p2"));
+
+        // Outside a conversation there is no current agent to set.
+        let err = HerdrToolExecutor::new(client.clone(), vec![])
+            .execute_tool("focus_project", &json!({ "agent": "p1" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not available"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_the_context_names_the_current_agent() {
+        let client = session_mock().await;
+        let current = CurrentAgent::default();
+        let contributor = HerdrContextContributor::new(client.clone(), vec![])
+            .with_naming(NamingConfig::default())
+            .with_current_agent(Arc::clone(&current));
+        let content = context_for(&contributor, "hello").await;
+        assert!(content.contains("### Current agent\nNone:"), "{content}");
+
+        *current.lock().unwrap() = Some("p1".to_string());
+        let content = context_for(&contributor, "hello").await;
+        let start = content.find("### Current agent").unwrap();
+        let section = &content[start..];
+        assert!(section.contains("Current agent: Claude"), "{section}");
+        assert!(section.contains("pane p1"), "{section}");
+        assert!(section.contains("cwd /work/example"), "{section}");
+
+        // Without one kept, there is no section.
+        let plain = HerdrContextContributor::new(client, vec![]);
+        assert!(
+            !context_for(&plain, "hello")
+                .await
+                .contains("### Current agent")
+        );
     }
 
     #[tokio::test]

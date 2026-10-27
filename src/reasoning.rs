@@ -105,13 +105,24 @@ impl InspectPaneParams {
     }
 }
 
+/// Parameters for the `focus_project` tool (plan 20261027_04, the 11:25
+/// EDT amendment).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct FocusProjectParams {
+    /// The coding agent whose project becomes current: its name, its tab
+    /// label or its pane id.
+    pub agent: String,
+}
+
 /// Parameters for the `send_agent_command` tool (plan 20261027_04,
 /// decision 1): an allow-listed command, or any other text as a request
 /// the user approves.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SendAgentCommandParams {
     /// The coding agent to send to: its name, its tab label or its pane id.
-    pub agent: String,
+    /// Left out, the current agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// What to type to the agent: an allowed command (e.g. "continue",
     /// "/compact", "/usage") or a request in words. A request is sent only
     /// after the user approves it.
@@ -129,7 +140,7 @@ impl SendAgentCommandParams {
         handle: impl Into<String>,
     ) -> Self {
         Self {
-            agent: agent.into(),
+            agent: Some(agent.into()),
             text: text.into(),
             handle: handle.into(),
         }
@@ -214,6 +225,9 @@ impl WatchPaneParams {
 /// 20261027_04, decision 1). The executor also takes the old names
 /// `run_command` and `send_command`.
 pub const SEND_AGENT_COMMAND: &str = "send_agent_command";
+/// The tool that makes an agent the conversation's current one (plan
+/// 20261027_04, the 11:25 EDT amendment).
+pub const FOCUS_PROJECT: &str = "focus_project";
 
 /// `list_files`: the current project's readable files (plan 20261027_04,
 /// decision 4).
@@ -277,6 +291,12 @@ pub fn declare_gemini_tools_for(set: ToolSet) -> Vec<Tool> {
             None,
         )
         .with_parameters::<FocusParams>(),
+        FunctionDeclaration::new(
+            FOCUS_PROJECT,
+            "Makes a coding agent the current agent for the rest of the conversation: requests without an agent go to it, and its project is the one discussed. Use when the user picks an agent or a project to talk about. It does not change what the user sees unless their settings say so.",
+            None,
+        )
+        .with_parameters::<FocusProjectParams>(),
         FunctionDeclaration::new(
             SEND_AGENT_COMMAND,
             "Sends text to a coding agent: a permitted command (e.g. 'continue', '/compact', '/usage'), typed as it is, or a request in words. flankr asks the user to approve a request, and a command when that agent requires approval. Use the command's and agent's real names; the returned `handle` is the name flankr kept.",
@@ -419,18 +439,25 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 4);
+        assert_eq!(decls.len(), 5);
 
         let names: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["focus", "send_agent_command", "watch_pane", "unwatch_pane"]
+            vec![
+                "focus",
+                "focus_project",
+                "send_agent_command",
+                "watch_pane",
+                "unwatch_pane"
+            ]
         );
         let with_files = declare_gemini_tools_for(ToolSet { file_tools: true });
         assert_eq!(
             tool_names(&with_files),
             [
                 "focus",
+                "focus_project",
                 "send_agent_command",
                 "watch_pane",
                 "unwatch_pane",
@@ -596,7 +623,7 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 4);
+        assert_eq!(decls.len(), 5);
         assert!(decls.iter().any(|d| d.name == "watch_pane"));
     }
 }
