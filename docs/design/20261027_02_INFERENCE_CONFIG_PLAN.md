@@ -239,3 +239,29 @@ nothing; step 4 needs 3.
    third-party backends, for example with a per-backend `third_party = false`
    that `enabled = false` leaves usable?
 4. **The name:** `[inference]`, or `[llm]`?
+
+## Amendment — 2026-10-27 00:59 EDT: the open questions answered; the section is [llm]
+
+The owner (2026-10-27): "1. can come later, but they should eventually be
+aligned. 2. not now 3. it should just enable non coding agent llms 4. llm".
+1. **The section is `[llm]`,** in place of `[inference]`, everywhere in this
+   plan: `[llm] enabled`, `[llm] default`, `[llm.backends.<name>]` and
+   `[llm.uses.<use>]`. The Rust types move to `src/llm/` (decision 2's
+   `src/inference/`), and the protocol's `InferenceInfo` is `LlmInfo`, sent as
+   `HelloResult.llm` and in `server.capabilities`. The refusal code is
+   `LLM_UNAVAILABLE`.
+2. **The master switch covers every LLM flankr uses itself,** third-party or
+   local, but never the coding agents in the panes. `[llm] enabled = false`
+   (the default) means no general agent turns, no card summaries and no
+   spoken summaries from any backend. There is no per-backend
+   `third_party` flag. This replaces decision 1's "third-party" wording and
+   answers open question 3.
+3. **Per-use prompts come later.** The prompts stay fixed per use in code for
+   now. A later plan should align each use with a named prompt in
+   `ADDITIONAL_PROMPTS.md`, and this plan's use names (`general_agent`,
+   `card_summaries`, `spoken_summaries`) are chosen so they can be those
+   names. This answers open question 1.
+4. **No per-use limits now** (timeouts, output length, caps). This answers
+   open question 2.
+
+The plan stays `Draft` until the owner approves it.
