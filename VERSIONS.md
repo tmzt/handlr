@@ -278,3 +278,13 @@ amendments of 11:20 EDT and the settings plan's of 11:27 EDT):
   - `common::ClientOptionsParams::tab_follows_focus: bool`, off when left
     out: when on, the general agent's `focus_project` also moves herdr's
     focused tab.
+
+## libflankr_proto 0.3.12 — 2026-10-27 (the commit tagged `libflankr_proto-v0.3.12`)
+
+Additive, by the owner's ruling ("appending to a struct is additive"): one
+appended, serde-defaulted field (plan 20261023_02, the 2026-10-27 13:25 EDT
+amendment):
+
+- **Added:** `common::AgentsSendParams::confirmed: bool`, off when left out
+  and not written when off: the user approved the send in the app already,
+  so a companion that may approve sends it without a confirmation.

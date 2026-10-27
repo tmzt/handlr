@@ -484,6 +484,12 @@ pub struct AgentsSendParams {
     /// and `-`. Required by `flankr.harness`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handle: Option<String>,
+    /// The user approved this in the app already, by tapping a button or
+    /// submitting reviewed text (plan 20261023_02, the 2026-10-27 13:25 EDT
+    /// amendment): a companion that may approve sends it without a
+    /// confirmation. Ignored from any other client. Off when left out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1832,13 +1838,26 @@ mod tests {
             command: "continue".to_string(),
             kind: SendKind::Command,
             handle: Some("keep-going".to_string()),
+            confirmed: false,
         });
         round_trip(AgentsSendParams {
             pane_id: "w2:pZ".to_string(),
             command: "please run the tests".to_string(),
             kind: SendKind::Message,
             handle: Some("message-claude-flankr-please-run".to_string()),
+            confirmed: true,
         });
+        // Left out, it is off, and off is not written.
+        let old: AgentsSendParams =
+            serde_json::from_value(serde_json::json!({"pane_id": "p1", "command": "continue"}))
+                .unwrap();
+        assert!(!old.confirmed);
+        assert!(
+            serde_json::to_value(&old)
+                .unwrap()
+                .get("confirmed")
+                .is_none()
+        );
         round_trip(AgentsSendResult::Sent);
         round_trip(AgentsSendResult::Pending {
             confirm_id: 3,
