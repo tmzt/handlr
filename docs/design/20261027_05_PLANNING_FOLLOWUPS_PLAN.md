@@ -261,3 +261,28 @@ agnostic)".
 4. The steps are now 1, 2, 3, 4, 6 and 7, numbered as before.
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-27 12:37 EDT: approved, with the discussion's remaining items
+
+The owner (2026-10-27): "approve and implement", to the question "Add the
+remaining items with my recommendations, leave the transcript readers on
+their 250 ms checks, and approve plan 05 for building?".
+
+1. **`recent_commits`' path filter** is checked only as a message's paths
+   are (inside the project, with `check_paths`'s bounds); it need not match
+   `read`, since the tool returns no file contents. This replaces decision
+   1's "must also match `read`".
+2. **`recent_commits(count?, path?, files?)`:** with `files: true`, each
+   commit also lists the paths it changed (`--name-only`), at most 50 per
+   commit, never diffs. Step 3's **Done when:** adds the `files` flag.
+3. **The watcher follows the key files' folders** as `[llm]` resolves them
+   (the default key file's folder, and each backend's `api_key_file`), and
+   moves its watch when they change.
+4. **Order:** step 2 (the old `[gemini]` section) is built first, then step
+   1, then the rest. This replaces the steps' "1 comes first".
+5. **The transcript tailers stay on their 250 ms checks.** This answers
+   open question 2.
+6. **Approved.** The status becomes `In implementation` with step 2's
+   commit. The `via flankr:` rule line (the 12:33 amendment, item 2) is
+   added by the lead to the shared rules and `AGENTS.md` together when
+   step 6 lands.
