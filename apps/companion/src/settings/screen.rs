@@ -718,14 +718,21 @@ impl SettingsScreen {
                     }
                 }
                 Section::Voice => {
-                    for (id, on) in [
-                        (n.microphone, settings.microphone),
-                        (n.general_agent, settings.general_agent),
+                    // *General agent* is dim while the daemon offers none;
+                    // its ⓘ says why (plan 20261027_02, decision 9).
+                    for (id, on, enabled) in [
+                        (n.microphone, settings.microphone, true),
+                        (
+                            n.general_agent,
+                            settings.general_agent,
+                            super::llm().general_agent,
+                        ),
                     ] {
                         let rect = row(&mut y);
                         if let Some(t) = router.get_mut::<ToggleRow>(id) {
                             t.rect = rect;
                             t.on = on;
+                            t.enabled = enabled;
                         }
                     }
                 }
@@ -1202,13 +1209,30 @@ impl SettingsScreen {
         );
     }
 
+    /// The daemon's `[llm]` changed: *General agent* is shown as it is now.
+    pub fn llm_changed(&mut self) {
+        if self.nodes.is_some() {
+            self.place();
+        }
+        self.invalidate();
+    }
+
     /// Opens `info`'s explanation.
     fn explain(&mut self, info: Info) {
         let copy = info.copy();
+        let vendor = self.vendor.as_deref();
+        let mut body = copy.body(vendor);
+        // Without the daemon's general agent: why, and where to turn it on.
+        let llm = super::llm();
+        if info == Info::GeneralAgent && !llm.general_agent {
+            let reason = llm.reason.as_deref().unwrap_or("not given");
+            let why = copy::GENERAL_AGENT_UNAVAILABLE.fill(vendor, &[("reason", reason)]);
+            body = format!("{why}\n\n{body}");
+        }
         let modal = InfoModal::new(
             self.modal_viewport(),
             copy.label(),
-            &copy.body(self.vendor.as_deref()),
+            &body,
             self.scale(),
             self.faces.clone(),
         );
@@ -2044,6 +2068,52 @@ mod tests {
         tap(&mut s, x, y);
         assert!(s.asking());
         assert!(opened.borrow().is_empty());
+    }
+
+    #[test]
+    fn without_the_daemons_general_agent_its_toggle_is_dim_and_its_info_says_why() {
+        use flankr_companion::wire::LlmInfo;
+        let label = "General agent (Gemini)";
+        let mut s = plain();
+        // Offered: the toggle flips.
+        assert!(matches!(
+            tap_row(&mut s, label),
+            Some(SettingsHit::Changed(_))
+        ));
+        tap_row(&mut s, label);
+        // The daemon stops offering it, while the screen is open.
+        crate::settings::set_llm(LlmInfo {
+            general_agent: false,
+            summaries: true,
+            reason: Some("[llm.uses.general_agent] enabled = false".into()),
+        });
+        s.llm_changed();
+        assert_eq!(tap_row(&mut s, label), None, "dim, it takes no taps");
+        let [x, y] = s.info_point(label).unwrap();
+        tap(&mut s, x, y);
+        assert!(s.asking());
+        s.tick(Duration::from_secs(1));
+        let text = s.modal_text();
+        assert!(
+            text.contains("[llm.uses.general_agent] enabled = false"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[llm]") && text.contains("config.toml"),
+            "{text}"
+        );
+        let (ok, _) = s.modal_points();
+        tap(&mut s, ok[0], ok[1]);
+        // Offered again: live again, and the ⓘ has no reason.
+        crate::settings::set_llm(LlmInfo::available());
+        s.llm_changed();
+        assert!(matches!(
+            tap_row(&mut s, label),
+            Some(SettingsHit::Changed(_))
+        ));
+        tap(&mut s, x, y);
+        s.tick(Duration::from_secs(1));
+        assert!(!s.modal_text().contains("offers no general agent"));
     }
 
     #[test]

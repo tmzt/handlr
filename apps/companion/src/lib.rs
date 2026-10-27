@@ -730,6 +730,19 @@ impl App {
                 }
                 self.session_cards.set(cards);
             }
+            // Plan 20261027_02, decision 9: the centre button, the Gemini
+            // strip and the settings toggle follow the daemon's `[llm]`.
+            Event::Llm(info) => {
+                settings::set_llm(info);
+                self.overview.settings_changed();
+                self.overview.invalidate();
+                if let Some(agent) = &mut self.agent {
+                    agent.invalidate();
+                }
+                if let Some(screen) = &mut self.settings_screen {
+                    screen.llm_changed();
+                }
+            }
             // herdr's focus shows on the cards, from the list it refreshes.
             Event::Say(_)
             | Event::Focus(_)
@@ -2387,7 +2400,7 @@ impl MorphApp for App {
             {
                 self.overview.strip().draw(&mut self.list, &draw);
             }
-            if settings::current().general_agent
+            if settings::general_agent_on()
                 && self.agent.is_some()
                 && self.overview.overlay().is_shown()
             {

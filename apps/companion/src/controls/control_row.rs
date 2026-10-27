@@ -55,12 +55,16 @@ impl ControlRow {
             row.push(square(AgentHit::Clear, (x0 + x1 - sq) * 0.5, theme().back));
             row.push(square(AgentHit::Submit, x1 - sq, theme().approve));
         } else {
-            // The centre button: general agent (Gemini) idle in neutral background.
-            row.push(square(
-                AgentHit::GeneralAgent,
-                (x0 + x1 - sq) * 0.5,
-                theme().back,
-            ));
+            // The centre button: general agent (Gemini) idle in neutral
+            // background, hidden while the daemon offers none (plan
+            // 20261027_02, decision 9).
+            if crate::settings::llm().general_agent {
+                row.push(square(
+                    AgentHit::GeneralAgent,
+                    (x0 + x1 - sq) * 0.5,
+                    theme().back,
+                ));
+            }
             // The keyboard glyph, left of record with record's hit box and
             // no background.
             let gap = 12.0 * s;
@@ -100,5 +104,16 @@ mod tests {
         assert_eq!(idle_buttons[1].hit, AgentHit::GeneralAgent);
         assert_eq!(idle_buttons[1].label, "");
         assert_eq!(idle_buttons[1].bg, theme().back);
+
+        // Without the daemon's general agent, no centre button.
+        crate::settings::set_llm(flankr_companion::wire::LlmInfo {
+            general_agent: false,
+            summaries: true,
+            reason: None,
+        });
+        let hidden = ControlRow::lay_out(10.0, 390.0, 500.0, 1.0, false, false);
+        assert_eq!(hidden.len(), 3);
+        assert!(hidden.iter().all(|b| b.hit != AgentHit::GeneralAgent));
+        crate::settings::set_llm(flankr_companion::wire::LlmInfo::available());
     }
 }

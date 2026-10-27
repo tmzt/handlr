@@ -291,15 +291,16 @@ impl Overview {
     }
 
     /// Whether the strip shows: a line of Gemini's, and the general agent
-    /// on (plan 20261024_02, decision 4).
+    /// on (plan 20261024_02, decision 4) and offered by the daemon (plan
+    /// 20261027_02, decision 9).
     pub fn strip_shown(&self) -> bool {
-        self.strip.visible() && settings::current().general_agent
+        self.strip.visible() && settings::general_agent_on()
     }
 
     /// The settings changed: what they turn off is redrawn, and without the
     /// general agent the strip and the overlay go.
     pub fn settings_changed(&mut self) {
-        if !settings::current().general_agent {
+        if !settings::general_agent_on() {
             self.overlay.close();
         }
         self.settle();
@@ -1639,5 +1640,36 @@ mod tests {
         let grid = o.grid().viewport();
         assert!((grid.y + grid.h - o.strip().rect().y).abs() < 0.01);
         assert_eq!(o.strip().rect().h, TurnStrip::HEIGHT * 2.0);
+    }
+
+    #[test]
+    fn the_centre_button_and_the_strip_follow_the_daemons_llm() {
+        use flankr_companion::wire::LlmInfo;
+        let mut o = overview(4);
+        talk(&mut o, 2);
+        let ctx = DrawContext::default();
+        let mut list = DrawList::new();
+        o.draw(&mut list, &ctx, None);
+        assert!(o.rect_of(AgentHit::GeneralAgent).is_some());
+        assert!(o.strip_shown());
+        // The daemon turns it off while connected: both go.
+        settings::set_llm(LlmInfo {
+            general_agent: false,
+            summaries: false,
+            reason: Some("off".into()),
+        });
+        o.settings_changed();
+        let mut list = DrawList::new();
+        o.draw(&mut list, &ctx, None);
+        assert!(o.rect_of(AgentHit::GeneralAgent).is_none(), "hidden");
+        assert!(!o.strip_shown());
+        assert!(!o.overlay().is_open());
+        // And back.
+        settings::set_llm(LlmInfo::available());
+        o.settings_changed();
+        let mut list = DrawList::new();
+        o.draw(&mut list, &ctx, None);
+        assert!(o.rect_of(AgentHit::GeneralAgent).is_some());
+        assert!(o.strip_shown());
     }
 }

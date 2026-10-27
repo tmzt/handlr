@@ -36,6 +36,8 @@ use std::path::{Path, PathBuf};
 use libmsdf::drawlist::DrawList;
 use serde::{Deserialize, Serialize};
 
+use flankr_companion::wire::LlmInfo;
+
 use crate::agent::{AgentHit, ScrollbarVisibility};
 use crate::theme::{self, Theme, Themes};
 
@@ -364,6 +366,25 @@ pub fn put_theme_in_force(settings: &Settings) -> Option<Theme> {
 thread_local! {
     /// The settings as the UI thread last set them.
     static CURRENT: RefCell<Settings> = RefCell::new(Settings::default());
+    /// What the daemon's `[llm]` makes available, as last told (plan
+    /// 20261027_02, decision 9); both until a daemon says otherwise.
+    static LLM: RefCell<LlmInfo> = RefCell::new(LlmInfo::available());
+}
+
+/// What the daemon's `[llm]` makes available, as the UI thread last set it.
+pub fn llm() -> LlmInfo {
+    LLM.with(|l| l.borrow().clone())
+}
+
+/// Sets what [`llm`] gives on this thread.
+pub fn set_llm(info: LlmInfo) {
+    LLM.with(|l| *l.borrow_mut() = info);
+}
+
+/// Whether the general agent is there to use: the user's toggle is on and
+/// the daemon offers it.
+pub fn general_agent_on() -> bool {
+    current().general_agent && llm().general_agent
 }
 
 /// The settings every control reads.
@@ -391,14 +412,17 @@ pub fn allows(hit: AgentHit) -> bool {
         | AgentHit::Scratch
         | AgentHit::Clear
         | AgentHit::Suggest(flankr_companion::Suggestion::Discuss) => s.microphone,
+        // Hidden while the daemon offers none (plan 20261027_02, decision 9).
+        AgentHit::GeneralAgent => llm().general_agent,
         _ => true,
     }
 }
 
 /// As [`allows`], on the overview: there, record is also the general
-/// agent's, and is disabled with it off (the 11:37 EDT amendment).
+/// agent's, and is disabled with it off (the 11:37 EDT amendment), or
+/// while the daemon offers none (plan 20261027_02).
 pub fn allows_on_overview(hit: AgentHit) -> bool {
-    allows(hit) && (hit != AgentHit::Message || current().general_agent)
+    allows(hit) && (hit != AgentHit::Message || general_agent_on())
 }
 
 /// Whether the app can show the soft keyboard (libmorph text input plan
@@ -703,6 +727,24 @@ mod tests {
         assert!(!allows_on_overview(AgentHit::Message));
         assert!(allows_on_overview(AgentHit::ReadAloud));
         set_current(Settings::default());
+    }
+
+    #[test]
+    fn the_daemons_llm_gates_the_general_agent() {
+        set_current(Settings::default());
+        assert!(general_agent_on() && allows(AgentHit::GeneralAgent));
+        set_llm(LlmInfo {
+            general_agent: false,
+            summaries: true,
+            reason: Some("off".into()),
+        });
+        assert!(!general_agent_on(), "though the toggle is on");
+        assert!(current().general_agent);
+        assert!(!allows(AgentHit::GeneralAgent));
+        assert!(allows(AgentHit::Message), "a message in the agent view");
+        assert!(!allows_on_overview(AgentHit::Message));
+        set_llm(LlmInfo::available());
+        assert!(general_agent_on() && allows_on_overview(AgentHit::Message));
     }
 
     #[test]

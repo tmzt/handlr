@@ -80,8 +80,18 @@ key's text on that vendor's phones.
     What you ask by voice on the overview (and, later, from the chat
     button) goes to **Gemini**, the general agent. Off, the overview's
     record button is disabled and no voice turn is sent to Gemini. The
-    daemon's spoken summaries of agents' replies are separate: they are
-    set in the daemon's `config.toml`, under `[summary]`.
+    daemon's own use of models, the general agent and its summaries of
+    agents' replies alike, is set in the daemon's `config.toml`, under
+    `[llm]`.
+
+# [Copy] general_agent_unavailable
+
+- [abc] reason: why the daemon offers no general agent, as it says
+- text: |
+    **The daemon offers no general agent:** {{ [abc] reason }}. Until it
+    does, this switch has no effect and the centre button is hidden. It is
+    turned on with `enabled = true` under `[llm]` in the daemon's
+    `config.toml`; the daemon picks the change up within about 5 seconds.
 
 # [Copy] scrollbar
 
