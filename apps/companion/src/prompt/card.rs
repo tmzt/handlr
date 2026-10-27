@@ -259,6 +259,31 @@ impl PromptCard {
         self.history.push(speaker, text.to_string());
     }
 
+    /// The whole conversation at once, as the app keeps it: for a screen's
+    /// card as the screen opens.
+    pub fn set_turns(&mut self, turns: &[(Speaker, String)]) {
+        let newest = |who: Speaker| {
+            turns
+                .iter()
+                .rev()
+                .find(|(s, t)| *s == who && !t.trim().is_empty())
+                .map(|(_, t)| t.trim().to_string())
+        };
+        self.user = newest(Speaker::User);
+        self.gemini = newest(Speaker::Gemini);
+        let lines = turns
+            .iter()
+            .filter(|(_, t)| !t.trim().is_empty())
+            .map(|(s, t)| super::history::Line::Turn(*s, t.trim().to_string()))
+            .collect();
+        self.history.set_lines(lines);
+    }
+
+    /// Whether it listens for the general agent.
+    pub fn listening(&self) -> bool {
+        self.listening
+    }
+
     /// What STT is hearing. Returns whether it changed.
     pub fn set_partial(&mut self, partial: Option<String>) -> bool {
         let partial = partial.filter(|p| !p.trim().is_empty());

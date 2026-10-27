@@ -48,14 +48,13 @@ use libmsdf::font::TerminalSource;
 use libmsdf::font::{GlyphStyle, TerminalShaper};
 
 use crate::controls::{ControlRow, SquareButton};
+use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts, Reply};
 use crate::theme::{theme, with_alpha};
-use crate::ui::{DictationPrompt, Layout};
+use crate::ui::Layout;
 
-mod dictation_card;
 mod input_box;
 pub mod link_spans;
 mod notice_line;
-use dictation_card::DictationCard;
 use input_box::InputBox;
 use link_spans::LinkSpan;
 use notice_line::NoticeLine;
@@ -130,8 +129,6 @@ pub const SPOKEN: &str = "spoken";
 const BULLET: &str = "\u{2022} ";
 /// Lines of the pinned card's text.
 const PIN_LINES: usize = 3;
-/// Lines of the dictation card shown at most: its tail.
-const DICTATION_LINES: usize = 6;
 
 /// A line height for type of `px` pixels.
 pub(crate) fn line_h(px: f32) -> f32 {
@@ -274,10 +271,6 @@ pub enum AgentHit {
     /// A summary card's play button: say its spoken text again. The packed
     /// serial of its card.
     Replay(u64),
-    /// The prompt card's text area (plan 20261022_03, living section L3).
-    TextArea,
-    /// The general agent multi-turn overlay's text area.
-    GeneralAgentTextArea,
     /// A prompt card's text area (plan 20261027_03, decision 6).
     PromptText(crate::prompt::PromptKind),
     /// A pinned prompt card's up arrow: expand it (decision 4).
@@ -1873,8 +1866,6 @@ pub struct Frame {
     pub full_viewport_h: f32,
     /// The pinned card, in full or as the bar, and its parts.
     pub pin: Option<Pinned>,
-    /// The dictation card, while a message is taken from the view.
-    pub dictation: Option<Flow>,
     pub buttons: Vec<FlowButton>,
     /// The back glyph's tap area, at the header's left.
     pub back: Rect,
@@ -1887,8 +1878,9 @@ pub struct Frame {
     /// Where other sessions' cards end, above the pinned card (plan
     /// 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT, item 2).
     pub cross_bottom: f32,
-    /// Where the general agent turn strip sits, above the bottom row or dictation.
-    pub strip_bottom: f32,
+    /// Where the prompt cards sit: above the bottom row, the suggestions
+    /// and a response just sent (plan 20261027_03).
+    pub prompt_bottom: f32,
 }
 
 /// The one-line "jump to end" message below the scrollback, while
@@ -2194,9 +2186,9 @@ pub struct AgentScreen {
     /// down, scrolling back).
     fling: f32,
     hits: Vec<(AgentHit, Rect)>,
-    /// The dictation card's prompt (as the main screen gives it), while a
-    /// message is taken.
-    dictation: Option<DictationPrompt>,
+    /// The view's own prompt cards (plan 20261027_03, decision 1): Gemini's
+    /// and the message card, and their overlay.
+    prompts: Prompts,
     /// The play button is on: replies are read aloud.
     read_aloud: bool,
     /// Something is being said: the play button skips it.
@@ -2285,8 +2277,8 @@ pub struct AgentScreen {
     session_colour: Option<u8>,
     /// The height other sessions' cards take above the pinned card.
     cross_h: f32,
-    /// The height the general agent turn strip takes.
-    strip_h: f32,
+    /// The height the pinned prompt cards take, as last laid out.
+    prompts_h: f32,
     /// Whether voice recognition is active for the general agent.
     general_agent_listening: bool,
     /// Blocks laid out, counted for the tests.
@@ -2341,25 +2333,59 @@ impl AgentScreen {
         self.frame.cross_bottom
     }
 
-    /// The top of the active dictation card, if showing.
-    pub fn dictation_top(&self) -> Option<f32> {
-        self.frame
-            .dictation
-            .as_ref()
-            .and_then(|d| d.fills.first().map(|f| f.rect.y))
+    /// The view's prompt cards and their overlay.
+    pub fn prompts(&self) -> &Prompts {
+        &self.prompts
     }
 
-    /// The height the general agent turn strip takes.
-    pub fn set_strip_height(&mut self, h: f32) {
-        if (h - self.strip_h).abs() > 0.01 {
-            self.strip_h = h;
+    /// The prompt cards, to act on a hit (expanding, collapsing, the
+    /// hold): the view is laid out again.
+    pub fn with_prompts(&mut self, f: impl FnOnce(&mut Prompts)) {
+        f(&mut self.prompts);
+        self.settle();
+    }
+
+    /// A line of the conversation with Gemini.
+    pub fn push_turn(&mut self, speaker: flankr_companion::Speaker, text: &str) {
+        self.prompts.gemini_mut().push_turn(speaker, text);
+        self.settle();
+    }
+
+    /// What STT is hearing, on Gemini's card.
+    pub fn set_partial(&mut self, partial: Option<String>) {
+        if self.prompts.gemini_mut().set_partial(partial) {
             self.settle();
         }
     }
 
-    /// Where the general agent turn strip sits: above the bottom row or dictation.
-    pub fn strip_bottom(&self) -> f32 {
-        self.frame.strip_bottom
+    /// Whether it listens for the general agent, on Gemini's card.
+    pub fn set_listening(&mut self, listening: bool) {
+        if self.prompts.gemini_mut().set_listening(listening) {
+            self.settle();
+        }
+    }
+
+    /// Gemini's typed prompt, while one is open.
+    pub fn set_gemini_input(&mut self, input: Option<PromptInput>) {
+        if self.prompts.set_gemini_input(input) {
+            self.settle();
+        }
+    }
+
+    /// The settings or the daemon's `[llm]` changed: Gemini's card shows
+    /// or goes with the general agent.
+    pub fn settings_changed(&mut self) {
+        self.settle();
+    }
+
+    /// The system Back: collapses an expanded prompt card. Returns whether
+    /// one was.
+    pub fn back(&mut self) -> bool {
+        let was = self.prompts.back();
+        if was {
+            self.settle();
+        }
+        was
     }
 
     /// *All sound* on or off: summary cards' replay buttons show or go.
@@ -2390,6 +2416,7 @@ impl AgentScreen {
         self.refresh_blocks();
         self.hold(keep);
         self.flow_stale = true;
+        self.prompts.restyle();
         self.settle();
         self.dirty = true;
     }
@@ -2908,12 +2935,13 @@ impl AgentScreen {
 
     /// The dictation card, or `None` once the message is sent or cleared.
     /// While it shows, the controls are send, cancel and record.
-    pub fn set_dictation(&mut self, prompt: Option<DictationPrompt>) {
-        if prompt == self.dictation {
+    pub fn set_dictation(&mut self, prompt: Option<MessagePrompt>) {
+        let open = self.prompts.message_open();
+        let starting = prompt.is_some() && !open;
+        let ending = prompt.is_none() && open;
+        if !self.prompts.set_message(prompt) {
             return;
         }
-        let starting = prompt.is_some() && self.dictation.is_none();
-        let ending = prompt.is_none() && self.dictation.is_some();
         if starting {
             if self.pin_saved_expanded.is_none() {
                 self.pin_saved_expanded = Some(self.pin_expanded);
@@ -2931,8 +2959,12 @@ impl AgentScreen {
             }
             self.pin_overridden = false;
         }
-        self.dictation = prompt;
         self.settle();
+    }
+
+    /// Whether a message is being taken from the view.
+    fn dictating(&self) -> bool {
+        self.prompts.message_open()
     }
 
     /// Whether voice recognition is active for the general agent.
@@ -2964,7 +2996,14 @@ impl AgentScreen {
 
     /// The card a message is being taken in reply to.
     pub fn replying_to(&self) -> Option<&AgentCard> {
-        self.reply.as_ref().filter(|_| self.dictation.is_some())
+        self.reply.as_ref().filter(|_| self.dictating())
+    }
+
+    /// The card replied to while the message card is pinned: the card's
+    /// text and the controls are in it. Expanded, the screen's row is back.
+    fn replying(&self) -> Option<&AgentCard> {
+        self.replying_to()
+            .filter(|_| !self.prompts.message().is_expanded())
     }
 
     /// The play button's state: bright when on, dull when off.
@@ -3000,7 +3039,7 @@ impl AgentScreen {
     /// Shows all of the pinned card's text, or folds it to its first lines.
     pub fn toggle_expand(&mut self) {
         self.pin_expanded = !self.pin_expanded;
-        if self.dictation.is_some() {
+        if self.dictating() {
             self.pin_overridden = true;
         }
         self.settle();
@@ -3093,7 +3132,29 @@ impl AgentScreen {
     /// Clamps the offset, follows the bottom when following, and places
     /// everything.
     fn settle(&mut self) {
+        // The prompt cards above the bottom row, the suggestions and a
+        // response just sent; a message replying to a card has the card's
+        // text and the controls in it while pinned.
+        let reply = self.replying().map(|c| Reply {
+            title: c.title.clone(),
+            text: c.text.clone(),
+            accent: accent(c.kind),
+        });
+        self.prompts.message_mut().set_reply(reply);
         self.frame = self.arrange(false);
+        let l = self.layout;
+        let s = self.scale();
+        let pad = PAD * s;
+        let bottom = self.frame.prompt_bottom;
+        let view_top = self.frame.header.y + self.frame.header.h;
+        let top = self
+            .prompts
+            .lay_out(pad, l.w - 2.0 * pad, bottom, view_top, l.h, s);
+        let prompts_h = bottom - top;
+        if (prompts_h - self.prompts_h).abs() > 0.01 {
+            self.prompts_h = prompts_h;
+            self.frame = self.arrange(false);
+        }
         let full_h = self.frame.full_viewport_h;
         let max = (self.ribbon_height() - full_h).max(0.0);
         if self.follow {
@@ -3130,8 +3191,8 @@ impl AgentScreen {
         // and a cancel sits in the middle. Replying to a card, the row is
         // in that card instead, and the screen's is hidden.
         let row_bottom = l.h - l.bottom - 16.0 * s;
-        let dictating = self.dictation.is_some();
-        let replying = self.reply.as_ref().filter(|_| dictating);
+        let dictating = self.dictating();
+        let replying = self.replying();
         let buttons = if replying.is_some() {
             Vec::new()
         } else {
@@ -3140,7 +3201,7 @@ impl AgentScreen {
                 l.w - pad,
                 row_bottom,
                 s,
-                dictating,
+                self.prompts.taking_input(),
                 self.general_agent_listening,
             )
         };
@@ -3173,17 +3234,12 @@ impl AgentScreen {
             above -= flow.height + 8.0 * s;
             flow
         });
-        // The message being taken, pinned above the buttons: on its own
-        // card, or in the card it replies to with the controls.
-        let dictation = self.dictation.as_ref().map(|d| {
-            let flow =
-                DictationCard::lay_out(&d.lines, d.mode, replying, pad, l.w - 2.0 * pad, above, s);
-            above -= flow.height + 8.0 * s;
-            flow
-        });
-        let strip_bottom = above;
-        if self.strip_h > 0.0 {
-            above -= self.strip_h + 8.0 * s;
+        // The prompt cards, pinned above the buttons (laid out by
+        // `settle`): the message on its own card, or in the card it replies
+        // to with the controls; Gemini's card or its bars.
+        let prompt_bottom = above;
+        if self.prompts_h > 0.0 {
+            above -= self.prompts_h;
         }
         let mut full_top = above;
         let mut pin = None;
@@ -3315,14 +3371,13 @@ impl AgentScreen {
             viewport: Rect::new(0.0, view_top, l.w, (view_bottom - view_top).max(0.0)),
             full_viewport_h: (full_bottom - view_top).max(0.0),
             pin,
-            dictation,
             buttons,
             back,
             suggestions,
             typed,
             jump,
             cross_bottom,
-            strip_bottom,
+            prompt_bottom,
         }
     }
 
@@ -3857,7 +3912,7 @@ impl AgentScreen {
     /// status. Those that belong to a card are in it: a question's yes and
     /// no, an approval's own buttons. None while working or dictating.
     pub fn suggestions(&self) -> Vec<Suggestion> {
-        if self.dictation.is_some() || self.status == "working" {
+        if self.dictating() || self.status == "working" {
             return Vec::new();
         }
         // Continue after something broke at once; after a finished turn,
@@ -3881,14 +3936,6 @@ impl AgentScreen {
             self.hits.push((b.hit, b.rect));
         }
         self.hits.push((AgentHit::Back, self.frame.back));
-        if let Some(d) = &self.frame.dictation {
-            for b in &d.buttons {
-                self.hits.push((b.hit, b.rect));
-            }
-            if let Some(ta) = &d.text_area {
-                self.hits.push((AgentHit::TextArea, ta.rect));
-            }
-        }
         for g in &self.frame.suggestions {
             self.hits.push((g.hit, g.rect));
         }
@@ -3942,24 +3989,27 @@ impl AgentScreen {
         self.flow.targets.get(index)
     }
 
-    /// The control at `(x, y)`, if any.
+    /// The control at `(x, y)`, if any: the bottom row first, then the
+    /// prompt cards' parts (a reply's controls among them), then the rest.
     pub fn hit(&self, x: f32, y: f32) -> Option<AgentHit> {
-        if let Some(d) = &self.frame.dictation
-            && let Some(ta) = &d.text_area
-            && ta.rect.contains([x, y])
-        {
-            ta.set_cursor_from_pos([x, y]);
-            return Some(AgentHit::TextArea);
+        if let Some(b) = self.frame.buttons.iter().find(|b| b.rect.contains([x, y])) {
+            return Some(b.hit);
         }
-        self.hits
-            .iter()
-            .find(|(_, rect)| rect.contains([x, y]))
-            .map(|&(hit, _)| hit)
+        self.prompts.hit(x, y).or_else(|| {
+            self.hits
+                .iter()
+                .find(|(_, rect)| rect.contains([x, y]))
+                .map(|&(hit, _)| hit)
+        })
     }
 
     /// Where `hit` is now, if it is on the screen.
     pub fn rect_of(&self, hit: AgentHit) -> Option<Rect> {
-        self.hits.iter().find(|(h, _)| *h == hit).map(|&(_, r)| r)
+        self.hits
+            .iter()
+            .find(|(h, _)| *h == hit)
+            .map(|&(_, r)| r)
+            .or_else(|| self.prompts.rect_of(hit))
     }
 
     pub fn frame(&self) -> &Frame {
@@ -4013,6 +4063,26 @@ impl AgentScreen {
         y: f32,
         now: Duration,
     ) -> Option<AgentHit> {
+        // The prompt cards, their bars and their overlay take what starts on
+        // them; the bottom row stays live under the overlay.
+        let on_row = self.frame.buttons.iter().any(|b| b.rect.contains([x, y]));
+        if !(phase == TouchPhase::Started && on_row)
+            && let Some(touched) = self.prompts.touch(id, phase, x, y, now)
+        {
+            self.dirty = true;
+            return match touched {
+                PromptTouched::Held => None,
+                PromptTouched::Hit(hit) => {
+                    if matches!(
+                        hit,
+                        AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars
+                    ) {
+                        self.settle();
+                    }
+                    Some(hit)
+                }
+            };
+        }
         let s = self.scale();
         match phase {
             TouchPhase::Started => {
@@ -4206,6 +4276,10 @@ impl AgentScreen {
         let moved = self.step(dt);
         self.step_bar(dt);
         self.step_pull(dt);
+        // The prompt overlay's slide and its history's fling.
+        if self.prompts.tick(dt) {
+            self.dirty = true;
+        }
         moved
     }
 
@@ -4283,7 +4357,7 @@ impl AgentScreen {
         list.clear();
         let l = self.layout;
         let s = self.scale();
-        let recording = self.dictation.is_some();
+        let recording = self.dictating();
         fill(list, Rect::new(0.0, 0.0, l.w, l.h), theme().bg, 0.0);
 
         // The flow, in its window, pulled up by a pull to refresh.
@@ -4429,45 +4503,21 @@ impl AgentScreen {
                 draw_row(list, ctx, term, r, [r.x, r.y]);
             }
         }
-        if let Some(d) = &self.frame.dictation {
-            let start = list.instances.len();
-            if let Some(ta) = &d.text_area {
-                for f in &d.fills {
-                    if f.rect != ta.rect {
-                        fill(list, f.rect, f.color, f.radius);
-                    }
-                }
-                for r in &d.rows {
-                    if !ta.rect.contains([r.x, r.y]) {
-                        ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
-                    }
-                }
-                ta.draw(list, ctx);
-            } else {
-                for f in &d.fills {
-                    fill(list, f.rect, f.color, f.radius);
-                }
-                for r in &d.rows {
-                    ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
-                }
-            }
-            // Without the microphone, the dictation card is dim (voice only).
-            if !crate::settings::current().microphone && d.text_area.is_none() {
-                crate::settings::dim_since(list, start);
-            }
-            for b in &d.buttons {
-                SquareButton::draw(
-                    list,
-                    ctx,
-                    term,
-                    b,
-                    b.rect,
-                    s,
-                    self.read_aloud,
-                    self.speaking,
-                    recording,
-                );
-            }
+        // The prompt cards (the message card dim without the microphone,
+        // voice only), and a reply's controls in its card.
+        self.prompts.draw_pinned(list, ctx);
+        for b in self.prompts.message().buttons() {
+            SquareButton::draw(
+                list,
+                ctx,
+                term,
+                b,
+                b.rect,
+                s,
+                self.read_aloud,
+                self.speaking,
+                recording,
+            );
         }
         if let Some(p) = &self.frame.pin {
             for f in &p.flow.fills {
@@ -4508,6 +4558,8 @@ impl AgentScreen {
                 crate::settings::dim_since(list, start);
             }
         }
+        // An expanded prompt card's overlay, over all but the bottom row.
+        self.prompts.draw_overlay(list, ctx, l.w);
         for b in &self.frame.buttons {
             SquareButton::draw(
                 list,
@@ -4569,7 +4621,6 @@ pub(crate) fn button(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::Line;
 
     const PHONE: Layout = Layout {
         w: 1080.0,
@@ -5383,128 +5434,138 @@ mod tests {
         let mut a = screen(conversation(20), vec![], None);
         let bottom = a.offset();
         assert!(a.rect_of(AgentHit::Back).is_some());
-        let lines = vec![
-            Line {
-                text: "Message for Claude".into(),
-                size: 18.0,
-                color: theme().fg,
-                gap: 4.0,
-            },
-            Line {
-                text: "please go on".into(),
-                size: 20.0,
-                color: theme().fg,
-                gap: 8.0,
-            },
-        ];
-        a.set_dictation(Some(lines.into()));
+        a.set_dictation(Some(crate::prompt::MessagePrompt {
+            target: Some(("Claude".into(), theme().session(2))),
+            ..PromptInput::said("please go on").into()
+        }));
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
         assert_eq!(
             hits,
             [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
         );
-        let card = a.frame().dictation.clone().expect("the card");
-        assert!(card.rows.iter().any(|r| r.text == "please go on"));
+        let card = a.prompts().message();
+        let rows: Vec<&str> = card.rows().iter().map(|r| r.text.as_str()).collect();
+        assert_eq!(rows, ["Message to Claude", "please go on"]);
+        assert_eq!(card.rows()[0].color, theme().session(2));
         let v = a.frame().viewport;
-        assert!(v.y + v.h <= card.fills[0].rect.y, "the flow ends above it");
+        assert!(v.y + v.h <= card.rect().y, "the flow ends above it");
+        let record = a.frame().buttons[2].rect;
+        assert!(card.rect().y + card.rect().h <= record.y);
         assert!(a.following());
         assert!(a.offset() > bottom, "still at the bottom, now higher");
         a.set_dictation(None);
         assert!(a.rect_of(AgentHit::Message).is_some());
-        assert!(a.frame().dictation.is_none());
+        assert!(!a.prompts().message_open());
+        assert_eq!(a.prompts().message().rect().h, 0.0);
     }
 
     #[test]
     fn keyboard_prompt_card_has_shaded_input_area() {
-        use flankr_companion::PromptMode;
         let mut a = screen(
             conversation(3),
             vec![card(CardKind::Finished, 12, true)],
             Some(0),
         );
-        let lines = vec![
-            crate::ui::Line {
-                text: "Message for Claude".into(),
-                size: 18.0,
-                color: theme().fg,
-                gap: 4.0,
-            },
-            crate::ui::Line {
-                text: "Type your message".into(),
-                size: 20.0,
-                color: theme().muted,
-                gap: 8.0,
-            },
-        ];
-        a.set_dictation(Some((lines, PromptMode::Keyboard).into()));
-        let card = a.frame().dictation.clone().expect("keyboard prompt card");
-        assert!(card.fills.iter().any(|f| f.color == theme().card));
-        assert!(card.fills.iter().any(|f| f.color == theme().input));
-        assert!(card.rows.iter().any(|r| r.text == "Type your message"));
+        a.set_dictation(Some(PromptInput::typed("").into()));
+        let card = a.prompts().message();
+        assert!(card.fills().iter().any(|f| f.color == theme().card));
+        assert!(card.fills().iter().any(|f| f.color == theme().input));
+        let ta = card.text_area().expect("the text area");
+        assert!(ta.is_active() && ta.text().is_empty());
     }
 
     #[test]
     fn agent_keyboard_prompt_multiline_drops_font_size_to_fit() {
-        use flankr_companion::PromptMode;
         let mut a = screen(
             conversation(3),
             vec![card(CardKind::Finished, 12, true)],
             Some(0),
         );
         let long_text = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6";
-        let lines = vec![
-            crate::ui::Line {
-                text: "Message for Claude".into(),
-                size: 18.0,
-                color: theme().fg,
-                gap: 4.0,
-            },
-            crate::ui::Line {
-                text: long_text.into(),
-                size: 20.0,
-                color: theme().fg,
-                gap: 8.0,
-            },
-        ];
-        a.set_dictation(Some((lines, PromptMode::Keyboard).into()));
-        let card = a.frame().dictation.clone().expect("keyboard prompt card");
-        let ta = card.text_area.as_ref().unwrap();
+        a.set_dictation(Some(PromptInput::typed(long_text).into()));
+        let ta = a.prompts().message().text_area().unwrap();
         assert!(ta.font_size.unwrap() <= 12.0 * a.scale());
-        assert!(card.rows.len() >= 6);
         assert!(ta.rect.h >= 3.0 * (12.0 * 1.3 * a.scale()));
     }
 
     #[test]
     fn tapping_text_area_hits_text_area_and_positions_cursor() {
-        use flankr_companion::PromptMode;
+        use crate::prompt::PromptKind;
         let mut a = screen(
             conversation(3),
             vec![card(CardKind::Finished, 12, true)],
             Some(0),
         );
-        let lines = vec![
-            crate::ui::Line {
-                text: "Message for Claude".into(),
-                size: 18.0,
-                color: theme().fg,
-                gap: 4.0,
-            },
-            crate::ui::Line {
-                text: "Hello world".into(),
-                size: 20.0,
-                color: theme().fg,
-                gap: 8.0,
-            },
-        ];
-        a.set_dictation(Some((lines, PromptMode::Keyboard).into()));
-        let card = a.frame().dictation.clone().expect("keyboard prompt card");
-        let ta = card.text_area.as_ref().unwrap();
-        let rect = ta.rect;
+        a.set_dictation(Some(PromptInput::typed("Hello world").into()));
+        let rect = a
+            .rect_of(AgentHit::PromptText(PromptKind::Message))
+            .expect("the text area");
         assert_eq!(
             a.hit(rect.x + 10.0, rect.y + 10.0),
-            Some(AgentHit::TextArea)
+            Some(AgentHit::PromptText(PromptKind::Message))
         );
-        assert!(a.rect_of(AgentHit::TextArea).is_some());
+        a.touch(
+            1,
+            TouchPhase::Started,
+            rect.x + 10.0,
+            rect.y + 10.0,
+            Duration::ZERO,
+        );
+        assert_eq!(
+            a.touch(1, TouchPhase::Ended, rect.x + 10.0, rect.y + 10.0, MS),
+            Some(AgentHit::PromptText(PromptKind::Message))
+        );
+    }
+
+    #[test]
+    fn the_views_own_gemini_card_pins_expands_and_goes_to_bars() {
+        use crate::prompt::{CardState, PromptKind, PromptOverlay};
+        use flankr_companion::Speaker;
+        let mut a = screen(conversation(20), vec![], None);
+        let before = a.frame().viewport;
+        a.push_turn(Speaker::User, "what is claude doing");
+        a.push_turn(Speaker::Gemini, "Running the tests.");
+        let card = a.prompts().gemini().rect();
+        assert!(card.h > 0.0);
+        let v = a.frame().viewport;
+        assert!(v.y + v.h < before.y + before.h, "the flow makes room");
+        assert!(v.y + v.h <= card.y);
+        // Its arrow expands it into the view's own overlay.
+        let arrow = a
+            .rect_of(AgentHit::PromptExpand(PromptKind::GeneralAgent))
+            .unwrap();
+        let (x, y) = (arrow.x + arrow.w * 0.5, arrow.y + arrow.h * 0.5);
+        a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
+        assert_eq!(
+            a.touch(1, TouchPhase::Ended, x, y, MS),
+            Some(AgentHit::PromptExpand(PromptKind::GeneralAgent))
+        );
+        a.tick(PromptOverlay::SLIDE);
+        assert!(a.prompts().overlay().is_open());
+        let sheet = a.prompts().overlay().rect();
+        let row = a.frame().buttons[0].rect;
+        assert!(sheet.y + sheet.h <= row.y, "the row stays live");
+        // A tap on the flow above it collapses it; the flow is not tapped.
+        assert_eq!(
+            a.touch(2, TouchPhase::Started, 540.0, sheet.y - 100.0, MS),
+            None
+        );
+        assert_eq!(
+            a.touch(2, TouchPhase::Ended, 540.0, sheet.y - 100.0, MS * 2),
+            Some(AgentHit::PromptCollapse)
+        );
+        assert_eq!(
+            a.prompts().state(PromptKind::GeneralAgent),
+            CardState::Pinned
+        );
+        // A message: its bars over the message card.
+        a.set_dictation(Some(PromptInput::said("go on").into()));
+        assert_eq!(
+            a.prompts().state(PromptKind::GeneralAgent),
+            CardState::Hidden
+        );
+        let bars = a.prompts().gemini().bars().rect().unwrap();
+        assert!(bars.y + bars.h <= a.prompts().message().rect().y);
     }
 
     #[test]
@@ -5736,13 +5797,8 @@ mod tests {
         assert!(!a.following());
     }
 
-    fn said(text: &str) -> Vec<Line> {
-        vec![Line {
-            text: text.into(),
-            size: 20.0,
-            color: theme().fg,
-            gap: 0.0,
-        }]
+    fn said(text: &str) -> PromptInput {
+        PromptInput::said(text)
     }
 
     #[test]
@@ -5769,10 +5825,10 @@ mod tests {
         // The pinned card collapses above the message card.
         assert!(f.pin.is_some());
         let pin = f.pin.expect("the pinned card");
-        let card = f.dictation.expect("the message card");
-        assert!(pin.rect.y + pin.rect.h <= card.fills[0].rect.y);
+        let card = a.prompts().message();
+        assert!(pin.rect.y + pin.rect.h <= card.rect().y);
         assert!(f.viewport.y + f.viewport.h <= pin.rect.y);
-        assert!(card.buttons.is_empty());
+        assert!(card.buttons().is_empty());
     }
 
     #[test]
@@ -5830,17 +5886,29 @@ mod tests {
         a.set_dictation(Some(said("yes, the second one").into()));
         let f = a.frame().clone();
         assert!(f.buttons.is_empty(), "the screen's row is hidden");
-        let card = f.dictation.expect("the card replied to");
-        assert!(card.rows.iter().any(|r| r.text.ends_with("is asking")));
-        assert!(card.rows.iter().any(|r| r.text == "yes, the second one"));
-        let hits: Vec<AgentHit> = card.buttons.iter().map(|b| b.hit).collect();
+        let card = a.prompts().message();
+        assert!(card.rows().iter().any(|r| r.text.ends_with("is asking")));
+        assert!(card.rows().iter().any(|r| r.text == "yes, the second one"));
+        let hits: Vec<AgentHit> = card.buttons().iter().map(|b| b.hit).collect();
         assert_eq!(
             hits,
             [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
         );
-        let b = card.buttons[2].rect;
+        let b = card.buttons()[2].rect;
         assert_eq!(a.hit(b.x + 5.0, b.y + 5.0), Some(AgentHit::Submit));
+        a.touch(1, TouchPhase::Started, b.x + 5.0, b.y + 5.0, Duration::ZERO);
+        assert_eq!(
+            a.touch(1, TouchPhase::Ended, b.x + 5.0, b.y + 5.0, MS),
+            Some(AgentHit::Submit)
+        );
         assert!(a.replying_to().is_some());
+        // Expanded, the screen's row is back for it.
+        a.with_prompts(|p| p.expand(crate::prompt::PromptKind::Message));
+        assert_eq!(a.frame().buttons.len(), 3);
+        a.with_prompts(|p| {
+            p.collapse();
+        });
+        assert!(a.frame().buttons.is_empty());
         // Sent or cancelled: back to play and record.
         a.set_dictation(None);
         assert!(a.replying_to().is_none());

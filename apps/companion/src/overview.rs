@@ -1,16 +1,17 @@
 //! The overview, the home screen (plan 20261023_04, as amended at 17:04
 //! and 18:07 EDT). From the top: the title and the status lines; then the
-//! agent cards ([`CardGrid`]), scrolling as one list; then the newest
-//! Gemini line ([`TurnStrip`]) while there is one; then, above the bottom
-//! row, the confirmation card while one is shown and the dictation card
-//! while a message is taken; and the bottom row of the agent view
-//! (decision 5): play at the left, record at the right, record becoming
-//! send with a cancel in the middle while a message is taken.
+//! agent cards ([`CardGrid`]), scrolling as one list; then, above the
+//! bottom row, its prompt cards ([`Prompts`], plan 20261027_03): Gemini's
+//! pinned card, or its two bars while a message is taken, and the message
+//! card; the confirmation card while one is shown; and the bottom row of
+//! the agent view (decision 5): play at the left, record at the right,
+//! record becoming send with a cancel in the middle while a message is
+//! taken.
 //!
-//! A tap on the strip slides the Gemini turns up over the cards
-//! ([`TurnOverlay`]); a tap on the dimmed cards above it, a swipe down on
-//! it, or Back ([`Overview::back`]) closes it. The bottom row, and the
-//! confirmation and dictation cards over it, stay live while it is open.
+//! A prompt card's up arrow expands it into an overlay over the cards; its
+//! grab bar, a swipe down on it, a tap on the dimmed cards above it, or
+//! Back ([`Overview::back`]) collapses it. The bottom row and the
+//! confirmation card stay live while it is open.
 //!
 //! Tapping a card opens the agent view on that pane (decision 4). Play
 //! reads replies from an agent view's pane only, so it is dim and does
@@ -20,23 +21,19 @@
 //! The gear ([`Gear`]) at the right of the title opens the settings
 //! (plan 20261024_02). What they turn off is off here too (decision 4):
 //! play without sound, record without the microphone or the general agent,
-//! and the dictation card without the microphone are drawn dim and take no
-//! taps, and without the general agent the strip and the overlay are
-//! hidden.
+//! and the message card being said without the microphone are drawn dim
+//! and take no taps, and without the general agent Gemini's card and its
+//! overlay are hidden.
 
 pub mod agent_card;
 pub mod card_grid;
 pub mod gear;
 pub mod panel_shader;
-pub mod turn_log;
-pub mod turn_overlay;
-pub mod turn_strip;
 
 use std::time::Duration;
 
-use flankr_companion::PromptMode;
 use flankr_companion::Speaker;
-use libcontrols::{DrawContext, DrawControl, Rect, TextArea};
+use libcontrols::{DrawContext, Rect};
 use libflankr_proto::common::AgentInfo;
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
@@ -46,22 +43,21 @@ use crate::agent::{
 };
 use crate::controls::scroll::Touched;
 use crate::controls::{ControlRow, SquareButton};
+use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts};
 use crate::settings;
 use crate::theme::theme;
-use crate::ui::{DictationPrompt, Layout, Line, wrap};
+use crate::ui::{Layout, Line, wrap};
 pub use card_grid::CardGrid;
 pub use gear::Gear;
 pub use panel_shader::{PanelInstance, PanelShader};
-pub use turn_log::TurnLog;
-pub use turn_overlay::TurnOverlay;
-pub use turn_strip::TurnStrip;
 
 /// What a touch on the overview did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OverviewHit {
     /// A card: open the agent view on this pane.
     Agent(String),
-    /// The bottom row, or a confirmation's Approve or Deny.
+    /// The bottom row, a confirmation's Approve or Deny, or a prompt
+    /// card's part.
     Bottom(AgentHit),
     /// A tap on no control.
     Tap,
@@ -81,12 +77,8 @@ pub struct Panel {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Target {
     Grid,
-    /// The strip: a tap opens the overlay.
-    Strip,
-    /// The overlay's sheet.
-    Sheet,
-    /// The dimmed cards above the open overlay: a tap closes it.
-    Shade,
+    /// A prompt card, its bars or its overlay ([`Prompts::touch`]).
+    Prompt,
     /// The gear.
     Gear,
     /// A control, or nothing.
@@ -114,10 +106,12 @@ pub struct Overview {
     agents: Vec<AgentInfo>,
     pending: Vec<String>,
     grid: CardGrid,
-    strip: TurnStrip,
-    overlay: TurnOverlay,
+    /// Gemini's card and the message card, and their overlay.
+    prompts: Prompts,
+    /// The message being taken, as given: held back while a confirmation
+    /// asks.
+    message: Option<MessagePrompt>,
     card: Option<Panel>,
-    dictation: Option<DictationPrompt>,
     read_aloud: bool,
     speaking: bool,
     /// An agent view has been opened: play reads its replies.
@@ -125,10 +119,8 @@ pub struct Overview {
     headings: Vec<Heading>,
     divider_y: Option<f32>,
     gear: Gear,
-    /// The confirmation and dictation cards as placed.
+    /// The confirmation card as placed.
     panels: Vec<Flow>,
-    /// The first of `panels` is the dictation card.
-    dictation_shown: bool,
     buttons: Vec<FlowButton>,
     hits: Vec<(AgentHit, Rect)>,
     touch: Option<(u64, Target)>,
@@ -160,10 +152,9 @@ impl Overview {
             agents: Vec::new(),
             pending: Vec::new(),
             grid: CardGrid::new(),
-            strip: TurnStrip::new(),
-            overlay: TurnOverlay::new(),
+            prompts: Prompts::new(),
+            message: None,
             card: None,
-            dictation: None,
             read_aloud: false,
             speaking: false,
             play_live: false,
@@ -171,7 +162,6 @@ impl Overview {
             divider_y: None,
             gear: Gear::default(),
             panels: Vec::new(),
-            dictation_shown: false,
             buttons: Vec::new(),
             hits: Vec::new(),
             touch: None,
@@ -237,10 +227,17 @@ impl Overview {
         self.cross_bottom
     }
 
-    /// The dictation card's prompt, while a message is taken.
-    pub fn set_dictation(&mut self, prompt: Option<DictationPrompt>) {
-        if prompt != self.dictation {
-            self.dictation = prompt;
+    /// The message card, while a message is taken.
+    pub fn set_dictation(&mut self, message: Option<MessagePrompt>) {
+        if message != self.message {
+            self.message = message;
+            self.settle();
+        }
+    }
+
+    /// Gemini's typed prompt, while one is open.
+    pub fn set_gemini_input(&mut self, input: Option<PromptInput>) {
+        if self.prompts.set_gemini_input(input) {
             self.settle();
         }
     }
@@ -266,51 +263,36 @@ impl Overview {
 
     /// A line of the conversation with Gemini.
     pub fn push_turn(&mut self, speaker: Speaker, text: String) {
-        let shown = self.strip.visible();
-        self.strip.push(speaker, &text);
-        self.overlay.log_mut().push(speaker, text);
-        self.strip_changed(shown);
+        self.prompts.gemini_mut().push_turn(speaker, &text);
+        self.settle();
     }
 
-    /// What STT is hearing, at the end of the conversation and on the
-    /// strip.
+    /// What STT is hearing, at the end of the conversation and on Gemini's
+    /// card.
     pub fn set_partial(&mut self, partial: Option<String>) {
-        let shown = self.strip.visible();
-        let strip = self.strip.set_partial(partial.clone());
-        if self.overlay.log_mut().set_partial(partial) || strip {
-            self.strip_changed(shown);
+        if self.prompts.gemini_mut().set_partial(partial) {
+            self.settle();
         }
     }
 
     /// Whether voice recognition is active for the general agent.
     pub fn set_listening(&mut self, listening: bool) {
-        let shown = self.strip.visible();
-        if self.strip.set_listening(listening) {
-            self.strip_changed(shown);
+        if self.prompts.gemini_mut().set_listening(listening) {
+            self.settle();
         }
-    }
-
-    /// Whether the strip shows: a line of Gemini's, and the general agent
-    /// on (plan 20261024_02, decision 4) and offered by the daemon (plan
-    /// 20261027_02, decision 9).
-    pub fn strip_shown(&self) -> bool {
-        self.strip.visible() && settings::general_agent_on()
     }
 
     /// The settings changed: what they turn off is redrawn, and without the
-    /// general agent the strip and the overlay go.
+    /// general agent Gemini's card and its overlay go.
     pub fn settings_changed(&mut self) {
-        if !settings::general_agent_on() {
-            self.overlay.close();
-        }
         self.settle();
     }
 
-    /// The theme changed: the cards, the conversation and the headings
-    /// are laid out again in its colours.
+    /// The theme changed: the cards, the histories and the headings are
+    /// laid out again in its colours.
     pub fn restyle(&mut self) {
         self.grid.restyle();
-        self.overlay.log_mut().restyle();
+        self.prompts.restyle();
         self.settle();
         self.dirty = true;
     }
@@ -319,57 +301,28 @@ impl Overview {
         self.gear
     }
 
-    /// The strip may have changed: when it shows or hides, the cards' room
-    /// changes with it.
-    fn strip_changed(&mut self, shown: bool) {
-        if self.strip.visible() != shown {
-            self.settle();
-        } else {
-            self.dirty = true;
-        }
-    }
-
     pub fn grid(&self) -> &CardGrid {
         &self.grid
     }
 
-    pub fn strip(&self) -> &TurnStrip {
-        &self.strip
+    /// The prompt cards and their overlay.
+    pub fn prompts(&self) -> &Prompts {
+        &self.prompts
     }
 
-    pub fn strip_mut(&mut self) -> &mut TurnStrip {
-        &mut self.strip
+    /// The prompt cards, to act on a hit (expanding, collapsing, the
+    /// hold): the screen is laid out again.
+    pub fn with_prompts(&mut self, f: impl FnOnce(&mut Prompts)) {
+        f(&mut self.prompts);
+        self.settle();
     }
 
-    pub fn overlay(&self) -> &TurnOverlay {
-        &self.overlay
-    }
-
-    pub fn overlay_mut(&mut self) -> &mut TurnOverlay {
-        &mut self.overlay
-    }
-
-    pub fn close_overlay(&mut self) -> bool {
-        self.overlay.close()
-    }
-
-    pub fn log(&self) -> &TurnLog {
-        self.overlay.log()
-    }
-
-    /// Opens the overlay, as a tap on the strip does.
-    pub fn open_turns(&mut self) {
-        if self.overlay.open() {
-            self.dirty = true;
-        }
-    }
-
-    /// The system Back: closes the overlay. Returns whether it was open;
-    /// if not, Back is not the overview's.
+    /// The system Back: collapses an expanded prompt card. Returns whether
+    /// one was; if not, Back is not the overview's.
     pub fn back(&mut self) -> bool {
-        let was = self.overlay.close();
+        let was = self.prompts.back();
         if was {
-            self.dirty = true;
+            self.settle();
         }
         was
     }
@@ -423,66 +376,38 @@ impl Overview {
         self.headings = headings;
         let top = divider_y + 12.0 * s;
 
+        // While a confirmation asks, the message makes way for it.
+        let asking = self.card.as_ref().is_some_and(|c| c.confirm.is_some());
+        let message = self.message.clone().filter(|_| !asking);
+        self.prompts.set_message(message);
+
         // The bottom row, then the cards above it.
         let row_bottom = l.h - l.bottom - 16.0 * s;
-        let dictating = self.dictation.is_some();
         self.buttons = ControlRow::lay_out(
             pad,
             l.w - pad,
             row_bottom,
             s,
-            dictating,
+            self.prompts.taking_input(),
             self.general_agent_listening,
         );
         let mut above = row_bottom - BUTTON_H * s - 12.0 * s;
         let mut panels = Vec::new();
-        // While a confirmation asks, the message makes way for it.
-        let asking = self.card.as_ref().is_some_and(|c| c.confirm.is_some());
-        self.dictation_shown = false;
-        if let Some(prompt) = self.dictation.as_ref().filter(|_| !asking) {
-            let p = panel(
-                &prompt.lines,
-                None,
-                prompt.mode == PromptMode::Keyboard,
-                pad,
-                l.w - 2.0 * pad,
-                above,
-                s,
-            );
-            above -= p.height + 8.0 * s;
-            panels.push(p);
-            self.dictation_shown = true;
-        }
         if let Some(card) = &self.card {
-            let p = panel(
-                &card.lines,
-                card.confirm,
-                false,
-                pad,
-                l.w - 2.0 * pad,
-                above,
-                s,
-            );
+            let p = panel(&card.lines, card.confirm, pad, l.w - 2.0 * pad, above, s);
             above -= p.height + 8.0 * s;
             panels.push(p);
         }
         self.panels = panels;
-        let overlay_bottom = above.max(top);
 
-        // The pinned Gemini strip sits above the panels / bottom row.
-        let strip_h = if self.strip_shown() {
-            TurnStrip::HEIGHT * s
-        } else {
-            0.0
-        };
-        let strip_bottom = above;
-        if strip_h > 0.0 {
-            above -= strip_h;
-        }
-        self.strip
-            .set_rect(Rect::new(0.0, strip_bottom - strip_h, l.w, strip_h), s);
+        // The prompt cards above them, pinned, and their overlay over the
+        // cards: two thirds of the screen, or what there is under the
+        // status lines.
+        above = self
+            .prompts
+            .lay_out(pad, l.w - 2.0 * pad, above, top, l.h, s);
 
-        // Other sessions' cards above the strip.
+        // Other sessions' cards above the prompt cards.
         self.cross_bottom = above;
         if self.cross_h > 0.0 {
             above -= self.cross_h + 8.0 * s;
@@ -492,40 +417,23 @@ impl Overview {
         self.grid
             .set_viewport(Rect::new(0.0, top, l.w, cards_bottom - top), s);
 
-        // The overlay, over the cards and the strip: two thirds of the
-        // screen, or what there is under the status lines.
-        let sheet_top = (l.h * (1.0 - TurnOverlay::SHARE))
-            .max(top)
-            .min(overlay_bottom);
-        self.overlay.set_area(
-            Rect::new(0.0, sheet_top, l.w, overlay_bottom - sheet_top),
-            s,
-        );
-
         self.hits = self
             .buttons
             .iter()
             .chain(self.panels.iter().flat_map(|p| &p.buttons))
             .map(|b| (b.hit, b.rect))
-            .chain(
-                self.panels
-                    .iter()
-                    .filter_map(|p| p.text_area.as_ref().map(|ta| (AgentHit::TextArea, ta.rect))),
-            )
             .collect();
         self.dirty = true;
     }
 
-    /// The control at `(x, y)`, if any.
+    /// The control at `(x, y)`, if any: the bottom row, the confirmation's
+    /// buttons, then the prompt cards' parts.
     pub fn hit(&self, x: f32, y: f32) -> Option<AgentHit> {
-        for p in &self.panels {
-            if let Some(ta) = &p.text_area
-                && ta.rect.contains([x, y])
-            {
-                ta.set_cursor_from_pos([x, y]);
-                return Some(AgentHit::TextArea);
-            }
-        }
+        self.control_at(x, y).or_else(|| self.prompts.hit(x, y))
+    }
+
+    /// The bottom row's or the confirmation's control at `(x, y)`.
+    fn control_at(&self, x: f32, y: f32) -> Option<AgentHit> {
         self.hits
             .iter()
             .find(|(_, r)| r.contains([x, y]))
@@ -534,12 +442,17 @@ impl Overview {
 
     /// Where `hit` is, if it is shown.
     pub fn rect_of(&self, hit: AgentHit) -> Option<Rect> {
-        self.hits.iter().find(|(h, _)| *h == hit).map(|&(_, r)| r)
+        self.hits
+            .iter()
+            .find(|(h, _)| *h == hit)
+            .map(|&(_, r)| r)
+            .or_else(|| self.prompts.rect_of(hit))
     }
 
     /// A touch at `now` (any monotonic clock). A drag scrolls the cards,
-    /// or the overlay while it is open; a tap returns what it hit. The
-    /// controls come first, so the bottom row works under the overlay.
+    /// or the overlay's history while it is open; a tap returns what it
+    /// hit. The controls come first, so the bottom row works under the
+    /// overlay.
     pub fn touch(
         &mut self,
         id: u64,
@@ -549,20 +462,12 @@ impl Overview {
         now: Duration,
     ) -> Option<OverviewHit> {
         if phase == TouchPhase::Started {
-            let target = if self.hit(x, y).is_some() {
+            let target = if self.control_at(x, y).is_some() {
                 Target::Other
-            } else if self.gear.contains(x, y) {
+            } else if self.gear.contains(x, y) && !self.prompts.overlay().is_open() {
                 Target::Gear
-            } else if self.overlay.is_open() {
-                if self.overlay.contains(x, y) {
-                    Target::Sheet
-                } else if y < self.overlay.rect().y {
-                    Target::Shade
-                } else {
-                    Target::Other
-                }
-            } else if self.strip_shown() && self.strip.contains(x, y) {
-                Target::Strip
+            } else if self.prompts.claims(x, y) {
+                Target::Prompt
             } else if self.grid.viewport().contains([x, y]) {
                 Target::Grid
             } else {
@@ -577,10 +482,25 @@ impl Overview {
         if matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled) {
             self.touch = None;
         }
+        if target == Target::Prompt {
+            let touched = self.prompts.touch(id, phase, x, y, now)?;
+            self.dirty = true;
+            return match touched {
+                PromptTouched::Held => None,
+                PromptTouched::Hit(hit) => {
+                    if matches!(
+                        hit,
+                        AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars
+                    ) {
+                        self.settle();
+                    }
+                    Some(OverviewHit::Bottom(hit))
+                }
+            };
+        }
         let touched = match target {
             Target::Grid => self.grid.touch(id, phase, x, y, now),
-            Target::Sheet => self.overlay.touch(id, phase, x, y, now),
-            Target::Strip | Target::Shade | Target::Gear | Target::Other => match phase {
+            Target::Prompt | Target::Gear | Target::Other => match phase {
                 TouchPhase::Ended => Touched::Tap,
                 _ => Touched::Nothing,
             },
@@ -596,27 +516,9 @@ impl Overview {
                     .grid
                     .pane_at(x, y)
                     .map(|p| OverviewHit::Agent(p.to_string())),
-                Target::Strip => {
-                    self.open_turns();
-                    None
-                }
-                Target::Shade => {
-                    self.back();
-                    None
-                }
-                Target::Sheet => {
-                    if self
-                        .overlay
-                        .text_area_rect()
-                        .is_some_and(|r| r.contains([x, y]))
-                    {
-                        Some(OverviewHit::Bottom(AgentHit::GeneralAgentTextArea))
-                    } else {
-                        None
-                    }
-                }
                 Target::Gear => self.gear.contains(x, y).then_some(OverviewHit::Settings),
-                Target::Other => match self.hit(x, y) {
+                Target::Prompt => None,
+                Target::Other => match self.control_at(x, y) {
                     // Nothing to read until a view has been opened.
                     Some(AgentHit::ReadAloud) if !self.play_live => None,
                     // Turned off in the settings: no tap.
@@ -631,7 +533,7 @@ impl Overview {
     /// Carries the cards' fling, and the overlay's slide and fling, on.
     /// Returns whether anything moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
-        let moved = self.grid.tick(dt) | self.overlay.tick(dt);
+        let moved = self.grid.tick(dt) | self.prompts.tick(dt);
         if moved {
             self.dirty = true;
         }
@@ -676,13 +578,8 @@ impl Overview {
         }
         self.gear.draw(list);
         self.grid.draw(list, ctx, self.shader_panels);
-        if self.strip_shown() {
-            self.strip.draw(list, ctx);
-        }
-        if settings::current().general_agent {
-            self.overlay.draw(list, ctx, l.w);
-        }
-        let recording = self.dictation.is_some();
+        self.prompts.draw_pinned(list, ctx);
+        let recording = self.prompts.message_open();
         let read_aloud = self.read_aloud && self.play_live;
         let draw_button = |list: &mut DrawList, b: &FlowButton| {
             SquareButton::draw_enabled(
@@ -698,37 +595,18 @@ impl Overview {
                 settings::allows_on_overview(b.hit),
             );
         };
-        let microphone = settings::current().microphone;
-        for (i, p) in self.panels.iter().enumerate() {
-            let start = list.instances.len();
-            if let Some(ta) = &p.text_area {
-                for f in &p.fills {
-                    if f.rect != ta.rect {
-                        fill(list, f.rect, f.color, f.radius);
-                    }
-                }
-                for r in &p.rows {
-                    if !ta.rect.contains([r.x, r.y]) {
-                        ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
-                    }
-                }
-                ta.draw(list, ctx);
-            } else {
-                for f in &p.fills {
-                    fill(list, f.rect, f.color, f.radius);
-                }
-                for r in &p.rows {
-                    ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
-                }
+        for p in &self.panels {
+            for f in &p.fills {
+                fill(list, f.rect, f.color, f.radius);
             }
-            // The dictation card without the microphone: dim (voice only).
-            if i == 0 && self.dictation_shown && !microphone && p.text_area.is_none() {
-                settings::dim_since(list, start);
+            for r in &p.rows {
+                ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
             }
             for b in &p.buttons {
                 draw_button(list, b);
             }
         }
+        self.prompts.draw_overlay(list, ctx, l.w);
         for b in &self.buttons {
             draw_button(list, b);
         }
@@ -754,11 +632,8 @@ impl Overview {
     }
 }
 
-/// `lines` on a card `w` wide from `x`, its bottom at `bottom`, with
-/// Approve and Deny under them when `confirm` is given. In keyboard mode,
-/// the input line sits inside a shaded input area.
-/// Drops font size as the text wraps onto more lines so that the multi-line
-/// message fits comfortably in the input card.
+/// Drops the type size as the text wraps onto more lines, so a long last
+/// line fits its card.
 fn fit_font_size(text: &str, base_pt: f32, box_w: f32, s: f32) -> (f32, Vec<String>) {
     let base = base_pt.min(12.0);
     let sizes = [base, 11.0, 10.0];
@@ -788,15 +663,10 @@ fn fit_font_size(text: &str, base_pt: f32, box_w: f32, s: f32) -> (f32, Vec<Stri
     (pt, rows)
 }
 
-fn panel(
-    lines: &[Line],
-    confirm: Option<u64>,
-    is_keyboard: bool,
-    x: f32,
-    w: f32,
-    bottom: f32,
-    s: f32,
-) -> Flow {
+/// The confirmation card: `lines` on a card `w` wide from `x`, its bottom
+/// at `bottom`, with Approve and Deny under them when `confirm` is given.
+/// (The message card is the prompt card's now, plan 20261027_03.)
+fn panel(lines: &[Line], confirm: Option<u64>, x: f32, w: f32, bottom: f32, s: f32) -> Flow {
     let pad = PAD * s;
     let inner_x = x + pad;
     let inner_w = w - 2.0 * pad;
@@ -805,104 +675,6 @@ fn panel(
     } else {
         0.0
     };
-
-    if is_keyboard {
-        let (input_line, head_lines) = match lines.split_last() {
-            Some((last, rest)) => (Some(last), rest),
-            None => (None, lines),
-        };
-
-        let mut rows: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
-        for (n, line) in head_lines.iter().enumerate() {
-            let px = line.size * s;
-            for (i, t) in wrap(&line.text, columns(inner_w, px))
-                .into_iter()
-                .enumerate()
-            {
-                let gap = if i == 0 && n > 0 {
-                    line.gap.min(8.0) * s
-                } else {
-                    0.0
-                };
-                rows.push((t, px, line.color, gap));
-            }
-        }
-
-        let box_pad_x = 10.0 * s;
-        let box_pad_y = 8.0 * s;
-        let box_inner_w = inner_w - 2.0 * box_pad_x;
-        let input_text = input_line.map_or("", |l| l.text.as_str());
-        let input_color = input_line.map_or(theme().muted, |l| l.color);
-        let base_pt = input_line.map_or(12.0, |l| l.size.min(12.0));
-        let (fit_pt, input_rows) = fit_font_size(input_text, base_pt, box_inner_w, s);
-        let px = fit_pt * s;
-        let line_count = input_rows.len().max(3);
-        let input_text_h = line_count as f32 * line_h(px);
-        let box_h = input_text_h + 2.0 * box_pad_y;
-        let gap_before_box = if !rows.is_empty() { 8.0 * s } else { 0.0 };
-
-        let rows_h: f32 = rows.iter().map(|(_, px, _, gap)| line_h(*px) + gap).sum();
-        let h = rows_h + gap_before_box + box_h + 2.0 * pad + actions;
-        let top = bottom - h;
-        let mut flow = Flow::default();
-
-        flow.fills.push(Fill {
-            rect: Rect::new(x, top, w, h),
-            color: theme().card,
-            radius: 10.0 * s,
-        });
-
-        let mut y = top + pad;
-        for (text, px, color, gap) in rows {
-            y += gap;
-            flow.rows.push(Row {
-                text,
-                x: inner_x,
-                y,
-                px,
-                color,
-                mono: false,
-            });
-            y += line_h(px);
-        }
-
-        let box_y = y + gap_before_box;
-        let box_rect = Rect::new(inner_x, box_y, inner_w, box_h);
-        let is_placeholder = input_text == "Type your message";
-        let actual_text = if is_placeholder { "" } else { input_text };
-
-        let text_area = TextArea::new(actual_text, box_rect)
-            .with_padding([box_pad_x, box_pad_y])
-            .with_font_size(px)
-            .with_text_color(theme().text)
-            .with_bg(theme().input)
-            .with_corner_radius(8.0 * s)
-            .with_placeholder("Type your message")
-            .with_active(true);
-        text_area.set_cursor(actual_text.len());
-        flow.text_area = Some(text_area);
-
-        flow.fills.push(Fill {
-            rect: box_rect,
-            color: theme().input,
-            radius: 8.0 * s,
-        });
-
-        for (i, text) in input_rows.into_iter().enumerate() {
-            flow.rows.push(Row {
-                text,
-                x: inner_x + box_pad_x,
-                y: box_y + box_pad_y + i as f32 * line_h(px),
-                px,
-                color: input_color,
-                mono: false,
-            });
-        }
-
-        flow.height = h;
-        return flow;
-    }
-
     let mut rows: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
     for (n, line) in lines.iter().enumerate() {
         let is_last = n == lines.len() - 1;
@@ -975,6 +747,7 @@ fn panel(
 mod tests {
     use super::*;
     use crate::overview::agent_card::tests::{agent, asking};
+    use crate::prompt::{PromptKind, PromptOverlay};
 
     const PHONE: Layout = Layout {
         w: 1080.0,
@@ -1058,7 +831,7 @@ mod tests {
             }));
         };
         give(&mut o);
-        o.open_turns();
+        o.with_prompts(|p| p.expand(PromptKind::GeneralAgent));
         let mut list = DrawList::new();
         assert!(o.draw(&mut list, &ctx, None));
         assert!(!dark_gray_only(&list).is_empty(), "drawn in Dark (gray)");
@@ -1119,12 +892,48 @@ mod tests {
         }
     }
 
-    /// Opens the overlay with a tap on the strip, and lets it slide.
+    /// Gemini's card as pinned.
+    fn gemini(o: &Overview) -> Rect {
+        o.prompts().gemini().rect()
+    }
+
+    /// The message card as pinned.
+    fn message(o: &Overview) -> Rect {
+        o.prompts().message().rect()
+    }
+
+    /// A message being said.
+    fn said(text: &str) -> Option<MessagePrompt> {
+        Some(PromptInput::said(text).into())
+    }
+
+    /// A message being typed.
+    fn typed(text: &str) -> Option<MessagePrompt> {
+        Some(PromptInput::typed(text).into())
+    }
+
+    /// Opens the overlay with a tap on Gemini's up arrow, and lets it
+    /// slide.
     fn open(o: &mut Overview) {
-        let strip = o.strip().rect();
-        assert_eq!(tap(o, 540.0, strip.y + strip.h * 0.5), None);
-        assert!(o.overlay().is_open());
-        o.tick(TurnOverlay::SLIDE);
+        let arrow = o
+            .rect_of(AgentHit::PromptExpand(PromptKind::GeneralAgent))
+            .expect("the arrow");
+        assert_eq!(
+            tap(o, arrow.x + arrow.w * 0.5, arrow.y + arrow.h * 0.5),
+            Some(OverviewHit::Bottom(AgentHit::PromptExpand(
+                PromptKind::GeneralAgent
+            )))
+        );
+        assert!(o.prompts().overlay().is_open());
+        o.tick(PromptOverlay::SLIDE);
+    }
+
+    fn sheet(o: &Overview) -> Rect {
+        o.prompts().overlay().rect()
+    }
+
+    fn history(o: &Overview) -> &crate::prompt::History {
+        o.prompts().gemini().history()
     }
 
     #[test]
@@ -1142,74 +951,77 @@ mod tests {
         // tap.
         assert_eq!(drag_up(&mut o, 540.0, grid.y + grid.h - 40.0, 250.0), None);
         assert!((o.grid().scroll().offset() - 250.0).abs() < 1.0);
-        // With turns, the strip takes one line off their bottom.
+        // With turns, Gemini's card takes its room off their bottom.
         talk(&mut o, 1);
-        let strip = o.strip().rect();
+        let card = gemini(&o);
         let grid = o.grid().viewport();
-        assert_eq!(strip.h, TurnStrip::HEIGHT * 2.0);
-        assert_eq!(grid.y + grid.h, strip.y);
-        assert!(strip.y + strip.h <= record.y);
+        assert!(card.h > 0.0);
+        assert!((grid.y + grid.h + Prompts::GAP * 2.0 - card.y).abs() < 0.01);
+        assert!(card.y + card.h <= record.y);
     }
 
     #[test]
-    fn the_strip_shows_the_newest_line_and_hides_with_no_turns() {
+    fn geminis_card_shows_the_latest_exchange_and_hides_with_no_turns() {
         let mut o = overview(2);
         let mut list = DrawList::new();
         let ctx = DrawContext::default();
         o.draw(&mut list, &ctx, None);
-        assert!(!o.strip().visible());
+        assert_eq!(gemini(&o).h, 0.0);
         let full = o.grid().viewport();
-        // A tap where the strip would be is a card's place, not the strip.
+        // A tap where the card would be is a card's place.
         assert_eq!(tap(&mut o, 540.0, full.y + full.h - 10.0), None);
-        assert!(!o.overlay().is_open());
-        o.push_turn(Speaker::User, "what is claude doing".into());
-        assert!(!o.strip().visible(), "the strip is Gemini's");
+        assert!(!o.prompts().overlay().is_open());
         o.push_turn(Speaker::Gemini, "Claude is running the tests.".into());
+        let rows = |o: &Overview| -> Vec<String> {
+            o.prompts()
+                .gemini()
+                .rows()
+                .iter()
+                .map(|r| r.text.clone())
+                .collect()
+        };
         assert_eq!(
-            o.strip().line().as_deref(),
-            Some("< Claude is running the tests.")
+            rows(&o),
+            ["\u{2726} Gemini", "< Claude is running the tests."]
         );
         assert!(o.draw(&mut list, &ctx, None));
-        // The live words while speaking, then Gemini's line again.
+        // The live words while speaking, then the exchange again.
         o.set_partial(Some("and co".into()));
-        assert_eq!(o.strip().line().as_deref(), Some("> and co\u{2026}"));
+        assert_eq!(rows(&o)[1], "> and co\u{2026}");
         assert!(o.draw(&mut list, &ctx, None));
         o.set_partial(None);
-        assert_eq!(
-            o.strip().line().as_deref(),
-            Some("< Claude is running the tests.")
-        );
-        // Above the confirmation and dictation cards' place.
-        o.set_dictation(Some(
-            vec![Line {
-                text: "Taking a message".into(),
-                size: 15.0,
-                color: theme().muted,
-                gap: 28.0,
-            }]
-            .into(),
-        ));
-        let card = &o.panels[0].fills[0].rect;
-        let strip = o.strip().rect();
-        assert!(strip.y + strip.h <= card.y);
+        assert_eq!(rows(&o)[1], "< Claude is running the tests.");
+        // A message: Gemini's card goes to its bars, above the message
+        // card, and comes back when it is sent.
+        o.set_dictation(said("please go on"));
+        assert_eq!(gemini(&o).h, 0.0);
+        let bars = o.prompts().gemini().bars().rect().expect("the bars");
+        assert!(bars.y + bars.h <= message(&o).y);
+        o.set_dictation(None);
+        assert!(gemini(&o).h > 0.0);
+        assert!(o.prompts().gemini().bars().rect().is_none());
     }
 
     #[test]
-    fn a_tap_on_the_strip_opens_the_overlay() {
+    fn a_tap_on_the_arrow_opens_the_overlay() {
         let mut o = overview(6);
         talk(&mut o, 30);
+        // A tap on the card but not its arrow leaves it pinned.
+        let card = gemini(&o);
+        assert_eq!(tap(&mut o, card.x + 40.0, card.y + card.h - 8.0), None);
+        assert!(!o.prompts().overlay().is_open());
         open(&mut o);
-        let sheet = o.overlay().rect();
+        let sheet = sheet(&o);
         let record = o.rect_of(AgentHit::Message).unwrap();
-        // About two thirds of the screen, over the cards and the strip,
-        // ending above the bottom row; the log in it, newest at the bottom.
+        // About two thirds of the screen, over the cards, ending above the
+        // bottom row; the history in it, newest at the bottom.
         assert!((sheet.y - PHONE.h / 3.0).abs() < 1.0);
         assert!(sheet.y + sheet.h <= record.y);
-        assert!(sheet.y + sheet.h >= o.strip().rect().y + o.strip().rect().h);
-        let log = o.log().viewport();
+        assert_eq!(gemini(&o).h, 0.0, "expanded, not pinned");
+        let log = history(&o).viewport();
         assert!(sheet.contains([log.x + 1.0, log.y + 1.0]));
-        assert!(o.log().scroll().max() > 0.0);
-        assert_eq!(o.log().scroll().offset(), o.log().scroll().max());
+        assert!(history(&o).scroll().max() > 0.0);
+        assert_eq!(history(&o).scroll().offset(), history(&o).scroll().max());
         // A drag on it scrolls the turns, not the cards, and leaves it open.
         o.touch(2, TouchPhase::Started, 540.0, log.y + 200.0, Duration::ZERO);
         let mut now = Duration::ZERO;
@@ -1230,18 +1042,22 @@ mod tests {
             log.y + 500.0,
             now + Duration::from_millis(300),
         );
-        assert!(o.overlay().is_open());
-        assert!((o.log().scroll().max() - o.log().scroll().offset() - 300.0).abs() < 1.0);
+        assert!(o.prompts().overlay().is_open());
+        let scroll = history(&o).scroll();
+        assert!((scroll.max() - scroll.offset() - 300.0).abs() < 1.0);
         assert_eq!(o.grid().scroll().offset(), 0.0);
         // A card under it is not a tap away.
-        let under = o.grid().card_rect("p5").unwrap();
-        assert!(sheet.contains([under.x + 5.0, under.y + 5.0]));
-        assert_eq!(tap(&mut o, under.x + 5.0, under.y + 5.0), None);
+        let y = log.y + 10.0;
+        let under = (1..=6)
+            .filter_map(|t| o.grid().card_rect(&format!("p{t}")))
+            .find(|r| r.y <= y && y <= r.y + r.h)
+            .expect("a card there");
+        assert_eq!(tap(&mut o, under.x + 5.0, y), None);
         // It never opens by itself: Gemini speaking leaves it closed.
         let mut o = overview(2);
         talk(&mut o, 3);
-        o.tick(TurnOverlay::SLIDE);
-        assert!(!o.overlay().is_shown());
+        o.tick(PromptOverlay::SLIDE);
+        assert!(!o.prompts().overlay().is_shown());
     }
 
     #[test]
@@ -1250,15 +1066,29 @@ mod tests {
         talk(&mut o, 1);
         // A tap on the dimmed cards above it.
         open(&mut o);
-        let sheet = o.overlay().rect();
+        let sheet = sheet(&o);
         let above = o.grid().card_rect("p1").unwrap();
         assert!(above.y + 5.0 < sheet.y);
-        assert_eq!(tap(&mut o, above.x + 5.0, above.y + 5.0), None);
-        assert!(!o.overlay().is_open());
-        o.tick(TurnOverlay::SLIDE);
-        assert!(!o.overlay().is_shown());
+        assert_eq!(
+            tap(&mut o, above.x + 5.0, above.y + 5.0),
+            Some(OverviewHit::Bottom(AgentHit::PromptCollapse))
+        );
+        assert!(!o.prompts().overlay().is_open());
+        o.tick(PromptOverlay::SLIDE);
+        assert!(!o.prompts().overlay().is_shown());
+        assert!(gemini(&o).h > 0.0, "pinned again");
+        // A tap on the grab bar.
+        open(&mut o);
+        let bar = o.rect_of(AgentHit::PromptCollapse).unwrap();
+        assert_eq!(
+            tap(&mut o, bar.x + bar.w * 0.5, bar.y + bar.h * 0.5),
+            Some(OverviewHit::Bottom(AgentHit::PromptCollapse))
+        );
+        o.tick(PromptOverlay::SLIDE);
+        assert!(!o.prompts().overlay().is_shown());
         // A swipe down on it.
         open(&mut o);
+        let sheet = self::sheet(&o);
         o.touch(
             1,
             TouchPhase::Started,
@@ -1279,16 +1109,16 @@ mod tests {
         }
         assert_eq!(
             o.touch(1, TouchPhase::Ended, 540.0, sheet.y + 500.0, now + MS),
-            None
+            Some(OverviewHit::Bottom(AgentHit::PromptCollapse))
         );
-        assert!(!o.overlay().is_open());
-        o.tick(TurnOverlay::SLIDE);
-        assert!(!o.overlay().is_shown());
+        assert!(!o.prompts().overlay().is_open());
+        o.tick(PromptOverlay::SLIDE);
+        assert!(!o.prompts().overlay().is_shown());
         // Back; and Back with it closed is not the overview's.
         open(&mut o);
         assert!(o.back());
-        o.tick(TurnOverlay::SLIDE);
-        assert!(!o.overlay().is_shown());
+        o.tick(PromptOverlay::SLIDE);
+        assert!(!o.prompts().overlay().is_shown());
         assert!(!o.back());
         // Closed, the cards are a tap away again.
         assert_eq!(
@@ -1316,27 +1146,20 @@ mod tests {
             tap(&mut o, play.x + 5.0, play.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::ReadAloud))
         );
-        assert!(o.overlay().is_open(), "the row leaves it open");
-        // Taking a message: the dictation card and send are live too, the
-        // sheet ending above the card.
-        o.set_dictation(Some(
-            vec![Line {
-                text: "Taking a message".into(),
-                size: 15.0,
-                color: theme().muted,
-                gap: 28.0,
-            }]
-            .into(),
-        ));
-        let card = o.panels[0].fills[0].rect;
-        let sheet = o.overlay().rect();
-        assert!(sheet.y + sheet.h <= card.y);
+        assert!(o.prompts().overlay().is_open(), "the row leaves it open");
+        // Taking a message: one card at a time. Gemini's goes to its bars,
+        // the message card is pinned, and send is live.
+        o.set_dictation(said("Taking a message"));
+        assert!(!o.prompts().overlay().is_open());
+        assert!(message(&o).h > 0.0);
         let send = o.rect_of(AgentHit::Submit).unwrap();
         assert_eq!(
             tap(&mut o, send.x + 5.0, send.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::Submit))
         );
-        assert!(o.overlay().is_open());
+        // Sent: Gemini's card comes back as it was, expanded.
+        o.set_dictation(None);
+        assert!(o.prompts().overlay().is_open());
     }
 
     #[test]
@@ -1368,24 +1191,21 @@ mod tests {
             Some(OverviewHit::Bottom(AgentHit::ReadAloud))
         );
         // Taking a message: cancel ('X') replaces the general agent button in
-        // the middle, send at the right, and the dictation card above them.
-        o.set_dictation(Some(
-            vec![Line {
-                text: "Taking a message".into(),
-                size: 15.0,
-                color: theme().muted,
-                gap: 28.0,
-            }]
-            .into(),
-        ));
+        // the middle, send at the right, and the message card above them.
+        o.set_dictation(said("Taking a message"));
         let send = o.rect_of(AgentHit::Submit).unwrap();
         assert!(send.x + send.w > 980.0);
         assert!(o.rect_of(AgentHit::Clear).is_some());
         assert!(o.rect_of(AgentHit::GeneralAgent).is_none());
         assert!(o.rect_of(AgentHit::Message).is_none());
-        let card = &o.panels[0].fills[0].rect;
+        let card = message(&o);
         assert!(card.y + card.h <= send.y);
         assert!(o.grid().viewport().y + o.grid().viewport().h <= card.y);
+        // Typing to Gemini: the X and send too.
+        o.set_dictation(None);
+        o.set_gemini_input(Some(PromptInput::typed("")));
+        assert!(o.rect_of(AgentHit::Clear).is_some());
+        assert!(o.rect_of(AgentHit::Submit).is_some());
     }
 
     #[test]
@@ -1397,13 +1217,14 @@ mod tests {
             color: theme().text,
             gap: 4.0,
         };
-        o.set_dictation(Some(vec![line("Please run the tests.")].into()));
+        o.set_dictation(said("Please run the tests."));
         o.set_card(Some(Panel {
             lines: vec![line("Approve?"), line("\"continue\" to Claude in flankr")],
             confirm: Some(7),
         }));
         // The message makes way for the question.
         assert_eq!(o.panels.len(), 1);
+        assert!(!o.prompts().message_open());
         let approve = o.rect_of(AgentHit::Approve(7)).unwrap();
         let deny = o.rect_of(AgentHit::Deny(7)).unwrap();
         assert!(approve.x + approve.w < deny.x);
@@ -1417,89 +1238,79 @@ mod tests {
             confirm: None,
         }));
         assert!(o.rect_of(AgentHit::Approve(7)).is_none());
-        assert_eq!(o.panels.len(), 2);
+        assert!(o.prompts().message_open());
+        assert!(message(&o).y + message(&o).h <= o.panels[0].fills[0].rect.y);
+    }
+
+    #[test]
+    fn a_message_card_opens_as_its_session_left_it() {
+        let mut o = overview(2);
+        // Left expanded for this session: it opens expanded, with what was
+        // sent to it.
+        o.set_dictation(Some(MessagePrompt {
+            expanded: true,
+            sent: vec![crate::prompt::Sent {
+                text: "run the tests".into(),
+                time: "09:41".into(),
+            }],
+            ..PromptInput::said("and push").into()
+        }));
+        o.tick(PromptOverlay::SLIDE);
+        assert_eq!(o.prompts().expanded(), Some(PromptKind::Message));
+        let rows = o.prompts().message().history().rows();
+        assert_eq!(rows[1].text, "> run the tests");
+        // Collapsed by the user, it stays collapsed while it is open.
+        assert!(o.back());
+        o.set_dictation(Some(MessagePrompt {
+            expanded: true,
+            ..PromptInput::said("and push it").into()
+        }));
+        assert_eq!(o.prompts().expanded(), None);
+        // Another session, left pinned: pinned.
+        o.set_dictation(None);
+        o.set_dictation(said("hello"));
+        assert_eq!(o.prompts().expanded(), None);
+        assert!(message(&o).h > 0.0);
     }
 
     #[test]
     fn overview_keyboard_prompt_card_has_shaded_input_area() {
         let mut o = overview(1);
-        let lines = vec![
-            Line {
-                text: "Message for Claude".into(),
-                size: 18.0,
-                color: theme().text,
-                gap: 4.0,
-            },
-            Line {
-                text: "Type your message".into(),
-                size: 20.0,
-                color: theme().muted,
-                gap: 8.0,
-            },
-        ];
-        o.set_dictation(Some((lines, PromptMode::Keyboard).into()));
-        assert_eq!(o.panels.len(), 1);
-        let panel = &o.panels[0];
-        assert!(panel.fills.iter().any(|f| f.color == theme().card));
-        assert!(panel.fills.iter().any(|f| f.color == theme().input));
-        assert!(panel.rows.iter().any(|r| r.text == "Type your message"));
-        assert!(panel.text_area.is_some());
-        let ta = panel.text_area.as_ref().unwrap();
+        o.set_dictation(typed(""));
+        let card = o.prompts().message();
+        assert!(card.fills().iter().any(|f| f.color == theme().card));
+        assert!(card.fills().iter().any(|f| f.color == theme().input));
+        let ta = card.text_area().expect("the text area");
         assert!(ta.is_active());
+        assert!(ta.text().is_empty(), "the placeholder shows");
     }
 
     #[test]
     fn keyboard_prompt_multiline_drops_font_size_to_fit() {
         let mut o = overview(1);
-        let long_text = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6";
-        let lines = vec![
-            Line {
-                text: "Message for Claude".into(),
-                size: 18.0,
-                color: theme().text,
-                gap: 4.0,
-            },
-            Line {
-                text: long_text.into(),
-                size: 20.0,
-                color: theme().text,
-                gap: 8.0,
-            },
-        ];
-        o.set_dictation(Some((lines, PromptMode::Keyboard).into()));
-        let panel = &o.panels[0];
-        let ta = panel.text_area.as_ref().unwrap();
+        o.set_dictation(typed("Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6"));
+        let ta = o.prompts().message().text_area().unwrap();
         assert!(ta.font_size.unwrap() <= 12.0 * o.scale());
-        assert!(panel.rows.len() >= 6);
         assert!(ta.rect.h >= 3.0 * (12.0 * 1.3 * o.scale()));
     }
 
     #[test]
     fn tapping_text_area_hits_text_area_and_positions_cursor() {
         let mut o = overview(1);
-        let lines = vec![
-            Line {
-                text: "Message for Claude".into(),
-                size: 18.0,
-                color: theme().text,
-                gap: 4.0,
-            },
-            Line {
-                text: "Hello world".into(),
-                size: 20.0,
-                color: theme().text,
-                gap: 8.0,
-            },
-        ];
-        o.set_dictation(Some((lines, PromptMode::Keyboard).into()));
-        let panel = &o.panels[0];
-        let ta = panel.text_area.as_ref().unwrap();
-        let rect = ta.rect;
+        o.set_dictation(typed("Hello world"));
+        let rect = o
+            .rect_of(AgentHit::PromptText(PromptKind::Message))
+            .expect("the text area");
         assert_eq!(
             o.hit(rect.x + 10.0, rect.y + 10.0),
-            Some(AgentHit::TextArea)
+            Some(AgentHit::PromptText(PromptKind::Message))
         );
-        assert!(o.rect_of(AgentHit::TextArea).is_some());
+        assert_eq!(
+            tap(&mut o, rect.x + 10.0, rect.y + 10.0),
+            Some(OverviewHit::Bottom(AgentHit::PromptText(
+                PromptKind::Message
+            )))
+        );
     }
 
     #[test]
@@ -1596,20 +1407,12 @@ mod tests {
                 "{off:?} takes no tap"
             );
         }
-        // The dictation card, without the microphone.
+        // The message card being said, without the microphone.
         settings::set_current(with(true, false, true));
-        o.set_dictation(Some(
-            vec![Line {
-                text: "Taking a message".into(),
-                size: 15.0,
-                color: theme().muted,
-                gap: 28.0,
-            }]
-            .into(),
-        ));
+        o.set_dictation(said("Taking a message"));
         let mut list = DrawList::new();
         o.draw(&mut list, &ctx, None);
-        let card = o.panels[0].fills[0].rect;
+        let card = message(&o);
         assert!((alpha_in(&list, card) - settings::DISABLED_ALPHA).abs() < 1e-6);
         let send = o.rect_of(AgentHit::Submit).unwrap();
         assert_eq!(tap(&mut o, send.x + 5.0, send.y + 5.0), None);
@@ -1617,33 +1420,34 @@ mod tests {
     }
 
     #[test]
-    fn without_the_general_agent_the_strip_and_overlay_are_hidden() {
+    fn without_the_general_agent_geminis_card_and_overlay_are_hidden() {
         let mut o = overview(4);
         talk(&mut o, 2);
+        let card = gemini(&o);
         open(&mut o);
-        let strip = o.strip().rect();
         settings::set_current(with(true, true, false));
         o.settings_changed();
-        assert!(!o.overlay().is_open());
-        // The cards take the strip's room, and tapping there does not open the strip.
+        assert!(!o.prompts().overlay().is_open());
+        // The cards take the card's room, and tapping there opens nothing.
         let grid = o.grid().viewport();
-        assert!(grid.y + grid.h >= strip.y + strip.h - 0.01);
-        tap(&mut o, 540.0, strip.y + strip.h * 0.5);
-        assert!(!o.overlay().is_open());
-        // Gemini's lines come in hidden, and show again with it on.
+        assert!(grid.y + grid.h >= card.y + card.h - 0.01);
+        tap(&mut o, 540.0, card.y + 10.0);
+        assert!(!o.prompts().overlay().is_open());
+        // Gemini's lines come in hidden, and show again with it on, as
+        // the card was left: expanded.
         o.push_turn(Speaker::Gemini, "Still here.".into());
         let mut list = DrawList::new();
         o.draw(&mut list, &DrawContext::default(), None);
-        assert!(o.grid().viewport().y + o.grid().viewport().h >= strip.y + strip.h - 0.01);
+        assert!(o.grid().viewport().y + o.grid().viewport().h >= card.y + card.h - 0.01);
         settings::set_current(settings::Settings::default());
         o.settings_changed();
-        let grid = o.grid().viewport();
-        assert!((grid.y + grid.h - o.strip().rect().y).abs() < 0.01);
-        assert_eq!(o.strip().rect().h, TurnStrip::HEIGHT * 2.0);
+        assert!(o.prompts().overlay().is_open());
+        o.back();
+        assert!(gemini(&o).h > 0.0);
     }
 
     #[test]
-    fn the_centre_button_and_the_strip_follow_the_daemons_llm() {
+    fn the_centre_button_and_geminis_card_follow_the_daemons_llm() {
         use flankr_companion::wire::LlmInfo;
         let mut o = overview(4);
         talk(&mut o, 2);
@@ -1651,7 +1455,7 @@ mod tests {
         let mut list = DrawList::new();
         o.draw(&mut list, &ctx, None);
         assert!(o.rect_of(AgentHit::GeneralAgent).is_some());
-        assert!(o.strip_shown());
+        assert!(gemini(&o).h > 0.0);
         // The daemon turns it off while connected: both go.
         settings::set_llm(LlmInfo {
             general_agent: false,
@@ -1662,14 +1466,14 @@ mod tests {
         let mut list = DrawList::new();
         o.draw(&mut list, &ctx, None);
         assert!(o.rect_of(AgentHit::GeneralAgent).is_none(), "hidden");
-        assert!(!o.strip_shown());
-        assert!(!o.overlay().is_open());
+        assert_eq!(gemini(&o).h, 0.0);
+        assert!(!o.prompts().overlay().is_open());
         // And back.
         settings::set_llm(LlmInfo::available());
         o.settings_changed();
         let mut list = DrawList::new();
         o.draw(&mut list, &ctx, None);
         assert!(o.rect_of(AgentHit::GeneralAgent).is_some());
-        assert!(o.strip_shown());
+        assert!(gemini(&o).h > 0.0);
     }
 }

@@ -104,6 +104,26 @@ impl PromptInput {
     }
 }
 
+/// A message card as the app gives it: the input, the agent it goes to
+/// and its colour, the messages sent to that session this run, and whether
+/// its card was last left expanded.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MessagePrompt {
+    pub input: PromptInput,
+    pub target: Option<(String, [f32; 4])>,
+    pub sent: Vec<Sent>,
+    pub expanded: bool,
+}
+
+impl From<PromptInput> for MessagePrompt {
+    fn from(input: PromptInput) -> Self {
+        MessagePrompt {
+            input,
+            ..Default::default()
+        }
+    }
+}
+
 /// What a touch on the prompts did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PromptTouched {
@@ -171,6 +191,44 @@ impl Prompts {
 
     pub fn message_mut(&mut self) -> &mut PromptCard {
         &mut self.message
+    }
+
+    /// The message being taken, or `None` once sent or cancelled. As it
+    /// opens, the card takes the state it was last left in for its session
+    /// (decision 5). Returns whether anything shown changed.
+    pub fn set_message(&mut self, m: Option<MessagePrompt>) -> bool {
+        let changed = match m {
+            Some(m) => {
+                let opening = !self.message.has_content();
+                if opening {
+                    self.message.set_expanded(m.expanded);
+                }
+                let target = self.message.set_target(m.target);
+                let sent = self.message.set_sent(&m.sent);
+                let input = self.message.set_input(Some(m.input));
+                opening || target || sent || input
+            }
+            None => {
+                let reply = self.message.set_reply(None);
+                self.message.set_input(None) || reply
+            }
+        };
+        self.sync_overlay();
+        changed
+    }
+
+    /// Gemini's typed prompt, while one is open. Returns whether it
+    /// changed.
+    pub fn set_gemini_input(&mut self, input: Option<PromptInput>) -> bool {
+        let changed = self.gemini.set_input(input);
+        self.sync_overlay();
+        changed
+    }
+
+    /// Whether a prompt with an input area is open: the message, or a
+    /// typed prompt to Gemini. The centre button is an X meanwhile.
+    pub fn taking_input(&self) -> bool {
+        self.message_open() || self.gemini.input().is_some()
     }
 
     pub fn card(&self, kind: PromptKind) -> &PromptCard {

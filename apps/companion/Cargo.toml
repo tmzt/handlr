@@ -47,6 +47,9 @@ serde = { version = "1", features = ["derive"] }
 # themes.toml (src/theme.rs), its themes in file order.
 toml = { version = "0.8", features = ["preserve_order"] }
 base64 = "0.22"
+# The time a message was sent, in the phone's time zone (localtime_r):
+# std has none (plan 20261027_03, decision 3).
+libc = "0.2"
 
 # The desktop window: the default devices through cpal, logs to stderr.
 [target.'cfg(not(target_os = "android"))'.dependencies]

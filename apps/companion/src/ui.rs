@@ -16,6 +16,7 @@ use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Rou
 use libflankr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
+use crate::prompt::PromptInput;
 use crate::theme::theme;
 
 /// Lines of the pairing area (the code and its notes).
@@ -32,25 +33,32 @@ pub struct Line {
     pub gap: f32,
 }
 
-/// A prompt card's lines and input mode.
-#[derive(Clone, Debug, PartialEq)]
-pub struct DictationPrompt {
-    pub lines: Vec<Line>,
-    pub mode: PromptMode,
-}
-
-impl From<Vec<Line>> for DictationPrompt {
-    fn from(lines: Vec<Line>) -> Self {
-        DictationPrompt {
-            lines,
-            mode: PromptMode::Voice,
-        }
+/// What the prompt card shows of a dictation (plan 20261027_03): where it
+/// stands, then any warning (no agent focused, the focus moved), then the
+/// text. The target's "Message for …" line is the card's header instead,
+/// and the general agent's "✦ Gemini" while it collects.
+pub fn prompt_input(d: &Dictation) -> PromptInput {
+    let lines = dictation_lines(d);
+    let collecting = d.phase == DictationPhase::Collecting && d.submit_in.is_none();
+    let status = lines
+        .first()
+        .filter(|_| !(d.general_agent && collecting))
+        .map(|l| (l.text.clone(), l.color));
+    let mut notes = Vec::new();
+    let untargeted = !d.general_agent && d.target.as_ref().is_none_or(|t| t.agent.is_none());
+    if untargeted && let Some(l) = lines.get(1) {
+        notes.push((l.text.clone(), l.color));
     }
-}
-
-impl From<(Vec<Line>, PromptMode)> for DictationPrompt {
-    fn from((lines, mode): (Vec<Line>, PromptMode)) -> Self {
-        DictationPrompt { lines, mode }
+    if d.focus_moved.is_some()
+        && let Some(l) = lines.get(2)
+    {
+        notes.push((l.text.clone(), l.color));
+    }
+    PromptInput {
+        status,
+        notes,
+        text: d.text.clone(),
+        mode: d.mode,
     }
 }
 
@@ -798,6 +806,18 @@ mod tests {
         assert_eq!(ga_lines[0], "\u{2726} Gemini");
         assert_eq!(ga_lines[1], "General agent chat");
         assert_eq!(ga_lines[2], "Hello");
+        // The prompt card's: the state, warnings only, and the text.
+        let p = prompt_input(&moved);
+        assert_eq!(p.status.unwrap().0, "Submitting in 3 s\u{2026}");
+        let notes: Vec<&str> = p.notes.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(notes, ["focus moved to Claude in keypad"]);
+        assert_eq!(p.text, "Please run the tests.");
+        let p = prompt_input(&none);
+        assert!(p.notes[0].0.starts_with("No agent focused"));
+        assert_eq!(p.notes[0].1, theme().warn);
+        let p = prompt_input(&ga);
+        assert!(p.status.is_none() && p.notes.is_empty());
+        assert_eq!(p.text, "Hello");
         // A tab without a label shows its number.
         let numbered = FocusInfo {
             tab_label: None,

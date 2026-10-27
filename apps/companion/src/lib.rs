@@ -63,6 +63,7 @@ pub mod settings;
 pub mod theme;
 pub mod ui;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -70,8 +71,8 @@ use flankr_audio::libvoicexn::config::SttQuant;
 use flankr_audio::libvoicexn::vad::GateState;
 use flankr_audio::{AudioConfig, AudioEvent, AudioSession};
 use flankr_companion::{
-    Companion, CompanionConfig, Dictation, Event, FileKeyStore, Input, KeyStore, Pressure,
-    Suggestion,
+    Companion, CompanionConfig, Dictation, DictationPhase, Event, FileKeyStore, Input, KeyStore,
+    Pressure, PromptMode, Speaker, Suggestion,
 };
 use libcontrols::DrawContext;
 use libflankr_proto::common::AgentInfo;
@@ -92,12 +93,13 @@ use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
 use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
+use crate::prompt::{MessagePrompt, PromptKind, Prompts, Sent};
 use crate::session_cards::{SessionCards, SessionHit, Touched};
 use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
 use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::theme::{Role, theme};
-use crate::ui::{Card, CardState, Hit, Layout, Line, Screen, View, chunk, dictation_lines, wrap};
+use crate::ui::{Card, CardState, Hit, Layout, Line, Screen, View, chunk, prompt_input, wrap};
 
 /// The frame rate: enough for text, and far less heat than the display's
 /// 120 Hz while STT listens.
@@ -113,30 +115,6 @@ const CLIENT: &str = "companion";
 /// The app's id: the Android package (build.rs) and the desktop's data
 /// directory's name.
 pub const APP_ID: &str = "dev.flankr.companion";
-
-/// The most lines of a dictated message's text the card shows: its tail.
-const MESSAGE_LINES: usize = 8;
-
-/// The dictation card's lines, with the tail of a long message.
-fn message_lines(d: &Dictation, layout: &Layout) -> Vec<Line> {
-    dictation_lines(d)
-        .into_iter()
-        .map(|l| {
-            if l.text != d.text || d.mode == flankr_companion::PromptMode::Keyboard {
-                return l;
-            }
-            let lines = wrap(&l.text, layout.columns(l.size));
-            let skip = lines.len().saturating_sub(MESSAGE_LINES);
-            if skip == 0 {
-                return l;
-            }
-            Line {
-                text: format!("\u{2026} {}", lines[skip..].join(" ")),
-                ..l
-            }
-        })
-        .collect()
-}
 
 /// What was drawn last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -324,6 +302,24 @@ pub struct App {
     external_kbd: bool,
     /// A touch held on the centre button, watched for opening the overlay after 2 seconds.
     center_hold: Option<CenterHold>,
+    /// The conversation with Gemini, as each screen's card is given it
+    /// (plan 20261027_03, decision 1: each screen owns its own card).
+    gemini_turns: Vec<(Speaker, String)>,
+    /// What each session's message card keeps for the app's run, by pane
+    /// (the amendment of 2026-10-27 01:14 EDT, item 2).
+    sessions: HashMap<String, SessionPrompt>,
+    /// The agent view's Gemini card was last left expanded (decision 5:
+    /// per screen); the overview's card keeps its own.
+    agent_gemini_expanded: bool,
+}
+
+/// A session's message card, kept for the app's run: the session it is
+/// for, the messages sent, and whether it was last left expanded.
+#[derive(Clone, Debug, Default)]
+struct SessionPrompt {
+    session_id: Option<String>,
+    sent: Vec<Sent>,
+    expanded: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -632,11 +628,7 @@ impl App {
             }
             Event::TurnEnded { outcome, .. } => {
                 log::info!("turn: {outcome}");
-                self.overview.set_listening(false);
-                self.overview.invalidate();
-                if let Some(agent) = &mut self.agent {
-                    agent.invalidate();
-                }
+                self.set_listening(false);
             }
             Event::Error(e) => {
                 log::warn!("companion: {e}");
@@ -644,6 +636,7 @@ impl App {
             }
             Event::Agents(agents) => {
                 self.agents = agents;
+                self.follow_sessions();
                 self.overview.set_agents(self.agents.clone(), &self.pending);
             }
             Event::PendingPanes(panes) => {
@@ -651,11 +644,16 @@ impl App {
                 self.overview.set_agents(self.agents.clone(), &self.pending);
             }
             Event::Conversation { speaker, text } => {
-                self.overview.push_turn(speaker, text);
-                self.overview.invalidate();
                 if let Some(agent) = &mut self.agent {
-                    agent.invalidate();
+                    agent.push_turn(speaker, &text);
                 }
+                self.gemini_turns.push((speaker, text.clone()));
+                let drop = self
+                    .gemini_turns
+                    .len()
+                    .saturating_sub(crate::prompt::history::KEPT);
+                self.gemini_turns.drain(..drop);
+                self.overview.push_turn(speaker, text);
             }
             Event::Dictation(d) => {
                 if d.active != self.dictation.is_some() {
@@ -663,15 +661,10 @@ impl App {
                 }
                 if !d.active {
                     self.ime_dismissed = false;
-                    self.overview.overlay_mut().set_input_text("");
-                    self.overview.set_listening(false);
+                    self.message_sent();
+                    self.set_listening(false);
                 } else if d.general_agent {
-                    self.overview.overlay_mut().set_input_text(&d.text);
-                    if d.mode == flankr_companion::PromptMode::Voice {
-                        self.overview.set_listening(true);
-                    } else {
-                        self.overview.set_listening(false);
-                    }
+                    self.set_listening(d.mode == PromptMode::Voice);
                 }
                 self.dictation = d.active.then_some(d);
                 self.overview.invalidate();
@@ -738,7 +731,7 @@ impl App {
                 self.overview.settings_changed();
                 self.overview.invalidate();
                 if let Some(agent) = &mut self.agent {
-                    agent.invalidate();
+                    agent.settings_changed();
                 }
                 if let Some(screen) = &mut self.settings_screen {
                     screen.llm_changed();
@@ -774,15 +767,165 @@ impl App {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
         });
         agent.set_general_agent_listening(ga_listening);
-        let s = self.scale();
-        let strip_h = if self.overview.strip_shown() {
-            crate::overview::TurnStrip::HEIGHT * s
-        } else {
-            0.0
-        };
-        agent.set_strip_height(strip_h);
+        // Its own Gemini card: the conversation so far, and the state the
+        // view's card was last left in (plan 20261027_03, decisions 1, 5).
+        self.remember_prompts();
+        let expanded = self.agent_gemini_expanded;
+        let listening = self.overview.prompts().gemini().listening();
+        let turns = &self.gemini_turns;
+        agent.with_prompts(|p| {
+            p.gemini_mut().set_turns(turns);
+            p.gemini_mut().set_listening(listening);
+            p.gemini_mut().set_expanded(expanded);
+        });
         self.agent = Some(agent);
         self.viewed = true;
+    }
+
+    /// The prompt cards of the screen shown.
+    fn prompts(&self) -> &Prompts {
+        match &self.agent {
+            Some(agent) => agent.prompts(),
+            None => self.overview.prompts(),
+        }
+    }
+
+    /// Acts on the prompt cards of the screen shown, which is laid out
+    /// again; what is to be remembered of them is.
+    fn with_prompts(&mut self, f: impl FnOnce(&mut Prompts)) {
+        match &mut self.agent {
+            Some(agent) => agent.with_prompts(f),
+            None => self.overview.with_prompts(f),
+        }
+        self.remember_prompts();
+    }
+
+    /// Remembers whether the shown screen's cards are left pinned or
+    /// expanded (decision 5): the message card's for its session, and the
+    /// agent view's Gemini card for the next view.
+    fn remember_prompts(&mut self) {
+        let prompts = self.prompts();
+        let message = prompts
+            .message_open()
+            .then(|| prompts.message().is_expanded());
+        let gemini = prompts.gemini().is_expanded();
+        if let Some(expanded) = message
+            && let Some(pane) = self.message_pane()
+        {
+            self.sessions.entry(pane).or_default().expanded = expanded;
+        }
+        if self.agent.is_some() {
+            self.agent_gemini_expanded = gemini;
+        }
+    }
+
+    /// The pane the message being taken goes to.
+    fn message_pane(&self) -> Option<String> {
+        self.dictation
+            .as_ref()
+            .filter(|d| !d.general_agent)
+            .and_then(|d| d.target.as_ref())
+            .map(|t| t.pane_id.clone())
+    }
+
+    /// The message card for `d`: the agent it goes to, as shown, in its
+    /// session's colour; what was sent to that session this run; and the
+    /// state its card was last left in.
+    fn message_prompt(&self, d: &Dictation) -> MessagePrompt {
+        let pane = d.target.as_ref().map(|t| t.pane_id.as_str());
+        let agent = pane.and_then(|p| self.agents.iter().find(|a| a.pane_id == p));
+        let target = d.target.as_ref().filter(|t| t.agent.is_some()).map(|t| {
+            let name = agent
+                .map(flankr_companion::cross::shown_name)
+                .unwrap_or_else(|| t.agent.clone().unwrap_or_default());
+            let colour = agent.map_or(theme().text, |a| {
+                theme().session(flankr_companion::cross::colour_of(a))
+            });
+            (name, colour)
+        });
+        let session = pane.and_then(|p| self.sessions.get(p));
+        MessagePrompt {
+            input: prompt_input(d),
+            target,
+            sent: session.map(|s| s.sent.clone()).unwrap_or_default(),
+            expanded: session.is_some_and(|s| s.expanded),
+        }
+    }
+
+    /// The message being taken has gone (the dictation turned off): if it
+    /// had been submitted, it was sent, and goes into its session's
+    /// history with the time.
+    fn message_sent(&mut self) {
+        let Some(d) = self.dictation.as_ref().filter(|d| {
+            !d.general_agent
+                && matches!(
+                    d.phase,
+                    DictationPhase::Submitting | DictationPhase::Confirming
+                )
+        }) else {
+            return;
+        };
+        let Some(pane) = d.target.as_ref().map(|t| t.pane_id.clone()) else {
+            return;
+        };
+        let sent = Sent::now(&d.text);
+        let session_id = self
+            .agents
+            .iter()
+            .find(|a| a.pane_id == pane)
+            .and_then(|a| a.session.as_ref())
+            .and_then(|s| s.session_id.clone());
+        let entry = self.sessions.entry(pane).or_default();
+        if entry.session_id.is_none() {
+            entry.session_id = session_id;
+        }
+        entry.sent.push(sent);
+        let drop = entry
+            .sent
+            .len()
+            .saturating_sub(crate::prompt::history::KEPT);
+        entry.sent.drain(..drop);
+    }
+
+    /// The sessions' messages are kept until the session's file changes: a
+    /// new session id for the pane clears them.
+    fn follow_sessions(&mut self) {
+        for (pane, kept) in &mut self.sessions {
+            let id = self
+                .agents
+                .iter()
+                .find(|a| &a.pane_id == pane)
+                .and_then(|a| a.session.as_ref())
+                .and_then(|s| s.session_id.clone());
+            let Some(id) = id else {
+                continue;
+            };
+            if kept.session_id.as_ref().is_some_and(|was| *was != id) {
+                log::info!("prompt: a new session file; its messages are cleared");
+                kept.sent.clear();
+            }
+            kept.session_id = Some(id);
+        }
+    }
+
+    /// Whether it listens for the general agent, on both screens' cards.
+    fn set_listening(&mut self, listening: bool) {
+        self.overview.set_listening(listening);
+        self.overview.invalidate();
+        if let Some(agent) = &mut self.agent {
+            agent.set_listening(listening);
+            agent.invalidate();
+        }
+    }
+
+    /// What STT is hearing, on both screens' Gemini cards.
+    fn set_partial(&mut self, partial: Option<String>) {
+        self.overview.set_partial(partial.clone());
+        self.overview.invalidate();
+        if let Some(agent) = &mut self.agent {
+            agent.set_partial(partial);
+            agent.invalidate();
+        }
     }
 
     /// The phone is short of memory (plan 20261022_03, the L3 amendments
@@ -799,6 +942,7 @@ impl App {
 
     /// Closes the agent view, back to the overview.
     fn close_agent(&mut self) {
+        self.remember_prompts();
         self.agent_pane = None;
         if self.agent.take().is_some() {
             log::info!("agent view: closed");
@@ -999,30 +1143,24 @@ impl App {
         match hit {
             AgentHit::Back => self.close_agent(),
             AgentHit::Message => self.send(Input::StartDictation),
+            // The centre button: stops what is being said to Gemini, or
+            // starts listening. Its card stays as the user left it (plan
+            // 20261027_03, decision 4).
             AgentHit::GeneralAgent => {
-                if self.overview.overlay().is_open() {
-                    self.overview.close_overlay();
-                    if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
-                        ctx.stop_text_input();
-                        self.dictation = None;
-                        self.overview.set_listening(false);
-                        self.overview.invalidate();
-                        if let Some(agent) = &mut self.agent {
-                            agent.invalidate();
-                        }
-                        self.send(Input::Clear);
-                    }
-                } else if self
+                if self
                     .dictation
                     .as_ref()
                     .is_some_and(|d| d.general_agent && d.active)
                 {
-                    self.dictation = None;
-                    self.overview.set_listening(false);
-                    self.overview.invalidate();
-                    if let Some(agent) = &mut self.agent {
-                        agent.invalidate();
+                    if self
+                        .dictation
+                        .as_ref()
+                        .is_some_and(|d| d.mode == PromptMode::Keyboard)
+                    {
+                        ctx.stop_text_input();
                     }
+                    self.dictation = None;
+                    self.set_listening(false);
                     self.send(Input::Clear);
                 } else {
                     self.dictation = Some(flankr_companion::Dictation {
@@ -1035,11 +1173,7 @@ impl App {
                         submit_in: None,
                         general_agent: true,
                     });
-                    self.overview.set_listening(true);
-                    self.overview.invalidate();
-                    if let Some(agent) = &mut self.agent {
-                        agent.invalidate();
-                    }
+                    self.set_listening(true);
                     self.send(Input::StartGeneralAgentPrompt(
                         flankr_companion::PromptMode::Voice,
                     ));
@@ -1047,17 +1181,9 @@ impl App {
             }
             AgentHit::Keyboard => {
                 self.ime_dismissed = false;
-                if self.overview.overlay().is_open() {
-                    self.send(Input::StartGeneralAgentPrompt(
-                        flankr_companion::PromptMode::Keyboard,
-                    ));
-                    if !self.external_kbd {
-                        let text = self.overview.overlay().input_text();
-                        let mut options = libmorph::TextInputOptions::default();
-                        options.multiline = true;
-                        options.action = libmorph::TextAction::None;
-                        ctx.start_text_input(&text, &options);
-                    }
+                // Gemini's card expanded: typing to Gemini; else a message.
+                if self.prompts().expanded() == Some(PromptKind::GeneralAgent) {
+                    self.agent_hit(ctx, AgentHit::PromptText(PromptKind::GeneralAgent));
                 } else {
                     self.send(Input::StartTextPrompt);
                     if !self.external_kbd {
@@ -1068,20 +1194,29 @@ impl App {
                     }
                 }
             }
-            AgentHit::GeneralAgentTextArea => {
+            AgentHit::PromptText(PromptKind::GeneralAgent) => {
                 self.ime_dismissed = false;
-                self.send(Input::StartGeneralAgentPrompt(
-                    flankr_companion::PromptMode::Keyboard,
-                ));
+                let typing = self
+                    .dictation
+                    .as_ref()
+                    .is_some_and(|d| d.general_agent && d.mode == PromptMode::Keyboard);
+                if !typing {
+                    self.send(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+                }
                 if !self.external_kbd {
-                    let text = self.overview.overlay().input_text();
+                    let text = self
+                        .dictation
+                        .as_ref()
+                        .filter(|_| typing)
+                        .map(|d| d.text.clone())
+                        .unwrap_or_default();
                     let mut options = libmorph::TextInputOptions::default();
                     options.multiline = true;
                     options.action = libmorph::TextAction::None;
                     ctx.start_text_input(&text, &options);
                 }
             }
-            AgentHit::TextArea => {
+            AgentHit::PromptText(PromptKind::Message) => {
                 self.ime_dismissed = false;
                 if !self.external_kbd {
                     let text = self
@@ -1185,11 +1320,11 @@ impl App {
                 self.ime_dismissed = false;
                 self.send(Input::Clear);
             }
-            // The prompt cards (plan 20261027_03): not on the screens yet.
-            AgentHit::PromptText(_)
-            | AgentHit::PromptExpand(_)
-            | AgentHit::PromptCollapse
-            | AgentHit::PromptBars => {}
+            // The prompt cards (plan 20261027_03): the screen expanded or
+            // collapsed one; the state is remembered (decision 5).
+            AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars => {
+                self.remember_prompts();
+            }
         }
     }
 
@@ -1285,7 +1420,7 @@ impl App {
                 }
                 match &input {
                     Input::Utterance(_) => {
-                        self.overview.set_partial(None);
+                        self.set_partial(None);
                         // A new utterance: an answered card has had its say.
                         if self
                             .card
@@ -1296,12 +1431,8 @@ impl App {
                         }
                     }
                     Input::Listening(false) => {
-                        self.overview.set_partial(None);
-                        self.overview.set_listening(false);
-                        self.overview.invalidate();
-                        if let Some(agent) = &mut self.agent {
-                            agent.invalidate();
-                        }
+                        self.set_partial(None);
+                        self.set_listening(false);
                     }
                     _ => {}
                 }
@@ -1334,13 +1465,7 @@ impl App {
                 log::error!("audio: TTS: {e}");
                 self.sound = format!("TTS model missing: {e}");
             }
-            AudioEvent::Partial(text) => {
-                self.overview.set_partial(Some(text));
-                self.overview.invalidate();
-                if let Some(agent) = &mut self.agent {
-                    agent.invalidate();
-                }
-            }
+            AudioEvent::Partial(text) => self.set_partial(Some(text)),
             AudioEvent::Gate(state) => {
                 self.sound = match state {
                     GateState::Idle => "ready",
@@ -1414,31 +1539,26 @@ impl App {
                 let currently_listening = self.dictation.as_ref().is_some_and(|d| {
                     d.general_agent && d.active && d.mode == flankr_companion::PromptMode::Voice
                 });
-                let started_listening =
-                    if !currently_listening && !self.overview.overlay().is_open() {
-                        // Activate immediately on press: start voice recognition, animation, and Gemini card!
-                        self.dictation = Some(flankr_companion::Dictation {
-                            active: true,
-                            mode: flankr_companion::PromptMode::Voice,
-                            text: String::new(),
-                            target: None,
-                            focus_moved: None,
-                            phase: flankr_companion::DictationPhase::Collecting,
-                            submit_in: None,
-                            general_agent: true,
-                        });
-                        self.overview.set_listening(true);
-                        self.overview.invalidate();
-                        if let Some(agent) = &mut self.agent {
-                            agent.invalidate();
-                        }
-                        self.send(Input::StartGeneralAgentPrompt(
-                            flankr_companion::PromptMode::Voice,
-                        ));
-                        true
-                    } else {
-                        false
-                    };
+                let started_listening = if !currently_listening {
+                    // Activate immediately on press: start voice recognition, animation, and Gemini card!
+                    self.dictation = Some(flankr_companion::Dictation {
+                        active: true,
+                        mode: flankr_companion::PromptMode::Voice,
+                        text: String::new(),
+                        target: None,
+                        focus_moved: None,
+                        phase: flankr_companion::DictationPhase::Collecting,
+                        submit_in: None,
+                        general_agent: true,
+                    });
+                    self.set_listening(true);
+                    self.send(Input::StartGeneralAgentPrompt(
+                        flankr_companion::PromptMode::Voice,
+                    ));
+                    true
+                } else {
+                    false
+                };
                 self.center_hold = Some(CenterHold {
                     id: touch.id,
                     start: now,
@@ -1449,69 +1569,22 @@ impl App {
             }
         }
 
-        // Another session's card, over whichever screen is shown.
+        // Another session's card, over whichever screen is shown, unless a
+        // prompt card's overlay is over it.
         let s = self.scale();
-        match self
-            .session_cards
-            .touch(touch.id, touch.phase, touch.x, touch.y, s)
-        {
-            Touched::Yes(hit) => return self.session_hit(hit),
-            Touched::No => {}
+        let overlay = self.settings_screen.is_none() && self.prompts().overlay().is_shown();
+        if !overlay {
+            match self
+                .session_cards
+                .touch(touch.id, touch.phase, touch.x, touch.y, s)
+            {
+                Touched::Yes(hit) => return self.session_hit(hit),
+                Touched::No => {}
+            }
         }
         if let Some(screen) = &mut self.settings_screen {
             if let Some(hit) = screen.touch(touch.id, touch.phase, touch.x, touch.y, now) {
                 self.settings_hit(hit);
-            }
-            return;
-        }
-        if self.overview.overlay().is_shown() {
-            match self
-                .overview
-                .overlay_mut()
-                .touch(touch.id, touch.phase, touch.x, touch.y, now)
-            {
-                crate::controls::scroll::Touched::Tap
-                    if touch.y < self.overview.overlay().rect().y =>
-                {
-                    self.overview.close_overlay();
-                    if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
-                        ctx.stop_text_input();
-                        self.send(Input::Clear);
-                    }
-                    self.overview.invalidate();
-                    if let Some(agent) = &mut self.agent {
-                        agent.invalidate();
-                    }
-                }
-                crate::controls::scroll::Touched::Tap => {
-                    if self
-                        .overview
-                        .overlay()
-                        .text_area_rect()
-                        .is_some_and(|r| r.contains([touch.x, touch.y]))
-                    {
-                        self.agent_hit(ctx, AgentHit::GeneralAgentTextArea);
-                    }
-                }
-                _ => {
-                    self.overview.invalidate();
-                    if let Some(agent) = &mut self.agent {
-                        agent.invalidate();
-                    }
-                }
-            }
-            return;
-        }
-        if self.agent.is_some()
-            && self.overview.strip_shown()
-            && self.overview.strip().contains(touch.x, touch.y)
-        {
-            if touch.phase == TouchPhase::Ended {
-                self.overview.open_turns();
-                self.overview.invalidate();
-                if let Some(agent) = &mut self.agent {
-                    agent.invalidate();
-                }
             }
             return;
         }
@@ -1614,13 +1687,18 @@ impl App {
         let ga_listening = self.dictation.as_ref().is_some_and(|d| {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
         });
-        let s = layout.scale.max(1.0);
-        let row_bottom = layout.h - layout.bottom - 16.0 * s;
-        let strip_h = if self.overview.strip_shown() {
-            crate::overview::TurnStrip::HEIGHT * s
-        } else {
-            0.0
-        };
+        // The prompt cards' inputs (plan 20261027_03): a message to a
+        // session, and a typed prompt to Gemini.
+        let message = self
+            .dictation
+            .as_ref()
+            .filter(|d| !d.general_agent)
+            .map(|d| self.message_prompt(d));
+        let gemini = self
+            .dictation
+            .as_ref()
+            .filter(|d| d.general_agent && d.mode == PromptMode::Keyboard)
+            .map(prompt_input);
 
         if let Some(screen) = &mut self.settings_screen {
             screen.set_layout(layout);
@@ -1645,25 +1723,16 @@ impl App {
                 lines: c.lines(),
                 confirm: c.asks().then_some(c.confirm_id),
             }));
-            o.set_dictation(
-                self.dictation
-                    .as_ref()
-                    .filter(|d| !d.general_agent)
-                    .map(|d| (message_lines(d, &layout), d.mode).into()),
-            );
+            o.set_dictation(message.clone());
+            o.set_gemini_input(gemini.clone());
             o.set_play(self.read_aloud, self.speaking, self.viewed);
         }
-        self.lay_out_session_cards(layout);
 
         if let Some(agent) = &mut self.agent {
             agent.set_layout(layout);
             agent.set_general_agent_listening(ga_listening);
-            agent.set_dictation(
-                self.dictation
-                    .as_ref()
-                    .filter(|d| !d.general_agent)
-                    .map(|d| (dictation_lines(d), d.mode).into()),
-            );
+            agent.set_dictation(message);
+            agent.set_gemini_input(gemini);
             // The band in its session's colour.
             let colour = self
                 .agent_pane
@@ -1671,20 +1740,10 @@ impl App {
                 .and_then(|p| self.agents.iter().find(|a| a.pane_id == p))
                 .map(flankr_companion::cross::colour_of);
             agent.set_session_colour(colour);
-            agent.set_strip_height(strip_h);
-            let strip_y = agent.strip_bottom() - strip_h;
-            self.overview
-                .strip_mut()
-                .set_rect(libcontrols::Rect::new(0.0, strip_y, layout.w, strip_h), s);
-            let sheet_top = (layout.h * (1.0 - crate::overview::TurnOverlay::SHARE))
-                .max(layout.top)
-                .min(row_bottom);
-            self.overview.overlay_mut().set_area(
-                libcontrols::Rect::new(0.0, sheet_top, layout.w, row_bottom - sheet_top),
-                s,
-            );
+            self.lay_out_session_cards(layout);
             return;
         }
+        self.lay_out_session_cards(layout);
 
         if !self.pairing() {
             return;
@@ -2022,6 +2081,9 @@ impl MorphApp for App {
             ime_dismissed: false,
             external_kbd: cfg!(not(target_os = "android")),
             center_hold: None,
+            gemini_turns: Vec::new(),
+            sessions: HashMap::new(),
+            agent_gemini_expanded: false,
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
@@ -2167,25 +2229,18 @@ impl MorphApp for App {
 
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
-        if let Some(hold) = &mut self.center_hold {
-            let elapsed = self.started.elapsed();
-            if !hold.opened && elapsed.saturating_sub(hold.start) >= Duration::from_secs(2) {
-                hold.opened = true;
-                self.overview.open_turns();
-                self.overview.invalidate();
-                if let Some(agent) = &mut self.agent {
-                    agent.invalidate();
-                }
-            }
+        let elapsed = self.started.elapsed();
+        if let Some(hold) = &mut self.center_hold
+            && !hold.opened
+            && elapsed.saturating_sub(hold.start) >= Duration::from_secs(2)
+        {
+            hold.opened = true;
+            self.with_prompts(|p| p.expand(PromptKind::GeneralAgent));
         }
         if let Some(screen) = &mut self.settings_screen {
             screen.tick(dt);
         } else if let Some(agent) = &mut self.agent {
             agent.tick(dt);
-            let moved = self.overview.tick(dt);
-            if moved {
-                agent.invalidate();
-            }
         } else {
             self.overview.tick(dt);
         }
@@ -2223,8 +2278,24 @@ impl MorphApp for App {
 
     /// Typing into the focused field (desktop): Enter pairs, Escape clears.
     fn on_key(&mut self, _ctx: &mut MorphContext, key: Key) -> KeyStatus {
+        let back = matches!(key, Key::Back | Key::Escape);
+        // The system Back cancels the settings' modal, or closes them.
+        if back && let Some(screen) = &mut self.settings_screen {
+            if !screen.back() {
+                self.close_settings();
+            }
+            return KeyStatus::Handled;
+        }
+        // Back collapses an expanded prompt card (plan 20261027_03,
+        // decision 4), and leaves what is in it.
+        if back && !self.pairing() && self.prompts().expanded().is_some() {
+            self.with_prompts(|p| {
+                p.back();
+            });
+            return KeyStatus::Handled;
+        }
         // Back or Escape cancels an active prompt card / dictation.
-        if self.dictation.is_some() && matches!(key, Key::Back | Key::Escape) {
+        if back && self.dictation.is_some() {
             _ctx.stop_text_input();
             self.send(Input::Clear);
             self.ime_dismissed = false;
@@ -2233,72 +2304,23 @@ impl MorphApp for App {
         if let Some(d) = &self.dictation
             && d.mode == flankr_companion::PromptMode::Keyboard
         {
+            let mut text = d.text.clone();
             match key {
                 Key::Character('\u{8}' | '\u{7f}') => {
-                    self.external_kbd = true;
-                    _ctx.stop_text_input();
-                    let mut text = d.text.clone();
                     text.pop();
-                    if d.general_agent {
-                        self.overview.overlay_mut().set_input_text(&text);
-                    }
-                    self.send(Input::SetText(text));
-                    return KeyStatus::Handled;
                 }
-                Key::Character('\r' | '\n') => {
-                    self.external_kbd = true;
-                    _ctx.stop_text_input();
-                    let mut text = d.text.clone();
-                    text.push('\n');
-                    if d.general_agent {
-                        self.overview.overlay_mut().set_input_text(&text);
-                    }
-                    self.send(Input::SetText(text));
-                    return KeyStatus::Handled;
-                }
-                Key::Character(c) if !c.is_control() => {
-                    self.external_kbd = true;
-                    _ctx.stop_text_input();
-                    let mut text = d.text.clone();
-                    text.push(c);
-                    if d.general_agent {
-                        self.overview.overlay_mut().set_input_text(&text);
-                    }
-                    self.send(Input::SetText(text));
-                    return KeyStatus::Handled;
-                }
-                _ => {}
+                Key::Character('\r' | '\n') => text.push('\n'),
+                Key::Character(c) if !c.is_control() => text.push(c),
+                _ => return KeyStatus::Unhandled,
             }
-        }
-        // The system Back cancels the settings' modal, or closes them.
-        if matches!(key, Key::Back | Key::Escape)
-            && let Some(screen) = &mut self.settings_screen
-        {
-            if !screen.back() {
-                self.close_settings();
-            }
-            return KeyStatus::Handled;
-        }
-        // The Gemini turns' overlay closes on Back from anywhere.
-        if self.overview.overlay().is_open() && matches!(key, Key::Back | Key::Escape) {
-            self.overview.close_overlay();
-            if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
-                _ctx.stop_text_input();
-                self.send(Input::Clear);
-            }
+            self.external_kbd = true;
+            _ctx.stop_text_input();
+            self.send(Input::SetText(text));
             return KeyStatus::Handled;
         }
         // The system Back closes the agent view.
-        if self.agent.is_some() && matches!(key, Key::Back | Key::Escape) {
+        if self.agent.is_some() && back {
             self.close_agent();
-            return KeyStatus::Handled;
-        }
-        // On the overview, it closes the Gemini turns' overlay.
-        if self.agent.is_none()
-            && !self.pairing()
-            && matches!(key, Key::Back | Key::Escape)
-            && self.overview.back()
-        {
             return KeyStatus::Handled;
         }
         if !self.field_focused {
@@ -2327,9 +2349,6 @@ impl MorphApp for App {
         log::info!("companion: on_text_input: {event:?}");
         match event {
             libmorph::TextInputEvent::Changed(text) => {
-                if self.overview.overlay().is_open() {
-                    self.overview.overlay_mut().set_input_text(text);
-                }
                 self.send(Input::SetText(text.clone()));
             }
             libmorph::TextInputEvent::Action(_) => {
@@ -2395,25 +2414,12 @@ impl MorphApp for App {
             (None, None) if shown == Shown::Pairing => self.screen.draw(&mut self.list, &draw),
             (None, None) => self.overview.draw(&mut self.list, &draw, Some(&term)),
         };
-        // The card goes over what the screen drew.
-        if drew && shown != Shown::Pairing {
+        // The card goes over what the screen drew, unless a prompt card's
+        // overlay is over it (each screen draws its own, plan 20261027_03).
+        let overlay = shown != Shown::Settings && self.prompts().overlay().is_shown();
+        if drew && shown != Shown::Pairing && !overlay {
             let s = ctx.scale_factor();
             self.session_cards.draw(&mut self.list, &draw, s);
-            let logical_w = frame.size.0 as f32 / s;
-            if self.overview.strip_shown()
-                && self.agent.is_some()
-                && !self.overview.overlay().is_shown()
-            {
-                self.overview.strip().draw(&mut self.list, &draw);
-            }
-            if settings::general_agent_on()
-                && self.agent.is_some()
-                && self.overview.overlay().is_shown()
-            {
-                self.overview
-                    .overlay()
-                    .draw(&mut self.list, &draw, logical_w);
-            }
         }
         let (w, h) = frame.size;
         let s = ctx.scale_factor();

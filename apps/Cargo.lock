@@ -541,6 +541,7 @@ dependencies = [
  "flankr-companion",
  "flankr-markdown",
  "getrandom 0.2.17",
+ "libc",
  "libcontrols",
  "libflankr_proto",
  "libmorph",

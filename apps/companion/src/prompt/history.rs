@@ -37,6 +37,33 @@ pub struct Sent {
     pub time: String,
 }
 
+impl Sent {
+    /// `text`, sent now: the time on the phone's clock, in its time zone.
+    pub fn now(text: &str) -> Self {
+        Sent {
+            text: text.trim().to_string(),
+            time: local_time(std::time::SystemTime::now()),
+        }
+    }
+}
+
+/// `at` as "HH:MM" in the phone's time zone, from the C library's
+/// `localtime_r` (std has no time zones; bionic reads Android's).
+pub fn local_time(at: std::time::SystemTime) -> String {
+    let secs = at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs()) as libc::time_t;
+    // SAFETY: `localtime_r` writes only into `tm`, which outlives the call.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let ok = unsafe { !libc::localtime_r(&secs, &mut tm).is_null() };
+    if ok {
+        format!("{:02}:{:02}", tm.tm_hour, tm.tm_min)
+    } else {
+        let day = secs.rem_euclid(86_400);
+        format!("{:02}:{:02}", day / 3600, day % 3600 / 60)
+    }
+}
+
 /// One line of a history.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Line {
