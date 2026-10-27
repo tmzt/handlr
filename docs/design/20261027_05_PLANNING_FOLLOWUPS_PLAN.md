@@ -233,3 +233,31 @@ The plan stays `Draft` until the owner approves it. The discussion's items
 3 to 7 (the path filter without `read`, a `files` flag, `list_plans` saying
 when the layout isn't there, the watcher's key folders, and doing step 2
 first) are not part of this amendment.
+
+## Amendment — 2026-10-27 12:35 EDT: no planning-specific tools; list_plans dropped
+
+The owner (2026-10-27): "interacting with my planning system should be via a
+skill or addon, maybe via a small cli?"; "I'm thinking about creating
+~/src/rules which would take over for the shared memory and could also have
+that tool"; then "yes, amend the plan to drop the planning-specific tools
+(list_files and read_file was supposed to be a bridge to that that's project
+agnostic)".
+
+1. **`list_plans` is dropped.** flankr knows nothing of the owner's planning
+   conventions (`docs/design/YYYYMMDD_NN_*.md`, front matter, amendments).
+   Decision 4 and step 5 are removed, and `list_plans` leaves the covers
+   list. The general agent reads plans with plan 20261027_04's
+   project-agnostic `list_files` and `read_file`, and the planning system's
+   own tooling (a CLI and a Claude Code skill, expected in a separate
+   `~/src/rules` project with its own plans) is not part of flankr.
+2. **No hook for external tools is added here.** A configured-tools hook,
+   through which flankr could call such a CLI, was discussed and is left to
+   a later plan, once that CLI exists.
+3. **What stays:** `recent_commits` (git is not specific to the planning
+   system), the file watcher, the instructions sent on change, the `via
+   flankr:` prefix and its rule line, and the `[gemini]` fix. Step 7's S23
+   check asks Gemini to find the plans in implementation by reading them,
+   in place of `list_plans`.
+4. The steps are now 1, 2, 3, 4, 6 and 7, numbered as before.
+
+The plan stays `Draft` until the owner approves it.
