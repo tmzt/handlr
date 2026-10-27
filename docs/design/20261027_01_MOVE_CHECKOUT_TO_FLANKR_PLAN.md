@@ -162,3 +162,8 @@ changed code, so no commits implement them:
 - **Clean-up:** the old project data
   `~/.claude/projects/-Users-tmeade-src-handlr/` was removed on the owner's word
   ("remove the old session folder"). There was no symlink to remove (step 5).
+
+## Amendment — 2026-10-27 00:41 EDT: a correction to the previous amendment's reference
+
+The previous amendment names "the 00:35 EDT amendment". It is the amendment
+of 2026-10-27 00:33 EDT, "the owner's decisions; approved".
