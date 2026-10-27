@@ -228,3 +228,49 @@ Step 1 is one daemon commit; 2, 4 and 5 are one each; 3 is
 2. **Focus on the overview:** `focus` makes the agent current *and* moves
    herdr's focus on the desktop, as written. Or should picking the project
    leave the desktop alone (a separate `open_project(agent)` tool)?
+
+## Amendment — 2026-10-27 11:20 EDT: the project focus split from herdr's focus; the pattern syntax
+
+The owner (2026-10-27): "the focus was meant to be split, not change
+herdr's focused tab, but that would be an option in the settings
+tab_follows_focus"; then, to the proposal: "yes, use the **/*.md for *.md in
+all folders, but keep the syntax limited, only use a crate for it if minimal
+and trusted".
+
+1. **`focus_project(agent)`, a new tool,** offered only while `planning` is
+   on. It makes that agent's project current for the rest of the
+   conversation, for `list_files`, `read_file` and the `instructions` block.
+   It does not touch herdr. A turn from the agent view still sets the
+   current project to the open session. This replaces decision 3's
+   overview bullet ("Gemini's `focus` tool, called on an agent, makes that
+   agent current …"), and adds `focus_project` to decision 7's list.
+2. **`focus` is unchanged:** it moves herdr's focus when the user asks to be
+   shown something, and no longer picks the project.
+3. **`tab_follows_focus`,** a toggle in the app's Settings, under the general
+   agent, off by default. While it is on, `focus_project` also focuses that
+   agent's tab in herdr. The phone sends it in `client.options`, a field
+   appended to `ClientOptions` beside `general_agent` and `spoken_output`,
+   in the same `libflankr_proto` 0.3.11 patch as `TurnStartParams.session`
+   (decision 9, step 3). Step 6 also adds the toggle, its copy in
+   `SETTINGS_COPY.md`. Step 4's **Done when:** reads "`focus_project`
+   changing the project, and herdr's focus only with `tab_follows_focus`" in
+   place of "`focus` changing the project on the overview". This answers
+   open question 2.
+4. **Patterns, a limited syntax, matched by flankr's own code** in place of
+   decision 4's `globset`:
+   - a pattern is `/`-separated segments, matched against the
+     root-relative path's segments;
+   - `**` as a whole segment matches zero or more segments;
+   - `*` within a segment matches any run of characters except `/`;
+   - every other character is literal, and a pattern containing `?`, `[`,
+     `]`, `{`, `}`, `!` or `\`, a leading `/`, or `**` inside a segment
+     (`a**`) is refused when the config is read: logged once as a warning
+     and left out;
+   - so `*.md` is the top folder only, and `**/*.md` is every folder, as
+     decision 4 says. The default stays `["*.md", "docs/**"]`. This answers
+     open question 1.
+
+   `list_files` walks with `walkdir`, already in `Cargo.lock`, without
+   following symlinks. No new crate is added for this plan.
+
+The plan stays `Draft` until the owner approves it.
