@@ -44,6 +44,9 @@ walkdir = "2"
 # The daemon's file watcher (src/watch_files.rs, plan 20261027_05, step 1).
 notify = "8.2"
 notify-debouncer-mini = "0.7"
+# The instructions marker's hash (src/transport.rs, plan 20261027_05, step 4),
+# already in Cargo.lock.
+sha2 = "0.10"
 
 [dev-dependencies]
 # Paused time for the confirmation broker's timers.

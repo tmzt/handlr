@@ -1352,6 +1352,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "sha2",
  "smol",
  "socket2",
  "tempfile",

@@ -39,7 +39,7 @@ use crate::llm::read_key_file;
 use crate::llm::{LlmOptions, LlmService, Profile, Use};
 use crate::reasoning::{Message, ReasoningEngine, SessionManager};
 use crate::transport::{
-    CurrentAgent, HerdrContextContributor, HerdrToolExecutor, TurnLog, VoiceTurn,
+    CurrentAgent, HerdrContextContributor, HerdrToolExecutor, InstructionsCache, TurnLog, VoiceTurn,
 };
 
 /// The model entry an interrupted turn leaves in the history.
@@ -152,6 +152,9 @@ pub struct Session {
     /// and the 11:25 EDT amendment): the session open on the phone, from
     /// `turn.start`'s `session`, or the agent `focus_project` picked.
     pub(super) current_agent: CurrentAgent,
+    /// The current project's instructions as last read (plan 20261027_05,
+    /// decision 3).
+    instructions: Arc<InstructionsCache>,
     serial: AtomicU64,
 }
 
@@ -191,6 +194,7 @@ impl Session {
             turn: Mutex::new(None),
             current: Mutex::new(None),
             current_agent: CurrentAgent::default(),
+            instructions: Arc::default(),
             serial: AtomicU64::new(0),
         }
     }
@@ -715,7 +719,8 @@ async fn work(
         .with_watches(Arc::clone(&daemon.watches))
         .with_naming(daemon.naming.clone())
         .with_sessions(Arc::clone(&daemon.sessions))
-        .with_current_agent(Arc::clone(&session.current_agent));
+        .with_current_agent(Arc::clone(&session.current_agent))
+        .with_instructions(Arc::clone(&session.instructions), daemon.file_watcher());
     // Plan 20261027_04: planning's file tools and instructions, while on.
     let planning = daemon.llm.planning();
     let contributor = match &planning {
@@ -724,6 +729,13 @@ async fn work(
     };
     if let Err(e) = contributor.contribute(&mut messages).await {
         log::warn!("The herdr context could not be added: {e}");
+    }
+    // The instructions block, when sent, is kept in the history before the
+    // user's turn (plan 20261027_05, decision 3, as amended at 12:33 EDT).
+    for added in contributor.take_added() {
+        if let Err(e) = manager.append_message(&session.id, &added) {
+            log::warn!("Could not write the history of {}: {e}", session.id);
+        }
     }
     if let Some(i) = messages.iter().rposition(|m| m == &user) {
         let user = messages.remove(i);

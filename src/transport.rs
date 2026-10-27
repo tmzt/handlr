@@ -25,6 +25,7 @@ use crate::project::{MAX_READ_BYTES, ProjectFiles};
 use crate::sessions::context::{self as session_context, AgentContext};
 use crate::sessions::{Sessions, pending};
 use crate::watch::WatchRegistry;
+use crate::watch_files::{FileWatcher, Subscription};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -727,6 +728,75 @@ pub struct HerdrContextContributor {
     /// `agents_prompt`, the current project's instructions are added
     /// (decisions 5 and 6).
     pub planning: Option<(PlanningConfig, PlanningPrompt)>,
+    /// The conversation's instructions as last read, and the file watcher
+    /// that says when to read them again (plan 20261027_05, decision 3).
+    /// Without it, they are read every turn.
+    pub instructions: Option<(Arc<InstructionsCache>, Option<FileWatcher>)>,
+    /// Messages this contributor added that belong in the stored history:
+    /// the instructions block, when it was sent.
+    added: Mutex<Vec<libinfer::Message>>,
+}
+
+/// The first line of an instructions block in the stored history (plan
+/// 20261027_05, 12:33 EDT amendment, item 3):
+/// `[flankr instructions <project> <sha256, first 16 hex>]`.
+pub const INSTRUCTIONS_MARKER: &str = "[flankr instructions ";
+
+/// The marker for `project`'s instructions `text`.
+pub fn instructions_marker(project: &str, text: &str) -> String {
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(text.as_bytes());
+    let hex: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("{INSTRUCTIONS_MARKER}{project} {hex}]")
+}
+
+/// A marker line's project and hash.
+fn parse_marker(line: &str) -> Option<(&str, &str)> {
+    line.strip_prefix(INSTRUCTIONS_MARKER)?
+        .strip_suffix(']')?
+        .rsplit_once(' ')
+}
+
+/// Whether `history` already gives `marker`'s project these instructions:
+/// the last instructions block for that project is this one.
+pub fn history_holds(history: &[libinfer::Message], marker: &str) -> bool {
+    let Some((project, _)) = parse_marker(marker) else {
+        return false;
+    };
+    history
+        .iter()
+        .rev()
+        .filter_map(|m| m.content.lines().next())
+        .find(|line| parse_marker(line).is_some_and(|(p, _)| p == project))
+        .is_some_and(|line| line == marker)
+}
+
+/// One conversation's instructions as last read (plan 20261027_05,
+/// decision 3): read again when the current project's folder changes, or
+/// when the file watcher reports a change to one of its instruction files.
+#[derive(Default)]
+pub struct InstructionsCache {
+    state: Mutex<Option<CachedInstructions>>,
+}
+
+struct CachedInstructions {
+    cwd: String,
+    /// The block, its marker first; `None` without an instructions file.
+    block: Option<String>,
+    watch: Option<Subscription>,
+    /// The watch's ticks when the block was read.
+    seen: u64,
+}
+
+impl InstructionsCache {
+    /// Whether the current project's instruction files are watched.
+    pub fn is_watched(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|c| c.watch.is_some())
+    }
 }
 
 impl HerdrContextContributor {
@@ -739,6 +809,8 @@ impl HerdrContextContributor {
             sessions: None,
             current_agent: None,
             planning: None,
+            instructions: None,
+            added: Mutex::new(Vec::new()),
         }
     }
 
@@ -747,8 +819,27 @@ impl HerdrContextContributor {
         self
     }
 
-    /// The `instructions` block for the current project (decision 6, item
-    /// 3), with `agents_prompt` on and an instructions file found.
+    /// The conversation's instructions cache, and the file watcher that
+    /// tells it when to read again.
+    pub fn with_instructions(
+        mut self,
+        cache: Arc<InstructionsCache>,
+        files: Option<FileWatcher>,
+    ) -> Self {
+        self.instructions = Some((cache, files));
+        self
+    }
+
+    /// The messages added to the conversation that belong in its stored
+    /// history, taken.
+    pub fn take_added(&self) -> Vec<libinfer::Message> {
+        std::mem::take(&mut *self.added.lock().unwrap())
+    }
+
+    /// The `instructions` block for the current project (plan 20261027_04,
+    /// decision 6, item 3), its marker first, with `agents_prompt` on and
+    /// an instructions file found; from the cache while the project and
+    /// its files are unchanged (plan 20261027_05, decision 3).
     fn instructions_block(&self, snapshot: &serde_json::Value) -> Option<String> {
         let (config, prompt) = self.planning.as_ref()?;
         if !config.agents_prompt
@@ -759,21 +850,64 @@ impl HerdrContextContributor {
         let pane_id = self.current_agent.as_ref()?.lock().unwrap().clone()?;
         let agent = current_ref(snapshot, &pane_id)?;
         let cwd = agent.cwd.clone()?;
-        let files = ProjectFiles::open(&cwd, Vec::new())
+        let Some((cache, files)) = &self.instructions else {
+            return Self::read_instructions(&agent, &cwd, prompt);
+        };
+        let mut state = cache.state.lock().unwrap();
+        if let Some(c) = state.as_ref()
+            && c.cwd == cwd
+            && c.watch.as_ref().is_some_and(|w| w.ticks() == c.seen)
+        {
+            return c.block.clone();
+        }
+        // The same folder keeps its watch; another one is watched anew,
+        // before reading, so no change is missed.
+        let watch = match state.take() {
+            Some(c) if c.cwd == cwd && c.watch.is_some() => c.watch,
+            _ => files.as_ref().and_then(|files| {
+                let paths: Vec<std::path::PathBuf> = crate::project::INSTRUCTION_FILES
+                    .iter()
+                    .map(|name| std::path::Path::new(&cwd).join(name))
+                    .collect();
+                files
+                    .subscribe(&paths)
+                    .inspect_err(|e| log::warn!("agents_prompt: can't watch {cwd}: {e}"))
+                    .ok()
+            }),
+        };
+        let seen = watch.as_ref().map_or(0, |w| w.ticks());
+        let block = Self::read_instructions(&agent, &cwd, prompt);
+        *state = Some(CachedInstructions {
+            cwd,
+            block: block.clone(),
+            watch,
+            seen,
+        });
+        block
+    }
+
+    /// The block read from `cwd`'s instructions file, its marker first.
+    fn read_instructions(
+        agent: &agents::AgentRef,
+        cwd: &str,
+        prompt: &PlanningPrompt,
+    ) -> Option<String> {
+        let files = ProjectFiles::open(cwd, Vec::new())
             .inspect_err(|e| log::warn!("agents_prompt: {e}"))
             .ok()?;
         let max = prompt.max_instructions_bytes();
         let (file, mut text, cut) = files.instructions(max)?;
+        let project = agent.project.clone().unwrap_or_else(|| {
+            std::path::Path::new(cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(cwd.to_string())
+        });
+        let marker = instructions_marker(&project, &text);
         if cut {
             text.push_str(&format!("\n\n(cut at {} KiB)", max / 1024));
         }
-        let project = agent.project.clone().unwrap_or_else(|| {
-            std::path::Path::new(&cwd)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or(cwd.clone())
-        });
-        log::info!("agents_prompt: {file} of {} added", files.root().display());
+        log::info!("agents_prompt: {file} of {} read", files.root().display());
         prompt
             .instructions(
                 &project,
@@ -783,6 +917,7 @@ impl HerdrContextContributor {
             )
             .inspect_err(|e| log::warn!("agents_prompt: {e}"))
             .ok()
+            .map(|block| format!("{marker}\n{block}"))
     }
 
     pub fn with_current_agent(mut self, current: CurrentAgent) -> Self {
@@ -1190,12 +1325,31 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             }
         }
 
+        // The current agent last, so the parts that vary stay at the end.
         if let Some(section) = self.current_agent_section(&snapshot) {
             content.push_str(&section);
         }
+
+        // The instructions go into the conversation itself, before the
+        // user's turn, unless the stored history already holds them (plan
+        // 20261027_05, decision 3, as amended at 12:33 EDT).
         if let Some(block) = self.instructions_block(&snapshot) {
-            content.push_str(&block);
-            content.push_str("\n\n");
+            let marker = block.lines().next().unwrap_or_default();
+            let at = match messages.last() {
+                Some(m) if m.role == "user" => messages.len() - 1,
+                _ => messages.len(),
+            };
+            if !history_holds(&messages[..at], marker) {
+                log::info!("agents_prompt: {marker} sent");
+                let message = libinfer::Message {
+                    role: "system".to_string(),
+                    content: block,
+                    name: None,
+                    thought_signature: None,
+                };
+                messages.insert(at, message.clone());
+                self.added.lock().unwrap().push(message);
+            }
         }
 
         // 4. Inject as a system instruction/turn
@@ -1823,51 +1977,163 @@ mod tests {
         assert!(err.contains("Reading files is off"), "{err}");
     }
 
+    /// One turn on a stored `history`, as the companion runs it: the
+    /// messages sent, with what the contributor added appended to the
+    /// history before the user's text and a reply.
+    async fn stored_turn(
+        contributor: &HerdrContextContributor,
+        history: &mut Vec<libinfer::Message>,
+        said: &str,
+    ) -> Vec<libinfer::Message> {
+        use libinfer::TurnContributor;
+        let message = |role: &str, content: &str| libinfer::Message {
+            role: role.to_string(),
+            content: content.to_string(),
+            name: None,
+            thought_signature: None,
+        };
+        let mut messages = history.clone();
+        messages.push(message("user", said));
+        contributor.contribute(&mut messages).await.unwrap();
+        history.extend(contributor.take_added());
+        history.push(message("user", said));
+        history.push(message("model", "ok"));
+        messages
+    }
+
+    /// The instructions blocks among `messages`.
+    fn blocks(messages: &[libinfer::Message]) -> Vec<&str> {
+        messages
+            .iter()
+            .filter(|m| m.content.starts_with(INSTRUCTIONS_MARKER))
+            .map(|m| m.content.as_str())
+            .collect()
+    }
+
+    /// Plan 20261027_05, step 4: the block goes into the stored history,
+    /// once per project and content, and never into the per-turn context.
     #[tokio::test]
-    async fn test_the_instructions_block_follows_the_current_project() {
+    async fn test_the_instructions_are_sent_once_per_project_and_content() {
         let dir = two_projects();
+        std::fs::write(dir.path().join("b/AGENTS.md"), "Rules for b.").unwrap();
         let client = project_mock(dir.path()).await;
         let current = CurrentAgent::default();
         let prompt = PlanningPrompt::load(None).unwrap();
-        let contributor = HerdrContextContributor::new(client.clone(), vec![])
-            .with_current_agent(Arc::clone(&current))
-            .with_planning(planning(&[], true), prompt.clone());
+        let files = crate::watch_files::FileWatcher::start().unwrap();
+        let cache = Arc::new(InstructionsCache::default());
+        let contributor = || {
+            HerdrContextContributor::new(client.clone(), vec![])
+                .with_current_agent(Arc::clone(&current))
+                .with_planning(planning(&[], true), prompt.clone())
+                .with_instructions(Arc::clone(&cache), Some(files.clone()))
+        };
+        let mut history = Vec::new();
 
         // No current agent: no instructions.
-        let content = context_for(&contributor, "hello").await;
-        assert!(!content.contains("The current project is"), "{content}");
+        let sent = stored_turn(&contributor(), &mut history, "hello").await;
+        assert!(blocks(&sent).is_empty());
 
-        // AGENTS.md over CLAUDE.md, after the herdr layout.
+        // AGENTS.md over CLAUDE.md, as a system message before the user's
+        // turn, its marker first; the context ends with the current agent.
         *current.lock().unwrap() = Some("p1".to_string());
-        let content = context_for(&contributor, "hello").await;
-        let at = content
-            .find("The current project is a, where the Claude")
-            .expect("block");
-        assert!(at > content.find("### Herdr Multiplexer State").unwrap());
-        assert!(
-            content.contains("from AGENTS.md:\n\nAgents rules for a."),
-            "{content}"
-        );
-        assert!(!content.contains("Claude rules"));
+        let sent = stored_turn(&contributor(), &mut history, "hello").await;
+        let found = blocks(&sent);
+        assert_eq!(found.len(), 1, "{sent:?}");
+        let block = found[0];
+        let marker = instructions_marker("a", "Agents rules for a.");
+        assert!(block.starts_with(&format!("{marker}\n")), "{block}");
+        assert!(block.contains("The current project is a, where the Claude"));
+        assert!(block.ends_with("from AGENTS.md:\n\nAgents rules for a."));
+        let at = sent.iter().position(|m| m.content == block).unwrap();
+        assert_eq!(sent[at].role, "system");
+        assert_eq!(sent[at + 1].role, "user", "before the user's turn");
+        let context = &sent.last().unwrap().content;
+        assert!(!context.contains("The current project is"), "{context}");
+        assert!(!context.contains(INSTRUCTIONS_MARKER));
+        let last_line = context.trim_end().lines().last().unwrap();
+        assert!(last_line.starts_with("Current agent: "), "{last_line}");
+        assert!(cache.is_watched());
+        assert_eq!(blocks(&history), [block], "kept in the history");
 
-        // A project without instruction files has no block.
+        // Unchanged: not again.
+        let sent = stored_turn(&contributor(), &mut history, "again").await;
+        assert_eq!(blocks(&sent).len(), 1, "only the stored one");
+        assert_eq!(blocks(&history).len(), 1);
+
+        // Another project: its own block.
         *current.lock().unwrap() = Some("p2".to_string());
-        assert!(
-            !context_for(&contributor, "hello")
-                .await
-                .contains("The current project is")
-        );
+        stored_turn(&contributor(), &mut history, "b").await;
+        assert_eq!(blocks(&history).len(), 2);
+        assert!(blocks(&history)[1].ends_with("Rules for b."));
 
-        // agents_prompt off: none either.
+        // Back to a: its block is in the history already.
         *current.lock().unwrap() = Some("p1".to_string());
+        stored_turn(&contributor(), &mut history, "a").await;
+        assert_eq!(blocks(&history).len(), 2);
+
+        // The file changes: sent again once the watcher says so.
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        std::fs::write(dir.path().join("a/AGENTS.md"), "New rules for a.").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        stored_turn(&contributor(), &mut history, "edited").await;
+        assert_eq!(blocks(&history).len(), 3, "{:?}", blocks(&history));
+        assert!(blocks(&history)[2].ends_with("New rules for a."));
+        stored_turn(&contributor(), &mut history, "once").await;
+        assert_eq!(blocks(&history).len(), 3);
+
+        // A restart (a new cache, the same history): not again.
+        let fresh = HerdrContextContributor::new(client.clone(), vec![])
+            .with_current_agent(Arc::clone(&current))
+            .with_planning(planning(&[], true), prompt.clone())
+            .with_instructions(Arc::default(), None);
+        stored_turn(&fresh, &mut history, "restarted").await;
+        assert_eq!(blocks(&history).len(), 3);
+
+        // A history without the marker (trimmed): sent again.
+        let mut trimmed: Vec<libinfer::Message> = history
+            .iter()
+            .filter(|m| !m.content.starts_with(INSTRUCTIONS_MARKER))
+            .cloned()
+            .collect();
+        stored_turn(&contributor(), &mut trimmed, "trimmed").await;
+        assert_eq!(blocks(&trimmed).len(), 1);
+
+        // agents_prompt off: nothing more is added.
         let off = HerdrContextContributor::new(client, vec![])
             .with_current_agent(Arc::clone(&current))
-            .with_planning(planning(&["*.md"], false), prompt);
-        assert!(
-            !context_for(&off, "hello")
-                .await
-                .contains("The current project is")
+            .with_planning(planning(&["*.md"], false), prompt)
+            .with_instructions(Arc::clone(&cache), Some(files.clone()));
+        let mut empty = Vec::new();
+        let sent = stored_turn(&off, &mut empty, "off").await;
+        assert!(blocks(&sent).is_empty());
+        assert!(blocks(&empty).is_empty());
+    }
+
+    #[test]
+    fn test_the_history_holds_only_the_projects_latest_marker() {
+        let message = |content: String| libinfer::Message {
+            role: "system".to_string(),
+            content,
+            name: None,
+            thought_signature: None,
+        };
+        let v1 = instructions_marker("my project", "one");
+        let v2 = instructions_marker("my project", "two");
+        let other = instructions_marker("other", "one");
+        assert_ne!(v1, v2);
+        assert_eq!(
+            v1.len(),
+            INSTRUCTIONS_MARKER.len() + "my project".len() + 1 + 16 + 1
         );
+        let history = vec![
+            message(format!("{v1}\nblock")),
+            message(format!("{v2}\nblock")),
+            message(format!("{other}\nblock")),
+        ];
+        assert!(history_holds(&history, &v2));
+        assert!(!history_holds(&history, &v1), "reverted to v1: sent again");
+        assert!(history_holds(&history, &other));
+        assert!(!history_holds(&[], &v1));
     }
 
     #[tokio::test]
