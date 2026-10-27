@@ -2494,3 +2494,64 @@ Built in the four companion commits before this entry.
       back on, if it was left that way.
     - The overlay shows its header under the grab bar.
     - Keyboard routing is in `prompt/keyboard.rs`.
+
+## 2026-10-27 11:50 EDT — plan 20261027_04 steps 1–6's departures
+
+Plan: docs/design/20261027_04_GENERAL_AGENT_PLANNING_PLAN.md. Steps 3
+(`af5cb63`, `861c3ee`), 6 (`bcb0a54`, `a63b4be`, `ea20791`), 1 (`0a03725`),
+2 (`f4c1543`), 3b (`7147d27`), 4 (`8b0e2c5`) and 5 (`4571d82`).
+
+1. **Step 1, free text with `/` and `-` is still refused.** The plan routes
+   Gemini's free text through `policy::check_message`, whose
+   `validate_message` has refused every symbol beyond `. , ' ? : _` since
+   `2fa3e43` (`SYMBOL_THRESHOLD = 0`), so step 1's **Done when:** "free text
+   with `/` and `-` accepted" does not hold. Requests longer than 256
+   characters are accepted; "open src/main.rs" is refused with "Message
+   rejected". `validate_message` is unchanged, since the app's typed
+   messages use it too; raised with the owner.
+2. **Step 1, the confirmation:** free text opens a message confirmation
+   (`request_message`), worded as for a typed message; without a handle it
+   falls back to "message <first words>". herdr always receives
+   `run_command` with `pane_id` and `command`.
+3. **Step 1, the context's agent list** said "Allow Arbitrary Safe
+   Commands" and forbade `/` and `-`; it now shows "Requests in words:
+   <allow_messages>" with the message rules. `PROMPT.md` section 3.2 still
+   describes the old rules; only the tool's names were changed there.
+4. **Step 2, `Prompt.user` is optional,** since `planning` has none;
+   `spoken_summary` checks for its own `user` when loaded.
+5. **Step 2, `Use::Planning`** is not in `Use::ALL` (the uses with their own
+   backend and model); it is resolved after the general agent, appears in
+   the `[llm]` log lines, and `from_name("planning")` finds it.
+6. **Step 2, the `read` slot** is in the `files` block, which the 11:22
+   amendment split from `system`.
+7. **Step 2, the client** is keyed on its target, profile and planning
+   profile, so any change to `planning` builds a new one. The `planning`
+   prompt is loaded once at start, from `--prompts` when given.
+8. **Step 2, refused patterns** also include empty patterns, empty segments
+   (`a//b`) and `.` or `..` segments.
+9. **Step 2, the `planning` prompt's wording** was written in the build;
+   for the owner's review.
+10. **Step 3b, `Session.current_agent`** is new, shared by the executor and
+    the context; `Session.current` (the last pane addressed, for interrupts)
+    is unchanged. `focus_project` also records the pane as addressed. The
+    context's "### Current agent" says "None: …" when there is none.
+11. **Step 4, refusals:** `.private`, `.git`, `.env` and `.env.*` are refused
+    at any depth. The canonical path is checked against the patterns and
+    refusals as well, so a link inside the project to `.env` is refused.
+    `list_files` lists regular files only. The file tools and
+    `agents_prompt` are refused when herdr is remote over SSH, since the
+    `cwd` is on another machine.
+12. **Step 4, layout:** `src/project.rs` for the file tools,
+    `src/llm/planning.rs` for the patterns; `walkdir = "2"` is a direct
+    dependency.
+13. **Step 5, `flankr prompt`** resolves `[llm]` with the process's key
+    environment, so it shows what the daemon would build; without a key it
+    prints "planning: off (…)" and the base prompt. `--agent` prints the
+    instructions block even with `agents_prompt` off, noting turns don't get
+    it. `--use` takes only `general_agent`.
+14. **Step 6, *Tab follows focus*** has an ⓘ like the row above it, and is
+    dim while the daemon offers no general agent as well as while the user's
+    toggle is off. The phone sends the setting as set even while the general
+    agent is off; the daemon gives it no effect then.
+15. **Step 6, `apps/Cargo.lock`** was still on `libflankr_proto` 0.3.10 after
+    `861c3ee`; it is bumped in its own commit, `a63b4be`.
