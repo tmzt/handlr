@@ -303,3 +303,19 @@ with no paths built-in (so the list/read feature is disabled by default)".
    `docs/x.txt` and `src/main.rs` refused).
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-27 11:22 EDT: the template suggests the top folder's Markdown too
+
+The owner (2026-10-27), right after the 11:22 amendment: "['*.md',
+'docs/**/*.md']".
+
+1. **`config.default.toml` suggests `read = ["*.md", "docs/**/*.md"]`,**
+   still commented out. This replaces the 11:22 amendment's item 2
+   (`read = ["docs/**/*.md"]`). There are still no built-in patterns.
+2. Step 2's **Done when:** declares both file tools with
+   `read = ["*.md", "docs/**/*.md"]`; step 4's tests use those patterns,
+   with `README.md` and `docs/design/x.md` read, and `docs/x.txt`,
+   `src/README.md` and `src/main.rs` refused. This replaces the 11:22
+   amendment's item 4 where they differ.
+
+The plan stays `Draft` until the owner approves it.
