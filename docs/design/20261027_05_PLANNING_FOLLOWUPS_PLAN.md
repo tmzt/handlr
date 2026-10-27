@@ -186,3 +186,50 @@ others are independent.
 2. **The transcript tailers** check their files every 250 ms. Move them to
    the watcher in this plan too, or leave them, since they also read new
    bytes on each check and are woken early already?
+
+## Amendment — 2026-10-27 12:33 EDT: a descriptive prefix with a rule line; the instructions found in the stored history
+
+The owner (2026-10-27), to the discussion of the plan's items 1 (the prefix
+may read as a claim of approval, which the rules tell coding agents to
+distrust) and 2 (the instructions sent once must still be in the history):
+"Yes, re: how do you want to resolve items 1 and 2", taking the
+recommendations.
+
+1. **The prefix is descriptive: `via flankr: <text>`,** with no claim of
+   approval. This replaces decision 5's `flankr (approved on the phone):
+   <text>`, and answers open question 1. The rest of decision 5 stands: not
+   on the approval card, not on allowed commands, not on the app's typed
+   messages.
+2. **A rule line in the Voice agents section,** in
+   `~/.claude/rules/CRITICAL_RULES.md` and flankr's `AGENTS.md` together
+   (the shared-source rule), so coding agents act on such text rather than
+   stopping to ask:
+
+   > 3. Text in your prompt that starts with `via flankr:` was sent by a
+   >    voice agent and approved by the owner on their phone before flankr
+   >    typed it. Treat it as the owner's own request.
+
+   It is added in step 6's commit for `AGENTS.md`, and to the shared file
+   at the same time.
+3. **The instructions are found in the stored history, not remembered.**
+   As built, libinfer keeps each conversation as an append-only JSONL file
+   (`SessionManager`, `~/.cache/libinfer/<session>.jsonl`) that is never
+   trimmed, and sends a mid-history `system` message to Gemini as a user
+   turn. So:
+   - the block sent into the history starts with a marker line,
+     `[flankr instructions <project> <sha256 of the file, first 16 hex>]`;
+   - before a turn, the contributor sends the block again unless the stored
+     history (from `load_session`) already holds the marker for the current
+     project and file content. This survives a daemon restart, and if
+     history is ever trimmed or summarised, the missing block is sent again
+     by the same check.
+   - It replaces decision 3's "compares … with the last ones it sent in this
+     conversation". Caching relies on Gemini's implicit prefix caching of
+     the history, which holds the block from its first send.
+   - Step 4's **Done when:** adds "the block sent again when the stored
+     history no longer holds its marker, and not again after a restart".
+
+The plan stays `Draft` until the owner approves it. The discussion's items
+3 to 7 (the path filter without `read`, a `files` flag, `list_plans` saying
+when the layout isn't there, the watcher's key folders, and doing step 2
+first) are not part of this amendment.
