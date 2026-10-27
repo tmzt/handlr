@@ -274,3 +274,32 @@ and trusted".
    following symlinks. No new crate is added for this plan.
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-27 11:22 EDT: no built-in read patterns; the template suggests docs/**/*.md
+
+The owner (2026-10-27): "the defaults in the toml should be docs/**/*.md
+with no paths built-in (so the list/read feature is disabled by default)".
+
+1. **`read` has no built-in patterns.** Unset, it is empty, and an empty
+   `read` turns the file tools off: `list_files` and `read_file` are not
+   declared to Gemini, and calls to them are refused. This replaces decision
+   2's `read = ["*.md", "docs/**"]   # the default when unset` and the
+   11:20 amendment's "The default stays `["*.md", "docs/**"]`".
+2. **`config.default.toml` suggests `read = ["docs/**/*.md"]`,** commented
+   out with the rest of `[llm.uses.planning]`, beside the existing `[llm]`
+   examples. Step 2 adds it.
+3. **What else depends on `read`:**
+   - `agents_prompt` does not: it reads only the three instruction files
+     (decision 5), with or without patterns.
+   - `focus_project` is declared while `planning` is on and either `read`
+     is non-empty or `agents_prompt` is on.
+   - The `planning` prompt's `system` text describes the file tools only
+     while they are declared: the prompt gets a separate `files` block,
+     added after `system` only then, as `spoken_summary`'s `points` is.
+4. **Tests:** step 2's **Done when:** adds "no file tools declared with
+   `read` unset or empty, and both declared with `read = ["docs/**/*.md"]`";
+   step 4's tests set `read` explicitly, and use `docs/**/*.md` in place of
+   `*.md` and `docs/**` (with `docs/design/x.md` read, and `README.md`,
+   `docs/x.txt` and `src/main.rs` refused).
+
+The plan stays `Draft` until the owner approves it.
