@@ -300,11 +300,11 @@ mod tests {
         let asked = [text(
             Role::Assistant,
             "2",
-            "Wrote the amendment.\n\nShall I build `docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md` now?",
+            "Wrote the amendment.\n\nApprove plan 04 and build it now?",
         )];
         let q = pending_question(&asked, &AgentStatus::Idle, false).unwrap();
         assert!(q.about_plan);
-        assert_eq!(q.plan.as_deref(), Some("the overview screen plan"));
+        assert_eq!(q.plan.as_deref(), Some("plan 04"));
         assert!(q.links.is_empty(), "links are the server's to add");
         let plain = [text(Role::Assistant, "2", "Install it on the S23?")];
         let q = pending_question(&plain, &AgentStatus::Idle, false).unwrap();

@@ -250,33 +250,49 @@ impl Linker {
     }
 }
 
-/// A `docs/design/…_PLAN.md` path.
-fn is_plan_path(path: &str) -> bool {
-    path.starts_with("docs/design/") && path.ends_with("_PLAN.md")
-}
-
-/// The words that make a question about a plan.
-const PLAN_WORDS: [&str; 4] = ["plan", "amendment", "draft", "approve"];
-
-/// Whether `question` is about a plan, and the plan's spoken name when
-/// exactly one plan path names it.
+/// Whether `question` asks to approve a plan, and the plan's id as the text
+/// gives it (plan 20261022_03, L3, the 2026-10-27 13:21 EDT amendment): a
+/// heuristic on the words alone, tied to no planning format. It is about a
+/// plan when it has "approve" and "plan", or "approve" and "draft", as whole
+/// words; the id is the word after "plan" when that holds a digit, given as
+/// "plan <id>"; with none, a question about a draft names "the draft"; and
+/// two differing ids name none.
 pub fn plan_question(question: &str) -> (bool, Option<String>) {
-    let plans: Vec<&str> = docs_paths(question)
-        .into_iter()
-        .filter(|p| is_plan_path(p))
+    let words: Vec<&str> = question
+        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '`' | '"' | '\'' | ','))
+        .filter(|w| !w.is_empty())
         .collect();
-    let says = question
-        .split(|c: char| !c.is_alphabetic())
-        .any(|w| PLAN_WORDS.iter().any(|p| w.eq_ignore_ascii_case(p)));
-    let about = says || !plans.is_empty();
-    let name = match plans.as_slice() {
-        [one] => {
-            let spoken = flankr_speech::read_aloud(one, flankr_speech::LocalTime::default());
-            (!spoken.is_empty()).then_some(spoken)
+    let bare = |w: &str| -> String {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase()
+    };
+    let has = |word: &str| words.iter().any(|w| bare(w) == word);
+    if !(has("approve") && (has("plan") || has("draft"))) {
+        return (false, None);
+    }
+    let mut ids: Vec<String> = Vec::new();
+    for pair in words.windows(2) {
+        if bare(pair[0]) != "plan" {
+            continue;
         }
+        let id = pair[1]
+            .trim_start_matches(['#', '№'])
+            .trim_end_matches(|c: char| !c.is_alphanumeric());
+        let ok = !id.is_empty()
+            && id.chars().any(|c| c.is_ascii_digit())
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if ok && !ids.iter().any(|known| known == id) {
+            ids.push(id.to_string());
+        }
+    }
+    let name = match ids.as_slice() {
+        [one] => Some(format!("plan {one}")),
+        [] if !has("plan") => Some("the draft".to_string()),
         _ => None,
     };
-    (about, name)
+    (true, name)
 }
 
 #[cfg(test)]
@@ -459,24 +475,43 @@ mod tests {
 
     #[test]
     fn plan_questions_are_found_and_named() {
+        let yes = |id: Option<&str>| (true, id.map(str::to_string));
+        assert_eq!(plan_question("Approve plan 03?"), yes(Some("plan 03")));
+        assert_eq!(
+            plan_question("Do you approve the plan (plan 20261027_04) as written?"),
+            yes(Some("plan 20261027_04"))
+        );
+        assert_eq!(
+            plan_question("Approve plan #5, then build it?"),
+            yes(Some("plan 5"))
+        );
+        assert_eq!(plan_question("Shall I approve the plan?"), yes(None));
+        // Two different ids: about a plan, but no one id.
+        assert_eq!(plan_question("Approve plan 03 or plan 04?"), yes(None));
+        // Both words are needed.
+        assert_eq!(
+            plan_question("Restart the daemon on the plan 05 build?"),
+            (false, None)
+        );
+        assert_eq!(plan_question("Do you approve?"), (false, None));
+        assert_eq!(plan_question("Shall I write the amendment?"), (false, None));
+        assert_eq!(plan_question("Is the DRAFT right?"), (false, None));
+        // "approve" with "draft" is about a plan too, named as the draft.
+        assert_eq!(plan_question("Approve the DRAFT?"), yes(Some("the draft")));
+        assert_eq!(
+            plan_question("Approve the draft of plan 06?"),
+            yes(Some("plan 06"))
+        );
+        assert_eq!(plan_question("Install it on the S23?"), (false, None));
+        // A plan's path alone is no longer enough.
         assert_eq!(
             plan_question(&format!("Shall I implement `{PLAN}`?")),
-            (true, Some("the overview screen plan".to_string()))
+            (false, None)
         );
-        assert_eq!(plan_question("Shall I write the amendment?"), (true, None));
-        assert_eq!(plan_question("Do you approve?"), (true, None));
-        assert_eq!(plan_question("Is the DRAFT right?"), (true, None));
-        assert_eq!(plan_question("Install it on the S23?"), (false, None));
-        // "planet" and "planning" are not the word.
-        assert_eq!(plan_question("Is the planet planning?"), (false, None));
-        // Two plans: about plans, but no one name.
+        // "planet", "planning" and "approved" are not the words.
         assert_eq!(
-            plan_question(&format!(
-                "Merge {PLAN} into docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md?"
-            )),
-            (true, None)
+            plan_question("Is the planet planning approved?"),
+            (false, None)
         );
-        // A docs path that is not a plan names none.
-        assert_eq!(plan_question("Is docs/FONT_X.md right?"), (false, None));
     }
 }

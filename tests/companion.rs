@@ -1378,7 +1378,8 @@ async fn give_plan_session(daemon: &Daemon) {
 
 #[tokio::test]
 async fn a_plan_question_is_marked_and_its_paths_and_urls_link() {
-    // Plan 20261022_03, the 21:57 EDT amendment.
+    // Plan 20261022_03, the 21:57 EDT amendment, and the 2026-10-27 13:21
+    // EDT amendment's "approve" and "plan" with the plan's id.
     let mut cfg = confirming();
     cfg.urls.repowiki_url = Some("http://wiki:8088/".to_string());
     let env = start(cfg).await;
@@ -1390,7 +1391,7 @@ async fn a_plan_question_is_marked_and_its_paths_and_urls_link() {
     let session = &r["result"]["session"];
     let q = &session["pending_question"];
     assert_eq!(q["about_plan"], true, "{r}");
-    assert_eq!(q["plan"], "the overview screen plan");
+    assert_eq!(q["plan"], "plan 04");
     let plan = "docs/design/20261023_04_OVERVIEW_SCREEN_PLAN.md";
     let plan_url = "http://wiki:8088/#/work--plans/docs/design/20261023_04_OVERVIEW_SCREEN_PLAN";
     let web = json!({"text": "https://example.com/spec", "url": "https://example.com/spec"});
