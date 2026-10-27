@@ -50,8 +50,8 @@ pub const FILE: &str = "settings.toml";
 pub const DISABLED_ALPHA: f32 = 0.35;
 
 /// The settings screen's values. Each toggle is on by default but
-/// *Alert when an agent needs you*, the scrollbar *Hidden*, and the voice
-/// *Default*.
+/// *Alert when an agent needs you* and *Tab follows focus*, the scrollbar
+/// *Hidden*, and the voice *Default*.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
     /// *All sound*.
@@ -62,6 +62,9 @@ pub struct Settings {
     pub microphone: bool,
     /// *General agent (Gemini)*.
     pub general_agent: bool,
+    /// *Tab follows focus* (plan 20261027_04, step 6): off until turned
+    /// on; on, Gemini's `focus_project` also moves herdr's focused tab.
+    pub tab_follows_focus: bool,
     /// *Scrollbar*, the agent view's.
     pub scrollbar: ScrollbarVisibility,
     /// *Stay connected in the background* (CHANGES.md 2026-10-24 12:38
@@ -147,6 +150,7 @@ impl Default for Settings {
             ding: true,
             microphone: true,
             general_agent: true,
+            tab_follows_focus: false,
             scrollbar: ScrollbarVisibility::Hidden,
             background: true,
             alerts: false,
@@ -169,6 +173,8 @@ struct SettingsFile {
     microphone: bool,
     #[serde(default = "on")]
     general_agent: bool,
+    #[serde(default)]
+    tab_follows_focus: bool,
     /// `disabled`, `hidden` or `always`.
     #[serde(default = "hidden")]
     scrollbar: String,
@@ -238,6 +244,7 @@ impl Settings {
             ding: self.ding,
             microphone: self.microphone,
             general_agent: self.general_agent,
+            tab_follows_focus: self.tab_follows_focus,
         }
     }
 
@@ -273,6 +280,7 @@ impl Settings {
             ding: file.ding,
             microphone: file.microphone,
             general_agent: file.general_agent,
+            tab_follows_focus: file.tab_follows_focus,
             scrollbar,
             background: file.background,
             alerts: file.alerts,
@@ -294,6 +302,7 @@ impl Settings {
             ding: self.ding,
             microphone: self.microphone,
             general_agent: self.general_agent,
+            tab_follows_focus: self.tab_follows_focus,
             scrollbar: scrollbar_name(self.scrollbar).to_string(),
             background: self.background,
             alerts: self.alerts,
@@ -516,9 +525,20 @@ mod tests {
         assert_eq!(Settings::load(dir.path()), Settings::default());
         std::fs::write(dir.path().join(FILE), "sound = 3\n").unwrap();
         assert_eq!(Settings::load(dir.path()), Settings::default());
-        // Background on, alerts off, by default.
+        // Background on, alerts and tab follows focus off, by default.
         let d = Settings::default();
-        assert!(d.background && !d.alerts);
+        assert!(d.background && !d.alerts && !d.tab_follows_focus);
+    }
+
+    #[test]
+    fn tab_follows_focus_reaches_the_client() {
+        assert!(!Settings::default().to_client().tab_follows_focus);
+        let s = Settings {
+            tab_follows_focus: true,
+            ..Settings::default()
+        };
+        let client = s.to_client();
+        assert!(client.tab_follows_focus && client.general_agent);
     }
 
     #[test]
@@ -529,6 +549,7 @@ mod tests {
             ding: true,
             microphone: false,
             general_agent: false,
+            tab_follows_focus: true,
             scrollbar: ScrollbarVisibility::Always,
             background: false,
             alerts: true,
@@ -543,6 +564,7 @@ mod tests {
         assert!(text.contains("scrollbar = \"always\""), "{text}");
         assert!(!dir.path().join(format!("{FILE}.tmp")).exists());
         assert!(text.contains("background = false") && text.contains("alerts = true"));
+        assert!(text.contains("tab_follows_focus = true"), "{text}");
         assert!(text.contains("voice = \"alba\""), "{text}");
         assert!(text.contains("appearance = \"light\""), "{text}");
         assert!(text.contains("light_theme = \"solarized_light\""), "{text}");

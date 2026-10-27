@@ -93,6 +93,17 @@ key's text on that vendor's phones.
     turned on with `enabled = true` under `[llm]` in the daemon's
     `config.toml`; the daemon picks the change up within about 5 seconds.
 
+# [Copy] tab_follows_focus
+
+- title: Tab follows focus
+- text: |
+    On, when Gemini focuses a project (its `focus_project` tool), herdr's
+    focused tab on the desktop moves to that agent's tab too. Off, Gemini's
+    project focus is its own: it sets which agent Gemini's commands and
+    file reads go to, and the desktop is left alone. Gemini's `focus` tool,
+    used when you ask to be shown a pane, moves herdr's focus either way;
+    this switch does not change it. Needs *General agent (Gemini)* on.
+
 # [Copy] scrollbar
 
 - text: Scrollbar

@@ -7,7 +7,9 @@
 //!   while all sound is off; then *Voice*, "‹ Default ›", stepping
 //!   through Phonon's voices with a spoken preview, inactive until Phonon
 //!   has loaded and while all sound is off ([`super::voice`]);
-//! - **Voice**: *Microphone* and *General agent (Gemini)*;
+//! - **Voice**: *Microphone*, *General agent (Gemini)*, and *Tab follows
+//!   focus* (off), inactive while the general agent is off or the daemon
+//!   offers none (plan 20261024_02, the 2026-10-27 11:27 EDT amendment);
 //! - **Display**: *Scrollbar*, "‹ Hidden ›"; then *Appearance* (*System*,
 //!   *Always light*, *Always dark*), *Light theme* and *Dark theme*, the
 //!   themes of each kind by name, each step applied at once; with *Always
@@ -30,7 +32,7 @@
 //!   ([`Confirm`]).
 //!
 //! Rows with a long explanation have an ⓘ that opens it in a modal
-//! ([`InfoModal`]): *Voice*, *General agent*, *Appearance*, the two above, *Battery optimization*
+//! ([`InfoModal`]): *Voice*, *General agent*, *Tab follows focus*, *Appearance*, the two above, *Battery optimization*
 //! and *Samsung battery (app sleeping)*. All the copy is in
 //! `SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
 //! label; a link in it is tappable, and the app opens it with libmorph's
@@ -141,6 +143,7 @@ impl Section {
 enum Info {
     Voice,
     GeneralAgent,
+    TabFollowsFocus,
     Background,
     Alerts,
     Optimization,
@@ -153,6 +156,7 @@ impl Info {
         match self {
             Info::Voice => copy::VOICE,
             Info::GeneralAgent => copy::GENERAL_AGENT,
+            Info::TabFollowsFocus => copy::TAB_FOLLOWS_FOCUS,
             Info::Background => copy::BACKGROUND,
             Info::Alerts => copy::ALERTS,
             Info::Optimization => copy::BATTERY_OPTIMIZATION,
@@ -220,6 +224,7 @@ impl Asking {
             Asking::Delete => "delete",
             Asking::Info(Info::Voice) => "info_voice",
             Asking::Info(Info::GeneralAgent) => "info_general_agent",
+            Asking::Info(Info::TabFollowsFocus) => "info_tab_follows_focus",
             Asking::Info(Info::Background) => "info_background",
             Asking::Info(Info::Alerts) => "info_alerts",
             Asking::Info(Info::Optimization) => "info_optimization",
@@ -238,6 +243,7 @@ struct Nodes {
     voice: NodeId,
     microphone: NodeId,
     general_agent: NodeId,
+    tab_follows_focus: NodeId,
     scrollbar: NodeId,
     appearance: NodeId,
     light_theme: NodeId,
@@ -560,6 +566,7 @@ impl SettingsScreen {
         };
         let microphone = toggle(&mut router, copy::MICROPHONE.label(), false);
         let general_agent = toggle(&mut router, copy::GENERAL_AGENT.label(), true);
+        let tab_follows_focus = toggle(&mut router, copy::TAB_FOLLOWS_FOCUS.label(), true);
         let scrollbar = router.add(
             under,
             OptionRow::new(
@@ -613,6 +620,7 @@ impl SettingsScreen {
             voice,
             microphone,
             general_agent,
+            tab_follows_focus,
             scrollbar,
             appearance,
             light_theme,
@@ -720,12 +728,17 @@ impl SettingsScreen {
                 Section::Voice => {
                     // *General agent* is dim while the daemon offers none;
                     // its ⓘ says why (plan 20261027_02, decision 9).
+                    // *Tab follows focus* is dim while the general agent is
+                    // off either way (plan 20261024_02, the 2026-10-27
+                    // 11:27 EDT amendment).
+                    let offered = super::llm().general_agent;
                     for (id, on, enabled) in [
                         (n.microphone, settings.microphone, true),
+                        (n.general_agent, settings.general_agent, offered),
                         (
-                            n.general_agent,
-                            settings.general_agent,
-                            super::llm().general_agent,
+                            n.tab_follows_focus,
+                            settings.tab_follows_focus,
+                            offered && settings.general_agent,
                         ),
                     ] {
                         let rect = row(&mut y);
@@ -850,6 +863,7 @@ impl SettingsScreen {
             n.ding,
             n.microphone,
             n.general_agent,
+            n.tab_follows_focus,
             n.background,
             n.alerts,
         ]
@@ -1058,6 +1072,7 @@ impl SettingsScreen {
             let info = [
                 (n.voice, Info::Voice),
                 (n.general_agent, Info::GeneralAgent),
+                (n.tab_follows_focus, Info::TabFollowsFocus),
                 (n.background, Info::Background),
                 (n.alerts, Info::Alerts),
                 (n.optimization, Info::Optimization),
@@ -1090,6 +1105,8 @@ impl SettingsScreen {
             s.microphone = !s.microphone;
         } else if target == n.general_agent {
             s.general_agent = !s.general_agent;
+        } else if target == n.tab_follows_focus {
+            s.tab_follows_focus = !s.tab_follows_focus;
         } else if target == n.background {
             s.background = !s.background;
         } else if target == n.alerts {
@@ -1345,6 +1362,7 @@ impl SettingsScreen {
             n.ding,
             n.microphone,
             n.general_agent,
+            n.tab_follows_focus,
             n.background,
             n.alerts,
         ]
@@ -1633,6 +1651,77 @@ mod tests {
         };
         assert!(!now.general_agent && !now.microphone && !now.ding);
         assert_eq!(s.settings(), now);
+    }
+
+    // *Tab follows focus* (plan 20261027_04, step 6; plan 20261024_02, the
+    // 2026-10-27 11:27 EDT amendment).
+
+    #[test]
+    fn tab_follows_focus_follows_the_general_agent_in_voice() {
+        let s = plain();
+        let mic = s.row_rect("Microphone").unwrap();
+        let ga = s.row_rect("General agent (Gemini)").unwrap();
+        let row = s
+            .row_rect("Tab follows focus")
+            .expect("a Tab follows focus row");
+        assert_eq!(ga.y, mic.y + mic.h);
+        assert_eq!(row.y, ga.y + ga.h, "right after General agent, in Voice");
+        assert!(row.y < s.row_rect("Scrollbar").unwrap().y, "before Display");
+        let t = s.toggle("Tab follows focus").unwrap();
+        assert!(!t.on, "off by default");
+        assert!(t.enabled && t.info);
+    }
+
+    #[test]
+    fn tab_follows_focus_toggles_and_is_dim_without_the_general_agent() {
+        let label = "Tab follows focus";
+        let mut s = plain();
+        assert_eq!(
+            tap_row(&mut s, label),
+            Some(SettingsHit::Changed(Settings {
+                tab_follows_focus: true,
+                ..Settings::default()
+            }))
+        );
+        assert!(s.toggle(label).unwrap().on);
+        // General agent off: dim, it takes no taps, and keeps its value.
+        tap_row(&mut s, "General agent (Gemini)");
+        let t = s.toggle(label).unwrap();
+        assert!(!t.enabled && t.on);
+        assert_eq!(tap_row(&mut s, label), None, "dim, it takes no taps");
+        // Its ⓘ still opens.
+        let [x, y] = s.info_point(label).unwrap();
+        tap(&mut s, x, y);
+        assert!(s.asking());
+        assert!(s.back());
+        // On again: live, and it toggles off.
+        tap_row(&mut s, "General agent (Gemini)");
+        assert!(s.toggle(label).unwrap().enabled);
+        let Some(SettingsHit::Changed(now)) = tap_row(&mut s, label) else {
+            panic!("tab follows focus toggles");
+        };
+        assert!(!now.tab_follows_focus && now.general_agent);
+        // The daemon offering no general agent dims it too.
+        crate::settings::set_llm(flankr_companion::wire::LlmInfo {
+            general_agent: false,
+            summaries: true,
+            reason: Some("off".into()),
+        });
+        s.llm_changed();
+        assert!(!s.toggle(label).unwrap().enabled);
+        assert_eq!(tap_row(&mut s, label), None);
+        crate::settings::set_llm(flankr_companion::wire::LlmInfo::available());
+        s.llm_changed();
+        assert!(s.toggle(label).unwrap().enabled);
+    }
+
+    #[test]
+    fn tab_follows_focus_copy_names_herdr_and_its_tools() {
+        let text = copy::TAB_FOLLOWS_FOCUS.text;
+        assert_eq!(copy::TAB_FOLLOWS_FOCUS.label(), "Tab follows focus");
+        for word in ["herdr", "`focus_project`", "`focus`", "desktop"] {
+            assert!(text.contains(word), "{word}: {text}");
+        }
     }
 
     #[test]
@@ -2130,6 +2219,7 @@ mod tests {
         for (label, info) in [
             ("Voice", Info::Voice),
             ("General agent (Gemini)", Info::GeneralAgent),
+            ("Tab follows focus", Info::TabFollowsFocus),
             (BACKGROUND, Info::Background),
             (ALERTS, Info::Alerts),
             ("Battery optimization", Info::Optimization),
@@ -2419,6 +2509,7 @@ mod tests {
             "Voice",
             "Microphone",
             "General agent (Gemini)",
+            "Tab follows focus",
             "Scrollbar",
             "Unpair this device",
             "Delete data",
