@@ -161,6 +161,15 @@ fn print_event(event: Event) {
             }
         }
         Event::Vocabulary(words) => println!("* vocabulary: {}", words.join(", ")),
+        Event::Llm(llm) => println!(
+            "* llm: general agent {}, summaries {}{}",
+            llm.general_agent,
+            llm.summaries,
+            llm.reason
+                .as_deref()
+                .map(|r| format!(" ({r})"))
+                .unwrap_or_default()
+        ),
         Event::Focus(focus) => match focus {
             Some(f) => println!("* focus: {}", f.name),
             None => println!("* focus: none"),

@@ -226,6 +226,11 @@ fn expect_connected(c: &Companion) {
         }
     );
     assert_eq!(next_event(c), Event::Vocabulary(vec!["claude".into()]));
+    // The hello has no `llm`: both, as from an older daemon.
+    assert_eq!(
+        next_event(c),
+        Event::Llm(flankr_companion::wire::LlmInfo::available())
+    );
 }
 
 /// The handshake's first message is one JSON-RPC `hello` request and

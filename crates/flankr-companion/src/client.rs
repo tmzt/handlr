@@ -454,6 +454,11 @@ pub enum Event {
     Vocabulary(Vec<String>),
     /// herdr's focus changed, or was first learned.
     Focus(Option<common::FocusInfo>),
+    /// What the daemon's `[llm]` makes available, from `hello` and each
+    /// `server.capabilities` (plan 20261027_02, decision 9). Without the
+    /// general agent the centre button and the Gemini strip are hidden and
+    /// the settings toggle is dim; without summaries, cards show no points.
+    Llm(wire::LlmInfo),
     /// The agents, as `agents.list` gave them: on its first answer on each
     /// connection, then whenever the list changes (plan 20261023_04, decision 6).
     Agents(Vec<common::AgentInfo>),
@@ -1018,6 +1023,9 @@ pub struct State {
     follow: bool,
     /// The settings screen's toggles (plan 20261024_02).
     settings: Settings,
+    /// What the daemon's `[llm]` makes available, as last told; both, from
+    /// a daemon that does not say (plan 20261027_02, decision 7).
+    llm: wire::LlmInfo,
     /// A `link.unpair` is on its way, since this time.
     unpairing: Option<Duration>,
     /// Panes whose finished turn the agent view has dinged: the list's
@@ -1460,6 +1468,7 @@ impl State {
             view: None,
             follow: false,
             settings: Settings::default(),
+            llm: wire::LlmInfo::available(),
             unpairing: None,
             dinged: HashSet::new(),
             cross: crate::cross::Cross::default(),
@@ -1525,6 +1534,39 @@ impl State {
     /// The settings as last given.
     pub fn settings(&self) -> Settings {
         self.settings
+    }
+
+    /// What the daemon's `[llm]` makes available, as last told.
+    pub fn llm(&self) -> &wire::LlmInfo {
+        &self.llm
+    }
+
+    /// Whether a general agent turn may start: the user's toggle is on and
+    /// the daemon offers one (plan 20261027_02, decisions 8 and 9).
+    pub fn general_agent(&self) -> bool {
+        self.settings.general_agent && self.llm.general_agent
+    }
+
+    /// The daemon said what `[llm]` makes available.
+    fn set_llm(&mut self, llm: wire::LlmInfo, out: &mut Vec<Output>) {
+        if self.llm != llm {
+            log::info!(
+                "llm: general agent {}, summaries {}{}",
+                llm.general_agent,
+                llm.summaries,
+                llm.reason
+                    .as_deref()
+                    .map(|r| format!(" ({r})"))
+                    .unwrap_or_default()
+            );
+        }
+        let lost = self.llm.general_agent && !llm.general_agent;
+        self.llm = llm.clone();
+        // A general agent prompt being dictated has nowhere to go.
+        if lost && self.dictation.as_ref().is_some_and(|d| d.general_agent) {
+            self.clear_dictation(out);
+        }
+        out.push(event(Event::Llm(llm)));
     }
 
     /// Drops what the settings silence (plan 20261024_02, decision 4):
@@ -2796,7 +2838,7 @@ impl State {
     }
 
     fn start_general_agent_prompt(&mut self, mode: PromptMode, out: &mut Vec<Output>) {
-        if !self.settings.general_agent {
+        if !self.general_agent() {
             log::info!("dictation: the general agent is off");
             return;
         }
@@ -3292,8 +3334,9 @@ impl State {
     }
 
     fn start_turn(&mut self, text: String, out: &mut Vec<Output>) {
-        if !self.settings.general_agent {
-            // No Gemini (plan 20261024_02, the 11:37 EDT amendment): in the
+        if !self.general_agent() {
+            // No Gemini (plan 20261024_02, the 11:37 EDT amendment), by the
+            // toggle or the daemon's `[llm]` (plan 20261027_02): in the
             // agent view, what was said is a message to its agent; on the
             // overview, nothing.
             if self.view.is_some() {
@@ -3434,6 +3477,9 @@ impl State {
                         server: hello.server,
                     }));
                     out.push(event(Event::Vocabulary(hello.vocabulary)));
+                    // What `[llm]` offers; an older daemon's is both.
+                    let llm = hello.llm.unwrap_or_else(wire::LlmInfo::available);
+                    self.set_llm(llm, out);
                     // The connection's options start off: say read aloud's.
                     self.send_options(out);
                     // herdr's focus, for the dictation mode's target.
@@ -4037,6 +4083,13 @@ impl State {
                     out.push(event(Event::Vocabulary(v.vocabulary)));
                 }
             }
+            wire::methods::SERVER_CAPABILITIES => {
+                if let Some(c) = parse_or_log::<wire::ServerCapabilities>(note)
+                    && let Some(llm) = c.llm
+                {
+                    self.set_llm(llm, out);
+                }
+            }
             wire::methods::FOCUS_CHANGED => {
                 if let Some(f) = parse_or_log::<wire::FocusChanged>(note) {
                     self.set_focus(f.focus.clone(), out);
@@ -4597,6 +4650,8 @@ mod tests {
                     server: "flankr".into()
                 },
                 Event::Vocabulary(vec!["claude".into(), "hr".into()]),
+                // No `llm` from this daemon: both, as before.
+                Event::Llm(wire::LlmInfo::available()),
             ]
         );
     }
@@ -7951,6 +8006,85 @@ mod tests {
         // Other settings changing leave it off for the daemon.
         let out = s.input(settings(true, false, true, false));
         assert!(options(&out).is_empty(), "{out:?}");
+    }
+
+    /// `server.capabilities` with `llm`.
+    fn capabilities(general_agent: bool, summaries: bool) -> Incoming {
+        let reason = (!general_agent || !summaries).then_some("[llm] enabled = true is not set");
+        note(
+            "server.capabilities",
+            json!({"llm": {"general_agent": general_agent, "summaries": summaries,
+                           "reason": reason}}),
+        )
+    }
+
+    fn llm_events(out: &[Output]) -> Vec<wire::LlmInfo> {
+        events(out)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Llm(i) => Some(i.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn hello_says_what_llm_offers_and_an_older_daemon_offers_both() {
+        // An older daemon: no `llm`, both.
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(id, json!({"server": "flankr", "vocabulary": []})));
+        assert_eq!(llm_events(&out), [wire::LlmInfo::available()]);
+        assert!(s.general_agent());
+        // A daemon with [llm] off.
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(
+            id,
+            json!({"server": "flankr", "vocabulary": [],
+                   "llm": {"general_agent": false, "summaries": false, "reason": "off"}}),
+        ));
+        let info = &llm_events(&out)[0];
+        assert!(!info.general_agent && !info.summaries);
+        assert_eq!(info.reason.as_deref(), Some("off"));
+        assert!(!s.general_agent());
+        // No turn starts, though the toggle is on and is still said as on.
+        assert!(s.settings().general_agent);
+        let out = s.input(Input::Utterance("what's going on".into()));
+        assert!(requests(&out, "turn.start").is_empty(), "{out:?}");
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+        assert!(dictation_of(&out).is_none(), "{out:?}");
+    }
+
+    #[test]
+    fn server_capabilities_change_the_general_agent_while_connected() {
+        let mut s = online();
+        assert!(s.general_agent());
+        let out = s.incoming(capabilities(false, true));
+        let info = &llm_events(&out)[0];
+        assert!(!info.general_agent && info.summaries);
+        assert!(!s.general_agent());
+        let out = s.input(Input::Utterance("hello".into()));
+        assert!(requests(&out, "turn.start").is_empty(), "{out:?}");
+        // Back: a turn starts again.
+        let out = s.incoming(capabilities(true, true));
+        assert_eq!(llm_events(&out), [wire::LlmInfo::available()]);
+        let out = s.input(Input::Utterance("hello".into()));
+        assert_eq!(requests(&out, "turn.start").len(), 1, "{out:?}");
+        // One without `llm` changes nothing.
+        let out = s.incoming(note("server.capabilities", json!({})));
+        assert!(llm_events(&out).is_empty());
+    }
+
+    #[test]
+    fn losing_the_general_agent_ends_its_prompt() {
+        let mut s = online();
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+        assert!(dictation_of(&out).unwrap().general_agent);
+        let out = s.incoming(capabilities(false, false));
+        assert!(!dictation_of(&out).expect("cleared").active, "{out:?}");
     }
 
     #[test]

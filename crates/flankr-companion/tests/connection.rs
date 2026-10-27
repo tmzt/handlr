@@ -113,6 +113,11 @@ fn expect_connected(c: &Companion) {
         next_event(c),
         Event::Vocabulary(vec!["claude".into(), "hr".into()])
     );
+    // The hello has no `llm`: both, as from an older daemon.
+    assert_eq!(
+        next_event(c),
+        Event::Llm(flankr_companion::wire::LlmInfo::available())
+    );
     // The first list answer, `greet`'s.
     assert_eq!(next_event(c), Event::Agents(vec![]));
 }
@@ -219,17 +224,18 @@ fn a_tap_sees_each_event_with_the_bytes_before_the_app_does() {
     let seen = seen.lock().unwrap();
     let events: Vec<&Event> = seen.iter().map(|(e, _)| e).collect();
     // The disconnected events of any attempt before the accept, then the
-    // three the app was given, in the same order.
+    // four the app was given, in the same order.
     let at = events
         .iter()
         .position(|e| matches!(e, Event::Connected { .. }))
         .expect("connected");
     assert!(matches!(events[at + 1], Event::Vocabulary(_)));
-    assert_eq!(events[at + 2], &Event::Agents(vec![]));
-    assert_eq!(events.len(), at + 3);
+    assert!(matches!(events[at + 2], Event::Llm(_)));
+    assert_eq!(events[at + 3], &Event::Agents(vec![]));
+    assert_eq!(events.len(), at + 4);
     // The bytes as they were then: the last is all of them.
-    assert_eq!(seen[at + 2].1, conn.bytes);
-    assert!(seen[at].1 <= seen[at + 2].1);
+    assert_eq!(seen[at + 3].1, conn.bytes);
+    assert!(seen[at].1 <= seen[at + 3].1);
 }
 
 #[test]
