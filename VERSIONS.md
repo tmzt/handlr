@@ -243,3 +243,24 @@ amendments of 2026-10-24 11:54, 12:06 and 12:27 EDT):
   - `common::CardBody::spoken`, the text to read aloud for the card;
   - `common::Slot::bookend`, true on a Finished card's outline slot, for
     the scrollbar's section labels.
+
+## libflankr_proto 0.3.10 — 2026-10-27 (the commit tagged `libflankr_proto-v0.3.10`)
+
+The first release under the crate's new name (plan 20261025_01); 0.3.9 was
+libhandlr_proto's. Additive, by the owner's rulings ("appending to a struct
+is additive", and plan 20261027_02, decision 7: "libflankr_proto gets a
+patch release"): two new types, an appended, serde-defaulted field, a
+notification and an error code (plan 20261027_02, step 3, with the
+amendment of 00:59 EDT naming them `llm`):
+
+- **Added:**
+  - `companion::LlmInfo { general_agent, summaries, reason }`, what the
+    daemon's `[llm]` makes available, with `LlmInfo::available()`;
+  - `companion::HelloResult::llm`, `None` from an older daemon, which
+    means both available;
+  - `companion::methods::SERVER_CAPABILITIES` (`server.capabilities`),
+    daemon to phone, with `companion::ServerCapabilities { llm }`, sent
+    whenever what the daemon offers changes;
+  - `envelope::codes::LLM_UNAVAILABLE` (-32016): a turn refused because
+    the general agent is not available, its message the reason.
+    `codes::ALL` is unchanged.

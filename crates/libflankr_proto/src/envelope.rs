@@ -173,13 +173,19 @@ pub mod codes {
     /// prompt did not load, or the call failed or timed out (plan
     /// 20261023_05, section 4).
     pub const UNAVAILABLE: i64 = -32015;
+    /// The daemon's own LLM use is not available for this request: `[llm]`
+    /// is off, the use is turned off, or its backend has no key (plan
+    /// 20261027_02, decision 8, as amended at 00:59 EDT). The message is the
+    /// reason, as `LlmInfo::reason` gives it.
+    pub const LLM_UNAVAILABLE: i64 = -32016;
     /// A companion turn is already running in this session
     /// (plan 20261022_02, decision 9).
     pub const BUSY: i64 = -32020;
 
-    /// Every code above but `UNAVAILABLE` and the three subscription codes,
-    /// for checking they are distinct. Those came in additive releases
-    /// (0.1.1, 0.3.5); growing this array would change its type.
+    /// Every code above but `UNAVAILABLE`, the three subscription codes and
+    /// `LLM_UNAVAILABLE`, for checking they are distinct. Those came in
+    /// additive releases (0.1.1, 0.3.5, 0.3.10); growing this array would
+    /// change its type.
     pub const ALL: [i64; 15] = [
         PARSE_ERROR,
         INVALID_REQUEST,
@@ -264,6 +270,7 @@ mod tests {
             codes::TOO_MANY_SUBSCRIPTIONS,
             codes::SUBSCRIPTION_NOT_FOUND,
             codes::SESSION_CHANGED,
+            codes::LLM_UNAVAILABLE,
         ] {
             assert!(seen.insert(later), "{later} repeats a code");
         }

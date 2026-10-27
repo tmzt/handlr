@@ -23,6 +23,10 @@ pub mod methods {
     pub const VOCABULARY_CHANGED: &str = "vocabulary.changed";
     /// herdr's focus changed (plan 20261023_02, decision 4).
     pub const FOCUS_CHANGED: &str = "focus.changed";
+    /// What the daemon offers changed: sent with
+    /// [`ServerCapabilities`](super::ServerCapabilities) whenever it does
+    /// (plan 20261027_02, decision 7).
+    pub const SERVER_CAPABILITIES: &str = "server.capabilities";
 }
 
 /// `notice.kind` values.
@@ -67,6 +71,47 @@ pub struct HelloResult {
     /// `true` on the first `hello` after pairing on this connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paired: Option<bool>,
+    /// What the daemon's own LLM use makes available (plan 20261027_02,
+    /// decision 7). `None`, from an older daemon, means as before: both
+    /// available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<LlmInfo>,
+}
+
+/// What the daemon's `[llm]` makes available to a companion (plan
+/// 20261027_02, decision 7, as amended at 00:59 EDT). Which model runs
+/// what is not sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmInfo {
+    /// Turns can be started (`turn.start`).
+    #[serde(default)]
+    pub general_agent: bool,
+    /// Card or spoken summaries are made.
+    #[serde(default)]
+    pub summaries: bool,
+    /// Why not, when either is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+impl LlmInfo {
+    /// Both available, as a daemon that sends no `llm` is taken to mean.
+    pub fn available() -> Self {
+        LlmInfo {
+            general_agent: true,
+            summaries: true,
+            reason: None,
+        }
+    }
+}
+
+/// `server.capabilities`: what the daemon offers, sent whenever it
+/// changes, so the phone adapts without reconnecting.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerCapabilities {
+    /// As [`HelloResult::llm`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm: Option<LlmInfo>,
 }
 
 /// `turn.start`. `turn_id` is chosen by the client, unique within the
@@ -242,7 +287,16 @@ mod tests {
             session_id: Some("companion:s23".into()),
             vocabulary: vec!["claude".into(), "HR".into()],
             paired: Some(true),
+            llm: Some(LlmInfo {
+                general_agent: false,
+                summaries: true,
+                reason: Some("[llm.uses.general_agent] enabled = false".into()),
+            }),
         });
+        round_trip(ServerCapabilities {
+            llm: Some(LlmInfo::available()),
+        });
+        round_trip(ServerCapabilities { llm: None });
         round_trip(TurnStartParams {
             turn_id: 4,
             text: "send continue to claude".into(),
@@ -347,5 +401,25 @@ mod tests {
             serde_json::to_value(h).unwrap(),
             json!({"protocol": "flankr.companion", "version": 1, "client": "tty"})
         );
+        // A hello from an older daemon has no `llm`: None.
+        let h: HelloResult = serde_json::from_value(json!({
+            "server": "flankr", "server_version": "0.1.0", "protocol_version": 1,
+            "session_id": "companion:s23", "vocabulary": []
+        }))
+        .unwrap();
+        assert_eq!(h.llm, None);
+        assert!(serde_json::to_value(&h).unwrap().get("llm").is_none());
+        // LlmInfo's shape; a reason only when there is one.
+        assert_eq!(
+            serde_json::to_value(ServerCapabilities {
+                llm: Some(LlmInfo::available())
+            })
+            .unwrap(),
+            json!({"llm": {"general_agent": true, "summaries": true}})
+        );
+        let i: LlmInfo = serde_json::from_value(json!({"reason": "off"})).unwrap();
+        assert!(!i.general_agent && !i.summaries);
+        assert_eq!(i.reason.as_deref(), Some("off"));
+        assert_eq!(methods::SERVER_CAPABILITIES, "server.capabilities");
     }
 }
