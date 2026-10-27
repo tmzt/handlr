@@ -712,6 +712,12 @@ async fn work(
         .with_naming(daemon.naming.clone())
         .with_sessions(Arc::clone(&daemon.sessions))
         .with_current_agent(Arc::clone(&session.current_agent));
+    // Plan 20261027_04: planning's file tools and instructions, while on.
+    let planning = daemon.llm.planning();
+    let contributor = match &planning {
+        Some((config, prompt)) => contributor.with_planning(config.clone(), prompt.clone()),
+        None => contributor,
+    };
     if let Err(e) = contributor.contribute(&mut messages).await {
         log::warn!("The herdr context could not be added: {e}");
     }
@@ -730,6 +736,10 @@ async fn work(
             utterance: Some(text.clone()),
         })
         .with_current_agent(Arc::clone(&session.current_agent), conn.tab_follows_focus());
+    let executor = match planning {
+        Some((config, _)) => executor.with_planning(config),
+        None => executor,
+    };
     // Subscribed before any confirmation can be opened, so no resolution
     // is missed.
     let mut events = daemon.broker.subscribe();

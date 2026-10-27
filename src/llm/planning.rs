@@ -67,6 +67,46 @@ impl ReadPattern {
             segments,
         })
     }
+
+    /// Whether the root-relative `path` (`/`-separated) matches.
+    pub fn matches(&self, path: &str) -> bool {
+        let names: Vec<&str> = path.split('/').collect();
+        match_segments(&self.segments, &names)
+    }
+}
+
+fn match_segments(pattern: &[Segment], names: &[&str]) -> bool {
+    match pattern.split_first() {
+        None => names.is_empty(),
+        Some((Segment::AnyDepth, rest)) => {
+            (0..=names.len()).any(|skip| match_segments(rest, &names[skip..]))
+        }
+        Some((Segment::Name(p), rest)) => match names.split_first() {
+            Some((name, names)) => match_name(p, name) && match_segments(rest, names),
+            None => false,
+        },
+    }
+}
+
+/// One name against one segment, `*` being any run of characters.
+fn match_name(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let first = parts.next().unwrap_or("");
+    let Some(mut rest) = name.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        // No `*`: the whole name.
+        return rest.is_empty();
+    };
+    for part in middle {
+        match rest.find(part) {
+            Some(at) => rest = &rest[at + part.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
 }
 
 /// `[llm.uses.planning]` as resolved: what its turns may read.
@@ -283,6 +323,33 @@ mod tests {
         assert!(problems[0].contains("'?'"), "{}", problems[0]);
         assert!(problems[5].contains("starts with '/'"), "{}", problems[5]);
         assert!(problems[6].contains("whole segment"), "{}", problems[6]);
+    }
+
+    #[test]
+    fn patterns_match_by_segment() {
+        let p = |t: &str| ReadPattern::parse(t).unwrap();
+        let top = p("*.md");
+        assert!(top.matches("README.md"));
+        assert!(!top.matches("docs/README.md"), "the top folder only");
+        assert!(!top.matches("README.mdx"));
+        let docs = p("docs/**/*.md");
+        for path in ["docs/x.md", "docs/design/x.md", "docs/a/b/c.md"] {
+            assert!(docs.matches(path), "{path}");
+        }
+        for path in ["docs/x.txt", "src/docs/x.md", "docs", "x.md"] {
+            assert!(!docs.matches(path), "{path}");
+        }
+        let all = p("**/*.md");
+        assert!(all.matches("README.md") && all.matches("src/a/README.md"));
+        let tree = p("docs/**");
+        assert!(tree.matches("docs/x.txt") && tree.matches("docs/a/b"));
+        assert!(!tree.matches("src/x"));
+        let mid = p("src/*_PLAN*.md");
+        assert!(mid.matches("src/20261027_04_X_PLAN.md"));
+        assert!(mid.matches("src/a_PLAN.md"));
+        assert!(!mid.matches("src/a_PLA.md"));
+        assert!(p("a*a").matches("aa") && !p("a*a").matches("a"));
+        assert!(p("Cargo.toml").matches("Cargo.toml") && !p("Cargo.toml").matches("Cargo.lock"));
     }
 
     #[test]

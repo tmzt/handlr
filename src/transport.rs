@@ -20,6 +20,8 @@ use crate::core::confirm::{self, Broker, ConfirmError, HandleRequest, Lifetime};
 use crate::core::naming::Names;
 use crate::core::policy;
 use crate::core::principal::Principal;
+use crate::llm::{PlanningConfig, PlanningPrompt};
+use crate::project::{MAX_READ_BYTES, ProjectFiles};
 use crate::sessions::context::{self as session_context, AgentContext};
 use crate::sessions::{Sessions, pending};
 use crate::watch::WatchRegistry;
@@ -61,6 +63,13 @@ pub struct VoiceTurn {
 /// conversation's turns.
 pub type CurrentAgent = Arc<Mutex<Option<String>>>;
 
+/// The current agent's pane in `snapshot`.
+fn current_ref(snapshot: &serde_json::Value, pane_id: &str) -> Option<agents::AgentRef> {
+    agents::agents(snapshot)
+        .into_iter()
+        .find(|a| crate::watch::pane_ids_match(&a.pane_id, pane_id))
+}
+
 /// Adapter to implement `libinfer::ToolExecutor` for `HerdrClient`.
 pub struct HerdrToolExecutor {
     pub client: HerdrClient,
@@ -80,6 +89,9 @@ pub struct HerdrToolExecutor {
     /// `focus_project` also moves herdr's focus (`client.options`
     /// `tab_follows_focus`).
     pub tab_follows_focus: bool,
+    /// `[llm.uses.planning]` while it is on: what `list_files` and
+    /// `read_file` may read (plan 20261027_04, decision 4).
+    pub planning: Option<PlanningConfig>,
 }
 
 impl HerdrToolExecutor {
@@ -93,7 +105,123 @@ impl HerdrToolExecutor {
             voice_turn: None,
             current_agent: None,
             tab_follows_focus: false,
+            planning: None,
         }
+    }
+
+    pub fn with_planning(mut self, planning: PlanningConfig) -> Self {
+        self.planning = Some(planning);
+        self
+    }
+
+    /// The current project: the current agent's folder, opened with the
+    /// `read` patterns.
+    async fn current_project(&self) -> Result<ProjectFiles, String> {
+        let read = match &self.planning {
+            Some(planning) if planning.file_tools() => planning.read.clone(),
+            _ => {
+                return Err(
+                    "Reading files is off: [llm.uses.planning] has no read patterns.".to_string(),
+                );
+            }
+        };
+        if matches!(self.client.transport(), HerdrTransport::RemoteSsh { .. }) {
+            return Err(
+                "The project's files are on another machine; flankr reads only its own."
+                    .to_string(),
+            );
+        }
+        let Some(pane_id) = self.current() else {
+            return Err("No project is open: open a session, or focus an agent first".to_string());
+        };
+        let snapshot = self
+            .client
+            .list_panes()
+            .await
+            .map_err(|e| format!("herdr is not answering: {e}"))?;
+        let cwd = current_ref(&snapshot, &pane_id)
+            .and_then(|a| a.cwd)
+            .ok_or_else(|| {
+                format!("The folder of the current agent (pane {pane_id}) is not known.")
+            })?;
+        tokio::task::spawn_blocking(move || ProjectFiles::open(&cwd, read))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    /// `list_files(glob?)` (decision 4): the readable files, sorted, at
+    /// most 500.
+    async fn execute_list_files(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let project = self.current_project().await?;
+        let glob = args
+            .get("glob")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let root = project.root().display().to_string();
+        let asked = glob.clone();
+        let listing = tokio::task::spawn_blocking(move || project.list(asked.as_deref()))
+            .await
+            .map_err(|e| e.to_string())??;
+        log::info!(
+            "list_files in {root} (glob {glob:?}): {} path(s), {} more",
+            listing.paths.len(),
+            listing.more
+        );
+        let mut result = serde_json::json!({ "project": root, "files": listing.paths });
+        if listing.more > 0 {
+            result["more"] = serde_json::json!(listing.more);
+            result["note"] = serde_json::json!(format!(
+                "{} more files match and are not listed; narrow the list with glob.",
+                listing.more
+            ));
+        }
+        Ok(result)
+    }
+
+    /// `read_file(path)` (decision 4): at most 64 KiB of one readable file.
+    async fn execute_read_file(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if path.trim().is_empty() {
+            return Err("'read_file' requires a 'path'.".to_string());
+        }
+        let project = self.current_project().await?;
+        let root = project.root().display().to_string();
+        let asked = path.clone();
+        let read = tokio::task::spawn_blocking(move || project.read(&asked))
+            .await
+            .map_err(|e| e.to_string());
+        let read = match read.and_then(|r| r) {
+            Ok(read) => read,
+            Err(e) => {
+                log::info!("read_file in {root}: '{path}' refused: {e}");
+                return Err(e);
+            }
+        };
+        log::info!(
+            "read_file in {root}: '{path}' ({} bytes{})",
+            read.len,
+            if read.cut { ", cut" } else { "" }
+        );
+        let mut result = serde_json::json!({ "path": path, "text": read.text });
+        if read.cut {
+            result["cut"] = serde_json::json!(true);
+            result["note"] = serde_json::json!(format!(
+                "Only the first {} KiB of {} bytes are shown.",
+                MAX_READ_BYTES / 1024,
+                read.len
+            ));
+        }
+        Ok(result)
     }
 
     pub fn with_current_agent(mut self, current: CurrentAgent, tab_follows_focus: bool) -> Self {
@@ -136,9 +264,7 @@ impl HerdrToolExecutor {
         let pane_id = self.resolve(&snapshot, requested)?;
         *current.lock().unwrap() = Some(pane_id.clone());
         self.addressed(&pane_id);
-        let agent = agents::agents(&snapshot)
-            .into_iter()
-            .find(|a| crate::watch::pane_ids_match(&a.pane_id, &pane_id));
+        let agent = current_ref(&snapshot, &pane_id);
         let moved = if self.tab_follows_focus {
             self.client.focus(&pane_id).await.map_err(|e| {
                 format!("The project is current, but herdr's focus did not move: {e}")
@@ -485,6 +611,8 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
                 self.execute_send_agent_command(args).await
             }
             crate::reasoning::FOCUS_PROJECT => self.execute_focus_project(args).await,
+            crate::reasoning::LIST_FILES => self.execute_list_files(args).await,
+            crate::reasoning::READ_FILE => self.execute_read_file(args).await,
             "focus" => self.execute_focus(name, args).await,
             _ => self
                 .client
@@ -510,6 +638,10 @@ pub struct HerdrContextContributor {
     /// When set, the context names the conversation's current agent (plan
     /// 20261027_04, the 11:25 EDT amendment).
     pub current_agent: Option<CurrentAgent>,
+    /// `[llm.uses.planning]` and its prompt while it is on: with
+    /// `agents_prompt`, the current project's instructions are added
+    /// (decisions 5 and 6).
+    pub planning: Option<(PlanningConfig, PlanningPrompt)>,
 }
 
 impl HerdrContextContributor {
@@ -521,7 +653,51 @@ impl HerdrContextContributor {
             naming: None,
             sessions: None,
             current_agent: None,
+            planning: None,
         }
+    }
+
+    pub fn with_planning(mut self, config: PlanningConfig, prompt: PlanningPrompt) -> Self {
+        self.planning = Some((config, prompt));
+        self
+    }
+
+    /// The `instructions` block for the current project (decision 6, item
+    /// 3), with `agents_prompt` on and an instructions file found.
+    fn instructions_block(&self, snapshot: &serde_json::Value) -> Option<String> {
+        let (config, prompt) = self.planning.as_ref()?;
+        if !config.agents_prompt
+            || matches!(self.client.transport(), HerdrTransport::RemoteSsh { .. })
+        {
+            return None;
+        }
+        let pane_id = self.current_agent.as_ref()?.lock().unwrap().clone()?;
+        let agent = current_ref(snapshot, &pane_id)?;
+        let cwd = agent.cwd.clone()?;
+        let files = ProjectFiles::open(&cwd, Vec::new())
+            .inspect_err(|e| log::warn!("agents_prompt: {e}"))
+            .ok()?;
+        let max = prompt.max_instructions_bytes();
+        let (file, mut text, cut) = files.instructions(max)?;
+        if cut {
+            text.push_str(&format!("\n\n(cut at {} KiB)", max / 1024));
+        }
+        let project = agent.project.clone().unwrap_or_else(|| {
+            std::path::Path::new(&cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or(cwd.clone())
+        });
+        log::info!("agents_prompt: {file} of {} added", files.root().display());
+        prompt
+            .instructions(
+                &project,
+                &crate::core::naming::capitalise(&agent.agent),
+                &file,
+                &text,
+            )
+            .inspect_err(|e| log::warn!("agents_prompt: {e}"))
+            .ok()
     }
 
     pub fn with_current_agent(mut self, current: CurrentAgent) -> Self {
@@ -540,10 +716,7 @@ impl HerdrContextContributor {
             );
             return Some(section);
         };
-        let found = agents::agents(snapshot)
-            .into_iter()
-            .find(|a| crate::watch::pane_ids_match(&a.pane_id, &pane_id));
-        let Some(agent) = found else {
+        let Some(agent) = current_ref(snapshot, &pane_id) else {
             section.push_str(&format!(
                 "Pane {pane_id}, which herdr no longer has. Ask which agent the user means.\n\n"
             ));
@@ -932,6 +1105,10 @@ impl libinfer::TurnContributor for HerdrContextContributor {
 
         if let Some(section) = self.current_agent_section(&snapshot) {
             content.push_str(&section);
+        }
+        if let Some(block) = self.instructions_block(&snapshot) {
+            content.push_str(&block);
+            content.push_str("\n\n");
         }
 
         // 4. Inject as a system instruction/turn
@@ -1323,6 +1500,183 @@ mod tests {
             !context_for(&plain, "hello")
                 .await
                 .contains("### Current agent")
+        );
+    }
+
+    /// Two projects, `a` (p1's) and `b` (p2's), under one folder that
+    /// also holds `x.md`.
+    fn two_projects() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |rel: &str, text: &str| {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        for rel in [
+            "a/README.md",
+            "a/docs/design/x.md",
+            "a/docs/x.txt",
+            "a/src/README.md",
+            "a/src/main.rs",
+            "a/.env",
+            "a/.private/key",
+        ] {
+            write(rel, rel);
+        }
+        write("a/AGENTS.md", "Agents rules for a.");
+        write("a/CLAUDE.md", "Claude rules for a.");
+        write("b/NOTES.md", "b's notes");
+        write("x.md", "outside");
+        std::os::unix::fs::symlink(dir.path().join("x.md"), dir.path().join("a/docs/out.md"))
+            .unwrap();
+        dir
+    }
+
+    /// The session mock with p1 in `a` and p2 in `b`.
+    async fn project_mock(dir: &std::path::Path) -> HerdrClient {
+        let client = session_mock().await;
+        if let HerdrTransport::Mock { state } = client.transport() {
+            let mut state = state.write().await;
+            let panes = &mut state.snapshot.workspaces[0].tabs[0].panes;
+            panes[0].cwd = Some(dir.join("a").display().to_string());
+            panes[1].cwd = Some(dir.join("b").display().to_string());
+        }
+        client
+    }
+
+    fn planning(read: &[&str], agents_prompt: bool) -> PlanningConfig {
+        PlanningConfig::from_use(&crate::config::LlmUseConfig {
+            agents_prompt: Some(agents_prompt),
+            read: Some(read.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        })
+        .0
+    }
+
+    #[tokio::test]
+    async fn test_the_file_tools_read_the_current_project_only() {
+        let dir = two_projects();
+        let client = project_mock(dir.path()).await;
+        let current = CurrentAgent::default();
+        let executor = HerdrToolExecutor::new(client.clone(), vec![])
+            .with_current_agent(Arc::clone(&current), false)
+            .with_planning(planning(&["*.md", "docs/**/*.md"], false));
+
+        // No current agent: refused.
+        let err = executor
+            .execute_tool("list_files", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "No project is open: open a session, or focus an agent first"
+        );
+
+        *current.lock().unwrap() = Some("p1".to_string());
+        let listed = executor
+            .execute_tool("list_files", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(
+            listed["files"],
+            json!(["AGENTS.md", "CLAUDE.md", "README.md", "docs/design/x.md"])
+        );
+        assert!(listed.get("more").is_none());
+        let narrowed = executor
+            .execute_tool("list_files", &json!({ "glob": "docs/**" }))
+            .await
+            .unwrap();
+        assert_eq!(narrowed["files"], json!(["docs/design/x.md"]));
+
+        for path in ["README.md", "docs/design/x.md"] {
+            let read = executor
+                .execute_tool("read_file", &json!({ "path": path }))
+                .await
+                .unwrap();
+            assert_eq!(read["text"], format!("a/{path}"));
+        }
+        for path in [
+            "docs/x.txt",
+            "src/README.md",
+            "src/main.rs",
+            ".env",
+            ".private/key",
+            "../x.md",
+            "docs/out.md",
+        ] {
+            let err = executor
+                .execute_tool("read_file", &json!({ "path": path }))
+                .await
+                .unwrap_err();
+            assert!(err.contains("may not be read"), "{path}: {err}");
+        }
+
+        // focus_project moves the project.
+        executor
+            .execute_tool("focus_project", &json!({ "agent": "p2" }))
+            .await
+            .unwrap();
+        let listed = executor
+            .execute_tool("list_files", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(listed["files"], json!(["NOTES.md"]));
+
+        // Without read patterns the tools are off.
+        let off = HerdrToolExecutor::new(client.clone(), vec![])
+            .with_current_agent(Arc::clone(&current), false)
+            .with_planning(planning(&[], true));
+        let err = off
+            .execute_tool("read_file", &json!({ "path": "NOTES.md" }))
+            .await
+            .unwrap_err();
+        assert!(err.contains("Reading files is off"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_the_instructions_block_follows_the_current_project() {
+        let dir = two_projects();
+        let client = project_mock(dir.path()).await;
+        let current = CurrentAgent::default();
+        let prompt = PlanningPrompt::load(None).unwrap();
+        let contributor = HerdrContextContributor::new(client.clone(), vec![])
+            .with_current_agent(Arc::clone(&current))
+            .with_planning(planning(&[], true), prompt.clone());
+
+        // No current agent: no instructions.
+        let content = context_for(&contributor, "hello").await;
+        assert!(!content.contains("The current project is"), "{content}");
+
+        // AGENTS.md over CLAUDE.md, after the herdr layout.
+        *current.lock().unwrap() = Some("p1".to_string());
+        let content = context_for(&contributor, "hello").await;
+        let at = content
+            .find("The current project is a, where the Claude")
+            .expect("block");
+        assert!(at > content.find("### Herdr Multiplexer State").unwrap());
+        assert!(
+            content.contains("from AGENTS.md:\n\nAgents rules for a."),
+            "{content}"
+        );
+        assert!(!content.contains("Claude rules"));
+
+        // A project without instruction files has no block.
+        *current.lock().unwrap() = Some("p2".to_string());
+        assert!(
+            !context_for(&contributor, "hello")
+                .await
+                .contains("The current project is")
+        );
+
+        // agents_prompt off: none either.
+        *current.lock().unwrap() = Some("p1".to_string());
+        let off = HerdrContextContributor::new(client, vec![])
+            .with_current_agent(Arc::clone(&current))
+            .with_planning(planning(&["*.md"], false), prompt);
+        assert!(
+            !context_for(&off, "hello")
+                .await
+                .contains("The current project is")
         );
     }
 

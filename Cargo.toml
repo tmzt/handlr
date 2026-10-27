@@ -38,6 +38,9 @@ flankr-speech = { path = "crates/flankr-speech" }
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
 # agy session reader (src/sessions/agy.rs, plan 20261023_06).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# The current project's files for list_files (src/project.rs, plan 20261027_04),
+# already in Cargo.lock.
+walkdir = "2"
 
 [dev-dependencies]
 # Paused time for the confirmation broker's timers.
