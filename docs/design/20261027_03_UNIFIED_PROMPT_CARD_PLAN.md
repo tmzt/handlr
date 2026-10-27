@@ -1,7 +1,7 @@
 ---
 title: One prompt card for the general agent and dictated messages
 date: 2026-10-27
-status: Draft
+status: In implementation
 covers:
   - "One `PromptCard` control, shared by the overview and the agent view,
     with two modes (the general agent, and a message to a session) and the
@@ -181,3 +181,9 @@ llm".
 3. **Approved.** It is built after plan 20261027_02 (the `[llm]` section)
    lands, since that plan's step 4 also changes the centre button and the
    Gemini card. The status becomes `In implementation` with step 1's commit.
+
+## Amendment — 2026-10-27 01:43 EDT: implementation has started; the document is now immutable
+
+Step 1 (`PromptCard`, its overlay, bars and history in
+`apps/companion/src/prompt/`) is the first implementing commit. From here
+the document changes only on the owner's explicit instruction.

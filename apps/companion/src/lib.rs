@@ -57,6 +57,7 @@ pub mod markdown_view;
 pub mod memory;
 pub mod notify;
 pub mod overview;
+pub mod prompt;
 pub mod session_cards;
 pub mod settings;
 pub mod theme;
@@ -1184,6 +1185,11 @@ impl App {
                 self.ime_dismissed = false;
                 self.send(Input::Clear);
             }
+            // The prompt cards (plan 20261027_03): not on the screens yet.
+            AgentHit::PromptText(_)
+            | AgentHit::PromptExpand(_)
+            | AgentHit::PromptCollapse
+            | AgentHit::PromptBars => {}
         }
     }
 

@@ -337,3 +337,37 @@ its agent; several collapse to the newest, with "+N" for the rest.
 - [#] count: the cards collapsed under the newest
 - text: |
     +{{ [#] count }}
+
+The prompt card (plan 20261027_03, `src/prompt/`): the general agent's and
+a message's card, pinned or expanded to an overlay with its history, and
+the general agent's two bars while its card is hidden.
+
+# [Copy] prompt_gemini
+
+- text: ✦ Gemini
+
+# [Copy] prompt_message
+
+- [abc] agent: the session's agent, as shown
+- text: |
+    Message to {{ [abc] agent }}
+
+# [Copy] prompt_message_untargeted
+
+- text: Message
+
+# [Copy] prompt_listening
+
+- text: Listening…
+
+# [Copy] prompt_ask_gemini
+
+- text: Ask Gemini…
+
+# [Copy] prompt_type_message
+
+- text: Type your message
+
+# [Copy] prompt_no_messages
+
+- text: No messages sent to this session yet.

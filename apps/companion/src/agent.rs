@@ -278,6 +278,14 @@ pub enum AgentHit {
     TextArea,
     /// The general agent multi-turn overlay's text area.
     GeneralAgentTextArea,
+    /// A prompt card's text area (plan 20261027_03, decision 6).
+    PromptText(crate::prompt::PromptKind),
+    /// A pinned prompt card's up arrow: expand it (decision 4).
+    PromptExpand(crate::prompt::PromptKind),
+    /// The overlay's grab bar, or a swipe down on it: collapse it.
+    PromptCollapse,
+    /// Gemini's bars while its card is hidden: open it again.
+    PromptBars,
 }
 
 /// A button, in the flow or on the screen.
