@@ -1655,3 +1655,12 @@ paragraph, on what makes a question `about_plan` and what `plan` holds:
    building it"; without an id, "the plan" as before.
 
 The rest of the 21:57, 22:58 and 23:00 EDT amendments stands.
+
+## Amendment — 2026-10-27 13:24 EDT: "approve" with "draft" is a plan question too (living section L3)
+
+The owner (2026-10-27), right after the 13:21 EDT amendment: "draft doesn't
+make it about a plan unless it includes \"approve\" and \"draft\" (as in,
+approve the draft)". This adds to the 13:21 EDT amendment's item 1: a
+question with both "approve" and "draft" (whole words) is `about_plan` too.
+With no plan id in it, its `plan` is "the draft", so **approve** sends
+"Approve the draft".
