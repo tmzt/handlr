@@ -3353,7 +3353,11 @@ impl State {
             speaker: Speaker::User,
             text: text.clone(),
         }));
-        let params = wire::TurnStartParams { turn_id: id, text };
+        let params = wire::TurnStartParams {
+            turn_id: id,
+            text,
+            session: None,
+        };
         out.push(self.request(wire::methods::TURN_START, params, Sent::Turn(id)));
     }
 
@@ -3730,6 +3734,7 @@ impl State {
             spoken_output: self.read_aloud && self.settings.sound,
             background: self.background,
             general_agent: self.settings.general_agent,
+            tab_follows_focus: false,
         };
         out.push(self.request(methods::CLIENT_OPTIONS, params, Sent::Options));
     }
@@ -6490,20 +6495,26 @@ mod tests {
         ));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": false, "background": false, "general_agent": true})]
+            [
+                json!({"spoken_output": false, "background": false, "general_agent": true, "tab_follows_focus": false})
+            ]
         );
         // Toggled: sent each time.
         let out = s.input(Input::ReadAloud(true));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": true, "background": false, "general_agent": true})]
+            [
+                json!({"spoken_output": true, "background": false, "general_agent": true, "tab_follows_focus": false})
+            ]
         );
         let id = requests(&out, "client.options")[0].id.clone();
         assert!(s.incoming(response(id, json!({}))).is_empty());
         let out = s.input(Input::ReadAloud(false));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": false, "background": false, "general_agent": true})]
+            [
+                json!({"spoken_output": false, "background": false, "general_agent": true, "tab_follows_focus": false})
+            ]
         );
         // Offline, nothing is sent; after the reconnect's hello, the value
         // as it is now.
@@ -6518,7 +6529,9 @@ mod tests {
         ));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": true, "background": false, "general_agent": true})]
+            [
+                json!({"spoken_output": true, "background": false, "general_agent": true, "tab_follows_focus": false})
+            ]
         );
         // A refused option is only logged.
         let id = requests(&out, "client.options")[0].id.clone();
@@ -7924,7 +7937,9 @@ mod tests {
         let out = s.input(settings(false, true, true, true));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": false, "background": false, "general_agent": true})]
+            [
+                json!({"spoken_output": false, "background": false, "general_agent": true, "tab_follows_focus": false})
+            ]
         );
         // A new reply is not sent to be measured, nor read.
         let out = s.input(Input::Tick(secs(200.0)));
@@ -7997,7 +8012,9 @@ mod tests {
         let out = s.input(settings(true, true, true, false));
         assert_eq!(
             options(&out),
-            [json!({"spoken_output": false, "background": false, "general_agent": false})]
+            [
+                json!({"spoken_output": false, "background": false, "general_agent": false, "tab_follows_focus": false})
+            ]
         );
         // On the overview, an utterance does nothing.
         let out = s.input(Input::Utterance("what's going on".into()));
