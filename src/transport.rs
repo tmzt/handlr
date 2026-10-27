@@ -174,20 +174,24 @@ impl HerdrToolExecutor {
         }
     }
 
-    /// `run_command`: the policy check as `principal`, then a send, a
+    /// `send_agent_command` (plan 20261027_04, decision 1), also called
+    /// as `run_command` or `send_command`: allow-listed text checked by
+    /// `policy::check` with the agent's `require_confirmation`, any other
+    /// text by `policy::check_message`, always confirmed. Then a send, a
     /// voice-turn confirmation, or a refusal.
-    async fn execute_run_command(
+    async fn execute_send_agent_command(
         &self,
-        name: &str,
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let cmd = args
-            .get("command")
+        let text = args
+            .get("text")
+            .or_else(|| args.get("command"))
             .or_else(|| args.get("cmd"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
         let requested = args
-            .get("pane_id")
+            .get("agent")
+            .or_else(|| args.get("pane_id"))
             .or_else(|| args.get("target_id"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
@@ -212,20 +216,26 @@ impl HerdrToolExecutor {
         };
         self.addressed(&pane_id);
 
+        let message = !policy::is_allow_listed(&self.agents, &agent_name, text);
         log::info!(
-            "Permission check: agent='{}' pane='{}' command='{}'",
+            "Permission check: agent='{}' pane='{}' {}='{}'",
             agent_name,
             pane_id,
-            cmd
+            if message { "message" } else { "command" },
+            text
         );
 
-        let checked = match policy::check(&self.principal, &self.agents, &agent_name, &pane_id, cmd)
-        {
+        let checked = if message {
+            policy::check_message(&self.principal, &self.agents, &agent_name, &pane_id, text)
+        } else {
+            policy::check(&self.principal, &self.agents, &agent_name, &pane_id, text)
+        };
+        let checked = match checked {
             Ok(checked) => checked,
             Err(denied) => {
                 log::warn!(
                     "Refused '{}' for agent '{}' on pane '{}': {}",
-                    cmd,
+                    text,
                     agent_name,
                     pane_id,
                     denied
@@ -272,9 +282,17 @@ impl HerdrToolExecutor {
                         }
                     })
                 });
+            // A message's handle, when the model gives none: "message" and
+            // its first words, as for one typed in the app.
+            let fallback = if message {
+                let first_words: Vec<&str> = final_cmd.split(' ').take(3).collect();
+                format!("message {}", first_words.join(" "))
+            } else {
+                final_cmd.clone()
+            };
             let request = HandleRequest {
                 given: args.get("handle").and_then(|v| v.as_str()),
-                command: &final_cmd,
+                command: &fallback,
                 agent: &spoken,
                 tab_code: tab_code.as_deref(),
             };
@@ -285,14 +303,26 @@ impl HerdrToolExecutor {
                 let pending = turn.broker.pending_handle_infos(&self.principal.id);
                 let settled =
                     confirm::settle_handle(&request, &pending, &priors, confirm::random_word);
-                match turn.broker.request_with(
-                    &self.principal,
-                    &pane_id,
-                    &agent_name,
-                    &final_cmd,
-                    Some(&settled),
-                    Lifetime::VoiceTurn,
-                ) {
+                let opened = if message {
+                    turn.broker.request_message(
+                        &self.principal,
+                        &pane_id,
+                        &agent_name,
+                        &final_cmd,
+                        Some(&settled),
+                        Lifetime::VoiceTurn,
+                    )
+                } else {
+                    turn.broker.request_with(
+                        &self.principal,
+                        &pane_id,
+                        &agent_name,
+                        &final_cmd,
+                        Some(&settled),
+                        Lifetime::VoiceTurn,
+                    )
+                };
+                match opened {
                     Ok(id) => break (id, settled.handle),
                     Err(ConfirmError::DuplicateHandle(_)) if attempt < 3 => attempt += 1,
                     Err(e) => return Err(e.to_string()),
@@ -312,25 +342,17 @@ impl HerdrToolExecutor {
                 "agent": spoken,
                 "handle": handle,
                 "note": format!(
-                    "Not sent yet. Right after your reply, flankr itself asks the user to approve sending '{final_cmd}' to {spoken}, and sends it only if they approve. Do not ask for confirmation yourself and do not call run_command again for this; say in a few words that it is waiting for their approval."
+                    "Not sent yet. Right after your reply, flankr itself asks the user to approve sending '{final_cmd}' to {spoken}, and sends it only if they approve. Do not ask for confirmation yourself and do not call send_agent_command again for this; say in a few words that it is waiting for their approval."
                 ),
             }));
         }
 
-        let mut final_args = args.clone();
-        if let Some(obj) = final_args.as_object_mut() {
-            obj.insert(
-                "command".to_string(),
-                serde_json::Value::String(final_cmd.clone()),
-            );
-            obj.insert(
-                "pane_id".to_string(),
-                serde_json::Value::String(pane_id.clone()),
-            );
-        }
+        // What reaches herdr is unchanged: its `run_command`, the text and
+        // Enter.
+        let final_args = serde_json::json!({ "pane_id": pane_id, "command": final_cmd });
         let result = self
             .client
-            .execute_tool_call(name, &final_args)
+            .execute_tool_call("run_command", &final_args)
             .await
             .map_err(|e| e.to_string())?;
         if let Some(turn) = &self.voice_turn {
@@ -378,7 +400,9 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
     ) -> Result<serde_json::Value, String> {
         match name {
             "watch_pane" | "unwatch_pane" => self.execute_watch_tool(name, args).await,
-            "run_command" | "send_command" => self.execute_run_command(name, args).await,
+            crate::reasoning::SEND_AGENT_COMMAND | "run_command" | "send_command" => {
+                self.execute_send_agent_command(args).await
+            }
             "focus" => self.execute_focus(name, args).await,
             _ => self
                 .client
@@ -723,17 +747,20 @@ impl libinfer::TurnContributor for HerdrContextContributor {
             content.push_str("### Configured Agents & Permitted Commands\n");
             for agent in &self.agents {
                 content.push_str(&format!(
-                    "- Agent '{}': Allowed commands: {:?}, Allow Arbitrary Safe Commands: {}, Requires Confirmation: {}\n",
-                    agent.name, agent.allowed_commands, agent.allow_arbitrary_commands, agent.require_confirmation
+                    "- Agent '{}': Allowed commands: {:?}, Requests in words: {}, Requires Confirmation: {}\n",
+                    agent.name, agent.allowed_commands, agent.allow_messages, agent.require_confirmation
                 ));
             }
-            if self.agents.iter().any(|a| a.allow_arbitrary_commands) {
+            // Plan 20261027_04, decision 1: text that is not an allowed
+            // command goes as a message, checked as one typed in the app.
+            if self.agents.iter().any(|a| a.allow_messages) {
                 content.push_str(&format!(
-                    "Arbitrary commands are validated mechanically before they are sent: ASCII only, \
-                     only letters, digits, spaces and the punctuation . , ' ? : (no '/', no '-', no shell \
-                     metacharacters, no newlines), {} characters max. Rephrase in plain words rather than \
-                     declining when the user's wording needs a forbidden character.\n",
-                    crate::commands::MAX_ARBITRARY_COMMAND_LEN
+                    "With `send_agent_command`, an allowed command is typed as it is. Any other text \
+                     is sent to an agent that takes requests in words as a request, checked as a \
+                     message typed in the app: one line, at most {} characters, letters, digits, \
+                     spaces and the punctuation . , ' ? : (no '/' or '-'; say a path or a flag in \
+                     words). The user always approves a request before it is sent.\n",
+                    crate::commands::MAX_MESSAGE_LEN
                 ));
             }
             content.push('\n');
@@ -874,51 +901,214 @@ mod tests {
     use libinfer::ToolExecutor;
     use serde_json::json;
 
+    async fn command_log(client: &HerdrClient) -> Vec<(String, String)> {
+        match client.transport() {
+            HerdrTransport::Mock { state } => state.read().await.command_log.clone(),
+            _ => unreachable!(),
+        }
+    }
+
+    fn voice_executor(
+        client: &HerdrClient,
+        broker: &Arc<Broker>,
+        log: &Arc<TurnLog>,
+        agents: Vec<AgentConfig>,
+    ) -> HerdrToolExecutor {
+        HerdrToolExecutor::new(client.clone(), agents).with_voice_turn(VoiceTurn {
+            broker: Arc::clone(broker),
+            log: Arc::clone(log),
+            utterance: None,
+        })
+    }
+
     #[tokio::test]
-    async fn test_allowed_commands_filtering() {
+    async fn test_allow_listed_commands_follow_require_confirmation() {
+        use crate::core::confirm::{DEFAULT_TTL, StatusKey};
         let client = HerdrClient::mock();
-        let executor = HerdrToolExecutor::new(
-            client,
+        let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+
+        // Not required: sent at once, through herdr's run_command.
+        let executor = voice_executor(
+            &client,
+            &broker,
+            &log,
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string(), "/compact".to_string()],
+                false,
+            )],
+        );
+        executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "/COMPACT", "handle": "send-compact-claude" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            command_log(&client).await,
+            [("p1".to_string(), "/COMPACT".to_string())]
+        );
+        assert!(log.confirmations.lock().unwrap().is_empty());
+
+        // Required: a command confirmation, not a message.
+        let executor = voice_executor(
+            &client,
+            &broker,
+            &log,
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string()],
+                true,
+            )],
+        );
+        let res = executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "continue", "handle": "send-continue-claude" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "awaiting_user_approval");
+        let (view, _) = broker
+            .status(
+                &Principal::local("flankr"),
+                &StatusKey::Handle("send-continue-claude".to_string()),
+            )
+            .unwrap();
+        assert_eq!(view.command, "continue");
+        assert!(!view.message);
+        assert_eq!(command_log(&client).await.len(), 1, "not sent");
+    }
+
+    #[tokio::test]
+    async fn test_free_text_is_a_message_always_awaiting_approval() {
+        use crate::core::confirm::{DEFAULT_TTL, StatusKey};
+        let client = HerdrClient::mock();
+        let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+        // The agent requires no confirmation for its commands.
+        let executor = voice_executor(
+            &client,
+            &broker,
+            &log,
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string()],
+                false,
+            )],
+        );
+        // Longer than the old voice check's 256 characters.
+        let text = format!(
+            "Read the general agent planning plan in the design docs, then {}",
+            "add the tests its fourth step asks for and run them. ".repeat(6)
+        );
+        let text = text.trim_end().trim_end_matches('.').to_string();
+        assert!(text.len() > crate::commands::MAX_ARBITRARY_COMMAND_LEN);
+        let res = executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": text, "handle": "ask-claude-tests" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "awaiting_user_approval");
+        let (view, _) = broker
+            .status(
+                &Principal::local("flankr"),
+                &StatusKey::Handle("ask-claude-tests".to_string()),
+            )
+            .unwrap();
+        assert_eq!(view.command, text);
+        assert!(view.message);
+        assert!(command_log(&client).await.is_empty());
+
+        // What validate_message refuses, as for a message typed in the app.
+        let err = executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "open src/main.rs", "handle": "h2" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.contains("Message rejected"), "{err}");
+
+        // Outside a companion turn there is no way to approve it.
+        let res = HerdrToolExecutor::new(
+            client.clone(),
+            vec![AgentConfig::new("claude", vec![], false)],
+        )
+        .execute_tool(
+            "send_agent_command",
+            &json!({ "agent": "p1", "text": "please run the tests", "handle": "h" }),
+        )
+        .await;
+        assert!(res.unwrap_err().contains("confirmation unavailable"));
+    }
+
+    #[tokio::test]
+    async fn test_free_text_is_refused_without_allow_messages() {
+        let client = HerdrClient::mock();
+        let broker = Broker::new(Arc::new(client.clone()), crate::core::confirm::DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+        let executor = voice_executor(
+            &client,
+            &broker,
+            &log,
             vec![
-                AgentConfig::new(
-                    "claude",
-                    vec!["continue".to_string(), "/compact".to_string()],
-                    false,
-                ),
-                AgentConfig::new("omp", vec!["continue".to_string()], false),
+                AgentConfig::new("claude", vec!["continue".to_string()], false)
+                    .with_arbitrary_commands(true)
+                    .with_messages(false),
             ],
         );
-
-        // Allowed command for claude (mock pane p1 defaults to agent 'claude') should execute
-        let ok_res = executor
+        let err = executor
             .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "continue" }),
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "please run the tests", "handle": "h" }),
             )
-            .await;
-        assert!(ok_res.is_ok());
-
-        let ok_res2 = executor
+            .await
+            .unwrap_err();
+        assert!(err.contains("allow_messages is off"), "{err}");
+        // The allow list still works.
+        executor
             .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "/compact" }),
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "continue", "handle": "h" }),
             )
-            .await;
-        assert!(ok_res2.is_ok());
-
-        // Disallowed command for claude should be rejected
-        let err_res = executor
+            .await
+            .unwrap();
+        assert!(log.confirmations.lock().unwrap().is_empty());
+        assert_eq!(command_log(&client).await.len(), 1);
+        // An unconfigured agent is refused either way.
+        let err = HerdrToolExecutor::new(client.clone(), vec![])
             .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "rm -rf /" }),
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "continue", "handle": "h" }),
             )
-            .await;
-        assert!(err_res.is_err());
-        assert!(
-            err_res
-                .unwrap_err()
-                .contains("not permitted for agent 'claude'")
+            .await
+            .unwrap_err();
+        assert!(err.contains("not configured"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn test_the_old_names_are_still_dispatched() {
+        let client = HerdrClient::mock();
+        let executor = HerdrToolExecutor::new(
+            client.clone(),
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string()],
+                false,
+            )],
         );
+        for name in ["run_command", "send_command"] {
+            executor
+                .execute_tool(name, &json!({ "pane_id": "p1", "command": "continue" }))
+                .await
+                .unwrap();
+        }
+        assert_eq!(command_log(&client).await.len(), 2);
     }
 
     #[tokio::test]
@@ -933,8 +1123,8 @@ mod tests {
         );
         let res = executor
             .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "continue" }),
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "continue" }),
             )
             .await;
         assert!(res.unwrap_err().contains("confirmation unavailable"));
@@ -961,26 +1151,32 @@ mod tests {
                 utterance: Some(utterance.to_string()),
             })
         };
-        let run = |handle: &'static str, command: &'static str| json!({ "pane_id": "p1", "command": command, "handle": handle });
+        let run = |handle: &'static str, command: &'static str| json!({ "agent": "p1", "text": command, "handle": handle });
 
         // The model's handle, normalised.
         let said = "send usage to claude in high bay";
         let res = executor(said)
-            .execute_tool("run_command", &run("Send-Usage-Claude-Highbay", "/usage"))
+            .execute_tool(
+                "send_agent_command",
+                &run("Send-Usage-Claude-Highbay", "/usage"),
+            )
             .await
             .unwrap();
         assert_eq!(res["status"], "awaiting_user_approval");
         assert_eq!(res["handle"], "send-usage-claude-highbay");
         // The same again while pending: `-2`.
         let res = executor(said)
-            .execute_tool("run_command", &run("send-usage-claude-highbay", "/usage"))
+            .execute_tool(
+                "send_agent_command",
+                &run("send-usage-claude-highbay", "/usage"),
+            )
             .await
             .unwrap();
         assert_eq!(res["handle"], "send-usage-claude-highbay-2");
         // A garbled transcript does not replace the model's handle.
         let res = executor("sin did again")
             .execute_tool(
-                "run_command",
+                "send_agent_command",
                 &run("send-continue-again-claude", "continue"),
             )
             .await
@@ -1186,76 +1382,5 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not available"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn test_arbitrary_commands_disabled_by_default() {
-        let executor = HerdrToolExecutor::new(
-            HerdrClient::mock(),
-            vec![AgentConfig::new(
-                "claude",
-                vec!["continue".to_string()],
-                false,
-            )],
-        );
-        let res = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "please run the tests" }),
-            )
-            .await;
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("is not permitted for agent"));
-    }
-
-    #[tokio::test]
-    async fn test_arbitrary_safe_commands_validation() {
-        let executor = HerdrToolExecutor::new(
-            HerdrClient::mock(),
-            vec![
-                AgentConfig::new("claude", vec!["continue".to_string()], false)
-                    .with_arbitrary_commands(true),
-            ],
-        );
-
-        // A safe arbitrary command with periods and commas
-
-        let ok_res = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "please run cargo test, check output." }),
-            )
-            .await;
-        assert!(ok_res.is_ok());
-
-        // Attempting a command with slash '/' must be rejected
-        let slash_res = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "cat /etc/passwd" }),
-            )
-            .await;
-        assert!(slash_res.is_err());
-        assert!(slash_res.unwrap_err().contains("too many symbols"));
-
-        // Attempting a command with hyphen '-' must be rejected
-        let dash_res = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "cargo test --all" }),
-            )
-            .await;
-        assert!(dash_res.is_err());
-        assert!(dash_res.unwrap_err().contains("too many symbols"));
-
-        // Non-ASCII command must be rejected
-        let non_ascii_res = executor
-            .execute_tool(
-                "run_command",
-                &json!({ "pane_id": "p1", "command": "你好" }),
-            )
-            .await;
-        assert!(non_ascii_res.is_err());
-        assert!(non_ascii_res.unwrap_err().contains("must be ASCII only"));
     }
 }

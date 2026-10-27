@@ -130,6 +130,20 @@ pub fn check(
     })
 }
 
+/// Whether `command` is on the allow list of the agent named `agent`
+/// (lowercased): `send_agent_command` checks such text with [`check`], and
+/// any other with [`check_message`] (plan 20261027_04, decision 1).
+pub fn is_allow_listed(agents: &[AgentConfig], agent: &str, command: &str) -> bool {
+    agents
+        .iter()
+        .find(|a| a.name.to_lowercase() == agent)
+        .is_some_and(|a| {
+            a.allowed_commands
+                .iter()
+                .any(|allowed| allowed.trim().eq_ignore_ascii_case(command.trim()))
+        })
+}
+
 /// Check a dictated message (plan 20261023_02, decision 6 as amended):
 /// the agent's entry and reach as for a command, its `allow_messages`, then
 /// `validate_message`. A message is always confirmed, whatever the agent's

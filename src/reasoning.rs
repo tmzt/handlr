@@ -105,28 +105,32 @@ impl InspectPaneParams {
     }
 }
 
-/// Parameters for the `run_command` tool.
+/// Parameters for the `send_agent_command` tool (plan 20261027_04,
+/// decision 1): an allow-listed command, or any other text as a request
+/// the user approves.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
-pub struct RunCommandParams {
-    /// Target pane ID in which to execute the command.
-    pub pane_id: String,
-    /// The shell command string to execute.
-    pub command: String,
+pub struct SendAgentCommandParams {
+    /// The coding agent to send to: its name, its tab label or its pane id.
+    pub agent: String,
+    /// What to type to the agent: an allowed command (e.g. "continue",
+    /// "/compact", "/usage") or a request in words. A request is sent only
+    /// after the user approves it.
+    pub text: String,
     /// Required. A short name for this action in lowercase words joined by
     /// '-', naming the command and the agent (and its project) as the user
     /// meant them (e.g. send-continue-claude-highbay).
     pub handle: String,
 }
 
-impl RunCommandParams {
+impl SendAgentCommandParams {
     pub fn new(
-        pane_id: impl Into<String>,
-        command: impl Into<String>,
+        agent: impl Into<String>,
+        text: impl Into<String>,
         handle: impl Into<String>,
     ) -> Self {
         Self {
-            pane_id: pane_id.into(),
-            command: command.into(),
+            agent: agent.into(),
+            text: text.into(),
             handle: handle.into(),
         }
     }
@@ -206,6 +210,11 @@ impl WatchPaneParams {
     }
 }
 
+/// The tool that sends a coding agent a command or a request (plan
+/// 20261027_04, decision 1). The executor also takes the old names
+/// `run_command` and `send_command`.
+pub const SEND_AGENT_COMMAND: &str = "send_agent_command";
+
 /// Construct the full list of Gemini tool declarations for `herdr` orchestration.
 pub fn declare_gemini_tools() -> Vec<Tool> {
     vec![Tool::with_functions(vec![
@@ -216,11 +225,11 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
         )
         .with_parameters::<FocusParams>(),
         FunctionDeclaration::new(
-            "run_command",
-            "Sends a permitted command (e.g. 'continue', '/compact', '/usage') to a target terminal pane. flankr asks the user to approve it when that agent requires approval. Use the command's and agent's real names; the returned `handle` is the name flankr kept.",
+            SEND_AGENT_COMMAND,
+            "Sends text to a coding agent: a permitted command (e.g. 'continue', '/compact', '/usage'), typed as it is, or a request in words. flankr asks the user to approve a request, and a command when that agent requires approval. Use the command's and agent's real names; the returned `handle` is the name flankr kept.",
             None,
         )
-        .with_parameters::<RunCommandParams>(),
+        .with_parameters::<SendAgentCommandParams>(),
         FunctionDeclaration::new(
             "watch_pane",
             "Start watching a pane so the user is told out loud when the agent there needs input or finishes its task. Use when the user asks to be notified about, watched, or told about a pane or agent.",
@@ -286,9 +295,10 @@ mod tests {
         let prompt = default_system_prompt().expect("should extract system prompt from PROMPT.md");
         assert!(prompt.contains("reasoning engine for `flankr`"));
         assert!(prompt.contains("RAG-Based Environment Context"));
-        assert!(prompt.contains("Action Tools (`focus`, `run_command`"));
+        assert!(prompt.contains("Action Tools (`focus`, `send_agent_command`"));
         assert!(prompt.contains("`watch_pane(pane_id)`"));
-        assert!(prompt.contains("`run_command(pane_id, command, handle)`"));
+        assert!(prompt.contains("`send_agent_command(agent, text, handle)`"));
+        assert!(!prompt.contains("run_command"));
         assert!(prompt.contains("There are no inspection tools"));
         assert!(prompt.contains("as the user meant them"));
         assert!(!prompt.contains("taken from the user's own words"));
@@ -306,8 +316,8 @@ mod tests {
     }
 
     #[test]
-    fn test_run_command_declares_a_required_handle() {
-        let schema = serde_json::to_value(schemars::schema_for!(RunCommandParams)).unwrap();
+    fn test_send_agent_command_declares_a_required_handle() {
+        let schema = serde_json::to_value(schemars::schema_for!(SendAgentCommandParams)).unwrap();
         assert!(schema["properties"]["handle"].is_object());
         let required: Vec<&str> = schema["required"]
             .as_array()
@@ -342,7 +352,7 @@ mod tests {
         let names: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["focus", "run_command", "watch_pane", "unwatch_pane"]
+            vec!["focus", "send_agent_command", "watch_pane", "unwatch_pane"]
         );
     }
 
@@ -361,11 +371,11 @@ mod tests {
         assert_eq!(ip_json["pane_id"], "p1");
         assert_eq!(ip_json["lines"], 20);
 
-        // 3. RunCommandParams
-        let rc = RunCommandParams::new("p1", "cargo check", "send-check-claude");
+        // 3. SendAgentCommandParams
+        let rc = SendAgentCommandParams::new("p1", "cargo check", "send-check-claude");
         let rc_json = serde_json::to_value(&rc).unwrap();
-        assert_eq!(rc_json["pane_id"], "p1");
-        assert_eq!(rc_json["command"], "cargo check");
+        assert_eq!(rc_json["agent"], "p1");
+        assert_eq!(rc_json["text"], "cargo check");
         assert_eq!(rc_json["handle"], "send-check-claude");
 
         // 4. SendKeysParams
