@@ -600,7 +600,7 @@ mod tests {
         assert!(items[4].text.contains("Shall I open it in the browser?"));
 
         // pending_question finds the question
-        let q = pending::pending_question(&items, &AgentStatus::Blocked, false).unwrap();
+        let q = pending::pending_question(&items, &AgentStatus::Blocked, false, None).unwrap();
         assert_eq!(q.text, "Shall I open it in the browser?");
     }
 

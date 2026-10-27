@@ -17,10 +17,14 @@
 //! left out, the shipped one it would have replaced staying.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::time::Duration;
 
 use libtypedmd::{Node, NodeKind, Text, TextPart};
 
 use crate::sessions::links::{bare, detected_plan_id, words_of};
+use crate::watch_files::FileWatcher;
 
 /// The shipped rules, compiled in as `ADDITIONAL_PROMPTS.md` is.
 pub const SUGGESTIONS_RAW: &str = include_str!("../SUGGESTIONS.md");
@@ -499,6 +503,185 @@ impl Suggestions {
             plan,
             answers,
         })
+    }
+}
+
+impl From<Filled> for libflankr_proto::common::Answer {
+    fn from(f: Filled) -> Self {
+        libflankr_proto::common::Answer {
+            label: f.label,
+            style: f.style,
+            sends: f.sends,
+            starts: f.starts,
+            command: f.command,
+            answers: f.answers,
+        }
+    }
+}
+
+/// How often the files are read again when the file watcher can't watch
+/// them (plan 20261027_05, decision 2: each user falls back to its own
+/// interval).
+pub const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
+
+/// The user file under a home: `.config/flankr/SUGGESTIONS.md` (the 14:13
+/// EDT amendment).
+pub fn user_file_under(home: &Path) -> PathBuf {
+    home.join(".config").join("flankr").join("SUGGESTIONS.md")
+}
+
+/// The files the rules come from, and what they held when last read.
+#[derive(Debug, Default)]
+struct Files {
+    /// `--suggestions <path>`, in place of the shipped file.
+    file: Option<PathBuf>,
+    /// The user file merged over it.
+    user: Option<PathBuf>,
+    /// The texts last merged (`None` for a file not there), so an
+    /// unchanged reload neither merges nor logs again.
+    read: Option<(Option<String>, Option<String>)>,
+}
+
+/// The daemon's rules as loaded, read again on a change to their files
+/// (decision 6, as the 14:13 EDT amendment has it).
+#[derive(Debug)]
+pub struct SuggestionStore {
+    files: Mutex<Files>,
+    /// The rules in use, and how many times they have changed.
+    current: RwLock<(u64, Arc<Suggestions>)>,
+}
+
+impl Default for SuggestionStore {
+    fn default() -> Self {
+        Self::shipped()
+    }
+}
+
+impl SuggestionStore {
+    /// The shipped rules only, never read again.
+    pub fn shipped() -> Self {
+        let store = SuggestionStore {
+            files: Mutex::new(Files::default()),
+            current: RwLock::new((0, Arc::new(Suggestions::default()))),
+        };
+        store.reload();
+        store
+    }
+
+    /// `file` in place of the shipped rules (`--suggestions`), with `user`
+    /// merged over them when it exists; both read now and again by
+    /// [`SuggestionStore::reload`].
+    pub fn set_files(&self, file: Option<PathBuf>, user: Option<PathBuf>) {
+        *self.files.lock().unwrap() = Files {
+            file,
+            user,
+            read: None,
+        };
+        self.reload();
+    }
+
+    /// The rules in use.
+    pub fn current(&self) -> Arc<Suggestions> {
+        Arc::clone(&self.current.read().unwrap().1)
+    }
+
+    /// How many times the rules have changed since the store was made.
+    pub fn generation(&self) -> u64 {
+        self.current.read().unwrap().0
+    }
+
+    /// The files to watch.
+    pub fn watched_paths(&self) -> Vec<PathBuf> {
+        let files = self.files.lock().unwrap();
+        files.file.iter().chain(&files.user).cloned().collect()
+    }
+
+    /// Read the files again and, when they changed, merge them and log
+    /// each error once. A `--suggestions` file that can't be read leaves
+    /// the shipped rules; a missing user file is none. If no rule loads,
+    /// yes and no are offered. Whether the rules changed.
+    pub fn reload(&self) -> bool {
+        let mut files = self.files.lock().unwrap();
+        let read = |path: &Path| match std::fs::read_to_string(path) {
+            Ok(text) => Some(text),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                log::warn!("suggestions: {} can't be read: {e}", path.display());
+                None
+            }
+        };
+        let base = files.file.as_deref().and_then(read);
+        let user = files.user.as_deref().and_then(read);
+        let texts = (base, user);
+        if files.read.as_ref() == Some(&texts) {
+            return false;
+        }
+        if let (Some(path), None) = (&files.file, &texts.0) {
+            log::warn!(
+                "suggestions: {} is not there; the shipped rules are used",
+                path.display()
+            );
+        }
+        let (mut merged, errors) = Suggestions::merge(
+            texts.0.as_deref().unwrap_or(SUGGESTIONS_RAW),
+            texts.1.as_deref(),
+        );
+        for e in &errors {
+            log::warn!("suggestions: {e}");
+        }
+        if merged.rules().is_empty() {
+            log::warn!("suggestions: no rule loads; yes and no are offered");
+            merged = Suggestions::fallback();
+        }
+        files.read = Some(texts);
+        let mut current = self.current.write().unwrap();
+        let changed = *current.1 != merged;
+        if changed {
+            *current = (current.0 + 1, Arc::new(merged));
+        }
+        changed
+    }
+
+    /// Read the files again on each change the file watcher reports, or,
+    /// without it, every [`RELOAD_INTERVAL`]. Nothing when no file is
+    /// given.
+    pub fn spawn_watch(self: &Arc<Self>, files: Option<&FileWatcher>) {
+        let paths = self.watched_paths();
+        if paths.is_empty() {
+            return;
+        }
+        let weak: Weak<Self> = Arc::downgrade(self);
+        if let Some(files) = files {
+            match files.subscribe(&paths) {
+                Ok(mut sub) => {
+                    tokio::spawn(async move {
+                        while sub.changed().await {
+                            let Some(store) = weak.upgrade() else {
+                                return;
+                            };
+                            store.reload();
+                        }
+                    });
+                    return;
+                }
+                Err(e) => log::warn!(
+                    "suggestions: the files can't be watched ({e}); reading them every {:?}",
+                    RELOAD_INTERVAL
+                ),
+            }
+        }
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(RELOAD_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let Some(store) = weak.upgrade() else {
+                    return;
+                };
+                store.reload();
+            }
+        });
     }
 }
 

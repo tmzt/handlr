@@ -123,6 +123,13 @@ impl Daemon {
             .agent_sessions
             .clone()
             .unwrap_or_else(|| Arc::new(Sessions::new()));
+        // The pending questions' answers (plan 20261027_06, step 3).
+        if turns.suggestions_file.is_some() || turns.suggestions_user_file.is_some() {
+            sessions.suggestions.set_files(
+                turns.suggestions_file.clone(),
+                turns.suggestions_user_file.clone(),
+            );
+        }
         let llm = crate::llm::LlmService::new(
             config,
             turns.llm.clone(),
@@ -347,6 +354,12 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
     // `[llm]` read again on a change to its file or its key files (plan
     // 20261027_05, decision 2), or within 5 s without the file watcher.
     daemon.llm.spawn_watch(daemon.file_watcher().as_ref());
+    // The suggestion rules read again on a change to their files (plan
+    // 20261027_06, decision 6 as the 14:13 EDT amendment has it).
+    daemon
+        .sessions
+        .suggestions
+        .spawn_watch(daemon.file_watcher().as_ref());
     if let Some(transport) = options.event_transport {
         tokio::spawn(watcher::run(
             transport,

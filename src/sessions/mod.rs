@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 pub use libflankr_proto::common::{
@@ -35,6 +36,7 @@ pub use libflankr_proto::common::{
 };
 
 use crate::core::agents::AgentRef;
+use crate::suggestions::{SuggestionStore, Who};
 
 /// How much of a file `tail` reads at a time, from the end.
 pub const TAIL_CHUNK: u64 = 256 * 1024;
@@ -411,6 +413,9 @@ pub struct Sessions {
     /// Where the approval journals are kept (plan 20261023_03, A4):
     /// `.local/state/flankr/sessions` under the home.
     pub state: PathBuf,
+    /// The rules that give a pending question its answers (plan
+    /// 20261027_06): the shipped ones until the daemon names its files.
+    pub suggestions: Arc<SuggestionStore>,
 }
 
 impl Default for Sessions {
@@ -443,6 +448,7 @@ impl Sessions {
                 .join("state")
                 .join("flankr")
                 .join("sessions"),
+            suggestions: Arc::new(SuggestionStore::shipped()),
         }
     }
 
@@ -532,7 +538,17 @@ impl Sessions {
                     .any(|i| i.is_text() && i.role == Role::Assistant)
         })?;
         let quiet = read.located.quiet();
-        let pending_question = pending::pending_question(&read.items, &pane.status, quiet);
+        let suggestions = self.suggestions.current();
+        let agent = crate::core::naming::capitalise(&pane.agent);
+        let asker = pending::Asker {
+            suggestions: &suggestions,
+            who: Who {
+                agent: &agent,
+                project: pane.project.as_deref().unwrap_or_default(),
+            },
+        };
+        let pending_question =
+            pending::pending_question(&read.items, &pane.status, quiet, Some(&asker));
         let turn = turn::turn(&read.items, &pane.status, quiet);
         let skip = read.items.len().saturating_sub(n);
         Some(Peeked {
@@ -647,6 +663,160 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// A home with one Claude Code session in `/work/example` whose last
+    /// reply ends on `question`, and its pane, idle.
+    fn asking(question: &str) -> (tempfile::TempDir, Sessions, AgentRef) {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".claude/projects/-work-example");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lines = [
+            serde_json::json!({"type": "user", "timestamp": "2026-01-02T00:00:01.000Z",
+                "isSidechain": false, "message": {"role": "user", "content": "go"},
+                "origin": {"kind": "human"}}),
+            serde_json::json!({"type": "assistant", "timestamp": "2026-01-02T00:00:02.000Z",
+                "isSidechain": false, "message": {"role": "assistant", "type": "message",
+                "content": [{"type": "text", "text": format!("Wrote it.\n\n{question}")}]}}),
+        ];
+        let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(dir.join("s1.jsonl"), text).unwrap();
+        let sessions = Sessions::with_home(home.path());
+        let pane = AgentRef {
+            pane_id: "w1:p1".into(),
+            agent: "claude".into(),
+            project: Some("example".into()),
+            cwd: Some("/work/example".into()),
+            workspace_id: None,
+            tab_id: None,
+            tab_label: None,
+            tab_number: None,
+            status: libherdr::protocol::AgentStatus::Idle,
+            focused: false,
+            session: None,
+        };
+        (home, sessions, pane)
+    }
+
+    fn answers(sessions: &Sessions, pane: &AgentRef) -> Vec<(String, Option<String>)> {
+        let q = sessions.peek(pane, 10).unwrap().pending_question.unwrap();
+        q.answers
+            .into_iter()
+            .map(|a| (a.label, a.sends.or(a.starts)))
+            .collect()
+    }
+
+    fn pair(label: &str, text: &str) -> (String, Option<String>) {
+        (label.to_string(), Some(text.to_string()))
+    }
+
+    #[test]
+    fn a_peeked_plan_question_has_its_answers() {
+        let (_home, sessions, pane) = asking("Approve plan 04 and build it?");
+        let q = sessions.peek(&pane, 10).unwrap().pending_question.unwrap();
+        assert!(q.about_plan);
+        assert_eq!(q.plan.as_deref(), Some("plan 04"));
+        assert_eq!(
+            answers(&sessions, &pane),
+            [
+                pair("approve", "Approve plan 04"),
+                pair("discuss", "Discuss plan 04:"),
+                pair("implement", "Approve plan 04 and start building it"),
+            ]
+        );
+        assert_eq!(q.answers[0].style, "green");
+        assert!(q.answers[0].answers && !q.answers[1].answers);
+        let (_home, sessions, pane) = asking("Install it on the S23?");
+        let q = sessions.peek(&pane, 10).unwrap().pending_question.unwrap();
+        assert!(!q.about_plan && q.plan.is_none());
+        assert_eq!(
+            answers(&sessions, &pane),
+            [pair("Yes", "yes"), pair("No", "no")]
+        );
+    }
+
+    const USER_FILE: &str = "\
+# [Answer] approve\n\n- label: approve\n- style: green\n- sends: LGTM {{ [abc] detected_plan_id }}, {{ [abc] agent }}\n- answers: true\n\n\
+# [Rule] install\n\n- when: install\n- offers: install, no\n\n\
+# [Answer] install\n\n- label: install\n- style: green\n- sends: Install it on {{ [abc] project }}\n- answers: true\n\n\
+# [Answer] discuss\n\n- label: discuss\n- style: purple\n- starts: Talk:\n";
+
+    #[test]
+    fn a_user_file_and_an_edit_change_the_next_peeks_answers() {
+        let (home, sessions, pane) = asking("Approve plan 04?");
+        let file = home.path().join("rules.md");
+        let user = home.path().join("user/SUGGESTIONS.md");
+        std::fs::write(&file, crate::suggestions::SUGGESTIONS_RAW).unwrap();
+        sessions
+            .suggestions
+            .set_files(Some(file.clone()), Some(user.clone()));
+        let before = sessions.suggestions.generation();
+        assert_eq!(
+            answers(&sessions, &pane)[0],
+            pair("approve", "Approve plan 04")
+        );
+        // The user file: approve replaced, a rule tried first, and a broken
+        // discuss that leaves the shipped one.
+        std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+        std::fs::write(&user, USER_FILE).unwrap();
+        assert!(sessions.suggestions.reload());
+        assert_eq!(
+            answers(&sessions, &pane),
+            [
+                pair("approve", "LGTM plan 04, Claude"),
+                pair("discuss", "Discuss plan 04:"),
+                pair("implement", "Approve plan 04 and start building it"),
+            ]
+        );
+        let (_h2, other, install) = asking("Install it now?");
+        other
+            .suggestions
+            .set_files(Some(file.clone()), Some(user.clone()));
+        assert_eq!(
+            answers(&other, &install),
+            [pair("install", "Install it on example"), pair("No", "no")]
+        );
+        // An edit to the given file changes the next peek's answers.
+        std::fs::write(
+            &file,
+            crate::suggestions::SUGGESTIONS_RAW.replace("label: approve", "label: ok"),
+        )
+        .unwrap();
+        // The user's approve still replaces the shipped one: no change.
+        assert!(!sessions.suggestions.reload());
+        assert_eq!(sessions.suggestions.generation(), before + 1);
+        assert_eq!(answers(&sessions, &pane)[0].0, "approve");
+        std::fs::remove_file(&user).unwrap();
+        assert!(sessions.suggestions.reload());
+        assert_eq!(answers(&sessions, &pane)[0], pair("ok", "Approve plan 04"));
+        // Unchanged files: nothing to do.
+        assert!(!sessions.suggestions.reload());
+    }
+
+    #[tokio::test]
+    async fn the_file_watcher_reloads_the_rules() {
+        let Ok(watcher) = crate::watch_files::FileWatcher::start() else {
+            return;
+        };
+        let (home, sessions, pane) = asking("Approve plan 04?");
+        let file = home.path().join("rules.md");
+        std::fs::write(&file, crate::suggestions::SUGGESTIONS_RAW).unwrap();
+        sessions.suggestions.set_files(Some(file.clone()), None);
+        sessions.suggestions.spawn_watch(Some(&watcher));
+        let before = sessions.suggestions.generation();
+        // Let the watch start before the edit.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        std::fs::write(
+            &file,
+            crate::suggestions::SUGGESTIONS_RAW.replace("label: approve", "label: ok"),
+        )
+        .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while sessions.suggestions.generation() == before {
+            assert!(std::time::Instant::now() < deadline, "no reload");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(answers(&sessions, &pane)[0].0, "ok");
+    }
 
     #[test]
     fn cut_keeps_short_text_and_cuts_at_a_char_boundary() {

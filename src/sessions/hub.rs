@@ -789,6 +789,9 @@ struct TailState {
     epoch: u64,
     /// The summaries' generation the cards were last given.
     summaries_seen: u64,
+    /// The suggestion rules' generation the pending question was given
+    /// its answers from.
+    suggestions_seen: u64,
     /// The cards have been found once since the state was read: before
     /// that, only the newest Finished card is new.
     primed: bool,
@@ -951,6 +954,7 @@ impl Tailer {
             outline: None,
             epoch: 0,
             summaries_seen: 0,
+            suggestions_seen: 0,
             primed: false,
         })
     }
@@ -1003,6 +1007,7 @@ impl Tailer {
             outline: None,
             epoch: 0,
             summaries_seen: 0,
+            suggestions_seen: 0,
             primed: false,
         })
     }
@@ -1439,6 +1444,13 @@ impl Tailer {
             st.live.quiet = quiet;
             st.dirty = true;
         }
+        // New rules give the pending question new answers (plan
+        // 20261027_06, step 3).
+        let rules = self.sessions.suggestions.generation();
+        if rules != st.suggestions_seen {
+            st.suggestions_seen = rules;
+            st.dirty = true;
+        }
         let generation = self.summaries.generation();
         if generation != st.summaries_seen {
             st.summaries_seen = generation;
@@ -1455,7 +1467,17 @@ impl Tailer {
     fn recompute(&self, st: &mut TailState, changed: Vec<Section>) -> Option<Batch> {
         st.dirty = false;
         let items: Vec<Item> = st.window.iter().map(|p| p.item.clone()).collect();
-        let mut question = pending::pending_question(&items, &st.live.status, st.live.quiet);
+        let suggestions = self.sessions.suggestions.current();
+        let agent = self.spoken_name(st);
+        let asker = pending::Asker {
+            suggestions: &suggestions,
+            who: crate::suggestions::Who {
+                agent: &agent,
+                project: &self.project,
+            },
+        };
+        let mut question =
+            pending::pending_question(&items, &st.live.status, st.live.quiet, Some(&asker));
         if let Some(q) = &mut question {
             self.linker.link_question(q);
         }
@@ -1528,6 +1550,22 @@ impl Tailer {
         })
     }
 
+    /// The pane's shown name, once a subscription has given it; the
+    /// agent's own name before.
+    fn agent_name(&self, st: &TailState) -> String {
+        if st.live.name == LiveState::default().name {
+            self.agent.clone()
+        } else {
+            st.live.name.clone()
+        }
+    }
+
+    /// [`Tailer::agent_name`] as it is spoken ("Claude"), for the
+    /// suggested answers' `agent` slot.
+    fn spoken_name(&self, st: &TailState) -> String {
+        crate::core::naming::capitalise(&self.agent_name(st))
+    }
+
     /// Send the new Finished cards among `cards` to be summarised, once
     /// each: those not among the cards last broadcast, and, the first time
     /// the cards are found, only the newest.
@@ -1536,13 +1574,7 @@ impl Tailer {
         let Some(jobs) = &self.jobs else {
             return;
         };
-        // The pane's shown name, once a subscription has given it; the
-        // agent's own name before.
-        let agent = if st.live.name == LiveState::default().name {
-            self.agent.clone()
-        } else {
-            st.live.name.clone()
-        };
+        let agent = self.agent_name(st);
         let finished: Vec<&Section> = cards.iter().filter(|c| is_bookend(c)).collect();
         let new: Vec<&Section> = if primed {
             finished

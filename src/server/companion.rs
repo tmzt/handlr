@@ -81,6 +81,12 @@ pub struct TurnOptions {
     /// starts the platform's on first use; `Some(Err(why))` stands for one
     /// that failed to start, so the intervals take over (tests).
     pub file_watcher: Option<Result<crate::watch_files::FileWatcher, String>>,
+    /// `--suggestions <path>`, in place of the shipped `SUGGESTIONS.md`
+    /// (plan 20261027_06, decision 1).
+    pub suggestions_file: Option<PathBuf>,
+    /// The user's `SUGGESTIONS.md`, merged over the rules when it exists
+    /// (the 14:13 EDT amendment); `None` reads none.
+    pub suggestions_user_file: Option<PathBuf>,
 }
 
 /// The engine, the session histories, and who is in a turn.
@@ -1001,7 +1007,7 @@ fn pending_question(
             .iter()
             .any(|i| i.is_text() && i.role == crate::sessions::Role::Assistant)
     })?;
-    crate::sessions::pending::pending_question(&read.items, status, read.located.quiet())
+    crate::sessions::pending::pending_question(&read.items, status, read.located.quiet(), None)
 }
 
 /// Send the held notices, oldest first, unless a confirmation this

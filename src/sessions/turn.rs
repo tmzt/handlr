@@ -25,7 +25,7 @@ use super::{EntryKind, Item, Role, cut, pending};
 /// and whose status is `status`. `quiet` is whether the session file has
 /// been unwritten for [`pending::TURN_QUIET`].
 pub fn turn(items: &[Item], status: &AgentStatus, quiet: bool) -> Turn {
-    if let Some(q) = pending::pending_question(items, status, quiet) {
+    if let Some(q) = pending::pending_question(items, status, quiet, None) {
         return Turn::Asking {
             question: cut(&q.text, TURN_TEXT_MAX),
         };

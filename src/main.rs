@@ -5,7 +5,7 @@
 //! ```text
 //! flankr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
 //!                 --socket <herdr.sock> | --mock] [--listen <flankr.sock>] [--show-tokens]
-//!                [--prompts <ADDITIONAL_PROMPTS.md>]
+//!                [--prompts <ADDITIONAL_PROMPTS.md>] [--suggestions <SUGGESTIONS.md>]
 //! flankr ctl [--listen <flankr.sock>] [--client <name>] [--follow] [--handle <text>]
 //!            <method> [<params as JSON>]
 //! flankr pair [--listen <flankr.sock>] [--name <name>] [--protocols companion,harness]
@@ -33,6 +33,9 @@ struct AppArgs {
     /// `serve`'s prompts file, in place of the shipped
     /// `ADDITIONAL_PROMPTS.md` (plan 20261023_05, decision 7).
     prompts: Option<String>,
+    /// `serve`'s suggestion rules, in place of the shipped
+    /// `SUGGESTIONS.md` (plan 20261027_06, decision 1).
+    suggestions: Option<String>,
     follow: bool,
     /// `ctl`'s client label.
     client: Option<String>,
@@ -71,6 +74,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         listen: None,
         show_tokens: false,
         prompts: None,
+        suggestions: None,
         follow: false,
         client: None,
         handle: None,
@@ -100,6 +104,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--listen" => parsed.listen = args.next(),
             "--show-tokens" => parsed.show_tokens = true,
             "--prompts" => parsed.prompts = args.next(),
+            "--suggestions" => parsed.suggestions = args.next(),
             "--follow" => parsed.follow = true,
             "--client" => parsed.client = args.next(),
             "--handle" => parsed.handle = args.next(),
@@ -264,6 +269,11 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
             prompts_file: args.prompts.as_ref().map(expand_tilde),
             ..Default::default()
         },
+        // SUGGESTIONS.md: the given file or the shipped one, with the
+        // user's merged over it (plan 20261027_06, the 14:13 EDT amendment).
+        suggestions_file: args.suggestions.as_ref().map(expand_tilde),
+        suggestions_user_file: std::env::var_os("HOME")
+            .map(|home| flankr::suggestions::user_file_under(Path::new(&home))),
         ..Default::default()
     };
     let daemon = flankr::server::Daemon::with_turns(client, &config, link, turns);
@@ -381,7 +391,7 @@ const PROMPT_USAGE: &str = "usage: flankr prompt [--use general_agent] [--agent 
 const USAGE: &str = "\
 flankr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
                 --socket <herdr.sock> | --mock] [--listen <flankr.sock>] [--show-tokens]
-               [--prompts <ADDITIONAL_PROMPTS.md>]
+               [--prompts <ADDITIONAL_PROMPTS.md>] [--suggestions <SUGGESTIONS.md>]
 flankr ctl [--listen <flankr.sock>] [--client <name>] [--follow] [--handle <text>]
            <method> [<params as JSON>]
 flankr pair [--listen <flankr.sock>] [--name <name>] [--protocols companion,harness]
