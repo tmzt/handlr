@@ -34,6 +34,7 @@
 
 use std::time::Duration;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use flankr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
@@ -246,6 +247,15 @@ pub enum AgentHit {
     Deny(u64),
     /// A suggested response, in the row above the buttons or a card.
     Suggest(Suggestion),
+    /// One of the live question card's answers from the daemon (plan
+    /// 20261027_06, step 4): its index among them; whether it is drawn as
+    /// plain coloured text rather than a button; whether it opens the
+    /// message card (`starts`) rather than sending.
+    Answer {
+        index: usize,
+        text: bool,
+        opens: bool,
+    },
     /// The play button: read the agent's replies aloud, or stop.
     ReadAloud,
     /// A card's record button: take a message in reply to that card.
@@ -286,7 +296,8 @@ pub enum AgentHit {
 pub struct FlowButton {
     pub hit: AgentHit,
     pub rect: Rect,
-    pub label: &'static str,
+    /// A fixed label, or an answer's from the daemon.
+    pub label: Cow<'static, str>,
     pub bg: [f32; 4],
 }
 
@@ -553,19 +564,58 @@ pub(crate) fn one_line(text: &str, cols: usize) -> String {
     format!("{kept}\u{2026}")
 }
 
+/// How an answer's style is drawn (plan 20261027_06, decision 3): its
+/// theme colour, and whether it is plain coloured text rather than a
+/// button. `approve` and `deny` are buttons, as Yes and No; a style this
+/// app does not know is drawn as `link`.
+pub fn answer_style(style: &str) -> ([f32; 4], bool) {
+    match style {
+        "approve" => (theme().approve, false),
+        "deny" => (theme().deny, false),
+        "green" => (theme().green, true),
+        "yellow" => (theme().yellow, true),
+        _ => (theme().link, true),
+    }
+}
+
 /// A card's actions.
-fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
+fn actions(card: &AgentCard) -> Vec<(AgentHit, Cow<'static, str>, [f32; 4])> {
+    let fixed = |list: Vec<(AgentHit, &'static str, [f32; 4])>| {
+        list.into_iter()
+            .map(|(hit, label, bg)| (hit, Cow::Borrowed(label), bg))
+            .collect()
+    };
     match (card.kind, card.confirm_id) {
-        (CardKind::Approval, Some(id)) => vec![
+        (CardKind::Approval, Some(id)) => fixed(vec![
             (AgentHit::Approve(id), "Approve", theme().approve),
             (AgentHit::Deny(id), "Deny", theme().deny),
-        ],
+        ]),
+        // The daemon's answers, in order, in their styles (plan
+        // 20261027_06, step 4), and the record button.
+        (CardKind::Question, _) if !card.answers.is_empty() => {
+            let mut acts: Vec<_> = card
+                .answers
+                .iter()
+                .enumerate()
+                .map(|(index, a)| {
+                    let (bg, text) = answer_style(&a.style);
+                    let hit = AgentHit::Answer {
+                        index,
+                        text,
+                        opens: a.starts.is_some(),
+                    };
+                    (hit, Cow::Owned(a.label.clone()), bg)
+                })
+                .collect();
+            acts.push((AgentHit::Reply, Cow::Borrowed(""), theme().message));
+            acts
+        }
         // A question about a plan (plan 20261022_03, the 21:57 EDT
         // amendment): just the three words, as plain coloured text, not
         // buttons (owner, 2026-10-23: "Yes/No are buttons but suggestions
         // (approve, impl) can be plain text"). The colour stands in the
         // background slot; `SquareButton::draw` draws these as text.
-        (CardKind::Question, _) if card.about_plan => vec![
+        (CardKind::Question, _) if card.about_plan => fixed(vec![
             (
                 AgentHit::Suggest(Suggestion::Approve),
                 "approve",
@@ -582,12 +632,12 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, &'static str, [f32; 4])> {
                 theme().yellow,
             ),
             (AgentHit::Reply, "", theme().message),
-        ],
-        (CardKind::Question, _) => vec![
+        ]),
+        (CardKind::Question, _) => fixed(vec![
             (AgentHit::Suggest(Suggestion::Yes), "Yes", theme().approve),
             (AgentHit::Suggest(Suggestion::No), "No", theme().deny),
             (AgentHit::Reply, "", theme().message),
-        ],
+        ]),
         _ => vec![],
     }
 }
@@ -730,7 +780,7 @@ fn replay_button(key: u64, x: f32, y: f32, s: f32) -> FlowButton {
     FlowButton {
         hit: AgentHit::Replay(key),
         rect: Rect::new(x, y - (h - line_h(TOOL_PT * s)) * 0.5, REPLAY_W * s, h),
-        label: "",
+        label: "".into(),
         bg: theme().dim,
     }
 }
@@ -3989,6 +4039,16 @@ impl AgentScreen {
         self.flow.targets.get(index)
     }
 
+    /// The live question card's answer at `index` (plan 20261027_06,
+    /// step 4).
+    pub fn answer(&self, index: usize) -> Option<libflankr_proto::common::Answer> {
+        self.blocks
+            .values()
+            .filter_map(Block::card)
+            .find(|c| c.live && c.kind == CardKind::Question && !c.answers.is_empty())
+            .and_then(|c| c.answers.get(index).cloned())
+    }
+
     /// The control at `(x, y)`, if any: the bottom row first, then the
     /// prompt cards' parts (a reply's controls among them), then the rest.
     pub fn hit(&self, x: f32, y: f32) -> Option<AgentHit> {
@@ -4621,6 +4681,7 @@ pub(crate) fn button(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use libflankr_proto::common::Answer;
 
     const PHONE: Layout = Layout {
         w: 1080.0,
@@ -4672,6 +4733,7 @@ mod tests {
             links: Vec::new(),
             points: Vec::new(),
             spoken: None,
+            answers: Vec::new(),
         }
     }
 
@@ -4781,8 +4843,11 @@ mod tests {
     fn a_plan_question_offers_approve_discuss_and_implement() {
         let entries = conversation(1);
         let flow = lay_out_flow(&entries, &[plan_card(4)], None, 1080.0, 2.0);
-        let buttons: Vec<(AgentHit, &str)> =
-            flow.buttons.iter().map(|b| (b.hit, b.label)).collect();
+        let buttons: Vec<(AgentHit, &str)> = flow
+            .buttons
+            .iter()
+            .map(|b| (b.hit, b.label.as_ref()))
+            .collect();
         assert_eq!(
             buttons,
             [
@@ -4802,6 +4867,92 @@ mod tests {
             let r = a.rect_of(hit).expect("on the pinned card");
             assert_eq!(a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5), Some(hit));
         }
+    }
+
+    fn answer(label: &str, style: &str, sends: Option<&str>, starts: Option<&str>) -> Answer {
+        Answer {
+            label: label.to_string(),
+            style: style.to_string(),
+            sends: sends.map(str::to_string),
+            starts: starts.map(str::to_string),
+            command: false,
+            answers: sends.is_some(),
+        }
+    }
+
+    /// A live plan question whose daemon sent its answers (plan
+    /// 20261027_06).
+    fn answered_card(at: usize) -> AgentCard {
+        AgentCard {
+            answers: vec![
+                answer("approve", "green", Some("Approve plan 04"), None),
+                answer("discuss", "link", None, Some("Discuss plan 04:")),
+                answer("ok", "approve", Some("yes"), None),
+                answer("nope", "deny", Some("no"), None),
+                answer("odd", "purple", Some("x"), None),
+            ],
+            ..plan_card(at)
+        }
+    }
+
+    #[test]
+    fn the_daemons_answers_are_drawn_in_order_in_their_styles() {
+        let entries = conversation(1);
+        let flow = lay_out_flow(&entries, &[answered_card(4)], None, 1080.0, 2.0);
+        let buttons: Vec<(AgentHit, &str, [f32; 4])> = flow
+            .buttons
+            .iter()
+            .map(|b| (b.hit, b.label.as_ref(), b.bg))
+            .collect();
+        let hit = |index, text, opens| AgentHit::Answer { index, text, opens };
+        assert_eq!(
+            buttons,
+            [
+                (hit(0, true, false), "approve", theme().green),
+                (hit(1, true, true), "discuss", theme().link),
+                (hit(2, false, false), "ok", theme().approve),
+                (hit(3, false, false), "nope", theme().deny),
+                // A style this app does not know: as link.
+                (hit(4, true, false), "odd", theme().link),
+                (AgentHit::Reply, "", theme().message),
+            ]
+        );
+        // Pinned, they can be tapped, and a tap names its answer.
+        let a = screen(entries, vec![answered_card(4)], Some(0));
+        for (index, label) in [(0, "approve"), (1, "discuss"), (3, "nope")] {
+            let h = buttons[index].0;
+            let r = a.rect_of(h).expect("on the pinned card");
+            assert_eq!(a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5), Some(h));
+            assert_eq!(a.answer(index).unwrap().label, label);
+        }
+        assert_eq!(
+            a.answer(1).unwrap().starts.as_deref(),
+            Some("Discuss plan 04:")
+        );
+        assert!(a.answer(9).is_none());
+    }
+
+    #[test]
+    fn without_answers_the_cards_keep_todays_buttons() {
+        let entries = conversation(1);
+        let flow = lay_out_flow(
+            &entries,
+            &[card(CardKind::Question, 4, true)],
+            None,
+            1080.0,
+            2.0,
+        );
+        let hits: Vec<AgentHit> = flow.buttons.iter().map(|b| b.hit).collect();
+        assert_eq!(
+            hits,
+            [
+                AgentHit::Suggest(Suggestion::Yes),
+                AgentHit::Suggest(Suggestion::No),
+                AgentHit::Reply
+            ]
+        );
+        let a = screen(entries, vec![plan_card(4)], Some(0));
+        assert!(a.answer(0).is_none());
     }
 
     #[test]

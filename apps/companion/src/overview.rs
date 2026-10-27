@@ -734,7 +734,7 @@ fn panel(lines: &[Line], confirm: Option<u64>, x: f32, w: f32, bottom: f32, s: f
             flow.buttons.push(FlowButton {
                 hit,
                 rect: Rect::new(inner_x + i as f32 * (bw + gap), by, bw, ACTION_H * s),
-                label,
+                label: label.into(),
                 bg,
             });
         }

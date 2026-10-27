@@ -251,16 +251,19 @@ impl SquareButton {
             }
             // A plan question's words are plain text in their colour (the
             // colour stands in `bg`), not buttons.
+            // So are the daemon's answers in a text style (plan
+            // 20261027_06, decision 3).
             AgentHit::Suggest(
                 flankr_companion::Suggestion::Approve
                 | flankr_companion::Suggestion::Discuss
                 | flankr_companion::Suggestion::Implement,
-            ) => {
+            )
+            | AgentHit::Answer { text: true, .. } => {
                 let px = 19.0 * s;
                 let y = rect.y + (rect.h - crate::agent::line_h(px)) * 0.5;
-                ctx.draw_text(list, b.label, [rect.x + 4.0 * s, y], px, b.bg);
+                ctx.draw_text(list, &b.label, [rect.x + 4.0 * s, y], px, b.bg);
             }
-            _ => button(list, ctx, b.label, rect, b.bg, s),
+            _ => button(list, ctx, &b.label, rect, b.bg, s),
         }
     }
 }

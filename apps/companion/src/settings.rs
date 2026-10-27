@@ -420,7 +420,8 @@ pub fn allows(hit: AgentHit) -> bool {
         | AgentHit::Submit
         | AgentHit::Scratch
         | AgentHit::Clear
-        | AgentHit::Suggest(flankr_companion::Suggestion::Discuss) => s.microphone,
+        | AgentHit::Suggest(flankr_companion::Suggestion::Discuss)
+        | AgentHit::Answer { opens: true, .. } => s.microphone,
         // Hidden while the daemon offers none (plan 20261027_02, decision 9).
         AgentHit::GeneralAgent => llm().general_agent,
         _ => true,
@@ -737,10 +738,23 @@ mod tests {
             AgentHit::Reply,
             AgentHit::Submit,
             AgentHit::Clear,
+            AgentHit::Answer {
+                index: 1,
+                text: true,
+                opens: true,
+            },
         ] {
             assert!(!allows(hit), "{hit:?}");
         }
         assert!(allows(AgentHit::Approve(1)), "Yes and No still work");
+        assert!(
+            allows(AgentHit::Answer {
+                index: 0,
+                text: true,
+                opens: false
+            }),
+            "an answer that sends still works"
+        );
         set_current(Settings {
             general_agent: false,
             ..Settings::default()

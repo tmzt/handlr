@@ -28,7 +28,7 @@ impl ControlRow {
         let square = |hit, x: f32, bg| FlowButton {
             hit,
             rect: Rect::new(x, y, sq, sq),
-            label: "",
+            label: "".into(),
             bg,
         };
         // Record, and send in its place, always at the bottom right, the
@@ -41,7 +41,7 @@ impl ControlRow {
             row.push(FlowButton {
                 hit: AgentHit::GeneralAgent,
                 rect: Rect::new((x0 + x1 - sq) * 0.5, y, sq, sq),
-                label: "listening",
+                label: "listening".into(),
                 bg: theme().accent,
             });
             if dictating {

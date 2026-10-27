@@ -1310,6 +1310,16 @@ impl App {
                 self.send(Input::Respond(Suggestion::Discuss));
             }
             AgentHit::Suggest(suggestion) => self.send(Input::Respond(suggestion)),
+            // One of the daemon's answers (plan 20261027_06, step 4): one
+            // that opens the message card takes it in reply to the card.
+            AgentHit::Answer { index, opens, .. } => {
+                if let Some(answer) = self.agent.as_ref().and_then(|a| a.answer(index)) {
+                    if opens && let Some(agent) = &mut self.agent {
+                        agent.begin_reply();
+                    }
+                    self.send(Input::Suggested(answer));
+                }
+            }
             AgentHit::Link(index) => {
                 // Opened at the end of the touch, with the context.
                 if let Some(url) = self
