@@ -16,6 +16,7 @@
 pub mod bars;
 pub mod card;
 pub mod history;
+pub mod keyboard;
 pub mod overlay;
 
 use std::time::Duration;

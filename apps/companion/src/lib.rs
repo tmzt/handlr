@@ -93,6 +93,7 @@ use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
 use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
+use crate::prompt::keyboard::{FocusedPrompt, Ime, KeyboardRoute, PromptScreen};
 use crate::prompt::{MessagePrompt, PromptKind, Prompts, Sent};
 use crate::session_cards::{SessionCards, SessionHit, Touched};
 use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
@@ -295,11 +296,10 @@ pub struct App {
     agent_pane: Option<String>,
     /// The display's scale, as last laid out.
     scale: f32,
-    /// Whether the soft keyboard was dismissed by the user while the text prompt is open.
-    ime_dismissed: bool,
-    /// An external physical keyboard is active (always true on desktop, or set on Android
-    /// when physical keystrokes are received).
-    external_kbd: bool,
+    /// The one keyboard route to the prompt cards (plan 20261027_03, step
+    /// 3): the focused prompt, the soft keyboard dismissed, and a physical
+    /// keyboard (always on the desktop; on Android once one types).
+    keyboard: KeyboardRoute,
     /// A touch held on the centre button, watched for opening the overlay after 2 seconds.
     center_hold: Option<CenterHold>,
     /// The conversation with Gemini, as each screen's card is given it
@@ -660,7 +660,7 @@ impl App {
                     log::info!("dictation: {}", if d.active { "on" } else { "off" });
                 }
                 if !d.active {
-                    self.ime_dismissed = false;
+                    self.keyboard.close();
                     self.message_sent();
                     self.set_listening(false);
                 } else if d.general_agent {
@@ -908,6 +908,51 @@ impl App {
         }
     }
 
+    /// The screen whose prompt cards are shown.
+    fn prompt_screen(&self) -> PromptScreen {
+        if self.agent.is_some() {
+            PromptScreen::Agent
+        } else {
+            PromptScreen::Overview
+        }
+    }
+
+    /// The keyboard types into `kind`'s card on the screen shown, and the
+    /// soft keyboard shows (plan 20261027_03, decision 6).
+    fn focus_prompt(&mut self, kind: PromptKind) {
+        let screen = self.prompt_screen();
+        self.keyboard.focus(FocusedPrompt { screen, kind });
+    }
+
+    /// The one place the soft keyboard is shown or hidden, each frame: for
+    /// the typed prompt open, unless it was dismissed or a physical
+    /// keyboard types.
+    fn sync_keyboard(&mut self, ctx: &mut MorphContext) {
+        let typing = self
+            .dictation
+            .as_ref()
+            .filter(|d| d.mode == PromptMode::Keyboard)
+            .map(|d| {
+                let kind = if d.general_agent {
+                    PromptKind::GeneralAgent
+                } else {
+                    PromptKind::Message
+                };
+                (kind, d.text.as_str())
+            });
+        let screen = self.prompt_screen();
+        match self.keyboard.sync(typing, ctx.text_input_active(), screen) {
+            Ime::Start(text) => {
+                let mut options = libmorph::TextInputOptions::default();
+                options.multiline = true;
+                options.action = libmorph::TextAction::None;
+                ctx.start_text_input(&text, &options);
+            }
+            Ime::Stop => ctx.stop_text_input(),
+            Ime::Keep => {}
+        }
+    }
+
     /// Whether it listens for the general agent, on both screens' cards.
     fn set_listening(&mut self, listening: bool) {
         self.overview.set_listening(listening);
@@ -1138,7 +1183,7 @@ impl App {
     }
 
     /// A tap on one of the agent view's controls, or the overview's.
-    fn agent_hit(&mut self, ctx: &mut MorphContext, hit: AgentHit) {
+    fn agent_hit(&mut self, hit: AgentHit) {
         log::info!("companion: agent_hit: {hit:?}");
         match hit {
             AgentHit::Back => self.close_agent(),
@@ -1152,13 +1197,7 @@ impl App {
                     .as_ref()
                     .is_some_and(|d| d.general_agent && d.active)
                 {
-                    if self
-                        .dictation
-                        .as_ref()
-                        .is_some_and(|d| d.mode == PromptMode::Keyboard)
-                    {
-                        ctx.stop_text_input();
-                    }
+                    self.keyboard.close();
                     self.dictation = None;
                     self.set_listening(false);
                     self.send(Input::Clear);
@@ -1179,56 +1218,28 @@ impl App {
                     ));
                 }
             }
+            // The keyboard glyph: a typed prompt, to Gemini while its card
+            // is expanded, else a message. The keyboard route focuses it.
             AgentHit::Keyboard => {
-                self.ime_dismissed = false;
-                // Gemini's card expanded: typing to Gemini; else a message.
                 if self.prompts().expanded() == Some(PromptKind::GeneralAgent) {
-                    self.agent_hit(ctx, AgentHit::PromptText(PromptKind::GeneralAgent));
+                    self.agent_hit(AgentHit::PromptText(PromptKind::GeneralAgent));
                 } else {
                     self.send(Input::StartTextPrompt);
-                    if !self.external_kbd {
-                        let mut options = libmorph::TextInputOptions::default();
-                        options.multiline = true;
-                        options.action = libmorph::TextAction::None;
-                        ctx.start_text_input("", &options);
-                    }
+                    self.focus_prompt(PromptKind::Message);
                 }
             }
-            AgentHit::PromptText(PromptKind::GeneralAgent) => {
-                self.ime_dismissed = false;
+            // A tap on a card's text area: focused, and the soft keyboard
+            // shown (again, if it was dismissed). Gemini's starts a typed
+            // prompt if none is open.
+            AgentHit::PromptText(kind) => {
                 let typing = self
                     .dictation
                     .as_ref()
                     .is_some_and(|d| d.general_agent && d.mode == PromptMode::Keyboard);
-                if !typing {
+                if kind == PromptKind::GeneralAgent && !typing {
                     self.send(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
                 }
-                if !self.external_kbd {
-                    let text = self
-                        .dictation
-                        .as_ref()
-                        .filter(|_| typing)
-                        .map(|d| d.text.clone())
-                        .unwrap_or_default();
-                    let mut options = libmorph::TextInputOptions::default();
-                    options.multiline = true;
-                    options.action = libmorph::TextAction::None;
-                    ctx.start_text_input(&text, &options);
-                }
-            }
-            AgentHit::PromptText(PromptKind::Message) => {
-                self.ime_dismissed = false;
-                if !self.external_kbd {
-                    let text = self
-                        .dictation
-                        .as_ref()
-                        .map(|d| d.text.as_str())
-                        .unwrap_or("");
-                    let mut options = libmorph::TextInputOptions::default();
-                    options.multiline = true;
-                    options.action = libmorph::TextAction::None;
-                    ctx.start_text_input(text, &options);
-                }
+                self.focus_prompt(kind);
             }
             AgentHit::Reply => {
                 if let Some(agent) = &mut self.agent {
@@ -1309,15 +1320,14 @@ impl App {
                     agent.set_read_aloud(self.read_aloud);
                 }
             }
+            // Sent or cancelled: the keyboard goes with the prompt.
             AgentHit::Submit => {
-                ctx.stop_text_input();
-                self.ime_dismissed = false;
+                self.keyboard.close();
                 self.send(Input::Submit);
             }
             AgentHit::Scratch => self.send(Input::Scratch),
             AgentHit::Clear => {
-                ctx.stop_text_input();
-                self.ime_dismissed = false;
+                self.keyboard.close();
                 self.send(Input::Clear);
             }
             // The prompt cards (plan 20261027_03): the screen expanded or
@@ -1504,7 +1514,7 @@ impl App {
     /// A touch on the screen shown: on the overview and in the agent view,
     /// every phase goes to the screen (a drag scrolls, a tap hits); on the
     /// pairing screen, only a touch's end counts.
-    fn touch(&mut self, ctx: &mut MorphContext, touch: Touch) {
+    fn touch(&mut self, touch: Touch) {
         let now = self.started.elapsed();
         if let Some(hold) = self.center_hold.as_mut()
             && hold.id == touch.id
@@ -1515,7 +1525,7 @@ impl App {
                     let started_listening = hold.started_listening;
                     self.center_hold = None;
                     if !opened && !started_listening {
-                        self.agent_hit(ctx, AgentHit::GeneralAgent);
+                        self.agent_hit(AgentHit::GeneralAgent);
                     }
                     return;
                 }
@@ -1590,7 +1600,7 @@ impl App {
         }
         if let Some(agent) = &mut self.agent {
             if let Some(hit) = agent.touch(touch.id, touch.phase, touch.x, touch.y, now) {
-                self.agent_hit(ctx, hit);
+                self.agent_hit(hit);
             }
             return;
         }
@@ -1600,7 +1610,7 @@ impl App {
                 .touch(touch.id, touch.phase, touch.x, touch.y, now)
             {
                 Some(OverviewHit::Agent(pane_id)) => self.open_agent(pane_id),
-                Some(OverviewHit::Bottom(hit)) => self.agent_hit(ctx, hit),
+                Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
                 Some(OverviewHit::Tap) => self.send(Input::Tap),
                 Some(OverviewHit::Settings) => self.open_settings(),
                 None => {}
@@ -2078,8 +2088,7 @@ impl MorphApp for App {
             session_cards: SessionCards::new(),
             agent_pane: None,
             scale: 1.0,
-            ime_dismissed: false,
-            external_kbd: cfg!(not(target_os = "android")),
+            keyboard: KeyboardRoute::new(cfg!(not(target_os = "android"))),
             center_hold: None,
             gemini_turns: Vec::new(),
             sessions: HashMap::new(),
@@ -2204,28 +2213,7 @@ impl MorphApp for App {
         for event in sounds {
             self.on_audio(event);
         }
-        let is_keyboard_prompt = self
-            .dictation
-            .as_ref()
-            .is_some_and(|d| d.mode == flankr_companion::PromptMode::Keyboard);
-        if is_keyboard_prompt && !self.ime_dismissed && !self.external_kbd {
-            if !ctx.text_input_active() {
-                let text = self
-                    .dictation
-                    .as_ref()
-                    .map(|d| d.text.as_str())
-                    .unwrap_or("");
-                let mut options = libmorph::TextInputOptions::default();
-                options.multiline = true;
-                options.action = libmorph::TextAction::None;
-                ctx.start_text_input(text, &options);
-            }
-        } else if (!is_keyboard_prompt || self.ime_dismissed || self.external_kbd)
-            && ctx.text_input_active()
-            && self.dictation.is_none()
-        {
-            ctx.stop_text_input();
-        }
+        self.sync_keyboard(ctx);
 
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
@@ -2265,7 +2253,7 @@ impl MorphApp for App {
     /// The controls, and a tap anywhere else ([`App::touch`]); then any
     /// link it tapped opens.
     fn on_touch(&mut self, ctx: &mut MorphContext, touch: Touch) {
-        self.touch(ctx, touch);
+        self.touch(touch);
         // Links tapped in the settings' copy and the agent view.
         let mut links = std::mem::take(&mut self.links);
         if let Some(screen) = &mut self.settings_screen {
@@ -2296,25 +2284,18 @@ impl MorphApp for App {
         }
         // Back or Escape cancels an active prompt card / dictation.
         if back && self.dictation.is_some() {
-            _ctx.stop_text_input();
+            self.keyboard.close();
             self.send(Input::Clear);
-            self.ime_dismissed = false;
             return KeyStatus::Handled;
         }
+        // A physical keyboard types into the typed prompt directly; the
+        // soft keyboard stays hidden from then on (the keyboard route).
         if let Some(d) = &self.dictation
-            && d.mode == flankr_companion::PromptMode::Keyboard
+            && d.mode == PromptMode::Keyboard
         {
-            let mut text = d.text.clone();
-            match key {
-                Key::Character('\u{8}' | '\u{7f}') => {
-                    text.pop();
-                }
-                Key::Character('\r' | '\n') => text.push('\n'),
-                Key::Character(c) if !c.is_control() => text.push(c),
-                _ => return KeyStatus::Unhandled,
-            }
-            self.external_kbd = true;
-            _ctx.stop_text_input();
+            let Some(text) = self.keyboard.key(&d.text, key) else {
+                return KeyStatus::Unhandled;
+            };
             self.send(Input::SetText(text));
             return KeyStatus::Handled;
         }
@@ -2345,20 +2326,18 @@ impl MorphApp for App {
         KeyStatus::Handled
     }
 
-    fn on_text_input(&mut self, ctx: &mut MorphContext, event: &libmorph::TextInputEvent) {
+    fn on_text_input(&mut self, _ctx: &mut MorphContext, event: &libmorph::TextInputEvent) {
         log::info!("companion: on_text_input: {event:?}");
         match event {
             libmorph::TextInputEvent::Changed(text) => {
                 self.send(Input::SetText(text.clone()));
             }
             libmorph::TextInputEvent::Action(_) => {
-                ctx.stop_text_input();
-                self.ime_dismissed = false;
+                self.keyboard.close();
                 self.send(Input::Submit);
             }
-            libmorph::TextInputEvent::Dismissed => {
-                self.ime_dismissed = true;
-            }
+            // The card and its text stay; a tap shows it again.
+            libmorph::TextInputEvent::Dismissed => self.keyboard.dismiss(),
             _ => {}
         }
     }

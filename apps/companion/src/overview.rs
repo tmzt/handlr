@@ -1274,6 +1274,35 @@ mod tests {
     }
 
     #[test]
+    fn the_keyboards_height_lifts_the_card_and_the_overlays_input() {
+        let mut o = overview(3);
+        o.set_dictation(typed("hello"));
+        let down = o
+            .rect_of(AgentHit::PromptText(PromptKind::Message))
+            .unwrap();
+        // The soft keyboard up: its inset is in the layout's bottom.
+        let inset = 700.0;
+        o.set_layout(Layout {
+            bottom: PHONE.bottom + inset,
+            ..PHONE
+        });
+        let up = o
+            .rect_of(AgentHit::PromptText(PromptKind::Message))
+            .unwrap();
+        assert!((down.y - up.y - inset).abs() < 0.01, "lifted by the inset");
+        assert!(up.y + up.h <= PHONE.h - PHONE.bottom - inset);
+        // Expanded: the overlay's input sits above the keyboard too.
+        o.with_prompts(|p| p.expand(PromptKind::Message));
+        o.tick(PromptOverlay::SLIDE);
+        let input = o
+            .rect_of(AgentHit::PromptText(PromptKind::Message))
+            .unwrap();
+        assert!(input.y + input.h <= PHONE.h - PHONE.bottom - inset);
+        let sheet = o.prompts().overlay().rect();
+        assert!(sheet.y >= o.grid().viewport().y, "under the status lines");
+    }
+
+    #[test]
     fn overview_keyboard_prompt_card_has_shaded_input_area() {
         let mut o = overview(1);
         o.set_dictation(typed(""));
