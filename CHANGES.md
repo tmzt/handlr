@@ -2596,3 +2596,48 @@ the beginning of the message is ignored and commands are still processed".
    message rules in the context and `PROMPT.md` section 3, item 2, describe
    the first-word rule; `PROMPT.md` was changed only there and in item 3's
    wording.
+
+## 2026-10-27 12:58 EDT — plan 20261027_05 steps 1–4 and 6's departures
+
+Plan: docs/design/20261027_05_PLANNING_FOLLOWUPS_PLAN.md. Steps 2
+(`2747243`), 1 (`a43a0bd`), 3 (`0f67677`), 4 (`a0bd4ff`) and 6 (`6c12d9c`).
+
+1. **Step 2:** `LlmConfig.enabled` is `Option<bool>`. Without an `enabled`
+   key, `[gemini]` and `[summary]` are merged under `[llm]`; a declared
+   `[llm.backends.gemini]` and a use's explicit `enabled` win. A note is
+   logged whenever `[llm]` exists without `enabled`. `config.default.toml`'s
+   wording follows.
+2. **Step 1:** the watcher is started lazily by `Daemon::file_watcher()`;
+   `TurnOptions.file_watcher` lets tests stand in a failed one. The
+   `revoke_interval` loop (60 s) always runs beside the watcher as the
+   fallback; `[llm]` runs no interval while the watcher works. A path whose
+   folder doesn't exist yet is watched from the nearest folder that does.
+   `notify` 8.2 and `notify-debouncer-mini` 0.7 are new dependencies.
+3. **Step 3:** `GIT_LITERAL_PATHSPECS=1`, and the path passed as `./<rel>`,
+   so pathspec magic isn't read; a leading `/` is the project root; paths
+   with whitespace or control characters are refused; the path goes through
+   `check_paths` with a trailing `/`, since a final `.` is otherwise taken as
+   punctuation. The record separator comes first (`%x1e%h%x1f…`) so
+   `--name-only` paths fall in their record. `count` is clamped to 1..50; no
+   commits answers "no commits yet"; a folder outside git returns no commits
+   with a note; `src/git.rs` finds `git`.
+4. **Step 4:** the marker hashes the instructions as read (up to
+   `max_instructions_kb`). The block is re-sent unless the *latest* marker
+   for the project matches, so a reverted file is sent again. The block is
+   inserted as a `system` message before the user's turn and appended to
+   the JSONL history right after `contribute`, so a failed turn still keeps
+   it. An `InstructionsCache` per session re-reads only on a project or file
+   change, or every turn without a watcher. `PROMPT.md` and
+   `ADDITIONAL_PROMPTS.md` don't mention `recent_commits`; its declaration
+   does.
+5. **Step 6:** the prefix is kept in the broker
+   (`Broker::request_message_typed`, a new parameter on `Broker::open`); the
+   direct-send path prefixes too, though requests are always confirmed.
+6. **The `via flankr:` rule line** (the 12:33 amendment, item 2) is not yet
+   added: `~/src/rules` became the canonical home of the rules at 12:57, in
+   another session, and its rules say changes are made there first and
+   copied out. It waits for that.
+7. **Versions:** the flankr crate gains public items (`Daemon::file_watcher`,
+   `TurnOptions.file_watcher`, `ToolSet.recent_commits`) and changes
+   `LlmConfig.enabled` to `Option<bool>`, but flankr is the daemon
+   application with no `VERSIONS.md`; no version change.
