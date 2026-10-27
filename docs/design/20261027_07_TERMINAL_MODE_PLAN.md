@@ -387,3 +387,181 @@ change on top.
    wait until herdr can report a cursor?
 6. Should the companion's `terminal.input` also be offered on the harness
    protocol (a local `flankr ctl term`), or stay phone-only?
+
+## Amendment — 2026-10-27 14:23 EDT: herdr's source and protocol; a split flag byte
+
+The owner's request (verbatim): "tell it to checkout
+https://github.com/herdrdev/herdr and continue the exploration, including the
+protocol herdr uses over ssh. also investigate splitting the current byte into
+two with the flags staying in one nibble."
+
+herdr was cloned read-only to `~/src/herdr` (commit `2713feb`, 2026-10-27,
+crate version 0.9.5). Nothing was run and no socket was touched. This
+amendment replaces the "Herdr gives text, not cells" finding and the sentence
+"Herdr's own source is not checked out" in section 2, the second half of the
+verdict in section 3, decision 3's framing (the whole-byte `0x02`/`0x03`
+kind), and open question 1. Where it disagrees with the body, this amendment
+wins.
+
+### Findings in herdr
+
+1. **herdr owns a full terminal emulator.** Every pane is a Ghostty VT
+   (`crates/ghostty-vt`; `src/pane/terminal.rs`), with `visible_text()`,
+   `visible_ansi()` and `cursor_state() -> Option<TerminalCursorState>`
+   (`src/pane/terminal.rs:2002`, `:2161-2175`). The cell grid, attributes
+   and cursor exist in process; only the JSON API hides them.
+2. **The JSON API already has an attributed read.** `pane.read`
+   (`src/app/api/panes.rs:1512`, `src/app/api_helpers.rs:109-139`) takes
+   `source` (`visible`, `recent`, `recent-unwrapped`, `detection`) **and**
+   `format`: `text` (default) or `ansi` (`src/api/schema/common.rs:112-121`).
+   `{source: "visible", format: "ansi"}` returns `terminal.visible_ansi()`:
+   the visible frame with SGR colour and attribute escapes. The result is
+   `PaneReadResult { pane_id, workspace_id, tab_id, source, format, text,
+   revision, truncated }` (`src/api/schema/panes.rs:729-738`); `revision` is
+   hard-wired to 0 (`panes.rs:1546`), `lines` is capped at 1000. No cursor,
+   no `cols`/`rows`. libherdr's `InspectPane` sends `lines` and `source`
+   only (`crates/libherdr/src/protocol.rs:232-240`), so `format` is a
+   one-field, serde-defaulted, additive change on flankr's side.
+3. **herdr's own clients get a mosh-like cell sync today.** The binary
+   thin-client protocol (`src/protocol/wire.rs`, `PROTOCOL_VERSION = 22`,
+   bincode frames behind a 4-byte little-endian length, at most 2 MiB) runs
+   on the *client* socket (`src/server/socket_paths.rs:23`, distinct from
+   the API socket). It carries `CellData { symbol, fg: u32, bg: u32,
+   modifier: u16, skip, hyperlink }` (`wire.rs:697`), `CursorState { x, y,
+   visible, shape }` (`wire.rs:749`), `PaneSurfaceFrame { boot_id,
+   projection_revision, surface_revision, frame, panes, splits, popup,
+   graphics }` (`wire.rs:1268`), `PaneSurfacePatchRow { x, y, cells }`
+   (`wire.rs:1289`) and the `surface_delta` capability
+   (`src/protocol/surface_delta.rs`: kind `endpoint.surface-delta.v1`,
+   `base_projection_revision`, `base_surface_revision`,
+   `GridUpdate::{Patch, Replace}`, at most 4096 spans). The server keeps a
+   per-client baseline (`src/server/render_stream.rs:15-30`,
+   `ClientRenderState::Semantic { last_surface, surface_revision, .. }` or
+   `TerminalAnsi { blit_encoder, seq, .. }`) and diffs from it: the same
+   model as decision 5's `Mirror`. A "stable endpoint contract" for
+   client-owned shells (`src/protocol/endpoint.rs`,
+   `ENDPOINT_PROTOCOL_GENERATION = 1`, `endpoint.hello.v1`/`welcome.v1`,
+   codecs `shell.snapshot.v1`, `shell.surface.v1`,
+   `shell.input.semantic.v1`) is documented as a floor "for Local, SSH, and
+   Cloud shell endpoints" that "must remain available indefinitely". But it
+   is the whole composed shell surface (all panes, splits, popups, sized by
+   `EndpointClientHello.surface_size {cols, rows}`), not one pane, and its
+   encoding is bincode of private Rust types with no published document; a
+   third party speaking it would track herdr's source. The API has
+   `client_shell.surface.set` (`docs/next/api/herdr-api.schema.json:4895`)
+   only to size such a shell.
+4. **The protocol over SSH.** herdr's remote mode is not RPC over ssh: it is
+   "a remote thin-client launcher over SSH command stdio"
+   (`src/remote/attach.rs:1`). `herdr --remote <target>` runs
+   `ssh <target> exec herdr --session <name> remote-client-bridge
+   [--idle-timeout-v1]` (`attach.rs:417-433`, dispatched at
+   `src/main.rs:565`). On the host, `run_remote_client_bridge`
+   (`src/remote/host.rs:6-37`) starts the server if needed, connects to the
+   remote client socket and pumps ssh's stdin/stdout to it
+   (`platform::forward_remote_bridge_stdio`). Locally the ssh child's stdio
+   is served on a per-process Unix socket,
+   `herdr-remote-<pid>-<target>-<session>.sock` (`attach.rs:3633-3642`),
+   and the local thin client connects to that as if to a local server. So
+   the bytes over ssh are the binary client protocol (version 22, endpoint
+   generation 1), one ssh session per attached client, under a managed
+   ssh_config with `ControlMaster=auto` and a herdr-owned `ControlPath`
+   (`attach.rs:1430-1460`); the authentication probe uses `BatchMode=no`,
+   `StrictHostKeyChecking=yes`, `-T <target> exit` (`attach.rs:796-812`).
+   libherdr's transport (`crates/libherdr/src/transport.rs:34-45`,
+   `:495-556`) is a different channel to a different socket: one `ssh` exec
+   per JSON request (`ControlMaster=auto`, `ControlPath`, `ControlPersist`),
+   whose remote command is `nc -U <api socket>` (`SocketPipe`, the default),
+   `herdr cli --socket <api socket>` (`HerdrCli`) or a template, against the
+   *API* socket `~/.config/herdr/herdr.sock` (`transport.rs:21-29`),
+   newline-delimited JSON. The two never meet. For the terminal poller this
+   confirms risk 1: in remote mode each frame is one ssh exec over the
+   multiplexed master unless the poller shares libherdr's long-lived
+   subscription process (open question 8).
+5. **Events and input.** Besides `pane.scroll_changed`, the API has
+   `pane.updated`, `pane.wait_for_output`, `pane.output_matched`,
+   `pane.resize`, `pane.scroll`, `pane.send_text`, `pane.send_input`,
+   `pane.send_keys` and `pane.selection.read` (schema.json). There is no
+   per-pane "screen changed" or revision event.
+
+### Revised verdict (replaces the second half of section 3)
+
+Feasible in the same app, and richer than the body says: with
+`format: "ansi"` the visible frame carries colours, bold, inverse and the rest
+of SGR, so the first terminal mode is a **live, attributed mirror**, not a
+monochrome one. What is still missing for a cursor and an exact size is small
+and sits in herdr's JSON API, not its emulator (addition (a) below). A
+mosh-grade sync fed by a true cell grid is possible from state herdr already
+holds and already ships to herdr's own clients (`surface_delta`); it is not
+reachable from the JSON API today and is not needed for the first release.
+
+Consequences for the body: decision 1's text-to-rows normaliser becomes an
+ANSI-to-runs normaliser (SGR parsed into runs of `{ text, fg, bg, flags }`
+per row; other escapes dropped), and `RowDiff` carries runs; decision 5's
+read is `InspectPane { source: Visible, format: Ansi, lines: rows }`;
+decision 8's poller skips a frame whose ANSI string is unchanged before
+parsing it; steps 1 and 3 hold with runs instead of plain rows; risk 2's
+"without attributes" clause no longer applies, its cursor clause stands until
+(a). The libherdr change is additive (`#[serde(default)] format: ReadFormat`
+on `InspectPane`, `revision` and `truncated` surfaced from the result): a
+patch bump of libherdr.
+
+**Open question 1 is replaced.** It asked herdr for a cell-grid read. The ask
+is now one of two smaller, additive herdr changes, either enough for a cursor:
+(a) `pane.read` gains optional result fields `cursor: { row, col, visible }`
+and `size: { cols, rows }` (herdr has both: `cursor_state()` and the
+emulator's size) and a non-zero `revision`, so a poller can skip unchanged
+frames; (b) a per-pane subscription to the existing
+`PaneSurfacePatch`/`surface_delta` stream over the API socket (say
+`pane.surface.subscribe`), which would feed `Mirror` with herdr's own diffs
+and make the mode mosh-grade. (a) is a few lines in `handle_pane_read`; (b)
+is a design change in herdr.
+
+### The flag byte, split in two nibbles (replaces decision 3's framing)
+
+Today each frame's plaintext starts with one byte, `0x00` last or `0x01` more
+(`crates/libflankr_proto/src/link/mod.rs:72-73`); `read_message` matches the
+whole byte and returns `BadFrame` on anything else (`link/stream.rs:206-214`),
+which finishes the connection (`mod.rs:99-100`). Both peers reassemble with
+`recv_message` (`src/server/conn.rs:292`; `crates/flankr-companion/src/net.rs:516`).
+
+- **An old peer and a new value.** Any byte other than `0x00`/`0x01` is
+  `BadFrame` and drops the connection, under the nibble layout exactly as
+  under the whole-byte one. So, as decision 3 already requires, a new value
+  is sent only to a peer that has proved it is new by calling
+  `terminal.open`. An old peer never emits a new value.
+- **`0x00` and `0x01` stay valid as kind 0.** With the flags in the low
+  nibble and the kind in the high nibble, `0x00` is kind 0 (JSON-RPC), last,
+  and `0x01` is kind 0, more: existing traffic is bit-for-bit unchanged.
+- **Which nibble holds which.** Flags low (bits 0-3), kind high (bits 4-7).
+  The two existing values are then the kind-0 values with no renumbering;
+  `byte & 0x0F` is the flag the reassembler already switches on and
+  `byte >> 4` the kind. Flag nibble: bit 0 = more (0 last, 1 more); bits
+  1-3 reserved, must be zero and `BadFrame` when set, so a later use of them
+  is refused cleanly by a peer of this generation. Kind nibble: 0 = JSON-RPC,
+  1 = terminal frame, 2-14 reserved, 15 = extended (the kind continues in
+  the next byte), which keeps the layout if sixteen kinds ever run out. All
+  frames of one message carry the same kind; a change mid-message is
+  `BadFrame`. The layout is recorded in `link/mod.rs`'s header beside the
+  existing frame description.
+- **Version under Rule 5.** No bump of the prologue (`flankr.link/1`),
+  `companion::VERSION` or the handshake. In `libflankr_proto` the change is
+  additive: `recv_message` keeps returning `BadFrame` for every non-kind-0
+  frame exactly as today, and `recv() -> Message` and
+  `send_kind(kind, &[u8])` are new functions, with `Message`
+  `#[non_exhaustive]` so later kinds are additive too. That is 0.3.12 to
+  0.3.13 (patch), with its `VERSIONS.md` entry, as decision 4 says. A later
+  change that makes `recv_message` accept kind 1 would be observable
+  behaviour and a minor bump; it is not planned. Decision 3's byte layout of
+  the terminal payload after the flag byte is unchanged.
+
+### New open questions
+
+7. Ask herdr for (a) cursor, size and revision on `pane.read`, (b) a per-pane
+   surface subscription, or both? The recommendation is (a) first.
+8. In remote mode, should the terminal poller share libherdr's long-lived
+   subscription process (one `nc`/`herdr cli` per connection, requests and
+   events on one channel) rather than pay one ssh exec per frame? libherdr's
+   subscription transport does not take requests today.
+9. An ANSI visible frame of a colourful 200x60 TUI is several times its text
+   size. Is the 8 Hz cap with the unchanged-string skip enough, or should
+   remote mode default to 2 Hz as risk 1 suggests?
