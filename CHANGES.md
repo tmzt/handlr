@@ -2462,3 +2462,35 @@ flankr-companion and companion (step 4) commits before this entry.
    the summaries. Moving to `[llm]` with no model gets the tier defaults:
    `gemini-3.8-flash` for the general agent, `gemini-3.8-flash-lite` for both
    summaries.
+
+## 2026-10-27 02:05 EDT — plan 20261027_03, steps 1–4: departures
+
+Built in the four companion commits before this entry.
+1. **A tap on Gemini's bars while a message is open** opens Gemini expanded
+   over the message, not in the state it was left in, because the message
+   card has no hidden state to step aside to. Collapsing goes back to the
+   bars. Raised with the owner.
+2. **More ways to collapse:** a tap on the dimmed area above the sheet, and a
+   swipe down on a history already at its top, both kept from `TurnOverlay`.
+3. **Message history is cleared** when the pane's `session_id` changes in
+   `agents.list`. The app can't see the outline epoch without a client change.
+4. **A message counts as sent** when it was Submitting or Confirming and then
+   ends, so one refused or denied while Confirming is recorded too.
+5. **New dependency:** `libc = "0.2"`, for `localtime_r` to stamp sent messages
+   with local time. The Android build compiles with it.
+6. **While typing to Gemini,** the centre button is an X and send takes
+   record's place, as for a message. It no longer collapses the overlay.
+7. **Stacking:** the confirmation card sits nearest the controls, with the
+   prompt cards above it. A message still steps aside while a confirmation
+   asks.
+8. **Voice input:** a voice message shows its last 6 lines (the overview showed
+   8). A tap on the overlay's input during a voice message does nothing.
+9. **Back,** in order: settings, an expanded card, a dictation, then the agent
+   view.
+10. **Other sessions' cards** aren't drawn and take no taps while an overlay
+    shows.
+11. **Smaller changes:**
+    - Gemini's card comes back expanded when the general agent is switched
+      back on, if it was left that way.
+    - The overlay shows its header under the grab bar.
+    - Keyboard routing is in `prompt/keyboard.rs`.
