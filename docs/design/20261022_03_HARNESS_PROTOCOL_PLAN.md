@@ -1664,3 +1664,14 @@ approve the draft)". This adds to the 13:21 EDT amendment's item 1: a
 question with both "approve" and "draft" (whole words) is `about_plan` too.
 With no plan id in it, its `plan` is "the draft", so **approve** sends
 "Approve the draft".
+
+## Amendment — 2026-10-27 14:04 EDT: a draft's plan id, from the question or the reply (living section L3)
+
+The owner (2026-10-27): "approve the draft should also get the number, as
+generally the question is approve the draft with a new plan id associated".
+This adds to the 13:21 and 13:24 EDT amendments:
+1. A plan id may follow "draft" as well as "plan" ("Approve draft 07?").
+2. When the question itself gives no id, the last id after "plan" or
+   "draft" earlier in the same reply is used, so "Approve the draft?" after
+   "I wrote plan 06 as a draft." names plan 06 and approve sends "Approve
+   plan 06". With no id anywhere, it stays "the draft".
