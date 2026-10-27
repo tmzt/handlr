@@ -319,3 +319,40 @@ The owner (2026-10-27), right after the 11:22 amendment: "['*.md',
    amendment's item 4 where they differ.
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-27 11:25 EDT: focus_project for every general agent turn, not only planning
+
+The owner (2026-10-27): "no, focus_project isn't only offered with
+planning, it's just split from the herdr focus now for all general agent
+uses".
+
+1. **`focus_project(agent)` is always declared to the general agent,**
+   whether or not `planning` is on. It sets the turn's current agent
+   (decision 3) for the rest of the conversation, and moves herdr's focus
+   only with `tab_follows_focus`. This replaces the 11:20 amendment's
+   item 1 "offered only while `planning` is on", and the 11:22 amendment's
+   item 3 condition on declaring it ("while `planning` is on and either
+   `read` is non-empty or `agents_prompt` is on").
+2. **What the current agent does without `planning`:**
+   - the context added before each turn names it ("Current agent: …"), so
+     Gemini knows which session the user means;
+   - `send_agent_command`'s `agent` may be left out to mean the current
+     agent; with neither, it is refused with "Which agent? Name one, or
+     focus a project first".
+
+   With `planning` on, it is also the project for the file tools and the
+   `instructions` block, as before.
+3. **Decision 7's tool list** becomes: `focus`, `focus_project`,
+   `send_agent_command`, `watch_pane`, `unwatch_pane`, plus
+   `list_files` and `read_file` only while `planning` is on and
+   `read` is non-empty.
+4. **Steps:** `focus_project`, the current agent and `tab_follows_focus`
+   move from step 4 to a new step 3b, after step 3 (it needs
+   `TurnStartParams.session` and `ClientOptions.tab_follows_focus`) and
+   before step 4. **Done when:** tests show `focus_project` declared with
+   `planning` off, the current agent named in the context, from the open
+   session or `focus_project`, `send_agent_command` without `agent`
+   going to it, and herdr's focus moving only with `tab_follows_focus`.
+   Step 4 then needs 3b.
+
+The plan stays `Draft` until the owner approves it.
