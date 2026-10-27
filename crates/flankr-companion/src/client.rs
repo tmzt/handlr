@@ -87,6 +87,10 @@ pub enum Input {
     /// A suggested response under the agent view: sent to the view's pane
     /// with `agents.send`, which the daemon confirms as any other.
     Respond(Suggestion),
+    /// One of a question's answers from the daemon (plan 20261027_06,
+    /// step 4), tapped: its `sends` sent confirmed, or the message card
+    /// opened with its `starts`.
+    Suggested(common::Answer),
     /// The play button: read the agent's new replies aloud, or stop. Only
     /// its prose is read, never tool calls, their output or code blocks.
     ReadAloud(bool),
@@ -208,7 +212,10 @@ struct Tapped {
     confirm_id: Option<u64>,
 }
 
-/// The agent view's suggested responses.
+/// The agent view's suggested responses. A question whose daemon sends
+/// its answers is answered with [`Input::Suggested`] instead; `Approve`,
+/// `Discuss`, `Implement` and [`plan_answer`] serve only an older daemon
+/// (plan 20261027_06, decision 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Suggestion {
     Yes,
@@ -643,7 +650,13 @@ pub fn is_dictation_start(utterance: &str) -> bool {
 /// A suggested response's handle: `reply`, the agent, its project and the
 /// response, as [`message_handle`] builds them.
 pub fn response_handle(target: &common::FocusInfo, response: Suggestion) -> String {
-    let handle = message_handle(target, response.label());
+    label_handle(target, response.label())
+}
+
+/// A tapped answer's handle: `reply`, the agent, its project and the
+/// answer's label.
+pub fn label_handle(target: &common::FocusInfo, label: &str) -> String {
+    let handle = message_handle(target, label);
     format!("reply{}", &handle["message".len()..])
 }
 
@@ -788,8 +801,8 @@ enum Sent {
     Unsubscribe,
     /// `session.history` for this subscription.
     History(u64),
-    /// `agents.send` of a suggested response.
-    Respond(Suggestion, String),
+    /// `agents.send` of a suggested response: its label and its text.
+    Respond(String, String),
     /// `speech.summarize` of the reply being read with this serial.
     Summarize(u64),
     /// `client.options`, with read aloud as it was then.
@@ -1741,6 +1754,7 @@ impl State {
                 approve,
             } => self.answer_id(confirm_id, approve, &mut out),
             Input::Respond(response) => self.respond(response, &mut out),
+            Input::Suggested(answer) => self.suggested(answer, &mut out),
             Input::Background(on) => self.set_background(on, &mut out),
             Input::Skip => {
                 if self.speaking {
@@ -2069,6 +2083,24 @@ impl State {
         } else {
             v.sections.view(hide)
         };
+        // The live question card offers its pending question's answers
+        // (plan 20261027_06, step 4).
+        let mut sections = sections;
+        if let Some(q) = v
+            .pending_question
+            .as_ref()
+            .filter(|q| !q.answers.is_empty())
+        {
+            for section in &mut sections {
+                if let crate::view::Shows::Card(c) = &mut section.shows
+                    && c.live
+                    && c.kind == crate::view::CardKind::Question
+                    && c.text == q.text
+                {
+                    c.answers = q.answers.clone();
+                }
+            }
+        }
         let changed = match &v.shown {
             Some(Event::AgentView {
                 sections: before, ..
@@ -3099,12 +3131,80 @@ impl State {
             }
             _ => word.to_string(),
         };
+        self.send_response(
+            pane_id,
+            response.label(),
+            text,
+            kind,
+            response.answers(),
+            out,
+        );
+    }
+
+    /// Sends a tapped answer of the open view's question (plan
+    /// 20261027_06, step 4): its `sends` as a message, or as a command
+    /// with `command`, confirmed; or, with `starts`, a message in reply to
+    /// the card with that start, to dictate the rest. A `sends` of just
+    /// "yes" or "no" says what it answers, as the Yes and No buttons do.
+    fn suggested(&mut self, answer: common::Answer, out: &mut Vec<Output>) {
+        let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
+            return;
+        };
+        if let Some(start) = answer.starts.filter(|s| !s.trim().is_empty()) {
+            if !self.online() {
+                out.push(event(Event::Say(
+                    "I'm not connected to flankr.".to_string(),
+                )));
+                return;
+            }
+            self.interact(&pane_id);
+            return self.start_dictation_with(vec![start], out);
+        }
+        let Some(sends) = answer.sends.filter(|s| !s.trim().is_empty()) else {
+            return;
+        };
+        if !self.online() {
+            out.push(event(Event::Say(
+                "I'm not connected to flankr.".to_string(),
+            )));
+            return;
+        }
+        self.interact(&pane_id);
+        let question = self
+            .view
+            .as_ref()
+            .and_then(|v| v.pending_question.as_ref())
+            .map(|q| q.text.clone());
+        let lower = sends.trim().to_ascii_lowercase();
+        let text = match (&question, lower.as_str()) {
+            (Some(q), "yes" | "no") if !answer.command => answer_text(lower == "yes", q),
+            _ => sends,
+        };
+        let kind = if answer.command {
+            common::SendKind::Command
+        } else {
+            common::SendKind::Message
+        };
+        self.send_response(pane_id, &answer.label, text, kind, answer.answers, out);
+    }
+
+    /// Sends `text` to `pane_id` as a tapped response labelled `label`,
+    /// confirmed; with `answers`, the question's card goes at once.
+    fn send_response(
+        &mut self,
+        pane_id: String,
+        label: &str,
+        text: String,
+        kind: common::SendKind,
+        answers: bool,
+        out: &mut Vec<Output>,
+    ) {
         // The card goes at once, and the answer shows as typed input until
         // the session has it (owner, 2026-10-23: "tapping yes/no on a card
         // should dismiss the card on the phone side (so immediate)"; "convert
         // the responses to typed amber text with the input box").
         if let Some(v) = self.view.as_mut() {
-            if response.answers() {
+            if answers {
                 v.replied_to = v.pending_question.as_ref().map(|q| q.ts.clone());
             }
             v.typed = Some(text.clone());
@@ -3127,7 +3227,7 @@ impl State {
         let mut params = serde_json::json!({
             "pane_id": pane_id,
             "text": text,
-            "handle": response_handle(&target, response),
+            "handle": label_handle(&target, label),
         });
         if kind == common::SendKind::Message {
             params["kind"] = serde_json::json!(kind);
@@ -3141,7 +3241,8 @@ impl State {
             text: text.to_string(),
             confirm_id: None,
         });
-        out.push(self.request(methods::AGENTS_SEND, params, Sent::Respond(response, text)));
+        let sent = Sent::Respond(label.to_string(), text);
+        out.push(self.request(methods::AGENTS_SEND, params, sent));
     }
 
     /// An utterance while dictating (decision 2, as amended).
@@ -3459,7 +3560,7 @@ impl State {
                     log::info!("dictation: focus {target:?}: {message}");
                     out.push(event(Event::Say(format!("I couldn't focus {target}."))));
                 }
-                Sent::Respond(response, text) => {
+                Sent::Respond(label, text) => {
                     // Not sent: the card comes back and the input goes.
                     if let Some(v) = self.view.as_mut() {
                         v.replied_to = None;
@@ -3471,8 +3572,7 @@ impl State {
                     out.push(event(Event::Error(message)));
                     out.push(event(Event::Say(format!(
                         "I can't send {}. {}",
-                        response.label(),
-                        error.message
+                        label, error.message
                     ))));
                 }
                 Sent::Message => {
@@ -6926,6 +7026,120 @@ mod tests {
         let out = s.input(Input::Utterance("split step two".into()));
         let d = dictation_of(&out).expect("the message");
         assert_eq!(d.text, "Discuss the overview screen plan: split step two");
+    }
+
+    /// A plan question whose daemon sent its answers (plan 20261027_06).
+    fn asking_with_answers() -> Value {
+        let mut session = asking_about_a_plan(Some("plan 04"));
+        session["pending_question"]["answers"] = json!([
+            {"label": "approve", "style": "green", "sends": "Approve plan 04", "answers": true},
+            {"label": "discuss", "style": "link", "starts": "Discuss plan 04:"},
+            {"label": "cont", "style": "yellow", "sends": "continue", "command": true},
+            {"label": "Yes", "style": "approve", "sends": "yes", "answers": true}
+        ]);
+        session
+    }
+
+    fn answer_of(session: &Value, label: &str) -> common::Answer {
+        serde_json::from_value(
+            session["pending_question"]["answers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["label"] == label)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_live_question_card_carries_the_answers_in_order() {
+        let s = viewing("idle", asking_with_answers());
+        let Some(Event::AgentView {
+            sections, pinned, ..
+        }) = s.agent_view()
+        else {
+            panic!("a view");
+        };
+        let (_, cards, _) = crate::view::flatten_view(&sections, pinned);
+        let card = cards
+            .iter()
+            .find(|c| c.kind == crate::view::CardKind::Question && c.live)
+            .unwrap();
+        let drawn: Vec<(&str, &str)> = card
+            .answers
+            .iter()
+            .map(|a| (a.label.as_str(), a.style.as_str()))
+            .collect();
+        assert_eq!(
+            drawn,
+            [
+                ("approve", "green"),
+                ("discuss", "link"),
+                ("cont", "yellow"),
+                ("Yes", "approve")
+            ]
+        );
+        // Without answers (an older daemon): none, and the app keeps its own.
+        let s = viewing("idle", asking_about_a_plan(Some("plan 04")));
+        let Some(Event::AgentView {
+            sections, pinned, ..
+        }) = s.agent_view()
+        else {
+            panic!("a view");
+        };
+        let (_, cards, _) = crate::view::flatten_view(&sections, pinned);
+        assert!(cards.iter().all(|c| c.answers.is_empty()));
+    }
+
+    #[test]
+    fn a_sends_answer_is_sent_confirmed_and_dismisses_the_card() {
+        let session = asking_with_answers();
+        let mut s = viewing("idle", session.clone());
+        let out = s.input(Input::Suggested(answer_of(&session, "approve")));
+        let send = requests(&out, "agents.send")[0].clone();
+        assert_eq!(send.params["text"], "Approve plan 04");
+        assert_eq!(send.params["kind"], "message");
+        assert_eq!(send.params["confirmed"], true);
+        assert_eq!(send.params["handle"], "reply-claude-flankr-approve");
+        let (_, cards, _) = view_of(&out).expect("the view again");
+        assert!(
+            !cards
+                .iter()
+                .any(|c| c.live && c.kind == crate::view::CardKind::Question),
+            "{out:?}"
+        );
+        // A command: no kind, and the card stays.
+        let mut s = viewing("idle", session.clone());
+        let out = s.input(Input::Suggested(answer_of(&session, "cont")));
+        let send = requests(&out, "agents.send")[0].clone();
+        assert_eq!(send.params["text"], "continue");
+        assert!(send.params.get("kind").is_none());
+        assert_eq!(send.params["confirmed"], true);
+        let (_, cards, _) = view_of(&out).expect("the view again");
+        assert!(
+            cards
+                .iter()
+                .any(|c| c.live && c.kind == crate::view::CardKind::Question)
+        );
+        // A plain "yes" says what it answers, as the Yes button does.
+        let mut s = viewing("idle", session.clone());
+        let out = s.input(Input::Suggested(answer_of(&session, "Yes")));
+        let text = &requests(&out, "agents.send")[0].params["text"];
+        assert!(text.as_str().unwrap().starts_with("Yes, "), "{text}");
+    }
+
+    #[test]
+    fn a_starts_answer_opens_the_message_card_with_its_text() {
+        let session = asking_with_answers();
+        let mut s = viewing("idle", session.clone());
+        let out = s.input(Input::Suggested(answer_of(&session, "discuss")));
+        assert!(requests(&out, "agents.send").is_empty(), "nothing sent yet");
+        let d = dictation_of(&out).expect("taking a message");
+        assert!(d.active);
+        assert_eq!(d.text, "Discuss plan 04:");
+        assert_eq!(d.target.as_ref().unwrap().pane_id, "w2:pZ");
     }
 
     #[test]

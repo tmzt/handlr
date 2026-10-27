@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use libflankr_proto::common::{CardBody, Entry, EntryKind, Link, Role, Section, Serial};
+use libflankr_proto::common::{Answer, CardBody, Entry, EntryKind, Link, Role, Section, Serial};
 pub use libflankr_proto::common::{CardKind, SectionKind, Slot};
 
 /// A card as the view shows it.
@@ -51,6 +51,10 @@ pub struct AgentCard {
     /// The text read aloud for the card (`CardBody::spoken`), when the
     /// daemon gave one: a summary card's short form, and its spoken form.
     pub spoken: Option<String>,
+    /// A live Question card's answers, in order, from its pending question
+    /// (plan 20261027_06, step 4). Empty from an older daemon: the app
+    /// then offers its own.
+    pub answers: Vec<Answer>,
 }
 
 impl AgentCard {
@@ -647,6 +651,7 @@ fn card_of(body: &CardBody, at: usize) -> AgentCard {
         links: body.links.clone(),
         points: body.points.clone(),
         spoken: body.spoken.clone(),
+        answers: Vec::new(),
     }
 }
 
