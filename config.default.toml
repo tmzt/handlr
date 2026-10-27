@@ -75,6 +75,19 @@ allow_arbitrary_commands = false
 #
 # [llm.uses.spoken_summaries]
 # enabled = false
+#
+# Planning: the general agent's own turns, on its backend and model, may
+# read the current project's files and its agent instructions. Off unless
+# `enabled = true`, and only while general_agent is on. `read` lists the
+# files `list_files` and `read_file` may read, as `/`-separated patterns
+# against the project's root: `*` is any part of one name, `**` alone is
+# any number of folders, so "*.md" is the top folder only. Without `read`
+# the file tools are off. `agents_prompt` adds the project's AGENTS.md
+# (or CLAUDE.md, or GEMINI.md) to each turn.
+# [llm.uses.planning]
+# enabled = true
+# agents_prompt = true
+# read = ["*.md", "docs/**/*.md"]
 
 # Deprecated: [gemini] is read as [llm] enabled = true with
 # [llm.backends.gemini] (its `api_key_file` and `model`), unless [llm] is set.

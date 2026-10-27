@@ -263,7 +263,11 @@ impl SpeechService {
         ]
         .into_iter()
         .collect();
-        let mut user = prompt.fill(&prompt.user, &values).map_err(unavailable)?;
+        let user_text = prompt
+            .user
+            .as_deref()
+            .ok_or_else(|| unavailable(format!("the prompt `{SPOKEN_SUMMARY}` has no `user`")))?;
+        let mut user = prompt.fill(user_text, &values).map_err(unavailable)?;
         if points {
             let request = prompt
                 .settings
@@ -355,6 +359,11 @@ fn load_prompt(file: Option<&std::path::Path>) -> Result<(Prompt, String), Strin
         .get(SPOKEN_SUMMARY)
         .cloned()
         .ok_or_else(|| format!("the prompt `{SPOKEN_SUMMARY}` did not load"))?;
+    if prompt.user.is_none() {
+        let e = format!("the prompt `{SPOKEN_SUMMARY}` has no `user`");
+        log::warn!("ADDITIONAL_PROMPTS: {e}");
+        return Err(e);
+    }
     let system = prompt
         .fill(&prompt.system, &BTreeMap::new())
         .inspect_err(|e| log::warn!("ADDITIONAL_PROMPTS: {e}"))?;

@@ -89,6 +89,14 @@ pub struct LlmUseConfig {
     pub backend: Option<String>,
     /// The model, else the backend's `model`, else its kind's tier default.
     pub model: Option<String>,
+    /// `[llm.uses.planning]` only (plan 20261027_04, decision 5): the
+    /// current project's agent instructions are added to each turn.
+    /// Off when left out.
+    pub agents_prompt: Option<bool>,
+    /// `[llm.uses.planning]` only (decision 4, as amended at 11:20 and
+    /// 11:22 EDT): the patterns `list_files` and `read_file` may read.
+    /// None built in: left out or empty, the file tools are off.
+    pub read: Option<Vec<String>>,
 }
 
 /// `[summary]`: what the daemon summarises with Gemini (plan 20261023_05,

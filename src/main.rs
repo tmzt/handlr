@@ -249,6 +249,9 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
                     .map(PathBuf::from)
                     .unwrap_or_else(flankr::config::AppConfig::default_config_path),
             ),
+            // The `planning` prompt comes from the same file
+            // (plan 20261027_04, decision 6).
+            prompts_file: args.prompts.as_ref().map(expand_tilde),
             ..Default::default()
         },
         ..Default::default()

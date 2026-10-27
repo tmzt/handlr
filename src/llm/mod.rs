@@ -9,8 +9,10 @@
 //! for the general agent, Flash-Lite for summaries, never Pro by default).
 
 pub mod gemini;
+pub mod planning;
 pub mod service;
 
+pub use planning::{AgentProfile, PlanningConfig, PlanningPrompt, ReadPattern};
 pub use service::{
     ClientFactory, ClientSpec, GeminiFactory, LlmOptions, LlmService, Overrides, Profile,
 };
@@ -30,9 +32,15 @@ pub enum Use {
     CardSummaries,
     /// `speech.summarize` while reading aloud.
     SpokenSummaries,
+    /// The general agent's turns with the planning tools and prompt
+    /// (plan 20261027_04, decision 2): off unless `enabled = true`, on the
+    /// general agent's backend and model, never a client of its own.
+    Planning,
 }
 
 impl Use {
+    /// The uses with a backend and model of their own. [`Use::Planning`]
+    /// extends the general agent's and is resolved after it.
     pub const ALL: [Use; 3] = [Use::GeneralAgent, Use::CardSummaries, Use::SpokenSummaries];
 
     /// The use's name in `[llm.uses.<name>]`, also the name its prompt is
@@ -42,11 +50,15 @@ impl Use {
             Use::GeneralAgent => "general_agent",
             Use::CardSummaries => "card_summaries",
             Use::SpokenSummaries => "spoken_summaries",
+            Use::Planning => "planning",
         }
     }
 
     pub fn from_name(name: &str) -> Option<Use> {
-        Use::ALL.into_iter().find(|u| u.name() == name)
+        Use::ALL
+            .into_iter()
+            .chain([Use::Planning])
+            .find(|u| u.name() == name)
     }
 }
 
@@ -242,6 +254,9 @@ pub struct LlmSettings {
     pub notes: Vec<String>,
     /// Backend errors (decision 3), each once. Logged as warnings.
     pub problems: Vec<String>,
+    /// `[llm.uses.planning]`'s `agents_prompt` and valid `read` patterns,
+    /// used while [`Use::Planning`] is available.
+    pub planning: PlanningConfig,
 }
 
 impl LlmSettings {
@@ -390,7 +405,7 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
         if Use::from_name(name).is_none() {
             notes.push(format!(
                 "[llm.uses.{name}] is not a use flankr has (general_agent, card_summaries, \
-                 spoken_summaries); ignored"
+                 spoken_summaries, planning); ignored"
             ));
         }
     }
@@ -418,11 +433,21 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
             };
             uses.insert(u, state);
         }
+        let (state, planning) = resolve_planning(
+            &llm,
+            &UseState::off(
+                "LLM use is off: [llm] enabled = true is not set in the daemon's config.toml",
+            ),
+            &mut notes,
+            &mut problems,
+        );
+        uses.insert(Use::Planning, state);
         return LlmSettings {
             enabled: false,
             uses,
             notes,
             problems,
+            planning,
         };
     }
 
@@ -506,12 +531,62 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
         };
         uses.insert(u, state);
     }
+    let (state, planning) =
+        resolve_planning(&llm, &uses[&Use::GeneralAgent], &mut notes, &mut problems);
+    uses.insert(Use::Planning, state);
     LlmSettings {
         enabled: true,
         uses,
         notes,
         problems,
+        planning,
     }
+}
+
+/// `[llm.uses.planning]` (plan 20261027_04, decision 2): off unless
+/// `enabled = true`, then the general agent's target, or why not.
+fn resolve_planning(
+    llm: &LlmConfig,
+    general: &UseState,
+    notes: &mut Vec<String>,
+    problems: &mut Vec<String>,
+) -> (UseState, PlanningConfig) {
+    let Some(table) = llm.uses.get(Use::Planning.name()) else {
+        return (
+            UseState::Unavailable {
+                reason: "[llm.uses.planning] is off unless enabled = true".to_string(),
+                turned_off: true,
+            },
+            PlanningConfig::default(),
+        );
+    };
+    for (key, set) in [
+        ("backend", table.backend.is_some()),
+        ("model", table.model.is_some()),
+    ] {
+        if set {
+            notes.push(format!(
+                "[llm.uses.planning] {key} is ignored: planning runs on the general agent's \
+                 backend and model"
+            ));
+        }
+    }
+    let (planning, refused) = PlanningConfig::from_use(table);
+    problems.extend(refused);
+    let state = if table.enabled != Some(true) {
+        UseState::Unavailable {
+            reason: "[llm.uses.planning] is off unless enabled = true".to_string(),
+            turned_off: true,
+        }
+    } else {
+        match general {
+            UseState::Available(target) => UseState::Available(target.clone()),
+            UseState::Unavailable { reason, .. } => UseState::off(format!(
+                "planning needs general_agent, which is off: {reason}"
+            )),
+        }
+    };
+    (state, planning)
 }
 
 fn nonempty(s: Option<&str>) -> Option<&str> {
@@ -647,7 +722,7 @@ mod tests {
         for u in Use::ALL {
             assert!(!model(&s, u).contains("pro"), "{u:?}");
         }
-        assert_eq!(s.describe().len(), 3);
+        assert_eq!(s.describe().len(), 4, "planning too");
         assert!(s.describe()[0].contains(gemini::GENERAL_AGENT_MODEL));
     }
 
@@ -854,6 +929,82 @@ backend = "b"
         // An unknown use is noted.
         let s = resolve(&parse("[llm.uses.poetry]\nenabled = true\n"), &env);
         assert!(s.notes[0].contains("[llm.uses.poetry]"));
+    }
+
+    #[test]
+    fn planning_is_off_without_its_table_and_on_with_enabled() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let planning_off = |s: &LlmSettings| {
+            matches!(
+                s.state(Use::Planning),
+                UseState::Unavailable {
+                    turned_off: true,
+                    ..
+                }
+            )
+        };
+        // No table, or one without enabled = true: off, even with [llm] on.
+        for text in [
+            "[llm]\nenabled = true\n",
+            "[llm]\nenabled = true\n[llm.uses.planning]\nagents_prompt = true\n",
+            "[llm]\nenabled = true\n[llm.uses.planning]\nenabled = false\n",
+        ] {
+            let s = resolve(&parse(text), &env);
+            assert!(planning_off(&s), "{text:?}");
+            assert!(s.target(Use::GeneralAgent).is_some());
+        }
+        // On: the general agent's backend and model; backend and model
+        // keys noted as ignored.
+        let s = resolve(
+            &parse(
+                r#"
+[llm]
+enabled = true
+[llm.uses.general_agent]
+model = "gemini-3.8-pro"
+[llm.uses.planning]
+enabled = true
+model = "other"
+agents_prompt = true
+read = ["*.md", "docs/**/*.md", "a?"]
+"#,
+            ),
+            &env,
+        );
+        assert_eq!(s.target(Use::Planning), s.target(Use::GeneralAgent));
+        assert_eq!(model(&s, Use::Planning), "gemini-3.8-pro");
+        assert!(
+            s.notes
+                .iter()
+                .any(|n| n.contains("planning] model is ignored"))
+        );
+        assert!(s.planning.agents_prompt);
+        assert_eq!(s.planning.read.len(), 2);
+        assert_eq!(s.problems.len(), 1, "the refused pattern: {:?}", s.problems);
+        assert!(
+            s.describe()
+                .iter()
+                .any(|l| l.starts_with("[llm] planning: backend"))
+        );
+        // The availability the phone is told is the three uses'.
+        assert_eq!(s.availability(), (true, true, None));
+
+        // Off while general_agent is off, with that reason.
+        let s = resolve(
+            &parse(
+                "[llm]\nenabled = true\n[llm.uses.general_agent]\nenabled = false\n\
+                 [llm.uses.planning]\nenabled = true\n",
+            ),
+            &env,
+        );
+        let reason = s.state(Use::Planning).reason().unwrap();
+        assert!(reason.contains("needs general_agent"), "{reason}");
+        // And while the master switch is off.
+        let s = resolve(&parse("[llm.uses.planning]\nenabled = true\n"), &env);
+        assert!(s.target(Use::Planning).is_none());
+        assert!(!planning_off(&s));
+        assert!(Use::from_name("planning") == Some(Use::Planning));
     }
 
     #[test]

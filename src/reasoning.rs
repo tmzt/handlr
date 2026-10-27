@@ -215,9 +215,62 @@ impl WatchPaneParams {
 /// `run_command` and `send_command`.
 pub const SEND_AGENT_COMMAND: &str = "send_agent_command";
 
-/// Construct the full list of Gemini tool declarations for `herdr` orchestration.
+/// `list_files`: the current project's readable files (plan 20261027_04,
+/// decision 4).
+pub const LIST_FILES: &str = "list_files";
+/// `read_file`: one of the current project's readable files.
+pub const READ_FILE: &str = "read_file";
+
+/// Parameters for the `list_files` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ListFilesParams {
+    /// Optional pattern to narrow the list, relative to the project's root:
+    /// '*' is any part of one name, '**' alone is any number of folders
+    /// (e.g. "docs/**/*.md"). Left out, every readable file is listed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glob: Option<String>,
+}
+
+/// Parameters for the `read_file` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct ReadFileParams {
+    /// The file's path relative to the project's root, as `list_files`
+    /// gives it (e.g. "docs/design/plan.md").
+    pub path: String,
+}
+
+/// Which of the general agent's optional tools are declared: the file
+/// tools only while `planning` is on with `read` patterns (plan
+/// 20261027_04, decision 7, as amended).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct ToolSet {
+    pub file_tools: bool,
+}
+
+/// The general agent's tools without the optional ones.
 pub fn declare_gemini_tools() -> Vec<Tool> {
-    vec![Tool::with_functions(vec![
+    declare_gemini_tools_for(ToolSet::default())
+}
+
+/// The declared functions' names, in order.
+pub fn tool_names(tools: &[Tool]) -> Vec<String> {
+    tools
+        .iter()
+        .flat_map(|t| match t {
+            Tool::Function {
+                function_declarations,
+            } => function_declarations
+                .iter()
+                .map(|f| f.name.clone())
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// Construct the list of Gemini tool declarations for `herdr` orchestration.
+pub fn declare_gemini_tools_for(set: ToolSet) -> Vec<Tool> {
+    let mut functions = vec![
         FunctionDeclaration::new(
             "focus",
             "Shifts the user's active visual focus to a specific pane or workspace (project).",
@@ -242,7 +295,26 @@ pub fn declare_gemini_tools() -> Vec<Tool> {
             None,
         )
         .with_parameters::<WatchPaneParams>(),
-    ])]
+    ];
+    if set.file_tools {
+        functions.push(
+            FunctionDeclaration::new(
+                LIST_FILES,
+                "Lists the current project's files that may be read, paths relative to its root, sorted.",
+                None,
+            )
+            .with_parameters::<ListFilesParams>(),
+        );
+        functions.push(
+            FunctionDeclaration::new(
+                READ_FILE,
+                "Reads one of the current project's files, by its path relative to the project's root.",
+                None,
+            )
+            .with_parameters::<ReadFileParams>(),
+        );
+    }
+    vec![Tool::with_functions(functions)]
 }
 
 // -------------------------------------------------------------------
@@ -353,6 +425,18 @@ mod tests {
         assert_eq!(
             names,
             vec!["focus", "send_agent_command", "watch_pane", "unwatch_pane"]
+        );
+        let with_files = declare_gemini_tools_for(ToolSet { file_tools: true });
+        assert_eq!(
+            tool_names(&with_files),
+            [
+                "focus",
+                "send_agent_command",
+                "watch_pane",
+                "unwatch_pane",
+                "list_files",
+                "read_file"
+            ]
         );
     }
 

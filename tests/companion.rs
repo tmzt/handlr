@@ -2028,6 +2028,7 @@ async fn start_llm(text: &str, key: bool) -> LlmEnv {
             key_env: Some(KeyEnv::in_dir(folder.path())),
             factory: Some(factory.clone()),
             interval: Some(Duration::from_millis(100)),
+            prompts_file: None,
         },
         ..TurnOptions::default()
     };

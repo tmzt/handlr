@@ -4,7 +4,9 @@
 //!
 //! Each prompt is a `# [Prompt] <name>` object. Its members are its
 //! settings; `system` and `user` are literal blocks whose
-//! `{{ [sigil] name }}` slots are filled by [`Prompt::fill`]. libtypedmd
+//! `{{ [sigil] name }}` slots are filled by [`Prompt::fill`]. Every prompt
+//! has a `system`; `user` is required by the uses that send one (the
+//! `planning` prompt has none: its other blocks are settings). libtypedmd
 //! takes a literal block verbatim, slots included, so the slots are found
 //! here.
 
@@ -21,6 +23,9 @@ pub const PROMPT_TAG: &str = "Prompt";
 /// The spoken summary of a complex reply (plan 20261023_05, decision 8).
 pub const SPOKEN_SUMMARY: &str = "spoken_summary";
 
+/// The general agent's planning blocks (plan 20261027_04, decision 6).
+pub const PLANNING: &str = "planning";
+
 /// One prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Prompt {
@@ -30,8 +35,9 @@ pub struct Prompt {
     pub settings: BTreeMap<String, String>,
     /// The system text, with its slots unfilled.
     pub system: String,
-    /// The user message, with its slots unfilled.
-    pub user: String,
+    /// The user message, with its slots unfilled; `None` for a prompt
+    /// that sends none.
+    pub user: Option<String>,
 }
 
 /// The prompts of one file, by name.
@@ -125,7 +131,7 @@ fn prompt(name: &str, children: &[Node]) -> Result<Prompt, String> {
         name: name.to_string(),
         settings,
         system: system.ok_or("it has no `system`")?,
-        user: user.ok_or("it has no `user`")?,
+        user,
     })
 }
 
@@ -181,14 +187,19 @@ mod tests {
     fn the_shipped_file_parses() {
         let (prompts, errors) = Prompts::shipped();
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts.len(), 2);
         let p = prompts.get(SPOKEN_SUMMARY).expect("spoken_summary");
         assert_eq!(p.settings.get("max_words").map(String::as_str), Some("60"));
         assert_eq!(p.number("max_words"), Some(60.0));
         assert_eq!(p.number("temperature"), Some(0.2));
         assert!(p.system.starts_with("You turn a coding agent's reply"));
         assert!(p.system.contains("{{ [#] max_words }}"));
-        assert!(p.user.ends_with("{{ [abc] reply }}"));
+        assert!(p.user.as_deref().unwrap().ends_with("{{ [abc] reply }}"));
+        let planning = prompts.get(PLANNING).expect("planning");
+        assert!(planning.user.is_none());
+        assert_eq!(planning.number("max_instructions_kb"), Some(32.0));
+        assert!(planning.settings["files"].contains("{{ [abc] read }}"));
+        assert!(planning.settings["instructions"].contains("{{ [abc] instructions }}"));
     }
 
     #[test]
@@ -203,7 +214,7 @@ mod tests {
             ("project", "flankr"),
             ("reply", "Done: `src/prompts.rs` added."),
         ]);
-        let user = p.fill(&p.user, &v).unwrap();
+        let user = p.fill(p.user.as_deref().unwrap(), &v).unwrap();
         assert_eq!(
             user,
             "The claude agent in flankr replied:\n\nDone: `src/prompts.rs` added."
@@ -219,13 +230,14 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_missing_user_is_reported_and_the_rest_load() {
-        let text = "# [Prompt] broken\n\n- system: |\n    hi\n\n# [Prompt] fine\n\n- system: |\n    a\n- user: |\n    b\n";
+    fn a_prompt_missing_system_is_reported_and_the_rest_load() {
+        let text = "# [Prompt] broken\n\n- user: |\n    hi\n\n# [Prompt] fine\n\n- system: |\n    a\n- user: |\n    b\n\n# [Prompt] no_user\n\n- system: |\n    c\n";
         let (prompts, errors) = Prompts::parse(text);
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("broken") && errors[0].contains("user"));
+        assert!(errors[0].contains("broken") && errors[0].contains("system"));
         assert!(prompts.get("broken").is_none());
-        assert_eq!(prompts.get("fine").unwrap().user, "b");
+        assert_eq!(prompts.get("fine").unwrap().user.as_deref(), Some("b"));
+        assert_eq!(prompts.get("no_user").unwrap().user, None);
     }
 
     #[test]
@@ -233,7 +245,7 @@ mod tests {
         let (prompts, _) = Prompts::shipped();
         let p = prompts.get(SPOKEN_SUMMARY).unwrap();
         let err = p
-            .fill(&p.user, &values(&[("agent", "claude")]))
+            .fill(p.user.as_deref().unwrap(), &values(&[("agent", "claude")]))
             .unwrap_err();
         assert!(err.contains("unknown slot `project`"), "{err}");
         assert!(p.fill("{{ [abc] reply", &BTreeMap::new()).is_err());

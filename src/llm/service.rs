@@ -15,6 +15,10 @@
 //!   client. A section that no longer parses keeps the last good settings.
 //! - **The phone:** [`LlmService::subscribe`] gives the [`LlmInfo`] as it
 //!   changes, for `server.capabilities`.
+//! - **Planning** (plan 20261027_04, decision 2): while `[llm.uses.planning]`
+//!   is available, the general agent's client is built with the planning
+//!   prompt's blocks after `PROMPT.md` and its tools; the [`AgentProfile`]
+//!   is part of the client's key, so a change builds the next one anew.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,11 +28,11 @@ use std::time::{Duration, SystemTime};
 use libflankr_proto::companion::LlmInfo;
 use tokio::sync::watch;
 
+use super::planning::{AgentProfile, PlanningConfig, PlanningPrompt};
 use super::{KeyEnv, Kind, LlmSettings, LlmSources, Target, Use, UseState, resolve_sources};
 use crate::config::AppConfig;
 use crate::reasoning::{
-    GeminiReasoningEngine, ReasoningEngine, declare_gemini_tools, default_system_prompt,
-    with_flankr_routes,
+    GeminiReasoningEngine, ReasoningEngine, declare_gemini_tools_for, with_flankr_routes,
 };
 
 /// How often the config file and the keys are checked (decision 6).
@@ -55,6 +59,9 @@ pub struct ClientSpec<'a> {
     pub target: &'a Target,
     /// A summary's system text.
     pub system: Option<&'a str>,
+    /// The general agent's system prompt and tools; `None` is
+    /// [`AgentProfile::base`].
+    pub agent: Option<&'a AgentProfile>,
 }
 
 /// Builds clients; [`GeminiFactory`] by default, a mock in tests.
@@ -74,9 +81,17 @@ impl ClientFactory for GeminiFactory {
                     .model(spec.target.model.clone());
                 match spec.profile {
                     Profile::Agent => {
-                        let mut builder = builder.tools(declare_gemini_tools());
-                        if let Some(prompt) = default_system_prompt() {
-                            builder = builder.system_prompt(prompt);
+                        let base;
+                        let agent = match spec.agent {
+                            Some(agent) => agent,
+                            None => {
+                                base = AgentProfile::base();
+                                &base
+                            }
+                        };
+                        let mut builder = builder.tools(declare_gemini_tools_for(agent.tools));
+                        if !agent.system_prompt.is_empty() {
+                            builder = builder.system_prompt(agent.system_prompt.clone());
                         }
                         let gemini = builder.build()?;
                         Ok(with_flankr_routes(Arc::new(gemini)))
@@ -107,6 +122,9 @@ pub struct LlmOptions {
     pub factory: Option<Arc<dyn ClientFactory>>,
     /// Instead of [`RELOAD_INTERVAL`].
     pub interval: Option<Duration>,
+    /// `--prompts <path>`: the `planning` prompt from this file in place
+    /// of the shipped `ADDITIONAL_PROMPTS.md`.
+    pub prompts_file: Option<PathBuf>,
 }
 
 /// Engines that stand in for a use's client whatever `[llm]` says, but
@@ -121,7 +139,7 @@ pub struct Overrides {
 impl Overrides {
     fn for_use(&self, use_: Use) -> Option<&Arc<dyn ReasoningEngine>> {
         match use_ {
-            Use::GeneralAgent => self.agent.as_ref(),
+            Use::GeneralAgent | Use::Planning => self.agent.as_ref(),
             Use::CardSummaries | Use::SpokenSummaries => self.summary.as_ref(),
         }
     }
@@ -136,7 +154,7 @@ struct Watched {
     settings: LlmSettings,
 }
 
-type ClientKey = (Target, Profile);
+type ClientKey = (Target, Profile, Option<AgentProfile>);
 
 /// `[llm]` while the daemon runs.
 pub struct LlmService {
@@ -145,6 +163,8 @@ pub struct LlmService {
     factory: Arc<dyn ClientFactory>,
     interval: Duration,
     overrides: Overrides,
+    /// The `planning` prompt, loaded once at start.
+    planning_prompt: Result<PlanningPrompt, String>,
     watched: Mutex<Watched>,
     clients: Mutex<HashMap<ClientKey, Arc<dyn ReasoningEngine>>>,
     info: watch::Sender<LlmInfo>,
@@ -154,8 +174,10 @@ impl LlmService {
     /// The service for `config`, as loaded at start.
     pub fn new(config: &AppConfig, options: LlmOptions, overrides: Overrides) -> Arc<Self> {
         let env = options.key_env.unwrap_or_else(KeyEnv::from_process);
+        let planning_prompt = PlanningPrompt::load(options.prompts_file.as_deref());
         let sources = LlmSources::of(config);
-        let settings = resolve_sources(&sources, &env);
+        let mut settings = resolve_sources(&sources, &env);
+        apply_prompt(&mut settings, &planning_prompt);
         log_settings(None, &settings);
         let (stamp, rest) = match &options.config_path {
             Some(path) => (
@@ -174,6 +196,7 @@ impl LlmService {
             factory: options.factory.unwrap_or_else(|| Arc::new(GeminiFactory)),
             interval: options.interval.unwrap_or(RELOAD_INTERVAL),
             overrides,
+            planning_prompt,
             watched: Mutex::new(Watched {
                 sources,
                 rest,
@@ -226,7 +249,8 @@ impl LlmService {
             .target(use_)
             .cloned()
             .ok_or_else(|| "unavailable".to_string())?;
-        let key = (target, profile);
+        let agent = (profile == Profile::Agent).then(|| self.agent_profile());
+        let key = (target, profile, agent);
         if let Some(engine) = self.clients.lock().unwrap().get(&key) {
             return Ok(Arc::clone(engine));
         }
@@ -235,6 +259,7 @@ impl LlmService {
             profile,
             target: &key.0,
             system,
+            agent: key.2.as_ref(),
         })?;
         log::info!(
             "[llm] {}: a client on backend {}, model {}",
@@ -244,6 +269,27 @@ impl LlmService {
         );
         let mut clients = self.clients.lock().unwrap();
         Ok(Arc::clone(clients.entry(key).or_insert(engine)))
+    }
+
+    /// `[llm.uses.planning]` and its prompt while planning is available.
+    pub fn planning(&self) -> Option<(PlanningConfig, PlanningPrompt)> {
+        self.available(Use::Planning).ok()?;
+        let prompt = self.planning_prompt.as_ref().ok()?.clone();
+        Some((
+            self.watched.lock().unwrap().settings.planning.clone(),
+            prompt,
+        ))
+    }
+
+    /// What the general agent's next client is built with: with planning
+    /// available, `PROMPT.md` and the planning blocks, and its tools.
+    pub fn agent_profile(&self) -> AgentProfile {
+        match self.planning() {
+            Some((config, prompt)) => AgentProfile::planning(&prompt, &config)
+                .inspect_err(|e| log::warn!("[llm] planning: {e}"))
+                .unwrap_or_else(|_| AgentProfile::base()),
+            None => AgentProfile::base(),
+        }
     }
 
     /// How many clients are kept.
@@ -273,7 +319,8 @@ impl LlmService {
                 self.reread(&mut watched, path);
             }
         }
-        let settings = resolve_sources(&watched.sources, &self.env);
+        let mut settings = resolve_sources(&watched.sources, &self.env);
+        apply_prompt(&mut settings, &self.planning_prompt);
         if settings == watched.settings {
             return false;
         }
@@ -285,11 +332,15 @@ impl LlmService {
             .collect();
         let info = info_of(&watched.settings, &self.overrides);
         drop(watched);
-        // Clients no longer used are dropped; a call running on one keeps it.
+        // Clients no longer used are dropped, and the general agent's built
+        // for other planning; a call running on one keeps it.
+        let agent = self.agent_profile();
         self.clients
             .lock()
             .unwrap()
-            .retain(|(target, _), _| in_use.contains(target));
+            .retain(|(target, _, profile), _| {
+                in_use.contains(target) && profile.as_ref().is_none_or(|p| *p == agent)
+            });
         self.info.send_if_modified(|old| {
             let changed = *old != info;
             *old = info;
@@ -395,6 +446,32 @@ fn stamp(path: &std::path::Path) -> Option<(SystemTime, u64)> {
     Some((meta.modified().ok()?, meta.len()))
 }
 
+/// A missing or broken `planning` prompt (decision 6): a warning, and
+/// planning off with that reason while it is otherwise available.
+fn apply_prompt(settings: &mut LlmSettings, prompt: &Result<PlanningPrompt, String>) {
+    let Err(e) = prompt else {
+        return;
+    };
+    let state = settings
+        .uses
+        .get_mut(&Use::Planning)
+        .expect("always resolved");
+    if matches!(
+        state,
+        UseState::Unavailable {
+            turned_off: true,
+            ..
+        }
+    ) {
+        return;
+    }
+    settings.problems.push(format!("ADDITIONAL_PROMPTS: {e}"));
+    *state = UseState::Unavailable {
+        reason: format!("planning is off: {e}"),
+        turned_off: false,
+    };
+}
+
 /// What the phone is told for `settings`, the overrides counted as
 /// available.
 fn info_of(settings: &LlmSettings, overrides: &Overrides) -> LlmInfo {
@@ -454,6 +531,8 @@ mod tests {
     #[derive(Default)]
     pub struct Recording {
         pub built: Mutex<Vec<(Use, Profile, String, String)>>,
+        /// The general agent's builds: their profiles.
+        pub agents: Mutex<Vec<AgentProfile>>,
     }
 
     impl ClientFactory for Recording {
@@ -464,6 +543,9 @@ mod tests {
                 spec.target.backend.clone(),
                 spec.target.model.clone(),
             ));
+            if let Some(agent) = spec.agent {
+                self.agents.lock().unwrap().push(agent.clone());
+            }
             Ok(Arc::new(MockReasoningEngine::with_response(format!(
                 "{}/{}",
                 spec.target.backend, spec.target.model
@@ -501,6 +583,7 @@ mod tests {
                 key_env: Some(KeyEnv::in_dir(dir.path())),
                 factory: Some(factory.clone()),
                 interval: None,
+                prompts_file: None,
             },
             Overrides::default(),
         );
@@ -653,6 +736,114 @@ backend = "cheap"
         assert!(s.service.check());
         assert!(!s.service.info().summaries);
         assert_eq!(s.service.client_count(), 0);
+    }
+
+    const PLANNING: &str = r#"
+[llm]
+enabled = true
+[llm.uses.planning]
+enabled = true
+"#;
+
+    fn tools_of(profile: &AgentProfile) -> Vec<String> {
+        crate::reasoning::tool_names(&declare_gemini_tools_for(profile.tools))
+    }
+
+    #[test]
+    fn planning_changes_the_general_agents_prompt_and_tools() {
+        // Off: PROMPT.md and the base tools.
+        let s = setup("[llm]\nenabled = true\n", true);
+        assert_eq!(s.service.agent_profile(), AgentProfile::base());
+        assert!(s.service.planning().is_none());
+
+        // On without read: the planning block, no file tools.
+        let s = setup(PLANNING, true);
+        let profile = s.service.agent_profile();
+        assert!(
+            profile
+                .system_prompt
+                .contains("reasoning engine for `flankr`")
+        );
+        assert!(
+            profile
+                .system_prompt
+                .contains("plan work for the coding agents")
+        );
+        assert!(!profile.system_prompt.contains("list_files"));
+        assert!(!tools_of(&profile).contains(&"list_files".to_string()));
+        // An empty read is the same.
+        let s = setup(&format!("{PLANNING}read = []\n"), true);
+        assert!(!s.service.agent_profile().tools.file_tools);
+
+        // With read: both file tools, and the files block naming the patterns.
+        let s = setup(
+            &format!("{PLANNING}read = [\"*.md\", \"docs/**/*.md\"]\n"),
+            true,
+        );
+        let profile = s.service.agent_profile();
+        let tools = tools_of(&profile);
+        assert!(tools.ends_with(&["list_files".to_string(), "read_file".to_string()]));
+        assert!(profile.system_prompt.contains("\"*.md\", \"docs/**/*.md\""));
+        s.service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        assert_eq!(*s.factory.agents.lock().unwrap(), [profile]);
+    }
+
+    #[test]
+    fn a_reload_changes_the_tools_of_the_next_client() {
+        let s = setup(PLANNING, true);
+        let first = s
+            .service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        rewrite(&s, &format!("{PLANNING}read = [\"docs/**/*.md\"]\n"));
+        assert!(s.service.check());
+        assert_eq!(s.service.client_count(), 0, "the old client is dropped");
+        let next = s
+            .service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &next));
+        let agents = s.factory.agents.lock().unwrap().clone();
+        assert_eq!(agents.len(), 2);
+        assert!(!agents[0].tools.file_tools && agents[1].tools.file_tools);
+        // Planning turned off again: the base profile.
+        rewrite(&s, "[llm]\nenabled = true\n");
+        assert!(s.service.check());
+        s.service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        assert_eq!(
+            s.factory.agents.lock().unwrap().last().unwrap(),
+            &AgentProfile::base()
+        );
+    }
+
+    #[test]
+    fn a_missing_planning_prompt_turns_planning_off_with_the_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        write_key(&dir.path().join(super::super::gemini::KEY_FILE), "k");
+        let prompts = dir.path().join("prompts.md");
+        std::fs::write(&prompts, "# [Prompt] other\n\n- system: |\n    x\n").unwrap();
+        let config: AppConfig = toml::from_str(PLANNING).unwrap();
+        let service = LlmService::new(
+            &config,
+            LlmOptions {
+                key_env: Some(KeyEnv::in_dir(dir.path())),
+                factory: Some(Arc::new(Recording::default())),
+                prompts_file: Some(prompts),
+                ..LlmOptions::default()
+            },
+            Overrides::default(),
+        );
+        let settings = service.settings();
+        let reason = settings.state(Use::Planning).reason().unwrap();
+        assert!(reason.contains("`planning` did not load"), "{reason}");
+        assert!(settings.problems.iter().any(|p| p.contains("did not load")));
+        // The general agent runs as without it.
+        assert!(service.available(Use::GeneralAgent).is_ok());
+        assert_eq!(service.agent_profile(), AgentProfile::base());
     }
 
     #[test]

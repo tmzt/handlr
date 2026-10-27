@@ -17,7 +17,7 @@ pub const KEY_ENV: &str = "GEMINI_API_KEY";
 /// The tier default for `use_`.
 pub fn tier_model(use_: Use) -> &'static str {
     match use_ {
-        Use::GeneralAgent => GENERAL_AGENT_MODEL,
+        Use::GeneralAgent | Use::Planning => GENERAL_AGENT_MODEL,
         Use::CardSummaries | Use::SpokenSummaries => SUMMARY_MODEL,
     }
 }
