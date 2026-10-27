@@ -216,3 +216,9 @@ common_suggestions or idle_suggestions added later".
    it into the file. This answers open question 3.
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-27 14:15 EDT: approved
+
+The owner (2026-10-27): "approve and implement 06". The plan is approved
+with its 14:13 EDT amendment. The status becomes `In implementation` with
+step 1's commit.
