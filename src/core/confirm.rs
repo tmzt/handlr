@@ -802,6 +802,10 @@ pub struct Found {
 
 struct Entry {
     view: ConfirmView,
+    /// What is typed on approval in place of `view.command`: the general
+    /// agent's request with its provenance prefix (plan 20261027_05,
+    /// decision 5).
+    typed: Option<String>,
     /// The words the daemon appended to the handle to set it apart, which
     /// are worth more than their class says.
     distinguisher: Option<String>,
@@ -900,6 +904,7 @@ impl Broker {
             pane_id,
             agent,
             command,
+            None,
             handle_info,
             lifetime,
             false,
@@ -918,7 +923,42 @@ impl Broker {
         handle_info: Option<&HandleInfo>,
         lifetime: Lifetime,
     ) -> Result<u64, ConfirmError> {
-        self.open(requester, pane_id, agent, text, handle_info, lifetime, true)
+        self.open(
+            requester,
+            pane_id,
+            agent,
+            text,
+            None,
+            handle_info,
+            lifetime,
+            true,
+        )
+    }
+
+    /// [`request_message`](Self::request_message) whose approval types
+    /// `typed` rather than `text`; the card and its question show `text`
+    /// (plan 20261027_05, decision 5: the general agent's `via flankr: `).
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_message_typed(
+        &self,
+        requester: &Principal,
+        pane_id: &str,
+        agent: &str,
+        text: &str,
+        typed: &str,
+        handle_info: Option<&HandleInfo>,
+        lifetime: Lifetime,
+    ) -> Result<u64, ConfirmError> {
+        self.open(
+            requester,
+            pane_id,
+            agent,
+            text,
+            Some(typed),
+            handle_info,
+            lifetime,
+            true,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -928,6 +968,7 @@ impl Broker {
         pane_id: &str,
         agent: &str,
         command: &str,
+        typed: Option<&str>,
         handle_info: Option<&HandleInfo>,
         lifetime: Lifetime,
         message: bool,
@@ -965,6 +1006,7 @@ impl Broker {
                 view.confirm_id,
                 Entry {
                     view: view.clone(),
+                    typed: typed.map(str::to_string),
                     distinguisher: handle_info.and_then(|h| h.distinguisher.clone()),
                     token: token.clone(),
                     lifetime,
@@ -1041,7 +1083,7 @@ impl Broker {
         approve: bool,
         nonce: Option<&str>,
     ) -> Result<Outcome, ConfirmError> {
-        let view = {
+        let (view, typed) = {
             let mut state = self.state.lock().unwrap();
             let entry = state
                 .entries
@@ -1083,7 +1125,7 @@ impl Broker {
             if approve {
                 entry.outcome = Outcome::Approved;
             }
-            entry.view.clone()
+            (entry.view.clone(), entry.typed.clone())
         };
 
         if !approve {
@@ -1097,7 +1139,8 @@ impl Broker {
             view.command,
             view.pane_id
         );
-        let (outcome, detail) = match self.sink.send(&view.pane_id, &view.command).await {
+        let text = typed.as_deref().unwrap_or(&view.command);
+        let (outcome, detail) = match self.sink.send(&view.pane_id, text).await {
             Ok(()) => (Outcome::Sent, None),
             Err(e) => {
                 log::warn!("Confirmation {confirm_id}: sending failed: {e}");

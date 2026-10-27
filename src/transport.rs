@@ -58,6 +58,12 @@ pub struct VoiceTurn {
     pub utterance: Option<String>,
 }
 
+/// What the general agent's requests in words are typed with, so the
+/// coding agent can tell they came through flankr (plan 20261027_05,
+/// decision 5, as amended at 12:33 EDT). Not on the approval card, not on
+/// allowed commands, not on messages typed in the app.
+pub const PROVENANCE_PREFIX: &str = "via flankr: ";
+
 /// The conversation's current agent, a pane id (plan 20261027_04,
 /// decision 3 and the 11:25 EDT amendment): the session open on the
 /// phone, or the agent `focus_project` last picked. Shared by a
@@ -595,12 +601,15 @@ impl HerdrToolExecutor {
                 let pending = turn.broker.pending_handle_infos(&self.principal.id);
                 let settled =
                     confirm::settle_handle(&request, &pending, &priors, confirm::random_word);
+                // A request is typed with its provenance; the card shows
+                // it without (plan 20261027_05, decision 5).
                 let opened = if message {
-                    turn.broker.request_message(
+                    turn.broker.request_message_typed(
                         &self.principal,
                         &pane_id,
                         &agent_name,
                         &final_cmd,
+                        &format!("{PROVENANCE_PREFIX}{final_cmd}"),
                         Some(&settled),
                         Lifetime::VoiceTurn,
                     )
@@ -640,8 +649,13 @@ impl HerdrToolExecutor {
         }
 
         // What reaches herdr is unchanged: its `run_command`, the text and
-        // Enter.
-        let final_args = serde_json::json!({ "pane_id": pane_id, "command": final_cmd });
+        // Enter; a request (always confirmed today) with its provenance.
+        let typed = if message {
+            format!("{PROVENANCE_PREFIX}{final_cmd}")
+        } else {
+            final_cmd.clone()
+        };
+        let final_args = serde_json::json!({ "pane_id": pane_id, "command": typed });
         let result = self
             .client
             .execute_tool_call("run_command", &final_args)
@@ -1606,6 +1620,79 @@ mod tests {
         )
         .await;
         assert!(res.unwrap_err().contains("confirmation unavailable"));
+    }
+
+    /// Plan 20261027_05, step 6: the general agent's request is typed with
+    /// `via flankr: `, which the approval card does not show; allowed
+    /// commands and the app's typed messages are typed as they are.
+    #[tokio::test]
+    async fn test_the_provenance_prefix_is_typed_for_the_general_agents_requests_only() {
+        use crate::core::confirm::{DEFAULT_TTL, Outcome, StatusKey};
+        let client = HerdrClient::mock();
+        let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+        let me = Principal::local("flankr");
+        let executor = voice_executor(
+            &client,
+            &broker,
+            &log,
+            vec![AgentConfig::new(
+                "claude",
+                vec!["continue".to_string()],
+                false,
+            )],
+        );
+
+        // A request: the card shows the text alone; approved, it is typed
+        // with the prefix.
+        let text = "please add the tests for docs/design and run them";
+        let res = executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": text, "handle": "ask-claude" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "awaiting_user_approval");
+        assert_eq!(res["command"], text);
+        let (view, _) = broker
+            .status(&me, &StatusKey::Handle("ask-claude".to_string()))
+            .unwrap();
+        assert_eq!(view.command, text, "the card");
+        assert!(view.message);
+        let outcome = broker
+            .reply(&me, view.confirm_id, true, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, Outcome::Sent);
+        assert_eq!(
+            command_log(&client).await,
+            [("p1".to_string(), format!("via flankr: {text}"))]
+        );
+
+        // An allowed command: as it is.
+        executor
+            .execute_tool(
+                "send_agent_command",
+                &json!({ "agent": "p1", "text": "continue", "handle": "go" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(command_log(&client).await[1].1, "continue");
+
+        // A message typed in the app: as it is.
+        let id = broker
+            .request_message(
+                &me,
+                "p1",
+                "claude",
+                "typed in the app",
+                None,
+                crate::core::confirm::Lifetime::VoiceTurn,
+            )
+            .unwrap();
+        broker.reply(&me, id, true, None).await.unwrap();
+        assert_eq!(command_log(&client).await[2].1, "typed in the app");
     }
 
     #[tokio::test]
