@@ -90,7 +90,8 @@ allow_arbitrary_commands = false
 # read = ["*.md", "docs/**/*.md"]
 
 # Deprecated: [gemini] is read as [llm] enabled = true with
-# [llm.backends.gemini] (its `api_key_file` and `model`), unless [llm] is set.
+# [llm.backends.gemini] (its `api_key_file` and `model`), until [llm] enabled is
+# set; [llm.uses.*] or [llm.backends.*] tables alone do not count.
 # [gemini]
 # api_key_file = ".private/gemini_api_key"
 # model = "gemini-3.8-flash"

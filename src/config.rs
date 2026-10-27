@@ -22,7 +22,8 @@ pub struct AppConfig {
     pub allow_arbitrary_commands: Option<bool>,
     /// Deprecated `[gemini]`: read as `[llm]`'s discovered `gemini`
     /// backend, and turning `[llm] enabled` on (plan 20261027_02,
-    /// decision 5). `None` when the section is not there.
+    /// decision 5), until `[llm] enabled` is set (plan 20261027_05,
+    /// decision 6). `None` when the section is not there.
     #[serde(default)]
     pub gemini: Option<GeminiConfig>,
     #[serde(default)]
@@ -35,7 +36,8 @@ pub struct AppConfig {
     pub urls: UrlsConfig,
     /// Deprecated `[summary]`: `cards = false` is read as
     /// `[llm.uses.card_summaries] enabled = false` (plan 20261027_02,
-    /// decision 5). `None` when the section is not there.
+    /// decision 5), until `[llm] enabled` is set (plan 20261027_05,
+    /// decision 6). `None` when the section is not there.
     #[serde(default)]
     pub summary: Option<SummaryConfig>,
     /// `[llm]`: every LLM flankr uses itself, outside the coding agents
@@ -52,8 +54,10 @@ pub struct AppConfig {
 pub struct LlmConfig {
     /// The master switch, off unless set (decision 1 and the 00:59 EDT
     /// amendment): off, no general agent turns, no card summaries and no
-    /// spoken summaries, from any backend.
-    pub enabled: bool,
+    /// spoken summaries, from any backend. `None` when the key is not
+    /// there: the deprecated `[gemini]` is then still read (plan
+    /// 20261027_05, decision 6).
+    pub enabled: Option<bool>,
     /// The backend a use takes when it names none. Left out, the only
     /// backend, or the one named `gemini`.
     pub default: Option<String>,
@@ -803,7 +807,7 @@ enabled = false
         )
         .unwrap();
         let llm = cfg.llm.unwrap();
-        assert!(llm.enabled);
+        assert_eq!(llm.enabled, Some(true));
         assert_eq!(llm.default.as_deref(), Some("fast"));
         let fast = &llm.backends["fast"];
         assert_eq!(fast.kind.as_deref(), Some("gemini"));
@@ -813,7 +817,7 @@ enabled = false
         assert_eq!(llm.uses["general_agent"].enabled, None);
         // The section alone is off.
         let cfg: AppConfig = toml::from_str("[llm]\n").unwrap();
-        assert!(!cfg.llm.unwrap().enabled);
+        assert_eq!(cfg.llm.unwrap().enabled, None);
     }
 
     #[test]
@@ -914,7 +918,7 @@ allow_messages = false
             .map(|l| format!("{l}\n"))
             .collect();
         let llm = toml::from_str::<AppConfig>(&example).unwrap().llm.unwrap();
-        assert!(llm.enabled);
+        assert_eq!(llm.enabled, Some(true));
         assert_eq!(llm.backends["gemini"].kind.as_deref(), Some("gemini"));
         assert_eq!(llm.uses["spoken_summaries"].enabled, Some(false));
     }

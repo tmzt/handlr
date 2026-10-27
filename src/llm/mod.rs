@@ -348,9 +348,11 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
     let mut problems = Vec::new();
 
     // Decision 5: the old sections, read as the new ones, unless `[llm]`
-    // is there.
+    // is set. Plan 20261027_05, decision 6: `[llm]` counts as set only
+    // with its `enabled` key; `[llm.uses.*]` or `[llm.backends.*]` alone
+    // leave the old sections read, merged under them.
     let llm = match &sources.llm {
-        Some(llm) => {
+        Some(llm) if llm.enabled.is_some() => {
             if sources.gemini.is_some() {
                 notes.push(
                     "[gemini] is deprecated and ignored: [llm] is also set, and wins \
@@ -367,23 +369,29 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
             }
             llm.clone()
         }
-        None => {
-            let mut llm = LlmConfig::default();
+        _ => {
+            let mut llm = sources.llm.clone().unwrap_or_default();
+            if sources.llm.is_some() {
+                notes.push(
+                    "[llm] has no enabled key, so it does not count as set: the old \
+                     [gemini] and [summary] sections are still read (set [llm] enabled)"
+                        .to_string(),
+                );
+            }
             if let Some(g) = &sources.gemini {
                 notes.push(
                     "[gemini] is deprecated: it is read as [llm] enabled = true with \
                      [llm.backends.gemini]"
                         .to_string(),
                 );
-                llm.enabled = true;
-                llm.backends.insert(
-                    "gemini".to_string(),
-                    LlmBackendConfig {
+                llm.enabled = Some(true);
+                llm.backends
+                    .entry("gemini".to_string())
+                    .or_insert_with(|| LlmBackendConfig {
                         kind: Some("gemini".to_string()),
                         api_key_file: g.api_key_file.clone(),
                         model: g.model.clone(),
-                    },
-                );
+                    });
             }
             if let Some(s) = &sources.summary {
                 notes.push(
@@ -392,10 +400,11 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
                         .to_string(),
                 );
                 if !s.cards {
-                    llm.uses
+                    let card = llm
+                        .uses
                         .entry(Use::CardSummaries.name().to_string())
-                        .or_default()
-                        .enabled = Some(false);
+                        .or_default();
+                    card.enabled.get_or_insert(false);
                 }
             }
             llm
@@ -418,7 +427,7 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
             .is_some_and(|on| !on)
     };
     let mut uses = BTreeMap::new();
-    if !llm.enabled {
+    if llm.enabled != Some(true) {
         for u in Use::ALL {
             let state = if turned_off(u) {
                 UseState::Unavailable {
@@ -928,7 +937,65 @@ backend = "b"
 
         // An unknown use is noted.
         let s = resolve(&parse("[llm.uses.poetry]\nenabled = true\n"), &env);
-        assert!(s.notes[0].contains("[llm.uses.poetry]"));
+        assert!(s.notes.iter().any(|n| n.contains("[llm.uses.poetry]")));
+    }
+
+    /// Plan 20261027_05, decision 6: `[llm.uses.*]` without `[llm]
+    /// enabled` leaves `[gemini]` read; `enabled = false` turns it off.
+    #[test]
+    fn old_gemini_is_read_until_llm_enabled_is_set() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let text = "[gemini]\nmodel = \"gemini-3.8-flash\"\n\
+                    [llm.uses.planning]\nenabled = true\nread = [\"*.md\"]\n";
+        let s = resolve(&parse(text), &env);
+        assert!(s.enabled, "[gemini] still turns the switch on");
+        for u in Use::ALL {
+            let t = s.target(u).unwrap();
+            assert_eq!((t.backend.as_str(), t.kind), ("gemini", Kind::Gemini));
+            assert_eq!(t.model, "gemini-3.8-flash", "{u:?}");
+        }
+        assert_eq!(s.target(Use::Planning), s.target(Use::GeneralAgent));
+        assert_eq!(s.planning.read.len(), 1);
+        assert_eq!(
+            s.notes
+                .iter()
+                .filter(|n| n.contains("[llm] has no enabled key"))
+                .count(),
+            1,
+            "{:?}",
+            s.notes
+        );
+        assert!(
+            s.notes
+                .iter()
+                .any(|n| n.contains("[gemini] is deprecated:"))
+        );
+
+        // [llm.backends.*] alone doesn't count as set either.
+        let s = resolve(
+            &parse("[gemini]\n[llm.backends.gemini]\nkind = \"gemini\"\nmodel = \"m\"\n"),
+            &env,
+        );
+        assert!(s.enabled);
+        assert_eq!(
+            model(&s, Use::GeneralAgent),
+            "m",
+            "the declared backend wins"
+        );
+
+        // enabled = false: everything off, [gemini] ignored.
+        let s = resolve(&parse(&format!("[llm]\nenabled = false\n{text}")), &env);
+        assert!(!s.enabled);
+        for u in Use::ALL {
+            assert!(s.target(u).is_none(), "{u:?}");
+        }
+        assert!(s.target(Use::Planning).is_none());
+        assert!(
+            s.notes
+                .iter()
+                .any(|n| n.contains("[gemini] is deprecated and ignored"))
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 ---
 title: The general agent's planning, continued, and one file watcher for the daemon
 date: 2026-10-27
-status: Draft
+status: In implementation
 covers:
   - "`recent_commits`, a read-only tool on the focused project's git
     history, run with the `git` binary"
@@ -286,3 +286,10 @@ their 250 ms checks, and approve plan 05 for building?".
    commit. The `via flankr:` rule line (the 12:33 amendment, item 2) is
    added by the lead to the shared rules and `AGENTS.md` together when
    step 6 lands.
+
+## Amendment — 2026-10-27 12:40 EDT: implementation has started; the document is now immutable
+
+Implementation starts with step 2 (the old `[gemini]` section), as the
+12:37 amendment orders. The status is `In implementation`, and the
+document is now immutable: it changes only on the owner's explicit
+instruction.
