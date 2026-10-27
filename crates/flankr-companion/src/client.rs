@@ -264,15 +264,16 @@ impl Suggestion {
     }
 }
 
-/// The plan as a plan answer names it: its spoken name ("the overview
-/// screen plan"), or "the plan" with none. Only the message filter's
-/// characters are kept.
+/// The plan as a plan answer names it: "plan 03" as the daemon gives its
+/// id (plan 20261022_03, L3, the 2026-10-27 13:21 EDT amendment), an older
+/// daemon's spoken name ("the overview screen plan"), or "the plan" with
+/// none. Only letters, digits, spaces and `. , ' _ -` are kept.
 fn plan_name(plan: Option<&str>) -> String {
     let plan: String = plan
         .unwrap_or("")
         .chars()
         .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | ',' | '\'') {
+            if c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | ',' | '\'' | '_' | '-') {
                 c
             } else {
                 ' '
@@ -282,7 +283,9 @@ fn plan_name(plan: Option<&str>) -> String {
     let plan = plan.split_whitespace().collect::<Vec<_>>().join(" ");
     if plan.is_empty() {
         "the plan".to_string()
-    } else if plan.to_ascii_lowercase().starts_with("the ") {
+    } else if plan.to_ascii_lowercase().starts_with("the ")
+        || plan.to_ascii_lowercase().starts_with("plan ")
+    {
         plan
     } else {
         format!("the {plan}")
@@ -6792,6 +6795,19 @@ mod tests {
         assert_eq!(
             plan_answer(Suggestion::Approve, None).unwrap(),
             "Approve the plan"
+        );
+        // A plan by the id the question gave it.
+        assert_eq!(
+            plan_answer(Suggestion::Approve, Some("plan 03")).unwrap(),
+            "Approve plan 03"
+        );
+        assert_eq!(
+            plan_answer(Suggestion::Implement, Some("plan 20261027_04")).unwrap(),
+            "Approve plan 20261027_04 and start building it"
+        );
+        assert_eq!(
+            plan_answer(Suggestion::Discuss, Some("plan 5")).unwrap(),
+            "Discuss plan 5:"
         );
         assert_eq!(
             plan_answer(Suggestion::Implement, Some("harness `protocol` plan")).unwrap(),
