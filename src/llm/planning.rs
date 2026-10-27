@@ -260,15 +260,27 @@ impl AgentProfile {
 
     /// With planning on: `PROMPT.md`, then the planning blocks (decision 6,
     /// items 1 and 2), and the file tools while `read` has patterns.
+    /// `recent_commits` is declared when `git` is on `PATH` (plan 20261027_05,
+    /// decision 1).
     pub fn planning(
         prompt: &PlanningPrompt,
         config: &PlanningConfig,
+    ) -> Result<AgentProfile, String> {
+        Self::planning_with_git(prompt, config, crate::git::binary().is_some())
+    }
+
+    /// [`planning`](Self::planning), with `git` found or not.
+    pub fn planning_with_git(
+        prompt: &PlanningPrompt,
+        config: &PlanningConfig,
+        git: bool,
     ) -> Result<AgentProfile, String> {
         let base = AgentProfile::base();
         Ok(AgentProfile {
             system_prompt: assemble(&base.system_prompt, &prompt.system_text(config)?),
             tools: ToolSet {
                 file_tools: config.file_tools(),
+                recent_commits: git,
             },
         })
     }
@@ -388,6 +400,17 @@ mod tests {
         );
         assert!(!p.system_prompt.contains("{{"));
         assert!(p.tools.file_tools);
+
+        // recent_commits: with git on PATH, whatever `read` says; not
+        // declared without git (plan 20261027_05, step 3).
+        let p = AgentProfile::planning_with_git(&prompt, &no_files, true).unwrap();
+        assert!(p.tools.recent_commits && !p.tools.file_tools);
+        let p = AgentProfile::planning_with_git(&prompt, &files, false).unwrap();
+        assert!(!p.tools.recent_commits);
+        let names =
+            crate::reasoning::tool_names(&crate::reasoning::declare_gemini_tools_for(p.tools));
+        assert!(!names.contains(&"recent_commits".to_string()), "{names:?}");
+        assert!(!AgentProfile::base().tools.recent_commits);
 
         let block = prompt
             .instructions("flankr", "claude", "AGENTS.md", "Be brief.")

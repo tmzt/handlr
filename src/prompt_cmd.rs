@@ -185,7 +185,7 @@ read = ["*.md", "docs/**/*.md"]
         assert!(out.contains("matching \"*.md\", \"docs/**/*.md\" can be read"));
         assert!(out.contains(
             "## Tools\n\nfocus, focus_project, send_agent_command, watch_pane, unwatch_pane, \
-             list_files, read_file"
+             list_files, read_file, recent_commits"
         ));
         assert!(out.contains("## Instructions for Claude"), "{out}");
         assert!(

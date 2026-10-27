@@ -933,7 +933,8 @@ enabled = true
         );
         let profile = s.service.agent_profile();
         let tools = tools_of(&profile);
-        assert!(tools.ends_with(&["list_files".to_string(), "read_file".to_string()]));
+        let at = tools.iter().position(|t| t == "list_files").unwrap();
+        assert_eq!(tools[at + 1], "read_file", "{tools:?}");
         assert!(profile.system_prompt.contains("\"*.md\", \"docs/**/*.md\""));
         s.service
             .client(Use::GeneralAgent, Profile::Agent, None)

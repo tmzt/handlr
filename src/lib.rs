@@ -4,6 +4,7 @@ pub mod commands;
 pub mod config;
 pub mod core;
 pub mod ctl;
+pub mod git;
 pub mod llm;
 pub mod notify;
 pub mod pair;

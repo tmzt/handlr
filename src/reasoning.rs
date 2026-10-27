@@ -235,6 +235,25 @@ pub const LIST_FILES: &str = "list_files";
 /// `read_file`: one of the current project's readable files.
 pub const READ_FILE: &str = "read_file";
 
+/// `recent_commits`: the current project's git history (plan 20261027_05,
+/// decision 1, as amended at 12:37 EDT).
+pub const RECENT_COMMITS: &str = "recent_commits";
+
+/// Parameters for the `recent_commits` tool.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct RecentCommitsParams {
+    /// How many commits, newest first: 20 when left out, at most 50.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
+    /// Only commits touching this file or folder, relative to the
+    /// project's root (e.g. "docs/design").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Also list the paths each commit changed (at most 50 per commit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<bool>,
+}
+
 /// Parameters for the `list_files` tool.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct ListFilesParams {
@@ -259,6 +278,9 @@ pub struct ReadFileParams {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct ToolSet {
     pub file_tools: bool,
+    /// `recent_commits`: while planning is on and `git` is on `PATH` (plan
+    /// 20261027_05, decision 1).
+    pub recent_commits: bool,
 }
 
 /// The general agent's tools without the optional ones.
@@ -332,6 +354,16 @@ pub fn declare_gemini_tools_for(set: ToolSet) -> Vec<Tool> {
                 None,
             )
             .with_parameters::<ReadFileParams>(),
+        );
+    }
+    if set.recent_commits {
+        functions.push(
+            FunctionDeclaration::new(
+                RECENT_COMMITS,
+                "Lists the current project's recent git commits, newest first: each one's short hash, date, author and subject, and with files the paths it changed. Never shows diffs or commit bodies.",
+                None,
+            )
+            .with_parameters::<RecentCommitsParams>(),
         );
     }
     vec![Tool::with_functions(functions)]
@@ -452,7 +484,10 @@ mod tests {
                 "unwatch_pane"
             ]
         );
-        let with_files = declare_gemini_tools_for(ToolSet { file_tools: true });
+        let with_files = declare_gemini_tools_for(ToolSet {
+            file_tools: true,
+            recent_commits: false,
+        });
         assert_eq!(
             tool_names(&with_files),
             [
@@ -465,6 +500,16 @@ mod tests {
                 "read_file"
             ]
         );
+        let all = declare_gemini_tools_for(ToolSet {
+            file_tools: true,
+            recent_commits: true,
+        });
+        assert_eq!(tool_names(&all).last().unwrap(), "recent_commits");
+        let commits_only = declare_gemini_tools_for(ToolSet {
+            file_tools: false,
+            recent_commits: true,
+        });
+        assert_eq!(tool_names(&commits_only).len(), 6);
     }
 
     #[test]

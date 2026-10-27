@@ -125,6 +125,14 @@ impl HerdrToolExecutor {
                 );
             }
         };
+        let cwd = self.current_folder().await?;
+        tokio::task::spawn_blocking(move || ProjectFiles::open(&cwd, read))
+            .await
+            .map_err(|e| e.to_string())?
+    }
+
+    /// The current agent's folder, on this machine.
+    async fn current_folder(&self) -> Result<String, String> {
         if matches!(self.client.transport(), HerdrTransport::RemoteSsh { .. }) {
             return Err(
                 "The project's files are on another machine; flankr reads only its own."
@@ -139,14 +147,78 @@ impl HerdrToolExecutor {
             .list_panes()
             .await
             .map_err(|e| format!("herdr is not answering: {e}"))?;
-        let cwd = current_ref(&snapshot, &pane_id)
+        current_ref(&snapshot, &pane_id)
             .and_then(|a| a.cwd)
             .ok_or_else(|| {
                 format!("The folder of the current agent (pane {pane_id}) is not known.")
-            })?;
-        tokio::task::spawn_blocking(move || ProjectFiles::open(&cwd, read))
-            .await
-            .map_err(|e| e.to_string())?
+            })
+    }
+
+    /// `recent_commits(count?, path?, files?)` (plan 20261027_05, decision
+    /// 1, as amended at 12:37 EDT): the current project's last commits,
+    /// newest first, with the `git` binary; `path` is checked as a
+    /// message's paths are, and need not match `read`.
+    async fn execute_recent_commits(
+        &self,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if self.planning.is_none() {
+            return Err(
+                "The project's history is available only while planning is on.".to_string(),
+            );
+        }
+        let Some(git) = crate::git::binary() else {
+            return Err("git is not installed where flankr runs.".to_string());
+        };
+        let count = crate::git::clamp_count(
+            args.get("count")
+                .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f as i64))),
+        );
+        let path = args
+            .get("path")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+        let files = args.get("files").and_then(|v| v.as_bool()).unwrap_or(false);
+        let root = self.current_folder().await?;
+        let spec = match path {
+            Some(path) => Some(crate::git::check_path(path, &root).inspect_err(|e| {
+                log::info!("recent_commits in {root}: '{path}' refused: {e}");
+            })?),
+            None => None,
+        };
+        let history = crate::git::recent_commits(
+            git,
+            std::path::Path::new(&root),
+            count,
+            spec.as_deref(),
+            files,
+        )
+        .await?;
+        match history {
+            crate::git::History::NotARepository => {
+                log::info!("recent_commits in {root}: not a git work tree");
+                Ok(serde_json::json!({
+                    "project": root,
+                    "commits": [],
+                    "note": "The project has no git history: its folder is not a git work tree.",
+                }))
+            }
+            crate::git::History::Commits(commits) => {
+                log::info!(
+                    "recent_commits in {root} (count {count}, path {path:?}, files {files}): {}",
+                    commits.len()
+                );
+                let mut result = serde_json::json!({ "project": root, "commits": commits });
+                if commits.is_empty() {
+                    result["note"] = serde_json::json!(match path {
+                        Some(_) => "No commits touch that path.",
+                        None => "The project has no commits yet.",
+                    });
+                }
+                Ok(result)
+            }
+        }
     }
 
     /// `list_files(glob?)` (decision 4): the readable files, sorted, at
@@ -625,6 +697,7 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
             crate::reasoning::FOCUS_PROJECT => self.execute_focus_project(args).await,
             crate::reasoning::LIST_FILES => self.execute_list_files(args).await,
             crate::reasoning::READ_FILE => self.execute_read_file(args).await,
+            crate::reasoning::RECENT_COMMITS => self.execute_recent_commits(args).await,
             "focus" => self.execute_focus(name, args).await,
             _ => self
                 .client
@@ -1577,6 +1650,97 @@ mod tests {
             ..Default::default()
         })
         .0
+    }
+
+    /// Plan 20261027_05, step 3: `recent_commits` on the current project,
+    /// with no `read` patterns; a path outside refused; a folder that
+    /// isn't a work tree answered plainly.
+    #[tokio::test]
+    async fn test_recent_commits_reads_the_current_projects_history() {
+        let dir = two_projects();
+        let a = dir.path().join("a");
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new(crate::git::binary().unwrap())
+                .arg("-C")
+                .arg(&a)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_AUTHOR_NAME", "Ada")
+                .env("GIT_AUTHOR_EMAIL", "ada@example.com")
+                .env("GIT_COMMITTER_NAME", "Ada")
+                .env("GIT_COMMITTER_EMAIL", "ada@example.com")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok, "{args:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "first: the readme"]);
+        git(&["add", "docs"]);
+        git(&["commit", "-q", "-m", "second: the docs"]);
+
+        let client = project_mock(dir.path()).await;
+        let current = CurrentAgent::default();
+        let executor = HerdrToolExecutor::new(client.clone(), vec![])
+            .with_current_agent(Arc::clone(&current), false)
+            .with_planning(planning(&[], false));
+        *current.lock().unwrap() = Some("p1".to_string());
+
+        let r = executor
+            .execute_tool("recent_commits", &json!({}))
+            .await
+            .unwrap();
+        let subjects: Vec<&str> = r["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["subject"].as_str().unwrap())
+            .collect();
+        assert_eq!(subjects, ["second: the docs", "first: the readme"]);
+        assert!(r["commits"][0].get("files").is_none(), "{r}");
+
+        let r = executor
+            .execute_tool(
+                "recent_commits",
+                &json!({ "count": 1, "path": "README.md", "files": true }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r["commits"].as_array().unwrap().len(), 1, "{r}");
+        assert_eq!(r["commits"][0]["subject"], "first: the readme");
+        assert_eq!(r["commits"][0]["files"], json!(["README.md"]));
+
+        for path in ["../b", "/../b", "~/x"] {
+            let e = executor
+                .execute_tool("recent_commits", &json!({ "path": path }))
+                .await
+                .unwrap_err();
+            assert!(e.contains("outside the project"), "{path}: {e}");
+        }
+
+        *current.lock().unwrap() = Some("p2".to_string());
+        let r = executor
+            .execute_tool("recent_commits", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(r["commits"], json!([]));
+        assert!(
+            r["note"].as_str().unwrap().contains("no git history"),
+            "{r}"
+        );
+
+        // Without planning, refused.
+        let off =
+            HerdrToolExecutor::new(client, vec![]).with_current_agent(Arc::clone(&current), false);
+        assert!(
+            off.execute_tool("recent_commits", &json!({}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
