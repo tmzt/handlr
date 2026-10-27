@@ -387,7 +387,8 @@ pub struct LinkConfig {
     /// The paired clients (default: ~/.config/flankr/auth.toml).
     pub auth: Option<String>,
     /// Seconds between checks of open link connections against
-    /// `auth.toml` (default: 60).
+    /// `auth.toml` (default: 60), a slow fallback to the check on each
+    /// change the file watcher reports (plan 20261027_05, decision 2).
     pub revoke_check_secs: Option<u64>,
 }
 

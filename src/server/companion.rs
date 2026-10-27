@@ -77,6 +77,10 @@ pub struct TurnOptions {
     pub speech: super::speech::SpeechOptions,
     /// `[llm]`'s watch, keys and clients (plan 20261027_02).
     pub llm: LlmOptions,
+    /// The daemon's file watcher (plan 20261027_05, decision 2): `None`
+    /// starts the platform's on first use; `Some(Err(why))` stands for one
+    /// that failed to start, so the intervals take over (tests).
+    pub file_watcher: Option<Result<crate::watch_files::FileWatcher, String>>,
 }
 
 /// The engine, the session histories, and who is in a turn.

@@ -14,7 +14,7 @@ mod watcher;
 use std::io::IsTerminal;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use libherdr::client::HerdrClient;
@@ -30,6 +30,7 @@ use crate::core::naming::{self, Names};
 use crate::sessions::Sessions;
 use crate::sessions::hub::SessionHub;
 use crate::watch::WatchRegistry;
+use crate::watch_files::FileWatcher;
 
 /// The socket `flankr serve` listens on unless `[server] socket` says otherwise.
 pub fn default_socket_path() -> PathBuf {
@@ -82,6 +83,9 @@ pub struct Daemon {
     /// `[llm]`: which of the daemon's own LLM uses are available, and
     /// their clients (plan 20261027_02).
     pub llm: Arc<crate::llm::LlmService>,
+    /// The file watcher as given, if it was (see [`Daemon::file_watcher`]).
+    file_watcher_option: Option<Result<FileWatcher, String>>,
+    file_watcher: OnceLock<Option<FileWatcher>>,
 }
 
 impl Daemon {
@@ -145,6 +149,8 @@ impl Daemon {
             link,
             turns: companion::TurnService::new(Arc::clone(&llm), &turns),
             llm,
+            file_watcher_option: turns.file_watcher.clone(),
+            file_watcher: OnceLock::new(),
         });
         // `[llm.uses.card_summaries]`: each new Finished card summarised
         // once, while card summaries are available.
@@ -152,6 +158,28 @@ impl Daemon {
             .hub
             .summarize_cards_with(Arc::new(speech::DaemonCards(Arc::downgrade(&daemon))));
         daemon
+    }
+
+    /// The daemon's one file watcher (plan 20261027_05, decision 2),
+    /// started on first use; `None` when it can't start, which is logged
+    /// once, and its users fall back to their intervals.
+    pub fn file_watcher(&self) -> Option<FileWatcher> {
+        self.file_watcher
+            .get_or_init(|| {
+                let started = match &self.file_watcher_option {
+                    Some(given) => given.clone(),
+                    None => FileWatcher::start(),
+                };
+                started
+                    .inspect_err(|e| {
+                        log::warn!(
+                            "the file watcher can't start ({e}): [llm] is checked every 5 s \
+                             and auth.toml every [link] revoke_check_secs instead"
+                        )
+                    })
+                    .ok()
+            })
+            .clone()
     }
 
     /// Every pane in `snapshot`, named by `[naming]`. The broker's word
@@ -316,8 +344,9 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
         });
     }
     tokio::spawn(subscriptions::journal_confirmations(Arc::clone(&daemon)));
-    // `[llm]` read again within 5 s of a change (plan 20261027_02).
-    daemon.llm.spawn_watch();
+    // `[llm]` read again on a change to its file or its key files (plan
+    // 20261027_05, decision 2), or within 5 s without the file watcher.
+    daemon.llm.spawn_watch(daemon.file_watcher().as_ref());
     if let Some(transport) = options.event_transport {
         tokio::spawn(watcher::run(
             transport,

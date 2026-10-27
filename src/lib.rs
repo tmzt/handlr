@@ -16,6 +16,7 @@ pub mod sessions;
 pub mod tail;
 pub mod transport;
 pub mod watch;
+pub mod watch_files;
 
 pub use commands::{
     ConfirmationRequest, confirmation_match_candidates, normalize_command_for_match,

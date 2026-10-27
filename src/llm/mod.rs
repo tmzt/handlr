@@ -598,6 +598,31 @@ fn resolve_planning(
     (state, planning)
 }
 
+/// The key files `sources` read keys from: the default key file and each
+/// backend's `api_key_file`, `[gemini]`'s included (plan 20261027_05,
+/// 12:37 EDT amendment, item 3: the file watcher follows them).
+pub fn key_files(sources: &LlmSources, env: &KeyEnv) -> Vec<PathBuf> {
+    let mut files = vec![env.path(Kind::Gemini.default_key_file())];
+    let named = sources
+        .llm
+        .iter()
+        .flat_map(|l| l.backends.values())
+        .filter_map(|b| nonempty(b.api_key_file.as_deref()))
+        .chain(
+            sources
+                .gemini
+                .iter()
+                .filter_map(|g| nonempty(g.api_key_file.as_deref())),
+        );
+    for file in named {
+        let path = env.path(file);
+        if !files.contains(&path) {
+            files.push(path);
+        }
+    }
+    files
+}
+
 fn nonempty(s: Option<&str>) -> Option<&str> {
     s.map(str::trim).filter(|s| !s.is_empty())
 }

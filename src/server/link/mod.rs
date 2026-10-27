@@ -18,9 +18,10 @@
 //!   queued (plan 20261024_02, decision 6).
 //! * A handshake's first message may only be `hello`; anything else closes
 //!   the connection without a reply.
-//! * `auth.toml` is read for every new connection, and every
-//!   `revoke_interval` open connections whose key is no longer in it are
-//!   closed.
+//! * `auth.toml` is read for every new connection, and on each change the
+//!   daemon's file watcher reports (plan 20261027_05, decision 2) and every
+//!   `revoke_interval` as a slow fallback, open connections whose key is no
+//!   longer in it are closed.
 //! * Sockets get `SO_KEEPALIVE` with the OS's timers; there is no
 //!   application idle timeout.
 //! * Each link message is one whole JSON-RPC object, without a newline.
@@ -420,12 +421,41 @@ pub fn spawn(daemon: Arc<Daemon>, listeners: Vec<TcpListener>) {
     let Some(link) = daemon.link.clone() else {
         return;
     };
+    // On each change to auth.toml the file watcher reports (plan
+    // 20261027_05, decision 2), and every `revoke_interval` as a slow
+    // fallback in case the watcher fails.
+    let mut changes = daemon.file_watcher().and_then(|files| {
+        files
+            .subscribe(std::slice::from_ref(&link.settings.auth_path))
+            .inspect_err(|e| {
+                log::warn!(
+                    "{} can't be watched ({e}); revocations are checked every {:?}",
+                    link.settings.auth_path.display(),
+                    link.settings.revoke_interval
+                )
+            })
+            .ok()
+    });
     let checker = Arc::clone(&link);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(checker.settings.revoke_interval);
         tick.tick().await;
         loop {
-            tick.tick().await;
+            match &mut changes {
+                Some(sub) => {
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        alive = sub.changed() => {
+                            if !alive {
+                                changes = None;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    tick.tick().await;
+                }
+            }
             checker.check_revocations();
         }
     });

@@ -44,6 +44,15 @@ impl Env {
 }
 
 async fn start() -> Env {
+    start_with(Duration::from_millis(200), None).await
+}
+
+/// A link checking revocations every `revoke_interval`, with the file
+/// watcher `file_watcher` (`None`: the platform's).
+async fn start_with(
+    revoke_interval: Duration,
+    file_watcher: Option<Result<flankr::watch_files::FileWatcher, String>>,
+) -> Env {
     let dir = tempfile::Builder::new()
         .prefix("hl")
         .tempdir_in("/tmp")
@@ -53,7 +62,7 @@ async fn start() -> Env {
         key_path: dir.path().join("link_key"),
         auth_path: dir.path().join("auth.toml"),
         listen: Some(vec!["127.0.0.1:0".to_string()]),
-        revoke_interval: Duration::from_millis(200),
+        revoke_interval,
     };
     let link = Link::open(settings).unwrap();
     let listeners = link.bind().await.unwrap();
@@ -67,6 +76,7 @@ async fn start() -> Env {
         TurnOptions {
             session_dir: Some(dir.path().join("history")),
             agent_sessions: Some(Arc::new(Sessions::with_home(&dir.path().join("home")))),
+            file_watcher,
             ..TurnOptions::default()
         },
     );
@@ -349,6 +359,50 @@ async fn pairing_reconnecting_and_revoking() {
             .await
             .is_err()
     );
+}
+
+/// A paired device's open connection, on `env`.
+async fn paired_connection(env: &Env) -> LinkStream<TcpStream> {
+    let mut local = Local::connect(&env.socket).await;
+    let begun = local.begin().await;
+    let payload = PairingPayload::decode(begun["pairing"].as_str().unwrap()).unwrap();
+    let (keypair, code) = device(&payload.server_key, "s23");
+    let r = local
+        .add(json!({"code": code, "protocols": ["harness"]}))
+        .await;
+    assert!(r["result"].is_object(), "{r}");
+    let mut paired = first_connect(env, &keypair).await;
+    let r = call(&mut paired, 1, "agents.list").await;
+    assert!(r["result"]["agents"].as_array().is_some(), "{r}");
+    paired
+}
+
+/// Plan 20261027_05, step 1: auth.toml's change closes a revoked key's
+/// connection at once, long before the 60 s fallback.
+#[tokio::test]
+async fn a_change_to_auth_toml_closes_a_revoked_connection_through_the_file_watcher() {
+    let env = start_with(Duration::from_secs(60), None).await;
+    let mut paired = paired_connection(&env).await;
+    // Let FSEvents' report of the pairing's write pass.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(env.link.open_connections(), 1);
+    std::fs::write(env.auth_path(), "").unwrap();
+    assert!(closes(&mut paired, Duration::from_secs(2)).await);
+    assert_eq!(env.link.open_connections(), 0);
+}
+
+/// When the file watcher can't start, the revoke interval still closes it.
+#[tokio::test]
+async fn without_the_file_watcher_the_revoke_interval_takes_over() {
+    let env = start_with(
+        Duration::from_millis(200),
+        Some(Err("no inotify instances".to_string())),
+    )
+    .await;
+    let mut paired = paired_connection(&env).await;
+    std::fs::write(env.auth_path(), "").unwrap();
+    assert!(closes(&mut paired, Duration::from_secs(3)).await);
+    assert_eq!(env.link.open_connections(), 0);
 }
 
 #[tokio::test]

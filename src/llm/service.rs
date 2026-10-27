@@ -7,7 +7,9 @@
 //!   general agent's (its tools, system prompt and flankr's routes) or a
 //!   summary's (one system text, no tools), since a Gemini engine carries
 //!   both from when it is built.
-//! - **The watch:** every [`RELOAD_INTERVAL`] the config file's
+//! - **The watch:** on each change the daemon's file watcher reports to
+//!   the config file or a key file (plan 20261027_05, decision 2), or every
+//!   [`RELOAD_INTERVAL`] without it, the config file's
 //!   modification time and length are compared; on a change only `[llm]`,
 //!   `[gemini]` and `[summary]` are read again. Keys are looked for on
 //!   every check, so a key file appearing or going is noticed too. A
@@ -29,13 +31,17 @@ use libflankr_proto::companion::LlmInfo;
 use tokio::sync::watch;
 
 use super::planning::{AgentProfile, PlanningConfig, PlanningPrompt};
-use super::{KeyEnv, Kind, LlmSettings, LlmSources, Target, Use, UseState, resolve_sources};
+use super::{
+    KeyEnv, Kind, LlmSettings, LlmSources, Target, Use, UseState, key_files, resolve_sources,
+};
 use crate::config::AppConfig;
 use crate::reasoning::{
     GeminiReasoningEngine, ReasoningEngine, declare_gemini_tools_for, with_flankr_routes,
 };
+use crate::watch_files::FileWatcher;
 
-/// How often the config file and the keys are checked (decision 6).
+/// How often the config file and the keys are checked (decision 6) when
+/// the file watcher can't be used (plan 20261027_05, decision 2).
 pub const RELOAD_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The sections the watch re-reads; a change anywhere else needs a
@@ -120,7 +126,7 @@ pub struct LlmOptions {
     pub key_env: Option<KeyEnv>,
     /// The clients' builder, instead of [`GeminiFactory`].
     pub factory: Option<Arc<dyn ClientFactory>>,
-    /// Instead of [`RELOAD_INTERVAL`].
+    /// Instead of [`RELOAD_INTERVAL`], when there is no file watcher.
     pub interval: Option<Duration>,
     /// `--prompts <path>`: the `planning` prompt from this file in place
     /// of the shipped `ADDITIONAL_PROMPTS.md`.
@@ -390,12 +396,46 @@ impl LlmService {
         watched.rest = Some(rest);
     }
 
-    /// Checks every interval while the service is in use.
-    pub fn spawn_watch(self: &Arc<Self>) {
-        if self.config_path.is_none() {
+    /// The paths whose change calls for a [`check`](Self::check): the
+    /// config file and the key files as `[llm]` resolves them now.
+    pub fn watched_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.config_path.iter().cloned().collect();
+        paths.extend(key_files(&self.watched.lock().unwrap().sources, &self.env));
+        paths
+    }
+
+    /// Checks on each change `files` reports to the config file or a key
+    /// file (plan 20261027_05, decision 2), following the key files as
+    /// they change; without `files`, or if it can't watch them, every
+    /// interval while the service is in use.
+    pub fn spawn_watch(self: &Arc<Self>, files: Option<&FileWatcher>) {
+        let Some(config_path) = &self.config_path else {
             return;
-        }
+        };
         let weak: Weak<Self> = Arc::downgrade(self);
+        if let Some(files) = files {
+            match files.subscribe(&self.watched_paths()) {
+                Ok(mut sub) => {
+                    tokio::spawn(async move {
+                        while sub.changed().await {
+                            let Some(service) = weak.upgrade() else {
+                                return;
+                            };
+                            service.check();
+                            if let Err(e) = sub.set_paths(&service.watched_paths()) {
+                                log::warn!("[llm] the key files can't be watched: {e}");
+                            }
+                        }
+                    });
+                    return;
+                }
+                Err(e) => log::warn!(
+                    "[llm] {} can't be watched ({e}); checking every {:?} instead",
+                    config_path.display(),
+                    self.interval
+                ),
+            }
+        }
         let interval = self.interval;
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
@@ -696,6 +736,117 @@ backend = "cheap"
         assert_eq!(s.service.client_count(), 0, "its client is dropped");
         // What was running keeps its client.
         assert_eq!(Arc::strong_count(&running), 1);
+    }
+
+    /// Waits up to `within` for `ok`.
+    async fn within(within: Duration, ok: impl Fn() -> bool) -> bool {
+        let end = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < end {
+            if ok() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        ok()
+    }
+
+    /// Plan 20261027_05, step 1: an edit is read within a second through
+    /// the file watcher, with no interval running (it is 5 s here, and
+    /// not started), and a key file appearing in a folder created later
+    /// is followed.
+    #[tokio::test]
+    async fn the_file_watcher_reads_an_edit_within_a_second() {
+        let s = setup("[llm]\nenabled = true\n", false);
+        let files = crate::watch_files::FileWatcher::start().unwrap();
+        s.service.spawn_watch(Some(&files));
+        assert!(s.service.available(Use::GeneralAgent).is_err(), "no key");
+        // Let FSEvents' report of the setup pass.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+
+        write_key(&s.dir.path().join(super::super::gemini::KEY_FILE), "k");
+        assert!(
+            within(Duration::from_secs(1), || s
+                .service
+                .available(Use::GeneralAgent)
+                .is_ok())
+            .await,
+            "the key file in a new folder"
+        );
+
+        std::fs::write(
+            &s.path,
+            "[llm]\nenabled = true\n[llm.uses.general_agent]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(
+            within(Duration::from_secs(1), || s
+                .service
+                .available(Use::GeneralAgent)
+                .is_err())
+            .await,
+            "the edit"
+        );
+
+        // A backend's own key file elsewhere is followed once named.
+        let other = tempfile::tempdir().unwrap();
+        let key = other.path().join("key");
+        std::fs::write(
+            &s.path,
+            format!(
+                "[llm]\nenabled = true\n[llm.backends.b]\nkind = \"gemini\"\n\
+                 api_key_file = \"{}\"\n",
+                key.display()
+            ),
+        )
+        .unwrap();
+        assert!(
+            within(Duration::from_secs(1), || s
+                .service
+                .watched_paths()
+                .contains(&key))
+            .await
+        );
+        let target = || s.service.settings().target(Use::GeneralAgent).cloned();
+        assert!(target().is_none(), "b has no key yet");
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        write_key(&key, "own");
+        assert!(
+            within(Duration::from_secs(1), || target()
+                .is_some_and(|t| t.key.expose() == "own"))
+            .await,
+            "the backend's key file"
+        );
+    }
+
+    /// Without the file watcher, the interval takes over.
+    #[tokio::test]
+    async fn without_the_file_watcher_the_interval_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        let service = LlmService::new(
+            &AppConfig::default(),
+            LlmOptions {
+                config_path: Some(path.clone()),
+                key_env: Some(KeyEnv::in_dir(dir.path())),
+                factory: Some(Arc::new(Recording::default())),
+                interval: Some(Duration::from_millis(100)),
+                prompts_file: None,
+            },
+            Overrides::default(),
+        );
+        service.spawn_watch(None);
+        write_key(&dir.path().join(super::super::gemini::KEY_FILE), "k");
+        std::fs::write(&path, "[llm]\nenabled = true\n").unwrap();
+        let f = std::fs::File::options().write(true).open(&path).unwrap();
+        f.set_modified(SystemTime::now() + Duration::from_secs(2))
+            .unwrap();
+        assert!(
+            within(Duration::from_secs(2), || service
+                .available(Use::GeneralAgent)
+                .is_ok())
+            .await
+        );
     }
 
     #[test]
