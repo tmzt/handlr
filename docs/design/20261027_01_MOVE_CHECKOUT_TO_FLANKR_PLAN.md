@@ -125,3 +125,22 @@ row, this plan) is its own commit (Rule 3.1).
    written, or no symlink at all?
 3. **Who runs the move:** this session as its last action (it then can't
    continue until resumed), or the owner from a shell?
+
+## Amendment — 2026-10-27 00:33 EDT: the owner's decisions; approved
+
+The owner (2026-10-27): "don't change remotes, update repowiki, copy the
+session, no symlink, I'll rename the repo". This replaces decisions 2 and 3
+and step 1, answers the open questions, and approves the plan.
+1. **Remotes are unchanged.** `origin` stays `tmzt/handlr` and `flankrapp` stays
+   `flankrapp/flankr`. Step 1 is dropped, and open question 1 is withdrawn.
+2. **No symlink.** `~/src/handlr` is gone after the move. Decision 2 and step
+   5's symlink removal are dropped.
+3. **repowiki** is updated now: `sites.toml`'s `source` becomes
+   `/Users/tmeade/src/flankr`, so its site id becomes `src--flankr`. It resolves
+   once the folder is renamed.
+4. **This session's data is copied now** to
+   `~/.claude/projects/-Users-tmeade-src-flankr/`, with its memory updated for
+   the new path and site id. The old folder stays until the owner says to
+   remove it.
+5. **The owner renames the folder** (`~/src/handlr` to `~/src/flankr`) and
+   resumes this session from it (decision 5).
