@@ -120,6 +120,11 @@ pub struct ServerCapabilities {
 pub struct TurnStartParams {
     pub turn_id: u64,
     pub text: String,
+    /// The pane id of the session the phone has open, sent from the agent
+    /// view, so that session is the turn's current agent (plan 20261027_04,
+    /// decision 3). `None` from the overview and from older apps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 /// How a turn ended.
@@ -300,7 +305,17 @@ mod tests {
         round_trip(TurnStartParams {
             turn_id: 4,
             text: "send continue to claude".into(),
+            session: None,
         });
+        round_trip(TurnStartParams {
+            turn_id: 5,
+            text: "what does the plan say".into(),
+            session: Some("w1:p6".into()),
+        });
+        // An older app's turn.start, without `session`, still parses.
+        let old: TurnStartParams =
+            serde_json::from_value(serde_json::json!({"turn_id": 6, "text": "hi"})).unwrap();
+        assert_eq!(old.session, None);
         round_trip(TurnResult {
             outcome: TurnOutcome::Interrupted,
             ran: vec![Ran {

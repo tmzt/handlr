@@ -1,7 +1,7 @@
 ---
 title: Planning tools for the general agent, and its prompt from ADDITIONAL_PROMPTS.md
 date: 2026-10-27
-status: Draft
+status: In implementation
 covers:
   - "`run_command` renamed `send_agent_command`, carrying both allow-listed
     commands and free-text requests to a coding agent"
@@ -356,3 +356,15 @@ uses".
    Step 4 then needs 3b.
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-27 11:28 EDT: approved; implementation has started; the document is now immutable
+
+The owner (2026-10-27): "approve and build". The plan is approved with its
+amendments of 11:20, 11:22 (both), and 11:25 EDT, and the settings plan's
+(20261024_02) amendment of 11:27 EDT for the *Tab follows focus* row. The
+11:20 amendment's `ClientOptions` is `ClientOptionsParams`, the type's
+real name.
+
+Step 3 (`libflankr_proto` 0.3.11) is the first implementing commit, since
+steps 3b, 4 and 6 need it; steps 1, 2, 3b, 4, 5 and 6 follow. From here the
+document changes only on the owner's explicit instruction.

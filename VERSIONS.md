@@ -264,3 +264,17 @@ amendment of 00:59 EDT naming them `llm`):
   - `envelope::codes::LLM_UNAVAILABLE` (-32016): a turn refused because
     the general agent is not available, its message the reason.
     `codes::ALL` is unchanged.
+
+## libflankr_proto 0.3.11 — 2026-10-27 (the commit tagged `libflankr_proto-v0.3.11`)
+
+Additive, by the owner's ruling ("appending to a struct is additive"): two
+appended, serde-defaulted fields (plan 20261027_04, step 3, with the
+amendments of 11:20 EDT and the settings plan's of 11:27 EDT):
+
+- **Added:**
+  - `companion::TurnStartParams::session: Option<String>`, the pane id of
+    the session the phone has open, so it is the turn's current agent;
+    `None` from the overview and from older apps;
+  - `common::ClientOptionsParams::tab_follows_focus: bool`, off when left
+    out: when on, the general agent's `focus_project` also moves herdr's
+    focused tab.

@@ -276,6 +276,12 @@ pub struct ClientOptionsParams {
     /// when left out.
     #[serde(default = "general_agent_default")]
     pub general_agent: bool,
+    /// Tab follows focus (plan 20261024_02, the amendment of 2026-10-27
+    /// 11:27 EDT): when the general agent focuses a project
+    /// (`focus_project`, plan 20261027_04), herdr's focused tab moves to
+    /// that agent's tab too. Off when left out.
+    #[serde(default)]
+    pub tab_follows_focus: bool,
 }
 
 fn general_agent_default() -> bool {
@@ -288,6 +294,7 @@ impl Default for ClientOptionsParams {
             spoken_output: false,
             background: false,
             general_agent: true,
+            tab_follows_focus: false,
         }
     }
 }
@@ -1809,7 +1816,12 @@ mod tests {
             spoken_output: true,
             background: true,
             general_agent: false,
+            tab_follows_focus: true,
         });
+        // Left out, Tab follows focus is off.
+        let old: ClientOptionsParams =
+            serde_json::from_value(serde_json::json!({"general_agent": true})).unwrap();
+        assert!(!old.tab_follows_focus);
         round_trip(LinkUnpairParams {});
         round_trip(LinkUnpairResult {});
         round_trip(AgentsReadResult {
