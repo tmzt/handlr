@@ -2555,3 +2555,44 @@ Plan: docs/design/20261027_04_GENERAL_AGENT_PLANNING_PLAN.md. Steps 3
     agent is off; the daemon gives it no effect then.
 15. **Step 6, `apps/Cargo.lock`** was still on `libflankr_proto` 0.3.10 after
     `861c3ee`; it is bumped in its own commit, `a63b4be`.
+
+## 2026-10-27 12:03 EDT — messages: only the first word may be a command; paths checked against the project
+
+Plans: docs/design/20261027_04_GENERAL_AGENT_PLANNING_PLAN.md (step 1,
+decision 1) and docs/design/20261023_02_BULK_INPUT_PLAN.md (decision 6, as
+amended). Commit `7d72b82`.
+
+The owner (2026-10-27): the symbol ban "was added to prevent agent commands
+from being sent until things were tested, then a specific allow list of
+commands. since command is only the first word, that restriction should
+probably be applied there"; "except paths should be resolved and checked to
+see if they fall outside of the focused repo, at least for now"; "this also
+means a heuristic to make sure pathological paths aren't being resolved,
+such as limiting the number of .. pairs"; and "it looks like whitespace at
+the beginning of the message is ignored and commands are still processed".
+
+1. **`validate_message`** no longer refuses symbols. The first
+   non-whitespace character may not be `/`, `!` or `#` (a slash command,
+   Claude Code's shell mode, older Claude Code's memory); after it any
+   printable text is kept. Control characters and newlines are still
+   refused, and the 4000-character limit stands. This changes the check on
+   messages typed in the app as well as the general agent's requests, and
+   closes the 11:50 entry's item 1: free text with `/` and `-` is accepted.
+2. **`check_paths`**, run by `policy::check_message` with the pane's `cwd`:
+   each word holding a `/` or starting with `~` (URLs aside) is resolved
+   against the agent's project folder and refused outside it. Bounds: 32
+   paths per message, 512 characters, 32 parts and 4 `..` per path.
+   Resolution is by the text; a path that exists is also resolved on disk.
+   Without a known folder, a message holding a path is refused. A slash
+   command later in the text (`run /compact later`) reads as a path outside
+   the project and is refused.
+3. **`validate_general_input`** (what the user says or types to the general
+   agent) keeps symbols: it never reaches a pane.
+4. **File tools:** a leading `/` is the project's root, and a refused or
+   missing path's error says "Paths are relative to the project's root, e.g.
+   docs/design/plan.md." Absolute filesystem paths are not accepted.
+5. **Context:** the "Current agent" line names the project, not its
+   absolute folder, and says file paths are relative to its root. The
+   message rules in the context and `PROMPT.md` section 3, item 2, describe
+   the first-word rule; `PROMPT.md` was changed only there and in item 3's
+   wording.
