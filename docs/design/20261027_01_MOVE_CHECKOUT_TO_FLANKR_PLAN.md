@@ -1,7 +1,7 @@
 ---
 title: Moving the checkout to ~/src/flankr, and this Claude Code session with it
 date: 2026-10-27
-status: Draft
+status: Implemented
 covers:
   - "Moving the local checkout from `~/src/handlr` to `~/src/flankr`, the
     last place the old name is still the working name"
@@ -144,3 +144,21 @@ and step 1, answers the open questions, and approves the plan.
    remove it.
 5. **The owner renames the folder** (`~/src/handlr` to `~/src/flankr`) and
    resumes this session from it (decision 5).
+
+## Amendment — 2026-10-27 00:41 EDT: implemented
+
+Every step that the 00:35 EDT amendment kept is done. None of them
+changed code, so no commits implement them:
+- **repowiki:** `~/src/repowiki/sites.toml` names `/Users/tmeade/src/flankr`, so
+  the site is `src--flankr` (step 2).
+- **The move:** this session's data was copied to
+  `~/.claude/projects/-Users-tmeade-src-flankr/`, with its memory updated. The
+  owner moved the folder to `~/src/flankr` and resumed the session there (steps
+  3 and 4).
+- **The daemon:** `target/debug/flankr serve` runs from `~/src/flankr`, and the
+  S23 reconnected over the tailnet at 04:39 UTC (step 4). A daemon another
+  session started on 2026-10-26 had been running all along, and was replaced
+  with the current build.
+- **Clean-up:** the old project data
+  `~/.claude/projects/-Users-tmeade-src-handlr/` was removed on the owner's word
+  ("remove the old session folder"). There was no symlink to remove (step 5).
