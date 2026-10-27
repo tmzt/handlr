@@ -167,3 +167,17 @@ needs it. 2 needs 1; 3 needs 2; 4 needs 2.
 2. **Message history's lifetime:** only while the view is open, as written,
    or kept per session for the app's run (cleared when the session's file
    changes)?
+
+## Amendment — 2026-10-27 01:14 EDT: the open questions answered; approved, built after plan 20261027_02
+
+The owner (2026-10-27): "1. dim with ✦ 2. per session. approve, build after
+llm".
+1. **The bars:** both the input bar and the output bar are drawn dim, each
+   with a small "✦" at the left. This answers open question 1.
+2. **Message history is kept per session** for the app's run, not only while
+   the view is open. It is cleared when the session's file changes (a new
+   session id or epoch). This replaces decision 3's "while it is open" and
+   answers open question 2.
+3. **Approved.** It is built after plan 20261027_02 (the `[llm]` section)
+   lands, since that plan's step 4 also changes the centre button and the
+   Gemini card. The status becomes `In implementation` with step 1's commit.
