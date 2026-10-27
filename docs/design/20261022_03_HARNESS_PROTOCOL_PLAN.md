@@ -1629,3 +1629,29 @@ The owner directed (2026-10-25): "expand message on a sesdion can collapse pinne
 3. **User Override:** The user may tap the pinned card to toggle its expansion while the message is active, marking it as user-overridden (`pin_overridden = true`).
 4. **Restoration:** When message mode closes, the pinned card's previous expansion state is restored if not overridden; if the user overrode it, the user's override is preserved.
 
+
+## Amendment — 2026-10-27 13:21 EDT: a plan question needs "approve" and "plan"; the plan named by its id as written (living section L3)
+
+The owner (2026-10-27), after "Restart the daemon on the plan 05 build?"
+was shown as a plan question and its approve sent "Approve the plan": "for
+now, the text has to have \"approve\" and \"plan\" to get the approve
+suggestion, and the plan id (as included in the text, such as 03) should be
+included in the suggestion. this is a heuristic and shouldn't be tied
+closely to the CRITICAL RULES/tpt planning format (those are a separate
+concern from flankr itself)".
+
+This replaces the 2026-10-23 21:57 EDT amendment's item 1, first
+paragraph, on what makes a question `about_plan` and what `plan` holds:
+1. A pending question is `about_plan` only when it has both the word
+   "approve" and the word "plan" (whole words, any case). A
+   `docs/design/…_PLAN.md` path, "amendment" or "draft" alone no longer
+   count, and nothing reads the planning format's file names.
+2. `plan` is the id the text gives the plan: the word right after "plan"
+   when it holds a digit (`plan 03`, `plan 20261027_04`, `plan #5` read as
+   `5`), sent as "plan <id>". With no such word, or two different ids, it
+   is `None`.
+3. The answers name it so: **approve** sends "Approve plan 03", **discuss**
+   starts "Discuss plan 03:", **implement** sends "Approve plan 03 and start
+   building it"; without an id, "the plan" as before.
+
+The rest of the 21:57, 22:58 and 23:00 EDT amendments stands.
