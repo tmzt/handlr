@@ -164,9 +164,18 @@ pub fn validate_arbitrary_command(cmd: &str) -> Result<String, String> {
 /// amended at 01:58 EDT).
 pub const MAX_MESSAGE_LEN: usize = 4000;
 
-/// Validate a dictated message (plan 20261023_02, decision 6, as amended):
-/// characters outside the whitelist are stripped, up to [`SYMBOL_THRESHOLD`]
-/// triggering symbols allowed, at most [`MAX_MESSAGE_LEN`] characters.
+/// The characters that make a text's first word a command in a coding
+/// agent's prompt: `/` (a slash command), `!` (Claude Code's shell mode)
+/// and `#` (older Claude Code's memory).
+pub const COMMAND_PREFIXES: &[char] = &['/', '!', '#'];
+
+/// Validate a message to a coding agent, typed in the app or sent by the
+/// general agent (plan 20261023_02, decision 6, and plan 20261027_04,
+/// decision 1, as changed in CHANGES.md 2026-10-27): the symbol ban is now
+/// only on the first word, which may not start with one of
+/// [`COMMAND_PREFIXES`], since a command must be on the agent's allow list.
+/// After it any printable text is kept, paths and flags included; paths
+/// are checked against the project by [`check_paths`].
 ///
 /// Returns the cleaned message (runs of spaces folded to one, surrounding
 /// space and trailing `.` and `,` removed) or the reason it was refused. Line
@@ -178,24 +187,19 @@ pub fn validate_message(text: &str) -> Result<String, String> {
             "Message rejected: control characters (found {bad:?}) are not permitted."
         ));
     }
-
-    let trigger_count = count_triggering_symbols(text);
-    if trigger_count > SYMBOL_THRESHOLD {
-        let bad = first_triggering_symbol(text).unwrap_or('?');
-        return Err(format!(
-            "Message rejected: too many symbols (found '{bad}', limit is {SYMBOL_THRESHOLD})."
-        ));
-    }
-
-    let filtered = filter_symbols(text);
-    let folded = filtered
-        .split(' ')
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let folded = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let cleaned = folded.trim_end_matches(['.', ',']).trim_end();
-    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
+    if !cleaned.chars().any(|c| c.is_alphanumeric()) {
         return Err("Message cannot be empty.".to_string());
+    }
+    if let Some(c) = cleaned
+        .chars()
+        .next()
+        .filter(|c| COMMAND_PREFIXES.contains(c))
+    {
+        return Err(format!(
+            "Message rejected: it starts with '{c}', which makes it a command; only the agent's allowed commands may be sent."
+        ));
     }
     let len = cleaned.chars().count();
     if len > MAX_MESSAGE_LEN {
@@ -206,11 +210,121 @@ pub fn validate_message(text: &str) -> Result<String, String> {
     Ok(cleaned.to_string())
 }
 
-/// Validate general agent chat input (plan 20261024_03 as amended):
-/// characters outside the whitelist are stripped, up to [`SYMBOL_THRESHOLD`]
-/// triggering symbols allowed, at most [`MAX_MESSAGE_LEN`] characters.
-/// Line breaks and tabs are preserved for multi-line inputs, and sentence
-/// punctuation is preserved.
+/// At most this many paths are checked in one message; more is refused.
+pub const MAX_PATHS: usize = 32;
+/// A path longer than this many characters is refused.
+pub const MAX_PATH_LEN: usize = 512;
+/// A path with more than this many `/`-separated parts is refused.
+pub const MAX_PATH_PARTS: usize = 32;
+/// A path with more than this many `..` parts is refused.
+pub const MAX_PARENT_PARTS: usize = 4;
+
+/// The words of `text` that look like paths: those holding a `/`, or
+/// starting with `~`, once quotes, brackets and trailing sentence
+/// punctuation are taken off. URLs (`://`) are not paths.
+pub fn path_words(text: &str) -> Vec<&str> {
+    text.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| "\"'`()[]{}<>".contains(c))
+                .trim_end_matches(['.', ',', ';', ':', '?', '!'])
+        })
+        .filter(|w| (w.contains('/') || w.starts_with('~')) && !w.contains("://"))
+        .collect()
+}
+
+/// Check every path in a message to an agent (the owner, 2026-10-27:
+/// "paths should be resolved and checked to see if they fall outside of the
+/// focused repo, at least for now"): each is resolved against `root`, the
+/// agent's project folder (`~` is the home folder), and must stay inside it.
+/// Resolution is by the text first, with bounds against pathological paths
+/// ([`MAX_PATHS`], [`MAX_PATH_LEN`], [`MAX_PATH_PARTS`],
+/// [`MAX_PARENT_PARTS`]); a path that exists is then resolved on disk too,
+/// so a symbolic link out of the project is caught. Without a `root`, a
+/// message holding a path is refused.
+pub fn check_paths(text: &str, root: Option<&str>) -> Result<(), String> {
+    use std::path::{Component, Path, PathBuf};
+    let words = path_words(text);
+    if words.is_empty() {
+        return Ok(());
+    }
+    if words.len() > MAX_PATHS {
+        return Err(format!(
+            "Message rejected: {} paths, more than the {MAX_PATHS} allowed.",
+            words.len()
+        ));
+    }
+    let Some(root) = root.filter(|r| r.starts_with('/')) else {
+        return Err(format!(
+            "Message rejected: the agent's project folder is unknown, so the path '{}' can't be checked.",
+            words[0]
+        ));
+    };
+    // The root by the text, and on disk when it is on this machine.
+    let root_text = normalise(Path::new(root)).unwrap_or_else(|| PathBuf::from(root));
+    let root_disk = std::fs::canonicalize(&root_text).ok();
+    let home = std::env::var("HOME").ok();
+    for word in words {
+        let outside =
+            || format!("Message rejected: the path '{word}' is outside the project {root}.");
+        if word.chars().count() > MAX_PATH_LEN {
+            return Err(format!(
+                "Message rejected: a path is longer than {MAX_PATH_LEN} characters."
+            ));
+        }
+        let parts = word.split('/').filter(|p| !p.is_empty()).count();
+        let parents = word.split('/').filter(|p| *p == "..").count();
+        if parts > MAX_PATH_PARTS || parents > MAX_PARENT_PARTS {
+            return Err(format!(
+                "Message rejected: the path '{word}' has too many parts (at most {MAX_PATH_PARTS}, and {MAX_PARENT_PARTS} '..')."
+            ));
+        }
+        let joined = match word.strip_prefix('~') {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => match &home {
+                Some(home) => PathBuf::from(format!("{home}{rest}")),
+                None => return Err(outside()),
+            },
+            // `~user/...`: another user's home.
+            Some(_) => return Err(outside()),
+            None if word.starts_with('/') => PathBuf::from(word),
+            None => root_text.join(word),
+        };
+        let resolved = normalise(&joined).ok_or_else(outside)?;
+        if !resolved.starts_with(&root_text) {
+            return Err(outside());
+        }
+        if let (Some(root_disk), Ok(real)) = (&root_disk, std::fs::canonicalize(&resolved))
+            && !real.starts_with(root_disk)
+        {
+            return Err(outside());
+        }
+    }
+    return Ok(());
+
+    /// `path` with `.` and `..` resolved by the text alone; `None` when a
+    /// `..` climbs above `/`.
+    fn normalise(path: &Path) -> Option<PathBuf> {
+        let mut out = PathBuf::new();
+        for part in path.components() {
+            match part {
+                Component::RootDir | Component::Prefix(_) => out.push(part.as_os_str()),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    if !out.pop() || out.as_os_str().is_empty() {
+                        return None;
+                    }
+                }
+                Component::Normal(p) => out.push(p),
+            }
+        }
+        Some(out)
+    }
+}
+
+/// Validate general agent chat input (plan 20261024_03 as amended): at
+/// most [`MAX_MESSAGE_LEN`] characters, line breaks and tabs kept. It goes
+/// to the general agent, never to a pane, so symbols are kept too (CHANGES.md
+/// 2026-10-27, plan 20261027_04): what the general agent then sends to an
+/// agent is checked by [`validate_message`] and [`check_paths`].
 pub fn validate_general_input(text: &str) -> Result<String, String> {
     if let Some(bad) = text
         .chars()
@@ -221,17 +335,8 @@ pub fn validate_general_input(text: &str) -> Result<String, String> {
         ));
     }
 
-    let trigger_count = count_triggering_symbols(text);
-    if trigger_count > SYMBOL_THRESHOLD {
-        let bad = first_triggering_symbol(text).unwrap_or('?');
-        return Err(format!(
-            "Input rejected: too many symbols (found '{bad}', limit is {SYMBOL_THRESHOLD})."
-        ));
-    }
-
-    let filtered = filter_message_symbols(text);
     let mut lines = Vec::new();
-    for line in filtered.lines() {
+    for line in text.lines() {
         let folded = line
             .split(' ')
             .filter(|w| !w.is_empty())
@@ -509,31 +614,103 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_message_removes_symbols_and_rejects_excessive_symbols() {
-        // Single symbols followed by space (such as period, comma, exclamation, hyphen)
-        // do not trigger the threshold and are kept or removed cleanly.
+    fn test_validate_message_keeps_symbols_after_the_first_word() {
         assert_eq!(
-            validate_message("Hello! This is a test, with punctuation. Is it ready?").unwrap(),
-            "Hello This is a test, with punctuation. Is it ready?"
+            validate_message("Hello! Look in src/main.rs, then run cargo test --all.").unwrap(),
+            "Hello! Look in src/main.rs, then run cargo test --all"
         );
         assert_eq!(
-            validate_message("run tests - now").unwrap(),
-            "run tests now"
+            validate_message("say \"hi\" (twice); ok?").unwrap(),
+            "say \"hi\" (twice); ok?"
         );
+        assert_eq!(validate_message("café crème").unwrap(), "café crème");
+        // The first word may not be a command.
+        for bad in ["/compact", "  /usage now", "!rm -rf /", "#remember this"] {
+            let err = validate_message(bad).unwrap_err();
+            assert!(err.contains("makes it a command"), "{bad:?}: {err}");
+        }
+        // A command character later on is only text.
         assert_eq!(
-            validate_message("first; then second: done.").unwrap(),
-            "first then second: done"
+            validate_message("please run /compact later").unwrap(),
+            "please run /compact later"
         );
+    }
 
-        // Embedded symbols not followed by space (such as paths, flags, quotes) trigger the threshold and are rejected.
-        let err = validate_message("/compact").unwrap_err();
-        assert!(err.contains("too many symbols"), "got: {err}");
-        let err = validate_message("look in src/main.rs please").unwrap_err();
-        assert!(err.contains("too many symbols"), "got: {err}");
-        let err = validate_message("use cargo test --all").unwrap_err();
-        assert!(err.contains("too many symbols"), "got: {err}");
-        let err = validate_message("say \"hi\"").unwrap_err();
-        assert!(err.contains("too many symbols"), "got: {err}");
+    #[test]
+    fn test_check_paths_keeps_paths_inside_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(root.join("docs/design")).unwrap();
+        std::fs::write(root.join("docs/design/x.md"), "x").unwrap();
+        let root_s = root.to_str().unwrap();
+        let ok = |t: &str| check_paths(t, Some(root_s));
+        // Relative, ./, new files, and absolute inside the root.
+        assert!(ok("read docs/design/x.md and fix src/new.rs").is_ok());
+        assert!(ok("see ./docs/design/x.md, then docs/../README.md.").is_ok());
+        assert!(ok(&format!("open {root_s}/docs/design/x.md")).is_ok());
+        assert!(ok("plain words, no paths; and/or both").is_ok());
+        assert!(ok("see https://example.com/a/b").is_ok());
+        // Outside: climbing out, absolute elsewhere, another home.
+        for bad in [
+            "read ../other/secret.md",
+            "read docs/../../x",
+            "cat /etc/passwd",
+            "run /compact later",
+            "look at ~other/notes",
+            "open `../x`",
+        ] {
+            let err = ok(bad).unwrap_err();
+            assert!(err.contains("outside the project"), "{bad:?}: {err}");
+        }
+        // No root: a path can't be checked; plain text still can.
+        assert!(
+            check_paths("read docs/x.md", None)
+                .unwrap_err()
+                .contains("unknown")
+        );
+        assert!(check_paths("no paths here", None).is_ok());
+    }
+
+    #[test]
+    fn test_check_paths_bounds_pathological_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("a/b/c/d/e/f");
+        std::fs::create_dir_all(&root).unwrap();
+        let root_s = root.to_str().unwrap();
+        // Four `..` that stay inside are fine; five are refused even inside.
+        assert!(check_paths("x/y/z/w/../../../../ok.md", Some(root_s)).is_ok());
+        let err = check_paths("v/x/y/z/w/../../../../../ok.md", Some(root_s)).unwrap_err();
+        assert!(err.contains("too many parts"), "{err}");
+        let deep = vec!["d"; MAX_PATH_PARTS + 1].join("/");
+        assert!(
+            check_paths(&deep, Some(root_s))
+                .unwrap_err()
+                .contains("too many parts")
+        );
+        let long = format!("x/{}", "a".repeat(MAX_PATH_LEN));
+        assert!(
+            check_paths(&long, Some(root_s))
+                .unwrap_err()
+                .contains("longer than")
+        );
+        let many = vec!["a/b"; MAX_PATHS + 1].join(" ");
+        assert!(
+            check_paths(&many, Some(root_s))
+                .unwrap_err()
+                .contains("paths, more than")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_check_paths_follows_a_link_out_of_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.path().join("secret.md"), "s").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("secret.md"), root.join("link.md")).unwrap();
+        let err = check_paths("read ./link.md", Some(root.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("outside the project"), "{err}");
     }
 
     #[test]
@@ -584,6 +761,11 @@ mod tests {
         assert_eq!(
             validate_general_input("Claude_Continue Send").unwrap(),
             "Claude_Continue Send"
+        );
+        // Symbols are kept: the input goes to the general agent, not a pane.
+        assert_eq!(
+            validate_general_input("read docs/design/x.md --all \"now\"").unwrap(),
+            "read docs/design/x.md --all \"now\""
         );
         for bad in ["clear\u{1b}[2J", "x\u{85}y", "a\x00b", "a\x07b"] {
             let err = validate_general_input(bad).unwrap_err();

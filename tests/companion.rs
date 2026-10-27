@@ -1157,20 +1157,25 @@ async fn a_denied_message_sends_nothing() {
 }
 
 #[tokio::test]
-async fn messages_are_always_confirmed_and_strictly_filtered() {
+async fn messages_are_always_confirmed_and_checked() {
     // claude takes commands without confirmation here; a message still asks.
     let env = start(direct("esc")).await;
     let (mut c, _) = Client::companion(&env).await;
     let r = c.call("agents.send", message("claude", "keep going")).await;
     assert_eq!(r["result"]["status"], "pending", "{r}");
 
-    // A character outside the filter is refused, and named.
+    // A command as the first word is refused, and named; a path out of
+    // the agent's project too (CHANGES.md 2026-10-27, plan 20261027_04).
     let r = c
-        .call("agents.send", message("claude", "look in src/main.rs"))
+        .call("agents.send", message("claude", " /status please"))
         .await;
     assert_eq!(r["error"]["code"], -32001, "{r}");
     let why = r["error"]["message"].as_str().unwrap();
     assert!(why.contains("'/'"), "{why}");
+    let r = c
+        .call("agents.send", message("claude", "read ../../../../../x"))
+        .await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
     let r = c.call("agents.send", message("claude", "one\ntwo")).await;
     assert!(
         r["error"]["message"]

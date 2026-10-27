@@ -1149,8 +1149,20 @@ async fn send_message(
 ) -> Result<Value, ErrorObject> {
     let daemon = &conn.daemon;
     let principal = conn.principal();
-    let checked = policy::check_message(principal, &daemon.agents, agent, pane_id, &p.command)
-        .map_err(|denied| ErrorObject::new(codes::NOT_PERMITTED, denied.to_string()))?;
+    // Paths in the text are checked against the agent's project.
+    let root = crate::core::agents::agents(snap)
+        .into_iter()
+        .find(|a| crate::watch::pane_ids_match(&a.pane_id, pane_id))
+        .and_then(|a| a.cwd);
+    let checked = policy::check_message(
+        principal,
+        &daemon.agents,
+        agent,
+        pane_id,
+        &p.command,
+        root.as_deref(),
+    )
+    .map_err(|denied| ErrorObject::new(codes::NOT_PERMITTED, denied.to_string()))?;
     let names = daemon.names(snap);
     let named = names.get(pane_id);
     let spoken = named

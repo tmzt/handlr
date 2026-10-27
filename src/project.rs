@@ -81,7 +81,7 @@ impl ProjectFiles {
     /// [`MAX_LISTED`]. Symbolic links are neither followed nor listed.
     pub fn list(&self, glob: Option<&str>) -> Result<Listing, String> {
         let glob = glob
-            .map(str::trim)
+            .map(from_root)
             .filter(|g| !g.is_empty())
             .map(ReadPattern::parse)
             .transpose()?;
@@ -115,15 +115,17 @@ impl ProjectFiles {
 
     /// The file at the root-relative `path`, at most [`MAX_READ_BYTES`].
     pub fn read(&self, path: &str) -> Result<FileText, String> {
-        let given = path.trim().trim_start_matches("./");
-        let refused = || format!("'{path}' may not be read.");
-        if given.starts_with('/') || given.contains('\\') || !self.allowed(given) {
+        // A leading `/` is the project's root, never the filesystem's
+        // (CHANGES.md 2026-10-27, plan 20261027_04).
+        let given = from_root(path);
+        let refused = || format!("'{path}' may not be read. {PATH_FORM}");
+        if given.is_empty() || given.contains('\\') || !self.allowed(given) {
             return Err(refused());
         }
         // The real file, which a symbolic link may move: inside the root,
         // and allowed by its own name too.
         let canonical = std::fs::canonicalize(self.root.join(given))
-            .map_err(|_| format!("'{path}' does not exist."))?;
+            .map_err(|_| format!("'{path}' does not exist. {PATH_FORM}"))?;
         let real = relative(&self.root, &canonical).ok_or_else(refused)?;
         if !self.allowed(&real) {
             return Err(refused());
@@ -168,6 +170,18 @@ impl ProjectFiles {
 
 /// `path` relative to `root`, `/`-separated; `None` outside it or not
 /// UTF-8.
+/// How a refused or missing path should have been written, for Gemini to
+/// try again.
+const PATH_FORM: &str = "Paths are relative to the project's root, e.g. docs/design/plan.md.";
+
+/// `path` relative to the project's root: trimmed, with a leading `/` or
+/// `./` taken as the root.
+fn from_root(path: &str) -> &str {
+    let path = path.trim();
+    let path = path.trim_start_matches('/');
+    path.strip_prefix("./").unwrap_or(path)
+}
+
 fn relative(root: &Path, path: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     let names: Option<Vec<&str>> = rel.components().map(|c| c.as_os_str().to_str()).collect();
@@ -248,6 +262,16 @@ mod tests {
             .unwrap();
         assert_eq!(files.read("README.md").unwrap().text, "text");
         assert_eq!(files.read("./docs/design/x.md").unwrap().text, "text");
+        // A leading `/` is the project's root; the filesystem's absolute
+        // path to the same file is not accepted, and the error says how.
+        assert_eq!(files.read("/docs/design/x.md").unwrap().text, "text");
+        let absolute = format!("{}/docs/design/x.md", root.display());
+        let err = files.read(&absolute).unwrap_err();
+        assert!(err.contains("relative to the project's root"), "{err}");
+        assert_eq!(
+            files.list(Some("/docs/**/*.md")).unwrap().paths,
+            ["docs/design/x.md"]
+        );
         for path in [
             "docs/x.txt",
             "src/README.md",

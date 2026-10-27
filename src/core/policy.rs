@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use crate::commands::{validate_arbitrary_command, validate_message};
+use crate::commands::{check_paths, validate_arbitrary_command, validate_message};
 use crate::config::AgentConfig;
 use crate::core::principal::Principal;
 
@@ -146,14 +146,16 @@ pub fn is_allow_listed(agents: &[AgentConfig], agent: &str, command: &str) -> bo
 
 /// Check a dictated message (plan 20261023_02, decision 6 as amended):
 /// the agent's entry and reach as for a command, its `allow_messages`, then
-/// `validate_message`. A message is always confirmed, whatever the agent's
-/// `require_confirmation`.
+/// `validate_message`, and `check_paths` against `root`, the agent's project
+/// folder (herdr's `cwd` for its pane). A message is always confirmed,
+/// whatever the agent's `require_confirmation`.
 pub fn check_message(
     principal: &Principal,
     agents: &[AgentConfig],
     agent: &str,
     pane_id: &str,
     text: &str,
+    root: Option<&str>,
 ) -> Result<Checked, Denied> {
     let agent_cfg = entry(principal, agents, agent, pane_id)?;
     if !agent_cfg.allow_messages {
@@ -161,8 +163,10 @@ pub fn check_message(
             agent: agent.to_string(),
         });
     }
+    let command = validate_message(text).map_err(Denied::Invalid)?;
+    check_paths(&command, root).map_err(Denied::Invalid)?;
     Ok(Checked {
-        command: validate_message(text).map_err(Denied::Invalid)?,
+        command,
         require_confirmation: true,
     })
 }
@@ -218,15 +222,33 @@ mod tests {
     fn messages_are_validated_and_always_confirmed() {
         let p = Principal::local("t");
         // omp does not require confirmation for commands; a message still does.
-        let checked = check_message(&p, &agents(), "omp", "p2", "please run  the tests.").unwrap();
+        let checked =
+            check_message(&p, &agents(), "omp", "p2", "please run  the tests.", None).unwrap();
         assert_eq!(checked.command, "please run the tests");
         assert!(checked.require_confirmation);
-        let err = check_message(&p, &agents(), "omp", "p2", "rm -rf /").unwrap_err();
+        let err = check_message(&p, &agents(), "omp", "p2", "rm -rf /", None).unwrap_err();
         assert!(matches!(err, Denied::Invalid(_)), "{err}");
-        let err = check_message(&p, &agents(), "codex", "p3", "hello").unwrap_err();
+        // A command as the first word, even after spaces, needs the allow list.
+        let err = check_message(&p, &agents(), "omp", "p2", "  /status", None).unwrap_err();
+        assert!(err.to_string().contains("makes it a command"), "{err}");
+        // Paths: inside the project, kept; outside, refused.
+        let checked = check_message(
+            &p,
+            &agents(),
+            "omp",
+            "p2",
+            "fix src/main.rs --all",
+            Some("/work/x"),
+        )
+        .unwrap();
+        assert_eq!(checked.command, "fix src/main.rs --all");
+        let err =
+            check_message(&p, &agents(), "omp", "p2", "read ../y/z", Some("/work/x")).unwrap_err();
+        assert!(err.to_string().contains("outside the project"), "{err}");
+        let err = check_message(&p, &agents(), "codex", "p3", "hello", None).unwrap_err();
         assert!(matches!(err, Denied::UnconfiguredAgent { .. }));
         let off = vec![AgentConfig::new("claude", vec![], true).with_messages(false)];
-        let err = check_message(&p, &off, "claude", "p1", "hello").unwrap_err();
+        let err = check_message(&p, &off, "claude", "p1", "hello", None).unwrap_err();
         assert_eq!(
             err,
             Denied::MessagesOff {
@@ -237,7 +259,7 @@ mod tests {
             agents: Some(vec!["omp".to_string()]),
             ..Principal::local("mcp")
         };
-        let err = check_message(&narrowed, &agents(), "claude", "p1", "hello").unwrap_err();
+        let err = check_message(&narrowed, &agents(), "claude", "p1", "hello", None).unwrap_err();
         assert!(matches!(err, Denied::OutOfReach { .. }));
     }
 

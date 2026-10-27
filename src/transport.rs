@@ -433,7 +433,19 @@ impl HerdrToolExecutor {
         );
 
         let checked = if message {
-            policy::check_message(&self.principal, &self.agents, &agent_name, &pane_id, text)
+            // Paths in the text are checked against the agent's project.
+            let root = snapshot
+                .as_ref()
+                .and_then(|snap| current_ref(snap, &pane_id))
+                .and_then(|a| a.cwd);
+            policy::check_message(
+                &self.principal,
+                &self.agents,
+                &agent_name,
+                &pane_id,
+                text,
+                root.as_deref(),
+            )
         } else {
             policy::check(&self.principal, &self.agents, &agent_name, &pane_id, text)
         };
@@ -732,12 +744,12 @@ impl HerdrContextContributor {
             })
             .unwrap_or_else(|| crate::core::naming::capitalise(&agent.agent));
         section.push_str(&format!(
-            "Current agent: {spoken} (pane {}, project {}, cwd {}). The user means this agent \
+            "Current agent: {spoken} (pane {}, project {}). The user means this agent \
              unless they name another; `send_agent_command` without `agent` goes to it, and \
-             `focus_project` changes it.\n\n",
+             `focus_project` changes it. File paths for it are relative to its project's \
+             root.\n\n",
             agent.pane_id,
             agent.project.as_deref().unwrap_or("unknown"),
-            agent.cwd.as_deref().unwrap_or("unknown"),
         ));
         Some(section)
     }
@@ -1061,10 +1073,12 @@ impl libinfer::TurnContributor for HerdrContextContributor {
                 content.push_str(&format!(
                     "With `send_agent_command`, an allowed command is typed as it is. Any other text \
                      is sent to an agent that takes requests in words as a request, checked as a \
-                     message typed in the app: one line, at most {} characters, letters, digits, \
-                     spaces and the punctuation . , ' ? : (no '/' or '-'; say a path or a flag in \
-                     words). The user always approves a request before it is sent.\n",
-                    crate::commands::MAX_MESSAGE_LEN
+                     message typed in the app: one line, at most {} characters, not starting with \
+                     '/', '!' or '#' (only allowed commands may). Paths and flags are fine inside \
+                     it, but every path must be inside that agent's project, at most {} '..' \
+                     deep. The user always approves a request before it is sent.\n",
+                    crate::commands::MAX_MESSAGE_LEN,
+                    crate::commands::MAX_PARENT_PARTS
                 ));
             }
             content.push('\n');
@@ -1336,15 +1350,23 @@ mod tests {
         assert!(view.message);
         assert!(command_log(&client).await.is_empty());
 
-        // What validate_message refuses, as for a message typed in the app.
-        let err = executor
-            .execute_tool(
-                "send_agent_command",
-                &json!({ "agent": "p1", "text": "open src/main.rs", "handle": "h2" }),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.contains("Message rejected"), "{err}");
+        // What validate_message and check_paths refuse, as for a message
+        // typed in the app: a command first that isn't allowed, and a path
+        // out of the project.
+        for text in [
+            "/status please",
+            "  !ls",
+            "read ../../../../../../etc/passwd",
+        ] {
+            let err = executor
+                .execute_tool(
+                    "send_agent_command",
+                    &json!({ "agent": "p1", "text": text, "handle": "h2" }),
+                )
+                .await
+                .unwrap_err();
+            assert!(err.contains("Message rejected"), "{text}: {err}");
+        }
 
         // Outside a companion turn there is no way to approve it.
         let res = HerdrToolExecutor::new(
@@ -1492,7 +1514,11 @@ mod tests {
         let section = &content[start..];
         assert!(section.contains("Current agent: Claude"), "{section}");
         assert!(section.contains("pane p1"), "{section}");
-        assert!(section.contains("cwd /work/example"), "{section}");
+        assert!(section.contains("project "), "{section}");
+        assert!(
+            !section.contains("/work/example"),
+            "no absolute folder: {section}"
+        );
 
         // Without one kept, there is no section.
         let plain = HerdrContextContributor::new(client, vec![]);
