@@ -265,3 +265,9 @@ aligned. 2. not now 3. it should just enable non coding agent llms 4. llm".
    open question 2.
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-27 01:00 EDT: approved, to be built now
+
+The owner approved the plan, with its amendment above, on 2026-10-27
+("approve and build"). The status becomes `In implementation` with step 1's
+commit.
