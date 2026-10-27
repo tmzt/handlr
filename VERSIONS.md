@@ -288,3 +288,20 @@ amendment):
 - **Added:** `common::AgentsSendParams::confirmed: bool`, off when left out
   and not written when off: the user approved the send in the app already,
   so a companion that may approve sends it without a confirmation.
+
+## libflankr_proto 0.3.13 — 2026-10-27 (the commit tagged `libflankr_proto-v0.3.13`)
+
+Additive, by the owner's ruling ("appending to a struct is additive", and
+plan 20261027_06, decision 5: "a patch release"): one new type and one
+appended, serde-defaulted field (plan 20261027_06, step 2):
+
+- **Added:**
+  - `common::Answer { label, style, sends, starts, command, answers }`, one
+    suggested answer to a pending question, its texts filled by the
+    daemon's `SUGGESTIONS.md` rules;
+  - `common::PendingQuestion::answers: Vec<Answer>`, empty when left out
+    and not written when empty: the answers to offer, in order; empty from
+    an older daemon.
+- **Changed (documentation only):** `PendingQuestion::about_plan` and
+  `PendingQuestion::plan` now say what the daemon fills them with (the
+  `plan` rule matched, and the plan as its answers name it).

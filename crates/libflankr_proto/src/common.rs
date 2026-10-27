@@ -415,18 +415,54 @@ pub struct PendingQuestion {
     pub text: String,
     /// The reply's timestamp, RFC 3339.
     pub ts: String,
-    /// The question is about a plan: it names a `docs/design/…_PLAN.md`
-    /// or says "plan", "amendment", "draft" or "approve". The companion
-    /// offers approve, improve and implement in place of Yes and No.
+    /// The question is about a plan: the daemon's `plan` rule in
+    /// `SUGGESTIONS.md` took it (plan 20261027_06, decision 5), which by
+    /// default means it says "approve" with "plan" or "draft" as whole
+    /// words. A companion without [`PendingQuestion::answers`] offers
+    /// approve, discuss and implement in place of Yes and No.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub about_plan: bool,
-    /// The plan's spoken name ("the overview screen plan"), when exactly
-    /// one plan path names it.
+    /// The plan the question is about, as its answers name it: "plan 06"
+    /// when the question, or the rest of its reply, gives an id after
+    /// "plan" or "draft"; else "the draft" or "the plan". Only with
+    /// `about_plan`. An older daemon gave a plan's spoken name ("the
+    /// overview screen plan").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<String>,
     /// The links in `text`, as [`Entry::links`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
+    /// The answers to offer, in order, their texts filled (plan
+    /// 20261027_06, decision 5). Empty from an older daemon: the companion
+    /// then offers its own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<Answer>,
+}
+
+/// One suggested answer to a pending question (plan 20261027_06,
+/// decision 3). Exactly one of `sends` and `starts` is given.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Answer {
+    /// What the button or text shows.
+    pub label: String,
+    /// `approve`, `deny`, `green`, `link` or `yellow`, mapped by the
+    /// companion to its theme's roles: `approve` and `deny` as buttons,
+    /// the others as plain coloured text. A companion draws a style it
+    /// does not know as `link`.
+    pub style: String,
+    /// The text sent when tapped, at most 200 characters, with
+    /// `confirmed: true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sends: Option<String>,
+    /// The text the message card opens with, for the user to finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts: Option<String>,
+    /// `sends` is one of the agent's allowed commands, not a message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub command: bool,
+    /// A tap answers the question, so its card goes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub answers: bool,
 }
 
 /// The longest `PendingQuestion::text`, in characters.
@@ -1390,6 +1426,7 @@ mod tests {
                 about_plan: false,
                 plan: None,
                 links: vec![],
+                answers: vec![],
             })),
             removed: vec![Serial::new(0x3fa9_c21e, 400, 195)],
             slots: vec![],
@@ -1676,6 +1713,7 @@ mod tests {
             about_plan: false,
             plan: None,
             links: vec![],
+            answers: vec![],
         });
         round_trip(PendingQuestion {
             text: "Approve docs/design/X_PLAN.md?".into(),
@@ -1686,11 +1724,56 @@ mod tests {
                 text: "docs/design/X_PLAN.md".into(),
                 url: "u".into(),
             }],
+            answers: vec![],
         });
+        // With answers (plan 20261027_06, step 2).
+        let with_answers = PendingQuestion {
+            text: "Approve plan 04?".into(),
+            ts: "t".into(),
+            about_plan: true,
+            plan: Some("plan 04".into()),
+            links: vec![],
+            answers: vec![
+                Answer {
+                    label: "approve".into(),
+                    style: "green".into(),
+                    sends: Some("Approve plan 04".into()),
+                    starts: None,
+                    command: false,
+                    answers: true,
+                },
+                Answer {
+                    label: "discuss".into(),
+                    style: "link".into(),
+                    sends: None,
+                    starts: Some("Discuss plan 04:".into()),
+                    command: false,
+                    answers: false,
+                },
+                Answer {
+                    label: "cont".into(),
+                    style: "yellow".into(),
+                    sends: Some("continue".into()),
+                    starts: None,
+                    command: true,
+                    answers: false,
+                },
+            ],
+        };
+        round_trip(with_answers.clone());
+        assert_eq!(
+            serde_json::to_value(&with_answers.answers).unwrap(),
+            json!([
+                {"label": "approve", "style": "green", "sends": "Approve plan 04", "answers": true},
+                {"label": "discuss", "style": "link", "starts": "Discuss plan 04:"},
+                {"label": "cont", "style": "yellow", "sends": "continue", "command": true}
+            ])
+        );
         // Old JSON reads, and empty new fields stay off the wire.
         let q: PendingQuestion =
             serde_json::from_value(json!({"text": "Go on?", "ts": "t"})).unwrap();
         assert!(!q.about_plan && q.plan.is_none() && q.links.is_empty());
+        assert!(q.answers.is_empty());
         assert_eq!(
             serde_json::to_value(&q).unwrap(),
             json!({"text": "Go on?", "ts": "t"})
@@ -1746,6 +1829,7 @@ mod tests {
                         about_plan: false,
                         plan: None,
                         links: vec![],
+                        answers: vec![],
                     }),
                 }),
                 turn: Some(Turn::Asking {
