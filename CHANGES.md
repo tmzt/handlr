@@ -2438,3 +2438,27 @@ Plan: [Markdown detection in agent output and automatic switch to rich rendering
 
 
 
+
+## 2026-10-27 01:27 EDT — plan 20261027_02, steps 1–4: departures
+
+Built in the flankr (step 1), libflankr_proto 0.3.10 (step 3), flankr (step 2),
+flankr-companion and companion (step 4) commits before this entry.
+1. **Clients are kept per backend, model and key, and per profile** (the
+   general agent, or summaries). A Gemini client fixes its tools and system
+   prompt when built, so the general agent and the summaries can't share
+   one; the two summaries do. A changed key gets a new client.
+2. **`server.capabilities`'s params are `{ "llm": LlmInfo }`,** not a bare
+   `LlmInfo`, so other capabilities can be added later.
+3. **Test stand-ins:** `TurnOptions::engine` and `SpeechOptions::engine` still
+   replace the real clients. A use with one counts as available unless its
+   own `enabled = false` turns it off.
+4. **A backend without `kind`** is an error for that backend alone.
+5. **Step 1 also touched server code** (`companion.rs`, `speech.rs`, `mod.rs`) to
+   compile with the deprecated sections now optional.
+6. **Commit order 1, 3, 2, 4:** step 2 needs the protocol. The flankr crate
+   doesn't compile at the protocol commit alone, only once step 2 lands.
+7. **An old `[gemini] model`** applies to every use, so the owner's config
+   (`gemini-3.8-flash`) runs all three uses on Flash rather than Flash-Lite for
+   the summaries. Moving to `[llm]` with no model gets the tier defaults:
+   `gemini-3.8-flash` for the general agent, `gemini-3.8-flash-lite` for both
+   summaries.
