@@ -263,3 +263,23 @@ adds a row to decision 3's Device section, before *Unpair this device*:
 
 The row is built with the session cache, in the full-text build after
 this plan's steps.
+
+## Amendment — 2026-10-27 11:27 EDT: Tab follows focus, in the Voice section
+
+The owner (2026-10-27), on plan 20261027_04: "the focus was meant to be
+split, not change herdr's focused tab, but that would be an option in the
+settings tab_follows_focus"; then "the tab_follows_focus part should also be
+added to the appropriate plan". This adds a row to decision 3's Voice
+section, after *General agent (Gemini)*:
+- *Tab follows focus* (toggle, off): on, when Gemini focuses a project
+  (`focus_project`, plan 20261027_04), herdr's focused tab on the desktop
+  moves to that agent's tab too; off, Gemini's focus stays its own and the
+  desktop is left alone. Dim and inactive while *General agent (Gemini)* is
+  off.
+- Sent to the daemon in `client.options` as `tab_follows_focus: bool`
+  (default false), a field appended to `ClientOptionsParams` beside
+  `general_agent` (decision 7), in `libflankr_proto` 0.3.11.
+- Its copy is `[Copy] tab_follows_focus` in `SETTINGS_COPY.md`, naming
+  herdr's tab focus and the `focus` tool it does not affect.
+
+The row is built by plan 20261027_04's step 6, once that plan is approved.
