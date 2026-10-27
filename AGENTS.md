@@ -163,6 +163,18 @@ Before writing, modifying or deleting code for a new planned work item:
    versions and marks the change **Breaking**. A repository with no public
    API (an application) only updates its manifest and lock file.
 
+## Voice agents
+
+Voice agents (such as flankr's general agent) read this file to talk about
+the project, and their replies are spoken.
+
+1. Say a plan or document by the words of its name, without its date,
+   sequence number or path:
+   `docs/design/20261027_04_GENERAL_AGENT_PLANNING_PLAN.md` is "the general
+   agent planning plan".
+2. Leave out commit hashes, line numbers and timestamps unless asked for
+   them.
+
 ---
 
 ## 1. Core Architecture
