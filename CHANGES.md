@@ -2641,3 +2641,22 @@ Plan: docs/design/20261027_05_PLANNING_FOLLOWUPS_PLAN.md. Steps 2
    `TurnOptions.file_watcher`, `ToolSet.recent_commits`) and changes
    `LlmConfig.enabled` to `Option<bool>`, but flankr is the daemon
    application with no `VERSIONS.md`; no version change.
+
+## 2026-10-27 13:40 EDT — the confirmed flag's trust, and the plan-question heuristic's tests
+
+Plans: docs/design/20261023_02_BULK_INPUT_PLAN.md (the 2026-10-27 13:25 EDT
+amendment; commits `9ce89dd`, `519c8f0`, `a225e07`, `b652196`) and
+docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md (L3, the 13:21 and 13:24
+EDT amendments; `f8b00df`, `2d84726`).
+
+1. **`confirmed` is trusted as far as self-approval goes,** not by
+   `can_approve` alone as item 2 of the 13:25 amendment says: from a
+   companion it is honoured for a message (whose voice-turn confirmation
+   the companion could approve itself) and for a command only when the
+   companion may approve. A local companion's tapped `continue` therefore
+   still asks; a paired phone's does not. Nothing is trusted that wasn't.
+2. **A submit by silence** does not send `confirmed`: only the Submit
+   button does. It keeps its own approval of the confirmation, as before.
+3. **The plan-question fixture** (`tests/fixtures/sessions/…/-work-plans`)
+   now asks "Approve plan 04 and build …", since a plan path alone no
+   longer makes a plan question.
