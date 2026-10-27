@@ -79,6 +79,9 @@ pub struct Daemon {
     /// `speech.summarize`: the summary prompt and its kept answers (plan
     /// 20261023_05).
     pub speech: speech::SpeechService,
+    /// `[llm]`: which of the daemon's own LLM uses are available, and
+    /// their clients (plan 20261027_02).
+    pub llm: Arc<crate::llm::LlmService>,
 }
 
 impl Daemon {
@@ -116,9 +119,16 @@ impl Daemon {
             .agent_sessions
             .clone()
             .unwrap_or_else(|| Arc::new(Sessions::new()));
-        let speech = speech::SpeechService::new(config, turns.speech.clone());
+        let llm = crate::llm::LlmService::new(
+            config,
+            turns.llm.clone(),
+            crate::llm::Overrides {
+                agent: turns.engine.clone(),
+                summary: turns.speech.engine.clone(),
+            },
+        );
+        let speech = speech::SpeechService::new(Arc::clone(&llm), turns.speech.clone());
         let hub = SessionHub::new(Arc::clone(&sessions), config.urls.repowiki_url.clone());
-        let cards = config.summary.as_ref().is_none_or(|s| s.cards);
         let daemon = Arc::new(Daemon {
             sessions,
             hub,
@@ -133,14 +143,14 @@ impl Daemon {
             // SAFETY: getuid has no preconditions and cannot fail.
             uid: unsafe { libc::getuid() },
             link,
-            turns: companion::TurnService::new(config, turns),
+            turns: companion::TurnService::new(Arc::clone(&llm), &turns),
+            llm,
         });
-        // `[summary] cards`: each new Finished card summarised once.
-        if cards {
-            daemon
-                .hub
-                .summarize_cards_with(Arc::new(speech::DaemonCards(Arc::downgrade(&daemon))));
-        }
+        // `[llm.uses.card_summaries]`: each new Finished card summarised
+        // once, while card summaries are available.
+        daemon
+            .hub
+            .summarize_cards_with(Arc::new(speech::DaemonCards(Arc::downgrade(&daemon))));
         daemon
     }
 
@@ -306,6 +316,8 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
         });
     }
     tokio::spawn(subscriptions::journal_confirmations(Arc::clone(&daemon)));
+    // `[llm]` read again within 5 s of a change (plan 20261027_02).
+    daemon.llm.spawn_watch();
     if let Some(transport) = options.event_transport {
         tokio::spawn(watcher::run(
             transport,

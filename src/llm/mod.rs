@@ -9,6 +9,11 @@
 //! for the general agent, Flash-Lite for summaries, never Pro by default).
 
 pub mod gemini;
+pub mod service;
+
+pub use service::{
+    ClientFactory, ClientSpec, GeminiFactory, LlmOptions, LlmService, Overrides, Profile,
+};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -81,7 +86,7 @@ impl Kind {
 }
 
 /// An API key. Its `Debug` never shows it.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ApiKey(String);
 
 impl ApiKey {
@@ -180,7 +185,7 @@ pub fn read_key_file(path: &Path) -> Result<Option<String>, String> {
 }
 
 /// What a use runs on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Target {
     /// The backend's name (`gemini` when discovered).
     pub backend: String,

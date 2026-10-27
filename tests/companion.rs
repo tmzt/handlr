@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use flankr::config::{AgentConfig, AppConfig};
+use flankr::llm::{ClientFactory, ClientSpec, KeyEnv, LlmOptions, Profile};
 use flankr::reasoning::{MockHandler, MockReasoningEngine, ReasoningEngine, ToolExecutor};
 use flankr::server::companion::{INTERRUPTED_ENTRY, TurnOptions};
 use flankr::server::link::{Link, LinkSettings};
@@ -127,6 +128,17 @@ async fn start_speech(
     home: &Path,
     speech: SpeechOptions,
 ) -> Env {
+    let turns = TurnOptions {
+        engine: Some(engine),
+        speech,
+        ..TurnOptions::default()
+    };
+    start_turns(config, with_link, home, turns).await
+}
+
+/// A daemon with `turns`, its histories under a temporary folder and the
+/// agents' sessions under `home`.
+async fn start_turns(config: AppConfig, with_link: bool, home: &Path, turns: TurnOptions) -> Env {
     let dir = tempfile::Builder::new()
         .prefix("hc")
         .tempdir_in("/tmp")
@@ -152,11 +164,10 @@ async fn start_speech(
         &config,
         link.as_ref().map(|(_, l)| Arc::clone(l)),
         TurnOptions {
-            engine: Some(engine),
             session_dir: Some(sessions.clone()),
             // The synthetic fixtures, never this machine's own sessions.
             agent_sessions: Some(Arc::new(Sessions::with_home(home))),
-            speech,
+            ..turns
         },
     );
     let listener = server::bind(&socket).await.unwrap();
@@ -1929,4 +1940,267 @@ async fn with_the_general_agent_off_spoken_summaries_go_on() {
         .await;
     assert_eq!(r["result"]["summary"], "Three files changed.", "{r}");
     assert_eq!(mock.recorded_transcripts().len(), 1);
+}
+
+// Plan 20261027_02, step 2: the daemon on `[llm]`, with Gemini mocked by a
+// factory that answers with the backend and model it was built for.
+
+/// Builds mocks: the general agent's runs `Script` (and `wait`, which
+/// takes 800 ms), a summary's answers with its backend and model.
+#[derive(Default)]
+struct Factory {
+    built: std::sync::Mutex<Vec<(String, String, String)>>,
+}
+
+/// `wait`: a turn that takes 800 ms, then says which client ran it.
+struct Labelled(String);
+
+#[async_trait]
+impl MockHandler for Labelled {
+    async fn handle(
+        &self,
+        text: &str,
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        if text == "wait" {
+            tokio::time::sleep(Duration::from_millis(800)).await;
+            return Ok(Some(format!("Waited on {}.", self.0)));
+        }
+        let said = Script.handle(text, executor).await?;
+        Ok(said.map(|s| format!("{s} ({})", self.0)))
+    }
+}
+
+impl ClientFactory for Factory {
+    fn build(&self, spec: &ClientSpec<'_>) -> Result<Arc<dyn ReasoningEngine>, String> {
+        let label = format!("{}/{}", spec.target.backend, spec.target.model);
+        self.built.lock().unwrap().push((
+            spec.use_.name().to_string(),
+            spec.target.backend.clone(),
+            spec.target.model.clone(),
+        ));
+        Ok(match spec.profile {
+            Profile::Agent => Arc::new(MockReasoningEngine::with_handler(Labelled(label))),
+            Profile::Summary => Arc::new(MockReasoningEngine::with_response(label)),
+        })
+    }
+}
+
+struct LlmEnv {
+    env: Env,
+    /// The daemon's working folder, with the config and the key.
+    folder: tempfile::TempDir,
+    config: PathBuf,
+    factory: Arc<Factory>,
+    _home: tempfile::TempDir,
+}
+
+fn write_key(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, "not-a-real-key").unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// Rewrites the config so its stamp changes.
+fn rewrite(path: &Path, text: &str) {
+    std::fs::write(path, text).unwrap();
+    let f = std::fs::File::options().write(true).open(path).unwrap();
+    f.set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
+        .unwrap();
+}
+
+/// A daemon whose `[llm]` is `text`, watched every 100 ms, with a key when
+/// `key`, the factory's clients and no engine given.
+async fn start_llm(text: &str, key: bool) -> LlmEnv {
+    let folder = tempfile::tempdir().unwrap();
+    if key {
+        write_key(&folder.path().join(".private/gemini_api_key"));
+    }
+    let config_path = folder.path().join("config.toml");
+    std::fs::write(&config_path, text).unwrap();
+    let config: AppConfig = toml::from_str(text).unwrap();
+    let factory = Arc::new(Factory::default());
+    let home = speech_home(COMPLEX);
+    let turns = TurnOptions {
+        llm: LlmOptions {
+            config_path: Some(config_path.clone()),
+            key_env: Some(KeyEnv::in_dir(folder.path())),
+            factory: Some(factory.clone()),
+            interval: Some(Duration::from_millis(100)),
+        },
+        ..TurnOptions::default()
+    };
+    let env = start_turns(config, false, home.path(), turns).await;
+    give_session(&env.daemon).await;
+    LlmEnv {
+        env,
+        folder,
+        config: config_path,
+        factory,
+        _home: home,
+    }
+}
+
+const TWO_BACKENDS: &str = r#"
+[llm]
+enabled = true
+default = "main"
+[llm.backends.main]
+kind = "gemini"
+[llm.backends.cheap]
+kind = "gemini"
+model = "gemini-3.8-flash-lite"
+[llm.uses.spoken_summaries]
+backend = "cheap"
+[llm.uses.card_summaries]
+enabled = false
+"#;
+
+#[tokio::test]
+async fn with_llm_off_hello_says_so_and_turns_are_refused() {
+    let e = start_llm("", true).await;
+    let (mut c, hello) = Client::companion(&e.env).await;
+    let llm = &hello["result"]["llm"];
+    assert_eq!(llm["general_agent"], false, "{hello}");
+    assert_eq!(llm["summaries"], false, "{hello}");
+    assert!(
+        llm["reason"].as_str().unwrap().contains("[llm] enabled"),
+        "{hello}"
+    );
+    let r = c.call("turn.start", turn(1, "hello")).await;
+    assert_eq!(r["error"]["code"], -32016, "{r}");
+    assert!(
+        r["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("[llm] enabled"),
+        "{r}"
+    );
+    // Read aloud goes by the rules, and nothing was built.
+    c.call("client.options", json!({"spoken_output": true}))
+        .await;
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(
+        r["result"],
+        json!({"read": COMPLEX_READ, "complex": true}),
+        "{r}"
+    );
+    assert!(e.factory.built.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn each_use_runs_on_its_own_backend_and_model() {
+    let e = start_llm(TWO_BACKENDS, true).await;
+    let (mut c, hello) = Client::companion(&e.env).await;
+    assert_eq!(
+        hello["result"]["llm"],
+        json!({"general_agent": true, "summaries": true}),
+        "{hello}"
+    );
+    let r = c.call("turn.start", turn(1, "hello")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    let say = c.note("turn.say").await;
+    assert_eq!(
+        say["params"]["text"], "You said hello. (main/gemini-3.8-flash)",
+        "{say}"
+    );
+    c.call("client.options", json!({"spoken_output": true}))
+        .await;
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(r["result"]["summary"], "cheap/gemini-3.8-flash-lite", "{r}");
+    let built = e.factory.built.lock().unwrap().clone();
+    assert_eq!(
+        built,
+        [
+            (
+                "general_agent".to_string(),
+                "main".to_string(),
+                "gemini-3.8-flash".to_string()
+            ),
+            (
+                "spoken_summaries".to_string(),
+                "cheap".to_string(),
+                "gemini-3.8-flash-lite".to_string()
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_reload_turns_the_general_agent_off_for_the_next_turn_while_a_running_one_finishes() {
+    let e = start_llm("[llm]\nenabled = true\n", true).await;
+    let (mut c, _) = Client::companion(&e.env).await;
+    let running = c.request("turn.start", turn(1, "wait")).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    rewrite(
+        &e.config,
+        "[llm]\nenabled = true\n[llm.uses.general_agent]\nenabled = false\n",
+    );
+    // The phone is told, without reconnecting.
+    let caps = c.note("server.capabilities").await;
+    assert_eq!(caps["params"]["llm"]["general_agent"], false, "{caps}");
+    assert_eq!(caps["params"]["llm"]["summaries"], true, "{caps}");
+    assert!(
+        caps["params"]["llm"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("[llm.uses.general_agent] enabled = false"),
+        "{caps}"
+    );
+    // The running turn finishes on its client.
+    let r = c.response(running).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    let say = c.note("turn.say").await;
+    assert_eq!(say["params"]["text"], "Waited on gemini/gemini-3.8-flash.");
+    // The next one is refused.
+    let r = c.call("turn.start", turn(2, "hello")).await;
+    assert_eq!(r["error"]["code"], -32016, "{r}");
+    // A new connection's hello says so too.
+    let (_other, hello) = Client::companion(&e.env).await;
+    assert_eq!(hello["result"]["llm"]["general_agent"], false, "{hello}");
+}
+
+#[tokio::test]
+async fn a_key_file_appearing_makes_the_uses_available() {
+    let e = start_llm("[llm]\nenabled = true\n", false).await;
+    let (mut c, hello) = Client::companion(&e.env).await;
+    assert_eq!(hello["result"]["llm"]["general_agent"], false, "{hello}");
+    assert!(
+        hello["result"]["llm"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("no Gemini key"),
+        "{hello}"
+    );
+    let r = c.call("turn.start", turn(1, "hello")).await;
+    assert_eq!(r["error"]["code"], -32016, "{r}");
+    write_key(&e.folder.path().join(".private/gemini_api_key"));
+    let caps = c.note("server.capabilities").await;
+    assert_eq!(
+        caps["params"]["llm"],
+        json!({"general_agent": true, "summaries": true}),
+        "{caps}"
+    );
+    let r = c.call("turn.start", turn(2, "hello")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+}
+
+#[tokio::test]
+async fn a_broken_llm_section_keeps_the_last_good_settings() {
+    let e = start_llm("[llm]\nenabled = true\n", true).await;
+    let (mut c, _) = Client::companion(&e.env).await;
+    rewrite(&e.config, "[llm]\nenabled = maybe\n");
+    // Several checks pass; nothing changes.
+    c.drain(Duration::from_millis(400)).await;
+    assert!(
+        c.position(|m| m["method"] == "server.capabilities")
+            .is_none()
+    );
+    let r = c.call("turn.start", turn(1, "hello")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
 }

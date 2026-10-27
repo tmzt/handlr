@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -31,9 +31,9 @@ use libflankr_proto::envelope::codes;
 use serde_json::Value;
 
 use super::conn::{self, Conn};
-use crate::config::AppConfig;
+use crate::llm::{LlmService, Profile, Use};
 use crate::prompts::{Prompt, Prompts, SPOKEN_SUMMARY};
-use crate::reasoning::{GeminiReasoningEngine, Message, ReasoningEngine, ToolExecutor};
+use crate::reasoning::{Message, ReasoningEngine, ToolExecutor};
 use crate::sessions::hub::{CardSummarizer, CardSummary};
 
 /// How long a summary may take before it is given up and the reply is
@@ -103,11 +103,14 @@ pub fn cut_at_sentence(text: &str, max: usize) -> String {
     }
 }
 
-/// How `speech.summarize` is set up. The default is Gemini, with the key
-/// the turn service uses, the shipped prompts and a 10 s timeout.
+/// How `speech.summarize` is set up. The default is `[llm]`'s clients for
+/// `spoken_summaries` and `card_summaries` (plan 20261027_02), the shipped
+/// prompts and a 10 s timeout.
 #[derive(Clone, Default)]
 pub struct SpeechOptions {
-    /// The engine to use instead of Gemini (tests use a mock).
+    /// The engine to use for both summaries instead of `[llm]`'s clients,
+    /// which counts them as available unless their own `enabled = false`
+    /// (tests use a mock).
     pub engine: Option<Arc<dyn ReasoningEngine>>,
     /// `--prompts <path>`: this file in place of the shipped
     /// `ADDITIONAL_PROMPTS.md` (decision 7).
@@ -116,12 +119,9 @@ pub struct SpeechOptions {
     pub timeout: Option<Duration>,
 }
 
-/// The summary prompt, its engine and the answers kept.
+/// The summary prompt, its clients and the answers kept.
 pub struct SpeechService {
-    given: Option<Arc<dyn ReasoningEngine>>,
-    gemini_key_file: PathBuf,
-    gemini_model: Option<String>,
-    gemini: OnceLock<Arc<dyn ReasoningEngine>>,
+    llm: Arc<LlmService>,
     /// `spoken_summary` and its filled system text, or why it is not
     /// there.
     prompt: Result<(Prompt, String), String>,
@@ -130,12 +130,9 @@ pub struct SpeechService {
 }
 
 impl SpeechService {
-    pub fn new(config: &AppConfig, options: SpeechOptions) -> Self {
+    pub fn new(llm: Arc<LlmService>, options: SpeechOptions) -> Self {
         SpeechService {
-            given: options.engine,
-            gemini_key_file: super::companion::gemini_key_file(config),
-            gemini_model: config.gemini.as_ref().and_then(|g| g.model.clone()),
-            gemini: OnceLock::new(),
+            llm,
             prompt: load_prompt(options.prompts_file.as_deref()),
             timeout: options.timeout.unwrap_or(SUMMARY_TIMEOUT),
             cache: Mutex::new(VecDeque::new()),
@@ -147,26 +144,11 @@ impl SpeechService {
         self.prompt.as_ref().ok().map(|(_, system)| system.as_str())
     }
 
-    /// The engine: Gemini with the summary's system text and no tools,
-    /// built on first use.
-    fn engine(&self, system: &str) -> Result<Arc<dyn ReasoningEngine>, String> {
-        if let Some(engine) = &self.given {
-            return Ok(Arc::clone(engine));
-        }
-        if let Some(engine) = self.gemini.get() {
-            return Ok(Arc::clone(engine));
-        }
-        let api_key = crate::llm::read_key_file(&self.gemini_key_file)?;
-        let mut builder = GeminiReasoningEngine::builder()
-            .api_key(api_key)
-            .system_prompt(system)
-            .tools(Vec::new())
-            .max_turns(1);
-        if let Some(model) = &self.gemini_model {
-            builder = builder.model(model.clone());
-        }
-        let engine: Arc<dyn ReasoningEngine> = Arc::new(builder.build()?);
-        Ok(Arc::clone(self.gemini.get_or_init(|| engine)))
+    /// `use_`'s client from `[llm]`: the summary's system text and no
+    /// tools, built on first use and shared by the two summaries when they
+    /// run on the same backend and model.
+    fn engine(&self, use_: Use, system: &str) -> Result<Arc<dyn ReasoningEngine>, String> {
+        self.llm.client(use_, Profile::Summary, Some(system))
     }
 
     fn cached(&self, key: &(String, String)) -> Option<String> {
@@ -204,6 +186,10 @@ impl SpeechService {
             None
         } else if cached.is_some() {
             cached
+        } else if let Err(e) = self.llm.available(Use::SpokenSummaries) {
+            // Read through the local rules, as offline (decision 8).
+            log::debug!("speech.summarize: {e}; the reply is read as it is");
+            None
         } else {
             match self.summarize(agent, project, reply).await {
                 Ok(summary) => Some(summary),
@@ -231,7 +217,9 @@ impl SpeechService {
         project: &str,
         reply: &str,
     ) -> Result<String, ErrorObject> {
-        let answer = self.ask(agent, project, reply, false).await?;
+        let answer = self
+            .ask(Use::SpokenSummaries, agent, project, reply, false)
+            .await?;
         Ok(cut_at_sentence(&answer, self.max_words()))
     }
 
@@ -243,7 +231,9 @@ impl SpeechService {
         project: &str,
         reply: &str,
     ) -> Result<CardSummary, ErrorObject> {
-        let answer = self.ask(agent, project, reply, true).await?;
+        let answer = self
+            .ask(Use::CardSummaries, agent, project, reply, true)
+            .await?;
         Ok(split_card_answer(&answer, self.max_words()))
     }
 
@@ -259,6 +249,7 @@ impl SpeechService {
     /// after the user message when `points`.
     async fn ask(
         &self,
+        use_: Use,
         agent: &str,
         project: &str,
         reply: &str,
@@ -281,7 +272,7 @@ impl SpeechService {
             let request = prompt.fill(request, &values).map_err(unavailable)?;
             user = format!("{}\n\n{}", user.trim_end(), request.trim());
         }
-        let engine = self.engine(system).map_err(unavailable)?;
+        let engine = self.engine(use_, system).map_err(unavailable)?;
         let turns = [Message {
             role: "user".to_string(),
             content: user,
@@ -298,19 +289,24 @@ impl SpeechService {
     }
 }
 
-/// The hub's card summariser (`[summary] cards`): the daemon's
-/// [`SpeechService::card_summary`]. No answer, no Gemini key or an error
-/// leaves the card's fields empty.
+/// The hub's card summariser (`[llm.uses.card_summaries]`): the daemon's
+/// [`SpeechService::card_summary`]. Card summaries unavailable, no answer
+/// or an error leaves the card's fields empty.
 pub struct DaemonCards(pub Weak<super::Daemon>);
 
 #[async_trait]
 impl CardSummarizer for DaemonCards {
     async fn summarize_card(&self, agent: &str, project: &str, reply: &str) -> Option<CardSummary> {
         let daemon = self.0.upgrade()?;
+        // Unavailable: cards carry no points or spoken text (decision 8).
+        if let Err(e) = daemon.llm.available(Use::CardSummaries) {
+            log::debug!("[llm] card_summaries: {e}");
+            return None;
+        }
         match daemon.speech.card_summary(agent, project, reply).await {
             Ok(summary) => Some(summary),
             Err(e) => {
-                log::warn!("[summary] cards: {}", e.message);
+                log::warn!("[llm] card_summaries: {}", e.message);
                 None
             }
         }
@@ -445,7 +441,26 @@ pub(super) async fn speech_summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::AppConfig;
+    use crate::llm::{LlmOptions, Overrides};
     use crate::reasoning::MockReasoningEngine;
+
+    /// A service whose summaries are `engine`'s, with `[llm]` as in
+    /// `config`.
+    fn service(config: &AppConfig, options: SpeechOptions) -> SpeechService {
+        let llm = LlmService::new(
+            config,
+            LlmOptions {
+                key_env: Some(crate::llm::KeyEnv::in_dir("/nonexistent")),
+                ..LlmOptions::default()
+            },
+            Overrides {
+                summary: options.engine.clone(),
+                ..Overrides::default()
+            },
+        );
+        SpeechService::new(llm, options)
+    }
 
     /// Replies as agents gave them.
     const PLAIN: &str = "I ran the tests and they all pass. Shall I go on with the next step?";
@@ -474,7 +489,7 @@ mod tests {
     #[tokio::test]
     async fn a_complex_reply_is_summarised_only_with_spoken_output_on() {
         let mock = Arc::new(MockReasoningEngine::with_response("The tests pass."));
-        let service = SpeechService::new(
+        let service = service(
             &AppConfig::default(),
             SpeechOptions {
                 engine: Some(mock.clone()),
@@ -528,7 +543,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("prompts.md");
         std::fs::write(&file, "# [Prompt] spoken_summary\n\n- system: |\n    s\n").unwrap();
-        let service = SpeechService::new(
+        let service = service(
             &AppConfig::default(),
             SpeechOptions {
                 engine: Some(Arc::new(MockReasoningEngine::with_response("x"))),
@@ -598,7 +613,7 @@ mod tests {
         let mock = Arc::new(MockReasoningEngine::with_response(
             "Written and pushed.\nPOINTS:\n- Wrote it\n- Pushed it",
         ));
-        let service = SpeechService::new(
+        let service = service(
             &AppConfig::default(),
             SpeechOptions {
                 engine: Some(mock.clone()),
@@ -627,7 +642,7 @@ mod tests {
 
     #[test]
     fn the_cache_keeps_the_last_64() {
-        let service = SpeechService::new(&AppConfig::default(), SpeechOptions::default());
+        let service = service(&AppConfig::default(), SpeechOptions::default());
         let answer = |n: usize| n.to_string();
         for n in 0..=CACHE_SIZE {
             service.keep(("p1".to_string(), n.to_string()), answer(n));

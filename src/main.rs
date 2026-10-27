@@ -240,6 +240,17 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
             prompts_file: args.prompts.as_ref().map(expand_tilde),
             ..Default::default()
         },
+        // `[llm]` is read again from this file while the daemon runs
+        // (plan 20261027_02, decision 6).
+        llm: flankr::llm::LlmOptions {
+            config_path: Some(
+                args.config
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(flankr::config::AppConfig::default_config_path),
+            ),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let daemon = flankr::server::Daemon::with_turns(client, &config, link, turns);

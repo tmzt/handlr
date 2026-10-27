@@ -512,6 +512,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
             session_id: Some(session_id),
             vocabulary,
             paired: paired_now.then_some(true),
+            llm: Some(conn.daemon.llm.info()),
         })?;
         return Ok((principal, result));
     }
@@ -691,6 +692,10 @@ async fn call(
     match method {
         companion::methods::TURN_START if conn.is_companion() => {
             let p: companion::TurnStartParams = params(raw)?;
+            // Plan 20261027_02, decision 8: no general agent, no turn.
+            if let Err(reason) = daemon.llm.available(crate::llm::Use::GeneralAgent) {
+                return Err(ErrorObject::new(codes::LLM_UNAVAILABLE, reason));
+            }
             if !conn
                 .general_agent
                 .load(std::sync::atomic::Ordering::Relaxed)
@@ -1212,6 +1217,11 @@ async fn forward_events(conn: Arc<Conn>) {
     let mut core = conn.daemon.events.subscribe();
     let principal = conn.principal().clone();
     let companion = conn.is_companion();
+    // What `hello` said of `[llm]` is the starting point; a change is sent
+    // as `server.capabilities` (plan 20261027_02, decision 7).
+    let mut llm = conn.daemon.llm.subscribe();
+    llm.mark_unchanged();
+    let mut llm_open = true;
     let mut vocabulary_check = tokio::time::interval_at(
         tokio::time::Instant::now() + turns::VOCABULARY_INTERVAL,
         turns::VOCABULARY_INTERVAL,
@@ -1221,6 +1231,16 @@ async fn forward_events(conn: Arc<Conn>) {
             _ = vocabulary_check.tick(), if companion => {
                 turns::check_vocabulary(Arc::clone(&conn)).await;
             }
+            changed = llm.changed(), if companion && llm_open => match changed {
+                Ok(()) => {
+                    let info = llm.borrow_and_update().clone();
+                    conn.send(&Notification::new(
+                        companion::methods::SERVER_CAPABILITIES,
+                        companion::ServerCapabilities { llm: Some(info) },
+                    ));
+                }
+                Err(_) => llm_open = false,
+            },
             event = confirms.recv() => match event {
                 // A companion's own voice-turn question is sent by its turn,
                 // after the reply.

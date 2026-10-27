@@ -29,17 +29,15 @@ use tokio_util::sync::CancellationToken;
 
 use super::Daemon;
 use super::conn::Conn;
-use crate::config::AppConfig;
 use crate::core::agents::extract_agent_name_for_pane;
 use crate::core::confirm::{ConfirmEvent, ConfirmView, Lifetime, Outcome, StatusKey, Token};
 use crate::core::naming::{self, Names};
 use crate::core::policy::Denied;
 use crate::core::principal::Principal;
-pub(super) use crate::llm::read_key_file;
-use crate::reasoning::{
-    GeminiReasoningEngine, Message, ReasoningEngine, SessionManager, declare_gemini_tools,
-    default_system_prompt, with_flankr_routes,
-};
+#[cfg(test)]
+use crate::llm::read_key_file;
+use crate::llm::{LlmOptions, LlmService, Profile, Use};
+use crate::reasoning::{Message, ReasoningEngine, SessionManager};
 use crate::transport::{HerdrContextContributor, HerdrToolExecutor, TurnLog, VoiceTurn};
 
 /// The model entry an interrupted turn leaves in the history.
@@ -59,12 +57,13 @@ const CLAIM_WAIT: Duration = Duration::from_secs(2);
 /// besides after every turn.
 pub const VOCABULARY_INTERVAL: Duration = Duration::from_secs(30);
 
-/// How the turn service is set up. The default is Gemini, with the key from
-/// `[gemini] api_key_file` (default `.private/gemini_api_key`) or
-/// `GEMINI_API_KEY`, and sessions in `~/.cache/libinfer`.
+/// How the turn service is set up. The general agent's client comes from
+/// `[llm]` (plan 20261027_02), and sessions are kept in `~/.cache/libinfer`.
 #[derive(Clone, Default)]
 pub struct TurnOptions {
-    /// The engine to use instead of Gemini (tests use a scripted
+    /// The engine to use for every turn instead of `[llm]`'s client, which
+    /// counts the general agent as available unless
+    /// `[llm.uses.general_agent] enabled = false` (tests use a scripted
     /// `MockReasoningEngine`).
     pub engine: Option<Arc<dyn ReasoningEngine>>,
     /// Where session histories are kept, instead of `~/.cache/libinfer`.
@@ -74,58 +73,34 @@ pub struct TurnOptions {
     pub agent_sessions: Option<Arc<crate::sessions::Sessions>>,
     /// `speech.summarize`'s engine, prompts and timeout (plan 20261023_05).
     pub speech: super::speech::SpeechOptions,
+    /// `[llm]`'s watch, keys and clients (plan 20261027_02).
+    pub llm: LlmOptions,
 }
 
 /// The engine, the session histories, and who is in a turn.
 pub struct TurnService {
-    given: Option<Arc<dyn ReasoningEngine>>,
-    gemini_key_file: PathBuf,
-    /// `[gemini] model`; `None` or empty is libinfer-gemini's default.
-    gemini_model: Option<String>,
-    gemini: OnceLock<Arc<dyn ReasoningEngine>>,
+    llm: Arc<LlmService>,
     session_dir: Option<PathBuf>,
     manager: OnceLock<SessionManager>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
 }
 
 impl TurnService {
-    pub fn new(config: &AppConfig, options: TurnOptions) -> Self {
+    pub fn new(llm: Arc<LlmService>, options: &TurnOptions) -> Self {
         TurnService {
-            given: options.engine,
-            gemini_key_file: gemini_key_file(config),
-            gemini_model: config.gemini.as_ref().and_then(|g| g.model.clone()),
-            gemini: OnceLock::new(),
-            session_dir: options.session_dir,
+            llm,
+            session_dir: options.session_dir.clone(),
             manager: OnceLock::new(),
             sessions: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The engine. Gemini is built on first use, so a daemon without a key
-    /// still serves everything else, and a turn says why it cannot think.
-    /// It is wrapped in flankr's routes, so "never mind" needs no request.
+    /// The general agent's client from `[llm]`, built on first use, so a
+    /// daemon without one still serves everything else, and a turn says
+    /// why it cannot think. It is wrapped in flankr's routes, so "never
+    /// mind" needs no request.
     fn engine(&self) -> Result<Arc<dyn ReasoningEngine>, String> {
-        if let Some(engine) = &self.given {
-            return Ok(Arc::clone(engine));
-        }
-        if let Some(engine) = self.gemini.get() {
-            return Ok(Arc::clone(engine));
-        }
-        // Read on first use, so a key added later needs no restart.
-        let api_key = read_key_file(&self.gemini_key_file)?;
-        let mut builder = GeminiReasoningEngine::builder()
-            .api_key(api_key)
-            .tools(declare_gemini_tools());
-        if let Some(model) = &self.gemini_model {
-            builder = builder.model(model.clone());
-        }
-        if let Some(prompt) = default_system_prompt() {
-            builder = builder.system_prompt(prompt);
-        }
-        let gemini = builder.build()?;
-        log::info!("The reasoning engine is Gemini, model {}", gemini.model());
-        let engine = with_flankr_routes(Arc::new(gemini));
-        Ok(Arc::clone(self.gemini.get_or_init(|| engine)))
+        self.llm.client(Use::GeneralAgent, Profile::Agent, None)
     }
 
     fn manager(&self) -> Result<SessionManager, String> {
@@ -333,31 +308,14 @@ pub fn message_confirm_text(spoken: &str) -> String {
     format!("Approve sending your message to {spoken}?")
 }
 
-/// The default key file, under the gitignored `.private`.
-const GEMINI_KEY_FILE: &str = ".private/gemini_api_key";
-
-/// `[gemini] api_key_file`, or [`GEMINI_KEY_FILE`], made absolute against
-/// the working directory at startup.
-pub(super) fn gemini_key_file(config: &AppConfig) -> PathBuf {
-    let path = PathBuf::from(
-        config
-            .gemini
-            .as_ref()
-            .and_then(|g| g.api_key_file.as_deref())
-            .unwrap_or(GEMINI_KEY_FILE),
-    );
-    match std::env::current_dir() {
-        Ok(dir) if path.is_relative() => dir.join(path),
-        _ => path,
-    }
-}
-
 /// A sentence to speak for a turn that failed with `error`.
 pub fn spoken_error(error: &str) -> String {
     if error.contains("GEMINI_API_KEY") {
         "Sorry, I can't think right now: the server has no Gemini API key.".to_string()
     } else if error.contains("Gemini key file") {
         "Sorry, I can't think right now: the server can't read its Gemini key.".to_string()
+    } else if error.contains("[llm") {
+        "Sorry, I can't think right now: the general agent is off on the server.".to_string()
     } else if error.contains("took too long") {
         "Sorry, that took too long. Please try again.".to_string()
     } else if error.contains("session") {
