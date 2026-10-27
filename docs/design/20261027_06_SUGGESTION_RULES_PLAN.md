@@ -179,3 +179,40 @@ Steps 1, 2 and 3 are one daemon or protocol commit each, 4 is two. 3 needs
    shipped rules, as `themes.toml` does for the app?
 3. **The standing row** (cont and cmpct under the view): move it into the
    file as well, as a rule for idle agents, or leave it in the app?
+
+## Amendment — 2026-10-27 14:13 EDT: the open questions answered: in the daemon; a user file merged over the shipped one; the standing row stays
+
+The owner (2026-10-27): "to answer your questions: yes, in the daemon. 2. it
+should merge the two if possible, with overrides via the ast, if that's not
+possible just the shipped file for now. they might stay for now, with a
+common_suggestions or idle_suggestions added later".
+
+1. **The rules run in the daemon,** as decisions 1 and 5 have it. This
+   answers open question 1.
+2. **A user file, merged over the shipped one.** The daemon also reads
+   `~/.config/flankr/SUGGESTIONS.md` when it exists, and merges it with the
+   shipped file (or the `--suggestions` file, which still replaces the
+   shipped one) on the parsed libtypedmd objects, not the text:
+   - an object with the same tag and head as a shipped one (`# [Rule] plan`,
+     `# [Answer] approve`) replaces it where it stands, so the order of the
+     shipped rules is kept;
+   - a new `[Rule]` goes before the shipped rules, in the user file's
+     order, so it is tried first; a new `[Answer]` is added;
+   - the merged set is then checked as decision 6 says, so a user answer an
+     unknown rule names, or a broken user object, is logged and left out,
+     and the shipped object it would have replaced stays.
+
+   The user file is watched (plan 20261027_05's watcher) and the merge done
+   again on a change. If merging by object turns out not to be possible
+   with libtypedmd as it is, only the shipped file is read for now, and that
+   is recorded in CHANGES.md. This replaces decision 6's "when it is given
+   by `--suggestions`, again on a change" with: the `--suggestions` file
+   and the user file are both watched. It answers open question 2.
+   Step 3's **Done when:** adds a user file replacing `[Answer] approve`'s
+   `sends`, adding a rule tried before `plan`, and a broken user object
+   leaving the shipped one in place.
+3. **The standing row (cont, cmpct) stays in the app** for now. A later
+   rule set, such as `common_suggestions` or `idle_suggestions`, may move
+   it into the file. This answers open question 3.
+
+The plan stays `Draft` until the owner approves it.
