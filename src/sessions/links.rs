@@ -251,28 +251,53 @@ impl Linker {
 }
 
 /// Whether `question` asks to approve a plan, and the plan's id as the text
-/// gives it (plan 20261022_03, L3, the 2026-10-27 13:21 EDT amendment): a
-/// heuristic on the words alone, tied to no planning format. It is about a
-/// plan when it has "approve" and "plan", or "approve" and "draft", as whole
-/// words; the id is the word after "plan" when that holds a digit, given as
-/// "plan <id>"; with none, a question about a draft names "the draft"; and
-/// two differing ids name none.
-pub fn plan_question(question: &str) -> (bool, Option<String>) {
-    let words: Vec<&str> = question
-        .split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '`' | '"' | '\'' | ','))
-        .filter(|w| !w.is_empty())
-        .collect();
-    let bare = |w: &str| -> String {
-        w.trim_matches(|c: char| !c.is_alphanumeric())
-            .to_ascii_lowercase()
-    };
+/// gives it (plan 20261022_03, L3, the 2026-10-27 13:21, 13:24 and 14:04 EDT
+/// amendments): a heuristic on the words alone, tied to no planning format.
+/// It is about a plan when it has "approve" and "plan", or "approve" and
+/// "draft", as whole words. The id is the word after "plan" or "draft" when
+/// that holds a digit, given as "plan <id>"; without one in the question,
+/// the last such id in `context` (the rest of the reply), so "Approve the
+/// draft?" after "I wrote plan 06 as a draft." names plan 06; with none
+/// there either, a question about a draft names "the draft". Two differing
+/// ids in the question name none.
+pub fn plan_question(question: &str, context: &str) -> (bool, Option<String>) {
+    let words = words_of(question);
     let has = |word: &str| words.iter().any(|w| bare(w) == word);
     if !(has("approve") && (has("plan") || has("draft"))) {
         return (false, None);
     }
+    let ids = plan_ids(&words);
+    let name = match ids.as_slice() {
+        [one] => Some(format!("plan {one}")),
+        [] => match plan_ids(&words_of(context)).last() {
+            Some(id) => Some(format!("plan {id}")),
+            None if !has("plan") => Some("the draft".to_string()),
+            None => None,
+        },
+        _ => None,
+    };
+    (true, name)
+}
+
+/// The words of `text`, split at spaces, brackets, quotes and commas.
+fn words_of(text: &str) -> Vec<&str> {
+    text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '`' | '"' | '\'' | ','))
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// A word without its surrounding punctuation, lower case.
+fn bare(w: &str) -> String {
+    w.trim_matches(|c: char| !c.is_alphanumeric())
+        .to_ascii_lowercase()
+}
+
+/// The ids after "plan" or "draft" (a word holding a digit, `#` dropped), in
+/// order, each once.
+fn plan_ids(words: &[&str]) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
     for pair in words.windows(2) {
-        if bare(pair[0]) != "plan" {
+        if !matches!(bare(pair[0]).as_str(), "plan" | "draft") {
             continue;
         }
         let id = pair[1]
@@ -287,12 +312,7 @@ pub fn plan_question(question: &str) -> (bool, Option<String>) {
             ids.push(id.to_string());
         }
     }
-    let name = match ids.as_slice() {
-        [one] => Some(format!("plan {one}")),
-        [] if !has("plan") => Some("the draft".to_string()),
-        _ => None,
-    };
-    (true, name)
+    ids
 }
 
 #[cfg(test)]
@@ -476,41 +496,62 @@ mod tests {
     #[test]
     fn plan_questions_are_found_and_named() {
         let yes = |id: Option<&str>| (true, id.map(str::to_string));
-        assert_eq!(plan_question("Approve plan 03?"), yes(Some("plan 03")));
+        assert_eq!(plan_question("Approve plan 03?", ""), yes(Some("plan 03")));
         assert_eq!(
-            plan_question("Do you approve the plan (plan 20261027_04) as written?"),
+            plan_question("Do you approve the plan (plan 20261027_04) as written?", ""),
             yes(Some("plan 20261027_04"))
         );
         assert_eq!(
-            plan_question("Approve plan #5, then build it?"),
+            plan_question("Approve plan #5, then build it?", ""),
             yes(Some("plan 5"))
         );
-        assert_eq!(plan_question("Shall I approve the plan?"), yes(None));
+        assert_eq!(plan_question("Shall I approve the plan?", ""), yes(None));
         // Two different ids: about a plan, but no one id.
-        assert_eq!(plan_question("Approve plan 03 or plan 04?"), yes(None));
+        assert_eq!(plan_question("Approve plan 03 or plan 04?", ""), yes(None));
         // Both words are needed.
         assert_eq!(
-            plan_question("Restart the daemon on the plan 05 build?"),
+            plan_question("Restart the daemon on the plan 05 build?", ""),
             (false, None)
         );
-        assert_eq!(plan_question("Do you approve?"), (false, None));
-        assert_eq!(plan_question("Shall I write the amendment?"), (false, None));
-        assert_eq!(plan_question("Is the DRAFT right?"), (false, None));
-        // "approve" with "draft" is about a plan too, named as the draft.
-        assert_eq!(plan_question("Approve the DRAFT?"), yes(Some("the draft")));
+        assert_eq!(plan_question("Do you approve?", ""), (false, None));
         assert_eq!(
-            plan_question("Approve the draft of plan 06?"),
+            plan_question("Shall I write the amendment?", ""),
+            (false, None)
+        );
+        assert_eq!(plan_question("Is the DRAFT right?", ""), (false, None));
+        // "approve" with "draft" is about a plan too, named as the draft.
+        assert_eq!(
+            plan_question("Approve the DRAFT?", ""),
+            yes(Some("the draft"))
+        );
+        assert_eq!(
+            plan_question("Approve the draft of plan 06?", ""),
             yes(Some("plan 06"))
         );
-        assert_eq!(plan_question("Install it on the S23?"), (false, None));
+        // The id after "draft", or from the rest of the reply.
+        assert_eq!(plan_question("Approve draft 07?", ""), yes(Some("plan 07")));
+        let reply = "I wrote plan 20261027_06 as a draft, after plan 05.";
+        assert_eq!(
+            plan_question("Approve the draft?", reply),
+            yes(Some("plan 05"))
+        );
+        assert_eq!(
+            plan_question("Approve the draft?", "I wrote it as plan 06, a draft."),
+            yes(Some("plan 06"))
+        );
+        assert_eq!(
+            plan_question("Approve the draft?", "Nothing numbered."),
+            yes(Some("the draft"))
+        );
+        assert_eq!(plan_question("Install it on the S23?", ""), (false, None));
         // A plan's path alone is no longer enough.
         assert_eq!(
-            plan_question(&format!("Shall I implement `{PLAN}`?")),
+            plan_question(&format!("Shall I implement `{PLAN}`?"), ""),
             (false, None)
         );
         // "planet", "planning" and "approved" are not the words.
         assert_eq!(
-            plan_question("Is the planet planning approved?"),
+            plan_question("Is the planet planning approved?", ""),
             (false, None)
         );
     }

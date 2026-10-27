@@ -64,7 +64,8 @@ pub fn question_in(reply: &Item) -> Option<PendingQuestion> {
         return None;
     }
     let redacted = redact(paragraph);
-    let (about_plan, plan) = super::links::plan_question(&redacted);
+    // An id the question lacks may be earlier in the reply.
+    let (about_plan, plan) = super::links::plan_question(&redacted, &redact(&reply.text));
     Some(PendingQuestion {
         text: cut(&redacted, PENDING_QUESTION_MAX),
         ts: reply.ts.clone(),
