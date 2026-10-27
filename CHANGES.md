@@ -2660,3 +2660,45 @@ EDT amendments; `f8b00df`, `2d84726`).
 3. **The plan-question fixture** (`tests/fixtures/sessions/…/-work-plans`)
    now asks "Approve plan 04 and build …", since a plan path alone no
    longer makes a plan question.
+
+## 2026-10-27 14:35 EDT — plan 20261027_06 steps 1–4's departures
+
+Plan: docs/design/20261027_06_SUGGESTION_RULES_PLAN.md. Steps 1
+(`4a120c3`), 2 (`0e29874`, tag `libflankr_proto-v0.3.13`, with
+`6d5e89a` for the new field's struct literals), 3 (`efcf3b6`) and 4
+(`fce074f`, `b28e49e`, `4a6736f`). The merge of the user file over the
+shipped one by object works with libtypedmd's AST, as the 14:13 amendment
+asks; a user rule offering an undefined answer falls back to the shipped
+rule of that name.
+
+1. **Where answers are filled:** `pending::question_for(reply, asker)`
+   fills them for `session.peek` and the session hub, with `agent` the
+   capitalised agent name (or the hub's shown name) and `project` the
+   agent's project (or the cwd's last part). The general agent's context,
+   notices and resolved cards keep `question_in` without answers.
+2. **`about_plan` and `plan`:** `about_plan` is "the rule `plan`
+   matched", and `plan` is `detected_plan_id` whenever it is, so "Shall I
+   approve the plan?" now carries "the plan" where it carried none.
+3. **Rules in the daemon:** `Sessions.suggestions` (`SuggestionStore`,
+   shipped rules only by default, so tests never read a real user file);
+   `TurnOptions.suggestions_file` and `suggestions_user_file`; `serve`
+   passes `--suggestions` and `~/.config/flankr/SUGGESTIONS.md`. Both are
+   watched through `Daemon::file_watcher()`, falling back to a 5 s check;
+   a reload re-merges only when a file's text changed, and the hub
+   recomputes when the rules change. The hub's use has no test of its own.
+4. **Answers reach the card** by the client copying
+   `pending_question.answers` onto the live Question card whose text
+   matches; `CardBody` is unchanged.
+5. **The client:** an answer sending exactly "yes" or "no" is still
+   expanded ("Yes, install it on the S23"); `Input::Suggested(Answer)`;
+   `Sent::Respond` carries the label; handles are
+   `reply-<agent>-<project>-<label>`; every answer is sent confirmed.
+6. **The app:** `AgentHit::Answer { index, text, opens }`; `FlowButton.label`
+   is a `Cow<'static, str>`; `approve` and `deny` styles are buttons,
+   `green`, `link` and `yellow` coloured text, and an unknown style is
+   drawn as `link`; a `starts` answer needs the microphone; the record
+   button stays after the answers.
+7. **The file:** the shipped yes and no answers are labelled "Yes" and
+   "No". The parser also refuses a key given twice, `command: true` with
+   `starts`, and a rule without `offers`; a `when` or `unless`
+   alternative may be a phrase of consecutive words.
