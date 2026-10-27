@@ -8,6 +8,7 @@ pub mod llm;
 pub mod notify;
 pub mod pair;
 pub mod project;
+pub mod prompt_cmd;
 pub mod prompts;
 pub mod reasoning;
 pub mod server;

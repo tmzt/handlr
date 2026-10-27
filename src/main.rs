@@ -12,6 +12,9 @@
 //!             [--replace] [--code <code>] [--qr-png <file>]
 //! flankr session tail [--listen <flankr.sock>] [--pane <id or name>] [--follow]
 //!                     [--entries N] [--history N] [--outline] [--from N] [--to N]
+//! flankr prompt [--use general_agent] [--agent <name>] [--prompts <ADDITIONAL_PROMPTS.md>]
+//!               [--config <file>] [--transport <name> | --remote <user@host> |
+//!                --socket <herdr.sock> | --mock]
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -52,6 +55,9 @@ struct AppArgs {
     outline: bool,
     from: Option<String>,
     to: Option<String>,
+    /// `prompt`'s use and agent (plan 20261027_04, decision 8).
+    use_name: Option<String>,
+    agent: Option<String>,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
@@ -80,6 +86,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         outline: false,
         from: None,
         to: None,
+        use_name: None,
+        agent: None,
     };
 
     while let Some(arg) = args.next() {
@@ -115,6 +123,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--outline" => parsed.outline = true,
             "--from" => parsed.from = args.next(),
             "--to" => parsed.to = args.next(),
+            "--use" => parsed.use_name = args.next(),
+            "--agent" => parsed.agent = args.next(),
             _ if !arg.starts_with("--") => parsed.positional.push(arg),
             _ => {
                 eprintln!("Unknown argument: {}", arg);
@@ -346,6 +356,28 @@ async fn session(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
     Ok(flankr::tail::run(&socket, &options, &mut out).await?)
 }
 
+/// `flankr prompt` (plan 20261027_04, decision 8): the general agent's
+/// assembled prompt; reads the config and herdr, calls no LLM.
+async fn prompt(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
+    if !args.positional.is_empty() {
+        return Err(PROMPT_USAGE.into());
+    }
+    let config = flankr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
+    let client = HerdrClient::new(select_transport(&args, &config));
+    let prompts_file = args.prompts.as_ref().map(expand_tilde);
+    let options = flankr::prompt_cmd::PromptOptions {
+        use_name: args.use_name.as_deref(),
+        agent: args.agent.as_deref(),
+        prompts_file: prompts_file.as_deref(),
+    };
+    let env = flankr::llm::KeyEnv::from_process();
+    let out = flankr::prompt_cmd::report(&config, &env, &client, &options).await?;
+    print!("{out}");
+    Ok(0)
+}
+
+const PROMPT_USAGE: &str = "usage: flankr prompt [--use general_agent] [--agent <name>] [--prompts <ADDITIONAL_PROMPTS.md>]";
+
 const USAGE: &str = "\
 flankr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
                 --socket <herdr.sock> | --mock] [--listen <flankr.sock>] [--show-tokens]
@@ -355,7 +387,10 @@ flankr ctl [--listen <flankr.sock>] [--client <name>] [--follow] [--handle <text
 flankr pair [--listen <flankr.sock>] [--name <name>] [--protocols companion,harness]
             [--replace] [--code <code>] [--qr-png <file>]
 flankr session tail [--listen <flankr.sock>] [--pane <id or name>] [--follow]
-                    [--entries N] [--history N] [--outline] [--from N] [--to N]";
+                    [--entries N] [--history N] [--outline] [--from N] [--to N]
+flankr prompt [--use general_agent] [--agent <name>] [--prompts <ADDITIONAL_PROMPTS.md>]
+              [--config <file>] [--transport <name> | --remote <user@host> |
+               --socket <herdr.sock> | --mock]";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -371,7 +406,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let command = match argv.first().map(String::as_str) {
-        Some("serve") | Some("ctl") | Some("pair") | Some("session") => argv.remove(0),
+        Some("serve") | Some("ctl") | Some("pair") | Some("session") | Some("prompt") => {
+            argv.remove(0)
+        }
         _ => "serve".to_string(),
     };
     let args = parse_args(argv.into_iter());
@@ -383,6 +420,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if command == "session" {
         std::process::exit(session(args).await?);
+    }
+    if command == "prompt" {
+        std::process::exit(prompt(args).await?);
     }
     if !args.positional.is_empty() {
         return Err(format!("unexpected arguments: {:?}", args.positional).into());
