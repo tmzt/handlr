@@ -20,10 +20,11 @@
 //! start.
 //!
 //! The home screen is the overview (plan 20261023_04, `overview.rs`): the
-//! agents' cards on the whole screen, the newest Gemini line in a strip
-//! under them, and the confirmation and dictation cards and the bottom row
-//! under that. A tap on the strip slides the conversation with Gemini up
-//! over the cards; the system Back closes it. The pairing screen (`ui.rs`) shows instead while
+//! agents' cards on the whole screen, the prompt cards under them (Gemini's
+//! and a message's, `prompt/`, plan 20261027_03), and the confirmation card
+//! and the bottom row under that. A prompt card's up arrow expands it over
+//! the cards with its history; its grab bar or the system Back collapses
+//! it. The pairing screen (`ui.rs`) shows instead while
 //! the phone is neither paired nor connected, or shows its device code.
 //!
 //! Dictation (plan 20261023_02): "take a message" or the record button
@@ -300,7 +301,8 @@ pub struct App {
     /// 3): the focused prompt, the soft keyboard dismissed, and a physical
     /// keyboard (always on the desktop; on Android once one types).
     keyboard: KeyboardRoute,
-    /// A touch held on the centre button, watched for opening the overlay after 2 seconds.
+    /// A touch held on the centre button, watched for opening Gemini's card
+    /// pinned after 2 seconds (plan 20261027_03, decision 7).
     center_hold: Option<CenterHold>,
     /// The conversation with Gemini, as each screen's card is given it
     /// (plan 20261027_03, decision 1: each screen owns its own card).
@@ -328,6 +330,20 @@ struct CenterHold {
     start: Duration,
     opened: bool,
     started_listening: bool,
+}
+
+impl CenterHold {
+    /// How long the centre button is held to open Gemini's card.
+    const OPENS: Duration = Duration::from_secs(2);
+
+    /// Whether the hold opens the card at `now`: once, at 2 s.
+    fn open_at(&mut self, now: Duration) -> bool {
+        if self.opened || now.saturating_sub(self.start) < Self::OPENS {
+            return false;
+        }
+        self.opened = true;
+        true
+    }
 }
 
 /// The foreground service, as the app knows it.
@@ -2217,13 +2233,15 @@ impl MorphApp for App {
 
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
+        // The 2 s hold opens Gemini's card pinned, not the overlay; the
+        // user expands it (plan 20261027_03, decision 7).
         let elapsed = self.started.elapsed();
-        if let Some(hold) = &mut self.center_hold
-            && !hold.opened
-            && elapsed.saturating_sub(hold.start) >= Duration::from_secs(2)
+        if self
+            .center_hold
+            .as_mut()
+            .is_some_and(|h| h.open_at(elapsed))
         {
-            hold.opened = true;
-            self.with_prompts(|p| p.expand(PromptKind::GeneralAgent));
+            self.with_prompts(Prompts::hold_open);
         }
         if let Some(screen) = &mut self.settings_screen {
             screen.tick(dt);
@@ -2468,4 +2486,60 @@ fn android_main(app: libmorph::AndroidApp) {
         )
     };
     libmorph::run_android::<App>(app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::prompt::{CardState, PromptOverlay};
+
+    #[test]
+    fn the_2_s_hold_opens_geminis_card_pinned_not_the_overlay() {
+        let start = Duration::from_secs(10);
+        let mut hold = CenterHold {
+            id: 1,
+            start,
+            opened: false,
+            started_listening: true,
+        };
+        assert!(!hold.open_at(start + Duration::from_millis(1999)));
+        assert!(hold.open_at(start + CenterHold::OPENS));
+        assert!(!hold.open_at(start + Duration::from_secs(3)), "once");
+        // What it opens, on either screen: the card pinned, even with
+        // nothing said yet, and the overlay closed, even if it was left
+        // expanded.
+        let mut o = Overview::new();
+        o.set_layout(Layout {
+            w: 1080.0,
+            h: 2340.0,
+            scale: 2.0,
+            top: 80.0,
+            bottom: 40.0,
+        });
+        assert_eq!(o.prompts().gemini().rect().h, 0.0);
+        o.with_prompts(Prompts::hold_open);
+        o.tick(PromptOverlay::SLIDE);
+        assert!(o.prompts().gemini().rect().h > 0.0);
+        assert!(!o.prompts().overlay().is_shown());
+        o.with_prompts(|p| p.expand(PromptKind::GeneralAgent));
+        o.tick(PromptOverlay::SLIDE);
+        assert!(o.prompts().overlay().is_open());
+        o.with_prompts(Prompts::hold_open);
+        assert!(!o.prompts().overlay().is_open());
+        assert_eq!(
+            o.prompts().state(PromptKind::GeneralAgent),
+            CardState::Pinned
+        );
+        let mut a = AgentScreen::new();
+        a.set_layout(Layout {
+            w: 1080.0,
+            h: 2340.0,
+            scale: 2.0,
+            top: 80.0,
+            bottom: 40.0,
+        });
+        a.with_prompts(Prompts::hold_open);
+        assert!(a.prompts().gemini().rect().h > 0.0);
+        assert!(!a.prompts().overlay().is_open());
+    }
 }
