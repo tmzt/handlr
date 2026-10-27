@@ -338,3 +338,33 @@ The owner (2026-10-26): "the filter applies to general wnd session input".
    - Newlines (`\n`, `\r\n`) and tabs are preserved in messages and general agent input so multi-line text input (from the 3-line `TextArea` and desktop entry) is retained rather than rejected as a control character or flattened.
 
 
+
+## Amendment — 2026-10-27 13:25 EDT: a tap is the approval: agents.send's confirmed flag
+
+The owner (2026-10-27): "we should also fix the bug where a short approval
+is shown for a command chosen via UI, but then immediately dismissed. that
+approval dialog should not be shown for UI buttons, only voice commands";
+then "tapping a UI button should send confirmed: true (or ui: true and that
+should be taken as confirmed without a confirmation step)".
+
+The 2026-10-23 02:28 EDT amendment made a button submit its own approval,
+which the app gave by approving the confirmation the daemon opened. The
+daemon sends that confirmation's `confirm.requested` before its
+`agents.send` answer, so the app could show it for a moment. This replaces
+that mechanism:
+1. **`AgentsSendParams.confirmed: bool`,** appended, off when left out
+   (`libflankr_proto` 0.3.12, a patch release by the owner's ruling that
+   appending to a struct is additive).
+2. **The daemon** takes `confirmed: true` from a companion connection that
+   may approve (`is_companion` and `can_approve`) as the approval: it opens
+   no confirmation and sends at once, answering `Sent`, for a command and
+   for a message alike. Every other check still runs (the agent's entry and
+   reach, the allow list, `allow_messages`, the message check and paths).
+   From any other connection the flag is ignored and a confirmation opens
+   as before. The log says "confirmed by the tap".
+3. **The app** sets it for every tapped suggestion (yes, no, cont, cmpct,
+   approve, implement) and for a submitted, reviewed message (the 02:28
+   EDT amendment's Submit). Voice commands, the general agent's requests and
+   anything else keep their confirmation.
+4. The app's own approval of such confirmations stays, for daemons older
+   than this.
