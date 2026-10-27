@@ -1,7 +1,7 @@
 ---
 title: A question's suggested answers, from word rules in SUGGESTIONS.md
 date: 2026-10-27
-status: Draft
+status: In implementation
 covers:
   - "`SUGGESTIONS.md`, a libtypedmd file of rules: each picks a set of
     answers for a pending question by the words it expects, and each answer
@@ -222,3 +222,9 @@ The plan stays `Draft` until the owner approves it.
 The owner (2026-10-27): "approve and implement 06". The plan is approved
 with its 14:13 EDT amendment. The status becomes `In implementation` with
 step 1's commit.
+
+## Amendment — 2026-10-27 14:21 EDT: implementation has started; the document is now immutable
+
+Implementation has started with step 1 (`SUGGESTIONS.md` and
+`src/suggestions.rs`). The status is `In implementation`, and the document
+is now immutable: it changes only on the owner's explicit instruction.

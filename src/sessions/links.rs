@@ -266,28 +266,43 @@ pub fn plan_question(question: &str, context: &str) -> (bool, Option<String>) {
     if !(has("approve") && (has("plan") || has("draft"))) {
         return (false, None);
     }
-    let ids = plan_ids(&words);
-    let name = match ids.as_slice() {
+    (true, plan_named(question, context))
+}
+
+/// The plan `question` names, as [`plan_question`] names it, whatever its
+/// other words: "plan <id>" from the question or else the last id in
+/// `context`, "the draft" for a question that says "draft" and not "plan",
+/// and none otherwise (or for two differing ids in the question).
+fn plan_named(question: &str, context: &str) -> Option<String> {
+    let words = words_of(question);
+    let has = |word: &str| words.iter().any(|w| bare(w) == word);
+    match plan_ids(&words).as_slice() {
         [one] => Some(format!("plan {one}")),
         [] => match plan_ids(&words_of(context)).last() {
             Some(id) => Some(format!("plan {id}")),
-            None if !has("plan") => Some("the draft".to_string()),
+            None if has("draft") && !has("plan") => Some("the draft".to_string()),
             None => None,
         },
         _ => None,
-    };
-    (true, name)
+    }
+}
+
+/// The `detected_plan_id` replacement of SUGGESTIONS.md (plan 20261027_06,
+/// decision 4): the plan [`plan_question`] would name, else "the draft"
+/// when the question says "draft" and not "plan", else "the plan".
+pub fn detected_plan_id(question: &str, context: &str) -> String {
+    plan_named(question, context).unwrap_or_else(|| "the plan".to_string())
 }
 
 /// The words of `text`, split at spaces, brackets, quotes and commas.
-fn words_of(text: &str) -> Vec<&str> {
+pub(crate) fn words_of(text: &str) -> Vec<&str> {
     text.split(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | '`' | '"' | '\'' | ','))
         .filter(|w| !w.is_empty())
         .collect()
 }
 
 /// A word without its surrounding punctuation, lower case.
-fn bare(w: &str) -> String {
+pub(crate) fn bare(w: &str) -> String {
     w.trim_matches(|c: char| !c.is_alphanumeric())
         .to_ascii_lowercase()
 }
