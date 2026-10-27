@@ -162,7 +162,7 @@ pub const CACHED_VIEWS: usize = 3;
 pub const REFRESH_WAIT: Duration = Duration::from_secs(5);
 
 /// The settings the client acts on (plan 20261024_02, decisions 3 and 4).
-/// Each is on by default.
+/// Each is on by default, except `tab_follows_focus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
     /// *All sound*: off, nothing is said ([`Event::Say`]), no ding is
@@ -179,6 +179,11 @@ pub struct Settings {
     /// a message, and on the overview does nothing (the 11:37 EDT
     /// amendment).
     pub general_agent: bool,
+    /// *Tab follows focus*, off by default: on, Gemini's `focus_project`
+    /// also moves herdr's focused tab to that agent's tab; sent in
+    /// `client.options` (plan 20261024_02, the 2026-10-27 11:27 EDT
+    /// amendment; plan 20261027_04, step 6).
+    pub tab_follows_focus: bool,
 }
 
 impl Default for Settings {
@@ -188,6 +193,7 @@ impl Default for Settings {
             ding: true,
             microphone: true,
             general_agent: true,
+            tab_follows_focus: false,
         }
     }
 }
@@ -1978,11 +1984,12 @@ impl State {
             return;
         }
         log::info!(
-            "settings: sound {}, ding {}, microphone {}, general agent {}",
+            "settings: sound {}, ding {}, microphone {}, general agent {}, tab follows focus {}",
             settings.sound,
             settings.ding,
             settings.microphone,
-            settings.general_agent
+            settings.general_agent,
+            settings.tab_follows_focus
         );
         if before.sound && !settings.sound {
             // Nothing more is read: what waits is dropped, and what is
@@ -2007,8 +2014,9 @@ impl State {
         // Read aloud is off in effect without sound, so the daemon makes no
         // summaries for it.
         let spoken = |s: Settings| self.read_aloud && s.sound;
-        let options =
-            before.general_agent != settings.general_agent || spoken(before) != spoken(settings);
+        let options = before.general_agent != settings.general_agent
+            || before.tab_follows_focus != settings.tab_follows_focus
+            || spoken(before) != spoken(settings);
         if options && self.online() {
             self.send_options(out);
         }
@@ -3353,10 +3361,13 @@ impl State {
             speaker: Speaker::User,
             text: text.clone(),
         }));
+        // From the agent view, its session is the turn's current agent
+        // (plan 20261027_04, decision 3 and step 6); none from the
+        // overview.
         let params = wire::TurnStartParams {
             turn_id: id,
             text,
-            session: None,
+            session: self.view.as_ref().map(|v| v.pane_id.clone()),
         };
         out.push(self.request(wire::methods::TURN_START, params, Sent::Turn(id)));
     }
@@ -3734,7 +3745,7 @@ impl State {
             spoken_output: self.read_aloud && self.settings.sound,
             background: self.background,
             general_agent: self.settings.general_agent,
-            tab_follows_focus: false,
+            tab_follows_focus: self.settings.tab_follows_focus,
         };
         out.push(self.request(methods::CLIENT_OPTIONS, params, Sent::Options));
     }
@@ -7911,6 +7922,7 @@ mod tests {
             ding,
             microphone,
             general_agent,
+            tab_follows_focus: false,
         })
     }
 
@@ -7924,7 +7936,8 @@ mod tests {
                 sound: true,
                 ding: true,
                 microphone: true,
-                general_agent: true
+                general_agent: true,
+                tab_follows_focus: false
             }
         );
     }
@@ -8023,6 +8036,70 @@ mod tests {
         // Other settings changing leave it off for the daemon.
         let out = s.input(settings(true, false, true, false));
         assert!(options(&out).is_empty(), "{out:?}");
+    }
+
+    // Tab follows focus and the turn's session (plan 20261027_04, step 6).
+
+    fn with_tab_follows_focus(on: bool) -> Input {
+        Input::Settings(Settings {
+            tab_follows_focus: on,
+            ..Settings::default()
+        })
+    }
+
+    #[test]
+    fn tab_follows_focus_is_sent_as_an_option_on_toggling_and_after_hello() {
+        let mut s = online();
+        // Toggled on, then off: sent each time.
+        let out = s.input(with_tab_follows_focus(true));
+        assert_eq!(
+            options(&out),
+            [
+                json!({"spoken_output": false, "background": false, "general_agent": true, "tab_follows_focus": true})
+            ]
+        );
+        // The same again sends nothing.
+        assert!(options(&s.input(with_tab_follows_focus(true))).is_empty());
+        let out = s.input(with_tab_follows_focus(false));
+        assert_eq!(options(&out)[0]["tab_follows_focus"], false);
+        // Offline, nothing is sent; after the reconnect's hello, the value
+        // as it is now.
+        s.disconnected(1000);
+        assert!(options(&s.input(with_tab_follows_focus(true))).is_empty());
+        let out = s.connected();
+        assert!(options(&out).is_empty(), "not before hello");
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(
+            id,
+            json!({"server": "flankr", "session_id": "companion:test", "vocabulary": []}),
+        ));
+        assert_eq!(
+            options(&out),
+            [
+                json!({"spoken_output": false, "background": false, "general_agent": true, "tab_follows_focus": true})
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_from_the_agent_view_carries_its_session() {
+        let mut s = viewing("idle", json!(null));
+        let turn = start(&mut s, "what is this project about");
+        assert_eq!(turn.params["session"], "w2:pZ", "{turn:?}");
+    }
+
+    #[test]
+    fn a_turn_from_the_overview_carries_no_session() {
+        let mut s = online();
+        let turn = start(&mut s, "what is going on");
+        assert!(turn.params.get("session").is_none(), "{turn:?}");
+        // Nor after a view is closed.
+        let mut s = viewing("idle", json!(null));
+        s.input(Input::CloseAgent);
+        let out = s.input(Input::Utterance("and now".into()));
+        let turn = requests(&out, "turn.start");
+        assert_eq!(turn.len(), 1, "{out:?}");
+        assert!(turn[0].params.get("session").is_none(), "{out:?}");
     }
 
     /// `server.capabilities` with `llm`.
