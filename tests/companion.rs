@@ -85,7 +85,7 @@ struct Env {
 fn config(agents: Vec<AgentConfig>) -> AppConfig {
     AppConfig {
         agents,
-        summary: flankr::config::SummaryConfig { cards: false },
+        summary: Some(flankr::config::SummaryConfig { cards: false }),
         ..AppConfig::default()
     }
 }
@@ -93,7 +93,7 @@ fn config(agents: Vec<AgentConfig>) -> AppConfig {
 /// claude needs confirmation, as by default.
 fn confirming() -> AppConfig {
     AppConfig {
-        summary: flankr::config::SummaryConfig { cards: false },
+        summary: Some(flankr::config::SummaryConfig { cards: false }),
         ..AppConfig::default()
     }
 }

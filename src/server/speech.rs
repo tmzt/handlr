@@ -134,7 +134,7 @@ impl SpeechService {
         SpeechService {
             given: options.engine,
             gemini_key_file: super::companion::gemini_key_file(config),
-            gemini_model: config.gemini.model.clone(),
+            gemini_model: config.gemini.as_ref().and_then(|g| g.model.clone()),
             gemini: OnceLock::new(),
             prompt: load_prompt(options.prompts_file.as_deref()),
             timeout: options.timeout.unwrap_or(SUMMARY_TIMEOUT),
@@ -156,7 +156,7 @@ impl SpeechService {
         if let Some(engine) = self.gemini.get() {
             return Ok(Arc::clone(engine));
         }
-        let api_key = super::companion::read_key_file(&self.gemini_key_file)?;
+        let api_key = crate::llm::read_key_file(&self.gemini_key_file)?;
         let mut builder = GeminiReasoningEngine::builder()
             .api_key(api_key)
             .system_prompt(system)

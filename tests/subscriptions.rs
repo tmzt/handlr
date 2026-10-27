@@ -169,7 +169,7 @@ async fn herdr_events(path: &Path, lines: broadcast::Sender<String>) {
 /// none reaches Gemini.
 fn no_card_summaries() -> AppConfig {
     AppConfig {
-        summary: SummaryConfig { cards: false },
+        summary: Some(SummaryConfig { cards: false }),
         ..AppConfig::default()
     }
 }
@@ -1391,7 +1391,7 @@ fn finished_cards(delivery: &Value) -> Vec<Value> {
 /// Card summaries on, with `engine` as Gemini.
 async fn start_summarising(engine: Arc<MockReasoningEngine>, cards: bool) -> Env {
     let config = AppConfig {
-        summary: SummaryConfig { cards },
+        summary: Some(SummaryConfig { cards }),
         ..AppConfig::default()
     };
     start_with(

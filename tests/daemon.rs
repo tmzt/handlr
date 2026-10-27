@@ -718,7 +718,7 @@ async fn status_by_handle_lists_pending_when_ambiguous() {
 /// so none reaches Gemini.
 fn test_config() -> AppConfig {
     AppConfig {
-        summary: flankr::config::SummaryConfig { cards: false },
+        summary: Some(flankr::config::SummaryConfig { cards: false }),
         ..AppConfig::default()
     }
 }

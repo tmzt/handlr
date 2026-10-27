@@ -2,7 +2,8 @@
 //!
 //! Loads TOML settings from `~/.config/flankr/config.toml` (or custom path),
 //! covering transports (`[[transports]]`), per-agent command permissions
-//! (`[[agents]]`), and LLM parameters.
+//! (`[[agents]]`), and the daemon's own LLM use (`[llm]`, resolved by
+//! [`crate::llm`]).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -19,8 +20,11 @@ pub struct AppConfig {
     /// agent, and `None` leaves each agent's own setting untouched.
     #[serde(default)]
     pub allow_arbitrary_commands: Option<bool>,
+    /// Deprecated `[gemini]`: read as `[llm]`'s discovered `gemini`
+    /// backend, and turning `[llm] enabled` on (plan 20261027_02,
+    /// decision 5). `None` when the section is not there.
     #[serde(default)]
-    pub gemini: GeminiConfig,
+    pub gemini: Option<GeminiConfig>,
     #[serde(default)]
     pub server: ServerConfig,
     #[serde(default)]
@@ -29,13 +33,68 @@ pub struct AppConfig {
     pub link: LinkConfig,
     #[serde(default)]
     pub urls: UrlsConfig,
+    /// Deprecated `[summary]`: `cards = false` is read as
+    /// `[llm.uses.card_summaries] enabled = false` (plan 20261027_02,
+    /// decision 5). `None` when the section is not there.
     #[serde(default)]
-    pub summary: SummaryConfig,
+    pub summary: Option<SummaryConfig>,
+    /// `[llm]`: every LLM flankr uses itself, outside the coding agents
+    /// (plan 20261027_02, as amended at 00:59 EDT). `None` when the
+    /// section is not there.
+    #[serde(default)]
+    pub llm: Option<LlmConfig>,
+}
+
+/// `[llm]`: the daemon's own LLM use (plan 20261027_02). Nothing here is
+/// used until [`crate::llm::resolve`] turns it into settings per use.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LlmConfig {
+    /// The master switch, off unless set (decision 1 and the 00:59 EDT
+    /// amendment): off, no general agent turns, no card summaries and no
+    /// spoken summaries, from any backend.
+    pub enabled: bool,
+    /// The backend a use takes when it names none. Left out, the only
+    /// backend, or the one named `gemini`.
+    pub default: Option<String>,
+    /// `[llm.backends.<name>]`. With none, a `gemini` backend is
+    /// discovered from a key.
+    pub backends: BTreeMap<String, LlmBackendConfig>,
+    /// `[llm.uses.<use>]`: `general_agent`, `card_summaries`,
+    /// `spoken_summaries`. Each is on unless its table turns it off.
+    pub uses: BTreeMap<String, LlmUseConfig>,
+}
+
+/// `[llm.backends.<name>]` (decision 3).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LlmBackendConfig {
+    /// The client type; only `gemini` for now. Required.
+    pub kind: Option<String>,
+    /// The file holding the API key, alone, with mode 0600 (default for
+    /// `gemini`: `.private/gemini_api_key`, against the daemon's working
+    /// folder; without the file, `GEMINI_API_KEY`).
+    pub api_key_file: Option<String>,
+    /// This backend's model for every use, over the tier defaults.
+    pub model: Option<String>,
+}
+
+/// `[llm.uses.<use>]` (decision 4).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LlmUseConfig {
+    /// On unless `false`.
+    pub enabled: Option<bool>,
+    /// The backend, else `[llm] default`.
+    pub backend: Option<String>,
+    /// The model, else the backend's `model`, else its kind's tier default.
+    pub model: Option<String>,
 }
 
 /// `[summary]`: what the daemon summarises with Gemini (plan 20261023_05,
 /// the CHANGES.md departure of 2026-10-24 12:06 EDT; owner: "should be
-/// daemon option, under summary tag").
+/// daemon option, under summary tag"). Deprecated by `[llm.uses.card_summaries]`
+/// (plan 20261027_02, decision 5).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct SummaryConfig {
@@ -97,12 +156,13 @@ impl Default for AppConfig {
             transports: Vec::new(),
             agents: default_agents(),
             allow_arbitrary_commands: None,
-            gemini: GeminiConfig::default(),
+            gemini: None,
             server: ServerConfig::default(),
             naming: NamingConfig::default(),
             link: LinkConfig::default(),
             urls: UrlsConfig::default(),
-            summary: SummaryConfig::default(),
+            summary: None,
+            llm: None,
         }
     }
 }
@@ -276,14 +336,16 @@ impl AgentConfig {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+/// Deprecated `[gemini]` (plan 20261027_02, decision 5): read as
+/// `[llm.backends.gemini]`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GeminiConfig {
     /// The file holding the Gemini API key, alone, with mode 0600 (default:
     /// `.private/gemini_api_key`, from the daemon's working directory;
     /// `.private` is gitignored). Without the file, `GEMINI_API_KEY` is
     /// used. The key itself is never put in this file.
     pub api_key_file: Option<String>,
-    /// Model identifier (default: "gemini-2.5-flash")
+    /// The model for every use (default: each use's tier model).
     pub model: Option<String>,
 }
 
@@ -700,12 +762,50 @@ revoke_check_secs = 5
     #[test]
     fn card_summaries_are_on_unless_turned_off() {
         let cfg: AppConfig = toml::from_str("").unwrap();
-        assert!(cfg.summary.cards);
+        assert_eq!(cfg.summary, None);
         let cfg: AppConfig = toml::from_str("[summary]\n").unwrap();
-        assert!(cfg.summary.cards);
+        assert!(cfg.summary.unwrap().cards);
         let cfg: AppConfig = toml::from_str("[summary]\ncards = false\n").unwrap();
-        assert!(!cfg.summary.cards);
-        assert!(AppConfig::default().summary.cards);
+        assert!(!cfg.summary.unwrap().cards);
+        assert!(SummaryConfig::default().cards);
+    }
+
+    #[test]
+    fn the_llm_section_parses() {
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert_eq!((cfg.llm, cfg.gemini), (None, None));
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[llm]
+enabled = true
+default = "fast"
+
+[llm.backends.fast]
+kind = "gemini"
+api_key_file = "/k"
+model = "m"
+
+[llm.uses.general_agent]
+backend = "fast"
+model = "g"
+
+[llm.uses.spoken_summaries]
+enabled = false
+"#,
+        )
+        .unwrap();
+        let llm = cfg.llm.unwrap();
+        assert!(llm.enabled);
+        assert_eq!(llm.default.as_deref(), Some("fast"));
+        let fast = &llm.backends["fast"];
+        assert_eq!(fast.kind.as_deref(), Some("gemini"));
+        assert_eq!(fast.api_key_file.as_deref(), Some("/k"));
+        assert_eq!(llm.uses["general_agent"].model.as_deref(), Some("g"));
+        assert_eq!(llm.uses["spoken_summaries"].enabled, Some(false));
+        assert_eq!(llm.uses["general_agent"].enabled, None);
+        // The section alone is off.
+        let cfg: AppConfig = toml::from_str("[llm]\n").unwrap();
+        assert!(!cfg.llm.unwrap().enabled);
     }
 
     #[test]
@@ -786,5 +886,28 @@ allow_messages = false
         assert_eq!(claude.allowed_commands, vec!["continue", "/compact"]);
         assert!(claude.require_confirmation);
         assert_eq!(parsed.naming, NamingConfig::default());
+        // The template turns no LLM use on, old or new.
+        assert_eq!(
+            (parsed.llm, parsed.gemini, parsed.summary),
+            (None, None, None)
+        );
+        // Its [llm] example, uncommented, parses as documented.
+        let example: String = template
+            .lines()
+            .skip_while(|l| *l != "# [llm]")
+            .take_while(|l| !l.starts_with("# Deprecated"))
+            .map(|l| l.strip_prefix("# ").unwrap_or(l))
+            .filter(|l| {
+                l.starts_with('[')
+                    || l.split_once(" = ").is_some_and(|(k, _)| {
+                        !k.is_empty() && k.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                    })
+            })
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let llm = toml::from_str::<AppConfig>(&example).unwrap().llm.unwrap();
+        assert!(llm.enabled);
+        assert_eq!(llm.backends["gemini"].kind.as_deref(), Some("gemini"));
+        assert_eq!(llm.uses["spoken_summaries"].enabled, Some(false));
     }
 }

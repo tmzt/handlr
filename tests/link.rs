@@ -609,7 +609,7 @@ async fn link_unpair_is_refused_on_the_daemon_socket() {
 /// so none reaches Gemini.
 fn test_config() -> AppConfig {
     AppConfig {
-        summary: flankr::config::SummaryConfig { cards: false },
+        summary: Some(flankr::config::SummaryConfig { cards: false }),
         ..AppConfig::default()
     }
 }

@@ -46,10 +46,41 @@ allowed_commands = ["continue"]
 require_confirmation = true
 allow_arbitrary_commands = false
 
-[gemini]
-# Optional Gemini API Key (defaults to GEMINI_API_KEY environment variable)
-# api_key = "..."
-# model = "gemini-2.5-flash"
+# Every LLM flankr uses itself: the general agent's turns, card summaries
+# and spoken summaries; never the coding agents in the panes. Off unless
+# `enabled = true`: without it, nothing calls any model. Turned on, the rest
+# is automatic: a `gemini` backend is found from `.private/gemini_api_key`
+# (in the daemon's working folder, mode 0600) or GEMINI_API_KEY, every use
+# is on, and each use gets its tier model: gemini-3.8-flash for the general
+# agent, gemini-3.8-flash-lite for summaries. A Pro model runs only where a
+# `model` names it. The daemon reads this section again within 5 s of a
+# change, and tells the companion app what is available.
+# [llm]
+# enabled = true
+# default = "gemini"             # the backend a use takes when it names none
+#
+# Named backends, when the defaults aren't wanted. `kind` picks the client
+# (only "gemini" for now); two backends of one kind may differ in key or
+# model. A backend's `model` is its model for every use.
+# [llm.backends.gemini]
+# kind = "gemini"
+# api_key_file = ".private/gemini_api_key"
+# model = "gemini-3.8-flash"
+#
+# Uses, each optional: general_agent, card_summaries, spoken_summaries.
+# Each is on unless `enabled = false`; `backend` and `model` override.
+# [llm.uses.general_agent]
+# backend = "gemini"
+# model = "gemini-3.8-flash"
+#
+# [llm.uses.spoken_summaries]
+# enabled = false
+
+# Deprecated: [gemini] is read as [llm] enabled = true with
+# [llm.backends.gemini] (its `api_key_file` and `model`), unless [llm] is set.
+# [gemini]
+# api_key_file = ".private/gemini_api_key"
+# model = "gemini-3.8-flash"
 
 # How agents are named aloud and on screen. Uncomment to change the defaults.
 # [naming]
@@ -93,10 +124,9 @@ allow_arbitrary_commands = false
 # [urls]
 # repowiki_url = "http://localhost:8088"
 
-# What the daemon summarises with Gemini. With `cards` on (the default),
-# every new Finished card is summarised once: a few points and the text to
-# read aloud go on the card, whether or not a client reads aloud. Off,
-# replies are summarised only while a client reads them aloud. Without a
-# Gemini key, nothing is summarised.
+# Deprecated: [summary] cards = false is read as
+# [llm.uses.card_summaries] enabled = false, unless [llm] is set. With card
+# summaries on, every new Finished card is summarised once: a few points
+# and the text to read aloud go on the card.
 # [summary]
 # cards = true

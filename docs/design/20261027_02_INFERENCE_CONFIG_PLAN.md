@@ -1,7 +1,7 @@
 ---
 title: The daemon's own LLM use, under one [inference] section
 date: 2026-10-27
-status: Draft
+status: In implementation
 covers:
   - "One `[inference]` section for every third-party LLM call flankr makes
     itself, outside the coding agents: the general agent's turns, card
@@ -271,3 +271,9 @@ The plan stays `Draft` until the owner approves it.
 The owner approved the plan, with its amendment above, on 2026-10-27
 ("approve and build"). The status becomes `In implementation` with step 1's
 commit.
+
+## Amendment — 2026-10-27 01:08 EDT: implementation has started; the document is now immutable
+
+Step 1 (the config) is the first implementing commit. From here the plan
+changes only on the owner's explicit instruction; departures go to
+`CHANGES.md` (Rule 1.7).

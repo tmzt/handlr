@@ -11,7 +11,7 @@
 //! so `ran` lists what was approved.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -35,6 +35,7 @@ use crate::core::confirm::{ConfirmEvent, ConfirmView, Lifetime, Outcome, StatusK
 use crate::core::naming::{self, Names};
 use crate::core::policy::Denied;
 use crate::core::principal::Principal;
+pub(super) use crate::llm::read_key_file;
 use crate::reasoning::{
     GeminiReasoningEngine, Message, ReasoningEngine, SessionManager, declare_gemini_tools,
     default_system_prompt, with_flankr_routes,
@@ -92,7 +93,7 @@ impl TurnService {
         TurnService {
             given: options.engine,
             gemini_key_file: gemini_key_file(config),
-            gemini_model: config.gemini.model.clone(),
+            gemini_model: config.gemini.as_ref().and_then(|g| g.model.clone()),
             gemini: OnceLock::new(),
             session_dir: options.session_dir,
             manager: OnceLock::new(),
@@ -341,49 +342,14 @@ pub(super) fn gemini_key_file(config: &AppConfig) -> PathBuf {
     let path = PathBuf::from(
         config
             .gemini
-            .api_key_file
-            .as_deref()
+            .as_ref()
+            .and_then(|g| g.api_key_file.as_deref())
             .unwrap_or(GEMINI_KEY_FILE),
     );
     match std::env::current_dir() {
         Ok(dir) if path.is_relative() => dir.join(path),
         _ => path,
     }
-}
-
-/// The key in `path`, trimmed; `None` when the file does not exist or is
-/// empty, which leaves `GEMINI_API_KEY` to libinfer. A file anyone but its
-/// owner may access is refused. Errors name the file, never its contents.
-pub(super) fn read_key_file(path: &Path) -> Result<Option<String>, String> {
-    use std::os::unix::fs::PermissionsExt;
-    let meta = match std::fs::metadata(path) {
-        Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("the Gemini key file {}: {e}", path.display())),
-    };
-    let mode = meta.permissions().mode() & 0o777;
-    if mode & 0o077 != 0 {
-        return Err(format!(
-            "the Gemini key file {} has mode {mode:04o}; only its owner may have access \
-             (chmod 600)",
-            path.display()
-        ));
-    }
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("the Gemini key file {}: {e}", path.display()))?;
-    let key = text.trim();
-    // An API key is one short token. Anything else (a service-account JSON,
-    // several lines) is refused here, so it never reaches a request header.
-    let looks_like_key =
-        !key.contains(char::is_whitespace) && !key.starts_with(['{', '[']) && key.len() <= 256;
-    if !key.is_empty() && !looks_like_key {
-        return Err(format!(
-            "the Gemini key file {} does not hold an API key (a service-account \
-             file is not an API key)",
-            path.display()
-        ));
-    }
-    Ok((!key.is_empty()).then(|| key.to_string()))
 }
 
 /// A sentence to speak for a turn that failed with `error`.

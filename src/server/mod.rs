@@ -118,7 +118,7 @@ impl Daemon {
             .unwrap_or_else(|| Arc::new(Sessions::new()));
         let speech = speech::SpeechService::new(config, turns.speech.clone());
         let hub = SessionHub::new(Arc::clone(&sessions), config.urls.repowiki_url.clone());
-        let cards = config.summary.cards;
+        let cards = config.summary.as_ref().is_none_or(|s| s.cards);
         let daemon = Arc::new(Daemon {
             sessions,
             hub,

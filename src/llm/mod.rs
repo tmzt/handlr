@@ -1,0 +1,867 @@
+//! The daemon's own LLM use (docs/design/20261027_02_INFERENCE_CONFIG_PLAN.md,
+//! as amended at 00:59 EDT: the section is `[llm]`).
+//!
+//! [`resolve`] turns `[llm]`, and the deprecated `[gemini]` and
+//! `[summary]`, into [`LlmSettings`]: for each [`Use`], the backend, model
+//! and key it runs on, or why it is unavailable. The master switch is off
+//! unless set; everything behind it is automatic: a `gemini` backend
+//! discovered from a key, every use on, and each use's tier model (Flash
+//! for the general agent, Flash-Lite for summaries, never Pro by default).
+
+pub mod gemini;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use crate::config::{AppConfig, GeminiConfig, LlmBackendConfig, LlmConfig, SummaryConfig};
+
+/// What flankr itself uses an LLM for (decision 4). The coding agents in
+/// the panes are never among them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Use {
+    /// The turns the user starts: voice, chat, the centre button.
+    GeneralAgent,
+    /// Points and spoken text on Finished cards (was `[summary] cards`).
+    CardSummaries,
+    /// `speech.summarize` while reading aloud.
+    SpokenSummaries,
+}
+
+impl Use {
+    pub const ALL: [Use; 3] = [Use::GeneralAgent, Use::CardSummaries, Use::SpokenSummaries];
+
+    /// The use's name in `[llm.uses.<name>]`, also the name its prompt is
+    /// to have in `ADDITIONAL_PROMPTS.md` later (00:59 EDT amendment, 3).
+    pub fn name(self) -> &'static str {
+        match self {
+            Use::GeneralAgent => "general_agent",
+            Use::CardSummaries => "card_summaries",
+            Use::SpokenSummaries => "spoken_summaries",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Use> {
+        Use::ALL.into_iter().find(|u| u.name() == name)
+    }
+}
+
+/// A backend's client type (decision 3); only `gemini` for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Gemini,
+}
+
+impl Kind {
+    pub fn from_name(name: &str) -> Option<Kind> {
+        match name {
+            "gemini" => Some(Kind::Gemini),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Gemini => "gemini",
+        }
+    }
+
+    /// The kind's default model for `use_`, by tier.
+    pub fn tier_model(self, use_: Use) -> &'static str {
+        match self {
+            Kind::Gemini => gemini::tier_model(use_),
+        }
+    }
+
+    /// The key file a backend of this kind reads when it names none.
+    pub fn default_key_file(self) -> &'static str {
+        match self {
+            Kind::Gemini => gemini::KEY_FILE,
+        }
+    }
+}
+
+/// An API key. Its `Debug` never shows it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApiKey(String);
+
+impl ApiKey {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ApiKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ApiKey(..)")
+    }
+}
+
+/// Where keys are looked for: the daemon's working folder, against which
+/// relative key files are read, and `GEMINI_API_KEY`.
+#[derive(Clone, PartialEq, Eq)]
+pub struct KeyEnv {
+    pub cwd: PathBuf,
+    pub gemini_api_key: Option<ApiKey>,
+}
+
+impl KeyEnv {
+    /// The process's working folder and environment.
+    pub fn from_process() -> Self {
+        KeyEnv {
+            cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            gemini_api_key: std::env::var(gemini::KEY_ENV)
+                .ok()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+                .map(ApiKey),
+        }
+    }
+
+    /// `dir` as the working folder, and no environment key (tests).
+    pub fn in_dir(dir: impl Into<PathBuf>) -> Self {
+        KeyEnv {
+            cwd: dir.into(),
+            gemini_api_key: None,
+        }
+    }
+
+    fn path(&self, file: &str) -> PathBuf {
+        let path = PathBuf::from(file);
+        if path.is_relative() {
+            self.cwd.join(path)
+        } else {
+            path
+        }
+    }
+}
+
+impl std::fmt::Debug for KeyEnv {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KeyEnv")
+            .field("cwd", &self.cwd)
+            .field("gemini_api_key", &self.gemini_api_key.is_some())
+            .finish()
+    }
+}
+
+/// The key in `path`, trimmed; `None` when the file does not exist or is
+/// empty. A file anyone but its owner may access is refused. Errors name
+/// the file, never its contents.
+pub fn read_key_file(path: &Path) -> Result<Option<String>, String> {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("the Gemini key file {}: {e}", path.display())),
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(format!(
+            "the Gemini key file {} has mode {mode:04o}; only its owner may have access \
+             (chmod 600)",
+            path.display()
+        ));
+    }
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("the Gemini key file {}: {e}", path.display()))?;
+    let key = text.trim();
+    // An API key is one short token. Anything else (a service-account JSON,
+    // several lines) is refused here, so it never reaches a request header.
+    let looks_like_key =
+        !key.contains(char::is_whitespace) && !key.starts_with(['{', '[']) && key.len() <= 256;
+    if !key.is_empty() && !looks_like_key {
+        return Err(format!(
+            "the Gemini key file {} does not hold an API key (a service-account \
+             file is not an API key)",
+            path.display()
+        ));
+    }
+    Ok((!key.is_empty()).then(|| key.to_string()))
+}
+
+/// What a use runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// The backend's name (`gemini` when discovered).
+    pub backend: String,
+    pub kind: Kind,
+    pub model: String,
+    pub key: ApiKey,
+}
+
+/// A use's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UseState {
+    Available(Target),
+    Unavailable {
+        /// Why, for the log and the phone.
+        reason: String,
+        /// Whether the use's own table (or `[summary] cards = false`)
+        /// turned it off, as against the master switch, a backend or a key.
+        turned_off: bool,
+    },
+}
+
+impl UseState {
+    pub fn target(&self) -> Option<&Target> {
+        match self {
+            UseState::Available(t) => Some(t),
+            UseState::Unavailable { .. } => None,
+        }
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            UseState::Available(_) => None,
+            UseState::Unavailable { reason, .. } => Some(reason),
+        }
+    }
+
+    fn off(reason: impl Into<String>) -> Self {
+        UseState::Unavailable {
+            reason: reason.into(),
+            turned_off: false,
+        }
+    }
+}
+
+/// `[llm]` resolved: each use's state, and what is to be logged about the
+/// config.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmSettings {
+    /// The master switch, after the deprecated `[gemini]`.
+    pub enabled: bool,
+    pub uses: BTreeMap<Use, UseState>,
+    /// Deprecations and conflicts, each once (decision 5), and unknown
+    /// use names. Logged at info.
+    pub notes: Vec<String>,
+    /// Backend errors (decision 3), each once. Logged as warnings.
+    pub problems: Vec<String>,
+}
+
+impl LlmSettings {
+    /// Nothing available: the master switch is off.
+    pub fn off() -> Self {
+        resolve(&AppConfig::default(), &KeyEnv::in_dir("."))
+    }
+
+    pub fn state(&self, use_: Use) -> &UseState {
+        &self.uses[&use_]
+    }
+
+    pub fn target(&self, use_: Use) -> Option<&Target> {
+        self.state(use_).target()
+    }
+
+    /// Whether the general agent and summaries (card or spoken) are
+    /// available, and why not when either is not (decision 7).
+    pub fn availability(&self) -> (bool, bool, Option<String>) {
+        let general = self.target(Use::GeneralAgent).is_some();
+        let summaries = self.target(Use::CardSummaries).is_some()
+            || self.target(Use::SpokenSummaries).is_some();
+        let reason = (!general || !summaries)
+            .then(|| {
+                let first = if !general {
+                    Use::GeneralAgent
+                } else if self.target(Use::CardSummaries).is_none() {
+                    Use::CardSummaries
+                } else {
+                    Use::SpokenSummaries
+                };
+                self.state(first).reason().map(str::to_string)
+            })
+            .flatten();
+        (general, summaries, reason)
+    }
+
+    /// One line per use, for the log at start: its backend and model, or
+    /// why it is unavailable.
+    pub fn describe(&self) -> Vec<String> {
+        self.uses
+            .iter()
+            .map(|(u, s)| match s {
+                UseState::Available(t) => format!(
+                    "[llm] {}: backend {} ({}), model {}",
+                    u.name(),
+                    t.backend,
+                    t.kind.name(),
+                    t.model
+                ),
+                UseState::Unavailable { reason, .. } => {
+                    format!("[llm] {}: unavailable: {reason}", u.name())
+                }
+            })
+            .collect()
+    }
+}
+
+/// The parts of the config `[llm]` is resolved from: the section and the
+/// deprecated ones (decision 6 re-reads only these).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LlmSources {
+    pub llm: Option<LlmConfig>,
+    pub gemini: Option<GeminiConfig>,
+    pub summary: Option<SummaryConfig>,
+}
+
+impl LlmSources {
+    pub fn of(config: &AppConfig) -> Self {
+        LlmSources {
+            llm: config.llm.clone(),
+            gemini: config.gemini.clone(),
+            summary: config.summary.clone(),
+        }
+    }
+}
+
+/// `config`'s `[llm]` resolved against `env`.
+pub fn resolve(config: &AppConfig, env: &KeyEnv) -> LlmSettings {
+    resolve_sources(&LlmSources::of(config), env)
+}
+
+/// A backend as resolved: its kind and key, or why it cannot be used.
+type BackendState = Result<(Kind, Option<String>, ApiKey), String>;
+
+/// [`resolve`], from the sections alone.
+pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
+    let mut notes = Vec::new();
+    let mut problems = Vec::new();
+
+    // Decision 5: the old sections, read as the new ones, unless `[llm]`
+    // is there.
+    let llm = match &sources.llm {
+        Some(llm) => {
+            if sources.gemini.is_some() {
+                notes.push(
+                    "[gemini] is deprecated and ignored: [llm] is also set, and wins \
+                     (use [llm.backends.gemini])"
+                        .to_string(),
+                );
+            }
+            if sources.summary.is_some() {
+                notes.push(
+                    "[summary] is deprecated and ignored: [llm] is also set, and wins \
+                     (use [llm.uses.card_summaries] enabled)"
+                        .to_string(),
+                );
+            }
+            llm.clone()
+        }
+        None => {
+            let mut llm = LlmConfig::default();
+            if let Some(g) = &sources.gemini {
+                notes.push(
+                    "[gemini] is deprecated: it is read as [llm] enabled = true with \
+                     [llm.backends.gemini]"
+                        .to_string(),
+                );
+                llm.enabled = true;
+                llm.backends.insert(
+                    "gemini".to_string(),
+                    LlmBackendConfig {
+                        kind: Some("gemini".to_string()),
+                        api_key_file: g.api_key_file.clone(),
+                        model: g.model.clone(),
+                    },
+                );
+            }
+            if let Some(s) = &sources.summary {
+                notes.push(
+                    "[summary] is deprecated: cards is read as \
+                     [llm.uses.card_summaries] enabled"
+                        .to_string(),
+                );
+                if !s.cards {
+                    llm.uses
+                        .entry(Use::CardSummaries.name().to_string())
+                        .or_default()
+                        .enabled = Some(false);
+                }
+            }
+            llm
+        }
+    };
+    for name in llm.uses.keys() {
+        if Use::from_name(name).is_none() {
+            notes.push(format!(
+                "[llm.uses.{name}] is not a use flankr has (general_agent, card_summaries, \
+                 spoken_summaries); ignored"
+            ));
+        }
+    }
+
+    // Each use's own switch is known whatever else holds.
+    let turned_off = |u: Use| {
+        llm.uses
+            .get(u.name())
+            .and_then(|c| c.enabled)
+            .is_some_and(|on| !on)
+    };
+    let mut uses = BTreeMap::new();
+    if !llm.enabled {
+        for u in Use::ALL {
+            let state = if turned_off(u) {
+                UseState::Unavailable {
+                    reason: format!("[llm.uses.{}] enabled = false", u.name()),
+                    turned_off: true,
+                }
+            } else {
+                UseState::off(
+                    "LLM use is off: [llm] enabled = true is not set in the daemon's \
+                     config.toml",
+                )
+            };
+            uses.insert(u, state);
+        }
+        return LlmSettings {
+            enabled: false,
+            uses,
+            notes,
+            problems,
+        };
+    }
+
+    // The backends, discovered when none is declared (decision 2).
+    let discovered = llm.backends.is_empty();
+    let declared: BTreeMap<String, LlmBackendConfig> = if discovered {
+        [(
+            "gemini".to_string(),
+            LlmBackendConfig {
+                kind: Some("gemini".to_string()),
+                ..LlmBackendConfig::default()
+            },
+        )]
+        .into_iter()
+        .collect()
+    } else {
+        llm.backends.clone()
+    };
+    let backends: BTreeMap<String, BackendState> = declared
+        .iter()
+        .map(|(name, b)| {
+            let state = backend(name, b, env, discovered);
+            if let Err(e) = &state {
+                problems.push(e.clone());
+            }
+            (name.clone(), state)
+        })
+        .collect();
+
+    // `default`: as named, or the only backend, or `gemini`.
+    let default: Result<String, String> = match &llm.default {
+        Some(name) if backends.contains_key(name) => Ok(name.clone()),
+        Some(name) => {
+            let e = format!("[llm] default names no backend: `{name}`");
+            problems.push(e.clone());
+            Err(e)
+        }
+        None if backends.len() == 1 => Ok(backends.keys().next().unwrap().clone()),
+        None if backends.contains_key("gemini") => Ok("gemini".to_string()),
+        None => Err("[llm] has several backends and no default".to_string()),
+    };
+
+    for u in Use::ALL {
+        let own = llm.uses.get(u.name()).cloned().unwrap_or_default();
+        if turned_off(u) {
+            uses.insert(
+                u,
+                UseState::Unavailable {
+                    reason: format!("[llm.uses.{}] enabled = false", u.name()),
+                    turned_off: true,
+                },
+            );
+            continue;
+        }
+        let name = match own.backend.as_deref() {
+            Some(name) if backends.contains_key(name) => Ok(name.to_string()),
+            Some(name) => {
+                let e = format!("[llm.uses.{}] backend names no backend: `{name}`", u.name());
+                problems.push(e.clone());
+                Err(e)
+            }
+            None => default.clone(),
+        };
+        let state = match name {
+            Err(e) => UseState::off(e),
+            Ok(name) => match &backends[&name] {
+                Err(e) => UseState::off(e.clone()),
+                Ok((kind, model, key)) => {
+                    let model = nonempty(own.model.as_deref())
+                        .or(model.as_deref())
+                        .unwrap_or(kind.tier_model(u))
+                        .to_string();
+                    UseState::Available(Target {
+                        backend: name,
+                        kind: *kind,
+                        model,
+                        key: key.clone(),
+                    })
+                }
+            },
+        };
+        uses.insert(u, state);
+    }
+    LlmSettings {
+        enabled: true,
+        uses,
+        notes,
+        problems,
+    }
+}
+
+fn nonempty(s: Option<&str>) -> Option<&str> {
+    s.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// One backend: its kind, its model and its key, or why it cannot be used.
+fn backend(name: &str, b: &LlmBackendConfig, env: &KeyEnv, discovered: bool) -> BackendState {
+    let kind = match nonempty(b.kind.as_deref()) {
+        None => return Err(format!("[llm.backends.{name}] has no kind")),
+        Some(k) => Kind::from_name(k).ok_or_else(|| {
+            format!("[llm.backends.{name}]: unknown kind `{k}` (only \"gemini\" for now)")
+        })?,
+    };
+    let file = nonempty(b.api_key_file.as_deref()).unwrap_or(kind.default_key_file());
+    let path = env.path(file);
+    let key = match read_key_file(&path) {
+        Err(e) => return Err(format!("[llm.backends.{name}]: {e}")),
+        Ok(Some(key)) => ApiKey(key),
+        Ok(None) => match &env.gemini_api_key {
+            Some(key) => key.clone(),
+            None if discovered => {
+                return Err(format!(
+                    "no Gemini key: neither {} nor {} is set",
+                    path.display(),
+                    gemini::KEY_ENV
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "[llm.backends.{name}] has no key: neither {} nor {} is set",
+                    path.display(),
+                    gemini::KEY_ENV
+                ));
+            }
+        },
+    };
+    Ok((kind, nonempty(b.model.as_deref()).map(str::to_string), key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(text: &str) -> AppConfig {
+        toml::from_str(text).unwrap()
+    }
+
+    /// A folder with `.private/gemini_api_key` holding `key`, mode 0600.
+    fn with_key(key: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        write_key(&dir.path().join(gemini::KEY_FILE), key);
+        dir
+    }
+
+    fn write_key(path: &Path, key: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, key).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn model(s: &LlmSettings, u: Use) -> &str {
+        &s.target(u).unwrap().model
+    }
+
+    #[test]
+    fn no_section_is_off() {
+        let dir = with_key("k1");
+        let env = KeyEnv::in_dir(dir.path());
+        for text in ["", "[llm]\n", "[llm]\nenabled = false\n"] {
+            let s = resolve(&parse(text), &env);
+            assert!(!s.enabled, "{text:?}");
+            for u in Use::ALL {
+                assert!(s.target(u).is_none(), "{text:?} {u:?}");
+            }
+            let (general, summaries, reason) = s.availability();
+            assert!(!general && !summaries);
+            assert!(reason.unwrap().contains("[llm] enabled"), "{text:?}");
+        }
+        assert!(!LlmSettings::off().enabled);
+    }
+
+    #[test]
+    fn enabled_alone_discovers_gemini_with_a_key_and_nothing_without() {
+        let cfg = parse("[llm]\nenabled = true\n");
+        let dir = with_key("k1");
+        let s = resolve(&cfg, &KeyEnv::in_dir(dir.path()));
+        for u in Use::ALL {
+            let t = s.target(u).unwrap();
+            assert_eq!((t.backend.as_str(), t.kind), ("gemini", Kind::Gemini));
+            assert_eq!(t.key.expose(), "k1");
+        }
+        assert_eq!(s.availability(), (true, true, None));
+        assert!(s.problems.is_empty() && s.notes.is_empty());
+
+        // GEMINI_API_KEY, when the file is not there.
+        let empty = tempfile::tempdir().unwrap();
+        let env = KeyEnv {
+            gemini_api_key: Some(ApiKey("k2".into())),
+            ..KeyEnv::in_dir(empty.path())
+        };
+        let s = resolve(&cfg, &env);
+        assert_eq!(s.target(Use::GeneralAgent).unwrap().key.expose(), "k2");
+
+        // Neither: nothing, and why.
+        let s = resolve(&cfg, &KeyEnv::in_dir(empty.path()));
+        assert!(Use::ALL.iter().all(|&u| s.target(u).is_none()));
+        let (general, summaries, reason) = s.availability();
+        assert!(!general && !summaries);
+        let reason = reason.unwrap();
+        assert!(reason.contains("no Gemini key"), "{reason}");
+        assert!(reason.contains("GEMINI_API_KEY"), "{reason}");
+        assert_eq!(s.problems.len(), 1, "logged once: {:?}", s.problems);
+        // The key is never in the settings' Debug.
+        let s = resolve(&cfg, &KeyEnv::in_dir(dir.path()));
+        assert!(!format!("{s:?} {:?}", KeyEnv::in_dir(dir.path())).contains("k1"));
+    }
+
+    #[test]
+    fn each_use_has_its_tier_model_and_never_pro() {
+        let dir = with_key("k");
+        let s = resolve(
+            &parse("[llm]\nenabled = true\n"),
+            &KeyEnv::in_dir(dir.path()),
+        );
+        assert_eq!(model(&s, Use::GeneralAgent), gemini::GENERAL_AGENT_MODEL);
+        assert_eq!(model(&s, Use::CardSummaries), gemini::SUMMARY_MODEL);
+        assert_eq!(model(&s, Use::SpokenSummaries), gemini::SUMMARY_MODEL);
+        assert!(gemini::GENERAL_AGENT_MODEL.contains("flash"));
+        assert!(!gemini::GENERAL_AGENT_MODEL.contains("lite"));
+        assert!(gemini::SUMMARY_MODEL.contains("flash-lite"));
+        for u in Use::ALL {
+            assert!(!model(&s, u).contains("pro"), "{u:?}");
+        }
+        assert_eq!(s.describe().len(), 3);
+        assert!(s.describe()[0].contains(gemini::GENERAL_AGENT_MODEL));
+    }
+
+    #[test]
+    fn models_are_overridden_per_backend_and_per_use() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let s = resolve(
+            &parse(
+                r#"
+[llm]
+enabled = true
+[llm.backends.gemini]
+kind = "gemini"
+model = "gemini-3.8-flash"
+[llm.uses.general_agent]
+model = "gemini-3.8-pro"
+"#,
+            ),
+            &env,
+        );
+        // A Pro model only where it is named.
+        assert_eq!(model(&s, Use::GeneralAgent), "gemini-3.8-pro");
+        assert_eq!(model(&s, Use::CardSummaries), "gemini-3.8-flash");
+        assert_eq!(model(&s, Use::SpokenSummaries), "gemini-3.8-flash");
+
+        // Two backends of one kind, with a default and a use on the other.
+        write_key(&dir.path().join("other_key"), "k2");
+        let s = resolve(
+            &parse(
+                r#"
+[llm]
+enabled = true
+default = "main"
+[llm.backends.main]
+kind = "gemini"
+[llm.backends.cheap]
+kind = "gemini"
+api_key_file = "other_key"
+model = "gemini-3.8-flash-lite"
+[llm.uses.card_summaries]
+backend = "cheap"
+[llm.uses.spoken_summaries]
+enabled = false
+"#,
+            ),
+            &env,
+        );
+        let general = s.target(Use::GeneralAgent).unwrap();
+        assert_eq!(general.backend, "main");
+        assert_eq!(general.model, gemini::GENERAL_AGENT_MODEL);
+        let cards = s.target(Use::CardSummaries).unwrap();
+        assert_eq!(cards.backend, "cheap");
+        assert_eq!(cards.key.expose(), "k2");
+        assert_eq!(cards.model, "gemini-3.8-flash-lite");
+        assert!(matches!(
+            s.state(Use::SpokenSummaries),
+            UseState::Unavailable {
+                turned_off: true,
+                ..
+            }
+        ));
+        // Summaries are available while one of the two is.
+        assert!(s.availability().1);
+    }
+
+    #[test]
+    fn an_unknown_kind_or_a_missing_backend_affects_only_its_uses() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let s = resolve(
+            &parse(
+                r#"
+[llm]
+enabled = true
+default = "gemini"
+[llm.backends.gemini]
+kind = "gemini"
+[llm.backends.local]
+kind = "llama"
+[llm.uses.card_summaries]
+backend = "local"
+[llm.uses.spoken_summaries]
+backend = "nowhere"
+"#,
+            ),
+            &env,
+        );
+        assert!(s.target(Use::GeneralAgent).is_some());
+        let cards = s.state(Use::CardSummaries).reason().unwrap();
+        assert!(cards.contains("unknown kind `llama`"), "{cards}");
+        let spoken = s.state(Use::SpokenSummaries).reason().unwrap();
+        assert!(spoken.contains("no backend: `nowhere`"), "{spoken}");
+        assert_eq!(s.problems.len(), 2, "{:?}", s.problems);
+        let (general, summaries, reason) = s.availability();
+        assert!(general && !summaries);
+        assert!(reason.unwrap().contains("llama"));
+
+        // A default naming no backend: only the uses that take it.
+        let s = resolve(
+            &parse(
+                r#"
+[llm]
+enabled = true
+default = "gone"
+[llm.backends.gemini]
+kind = "gemini"
+[llm.uses.general_agent]
+backend = "gemini"
+"#,
+            ),
+            &env,
+        );
+        assert!(s.target(Use::GeneralAgent).is_some());
+        assert!(
+            s.state(Use::CardSummaries)
+                .reason()
+                .unwrap()
+                .contains("default names no backend")
+        );
+        // A backend with no kind, or no key, is an error for it alone.
+        let empty = tempfile::tempdir().unwrap();
+        let s = resolve(
+            &parse(
+                r#"
+[llm]
+enabled = true
+default = "a"
+[llm.backends.a]
+api_key_file = "x"
+[llm.backends.b]
+kind = "gemini"
+api_key_file = "missing"
+[llm.uses.general_agent]
+backend = "b"
+"#,
+            ),
+            &KeyEnv::in_dir(empty.path()),
+        );
+        assert!(
+            s.state(Use::CardSummaries)
+                .reason()
+                .unwrap()
+                .contains("has no kind")
+        );
+        assert!(
+            s.state(Use::GeneralAgent)
+                .reason()
+                .unwrap()
+                .contains("[llm.backends.b] has no key")
+        );
+    }
+
+    #[test]
+    fn old_gemini_and_summary_sections_read_as_before_each_noted_once() {
+        let dir = with_key("k");
+        write_key(&dir.path().join("my_key"), "mine");
+        let env = KeyEnv::in_dir(dir.path());
+        let s = resolve(
+            &parse("[gemini]\nmodel = \"gemini-3.8-flash\"\napi_key_file = \"my_key\"\n"),
+            &env,
+        );
+        assert!(s.enabled, "[gemini] turns the switch on");
+        for u in Use::ALL {
+            let t = s.target(u).unwrap();
+            assert_eq!(t.model, "gemini-3.8-flash", "{u:?}");
+            assert_eq!(t.key.expose(), "mine");
+        }
+        assert_eq!(s.notes.len(), 1, "{:?}", s.notes);
+        assert!(s.notes[0].contains("[gemini] is deprecated"));
+
+        // An empty [gemini] is the discovered backend, with tier models.
+        let s = resolve(&parse("[gemini]\n[summary]\ncards = false\n"), &env);
+        assert_eq!(model(&s, Use::GeneralAgent), gemini::GENERAL_AGENT_MODEL);
+        assert!(matches!(
+            s.state(Use::CardSummaries),
+            UseState::Unavailable {
+                turned_off: true,
+                ..
+            }
+        ));
+        assert!(s.target(Use::SpokenSummaries).is_some());
+        assert_eq!(s.notes.len(), 2, "one each: {:?}", s.notes);
+        assert!(s.notes[1].contains("[summary] is deprecated"));
+
+        // [summary] alone changes nothing while the switch is off.
+        let s = resolve(&parse("[summary]\ncards = true\n"), &env);
+        assert!(!s.enabled && s.notes.len() == 1);
+
+        // Both old and new: the new one, and the conflict noted.
+        let s = resolve(
+            &parse("[gemini]\nmodel = \"old\"\n[summary]\ncards = false\n[llm]\nenabled = true\n"),
+            &env,
+        );
+        assert_eq!(model(&s, Use::GeneralAgent), gemini::GENERAL_AGENT_MODEL);
+        assert!(s.target(Use::CardSummaries).is_some(), "[summary] ignored");
+        assert_eq!(s.notes.len(), 2);
+        assert!(
+            s.notes.iter().all(|n| n.contains("ignored")),
+            "{:?}",
+            s.notes
+        );
+
+        // An unknown use is noted.
+        let s = resolve(&parse("[llm.uses.poetry]\nenabled = true\n"), &env);
+        assert!(s.notes[0].contains("[llm.uses.poetry]"));
+    }
+
+    #[test]
+    fn a_key_file_must_be_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = with_key("k");
+        let path = dir.path().join(gemini::KEY_FILE);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let s = resolve(
+            &parse("[llm]\nenabled = true\n"),
+            &KeyEnv::in_dir(dir.path()),
+        );
+        let reason = s.state(Use::GeneralAgent).reason().unwrap();
+        assert!(reason.contains("chmod 600"), "{reason}");
+    }
+}
