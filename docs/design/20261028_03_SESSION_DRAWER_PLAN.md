@@ -1,7 +1,7 @@
 ---
 title: The session drawer, with remote cards and switching the active remote
 date: 2026-10-28
-status: Draft
+status: In implementation
 covers:
   - "A left-hand drawer in the companion app, built on libcontrols 0.10.1's
     `DrawerLayout` and `Drawer`: up to 8 remote cards (4 across) with a **+**
@@ -942,3 +942,10 @@ with the body or the earlier amendments, it wins.
    is the first).
 6. **Limits and costs:** up to 8 links held open; a background link sends
    little, and the app's own backgrounding sets every link to background.
+
+## Amendment — 2026-10-28 18:58 EDT: implementation has started; the document is now immutable
+
+Implementation has started with steps 1 and 2 (libflankr_proto 0.5.1 and
+the daemon's activity fields). The status is `In implementation`, and the
+document is now immutable: it changes only on the owner's explicit
+instruction.

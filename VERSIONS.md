@@ -556,3 +556,17 @@ the living section's 2026-10-28 entries). Not strictly additive:
 - **Added:** `ServerRecord::nickname`; `Remotes::set_nickname`,
   `Remotes::display_names`; `keys::nickname`, `base_hostname`,
   `fingerprint_hex`, `NICKNAME_MAX` (40).
+
+## libflankr_proto 0.5.1 — 2026-10-28 (the commit tagged `libflankr_proto-v0.5.1`)
+
+Plan 20261028_03 (the session drawer), step 1. Strictly additive:
+
+- **Added:** `AgentInfo::idle_ms: Option<u64>` (milliseconds since the
+  session file or any of its subagents' files was last written, on the
+  daemon's clock), `AgentInfo::subagents_running: Option<u32>` (subagents
+  not marked finished and written within 60 s; absent when the agent's
+  reader does not read subagents) and `AgentInfo::summary: Option<String>`
+  (the first line of the latest Finished card's spoken summary, redacted, at
+  most `TURN_TEXT_MAX` characters). Appended, defaulted when absent and left
+  off the wire when `None`, so older lists parse and older clients ignore
+  them.

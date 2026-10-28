@@ -181,6 +181,22 @@ pub struct AgentInfo {
     /// no session on the daemon's machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn: Option<Turn>,
+    /// Milliseconds since the session file (or any of its subagents'
+    /// files) was last written, on the daemon's clock, as this list was
+    /// made (plan 20261028_03, 3.12). Absent without a session on the
+    /// daemon's machine. An age, not a time, so the client's clock and the
+    /// daemon's need not agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_ms: Option<u64>,
+    /// The subagents of the session that are running: not marked
+    /// finished, and written within 60 s. Absent when the agent's reader
+    /// does not read subagents (only Claude Code's does).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagents_running: Option<u32>,
+    /// The first line of the latest Finished card's spoken summary, when
+    /// the daemon has one; redacted, at most [`TURN_TEXT_MAX`] characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// Where an agent's turn stands, from its own session (plan 20261023_04,
@@ -2096,6 +2112,9 @@ mod tests {
                 turn: Some(Turn::Asking {
                     question: "Shall I go on?".to_string(),
                 }),
+                idle_ms: Some(4_000),
+                subagents_running: Some(2),
+                summary: Some("The plan is written.".to_string()),
             }],
             focus: Some(FocusInfo {
                 pane_id: "w2:pZ".to_string(),
@@ -2347,10 +2366,34 @@ mod tests {
             "tab_number",
             "session",
             "turn",
+            "idle_ms",
+            "subagents_running",
+            "summary",
         ] {
             assert!(shown.get(key).is_none(), "{key} in {shown}");
         }
         assert_eq!(agent.turn, None);
+        // The drawer's fields (plan 20261028_03, 3.12) are additive: an
+        // older list without them reads as `None`, and they are on the
+        // wire, by these names, only when set.
+        assert_eq!(
+            (&agent.idle_ms, &agent.subagents_running, &agent.summary),
+            (&None, &None, &None)
+        );
+        let active = serde_json::to_value(AgentInfo {
+            idle_ms: Some(1_500),
+            subagents_running: Some(0),
+            summary: Some("Tests pass.".to_string()),
+            ..agent.clone()
+        })
+        .unwrap();
+        assert_eq!(active["idle_ms"], 1_500);
+        assert_eq!(active["subagents_running"], 0);
+        assert_eq!(active["summary"], "Tests pass.");
+        let back: AgentInfo = serde_json::from_value(active).unwrap();
+        assert_eq!(back.idle_ms, Some(1_500));
+        assert_eq!(back.subagents_running, Some(0));
+        assert_eq!(back.summary.as_deref(), Some("Tests pass."));
         let named = serde_json::to_value(AgentInfo {
             name: Some("Claude".to_string()),
             spoken: Some("Claude".to_string()),
