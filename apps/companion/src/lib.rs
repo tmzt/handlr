@@ -928,6 +928,9 @@ impl App {
             | Event::StopSpeaking
             | Event::Arm
             | Event::Vocabulary(_) => {}
+            // A remote in the background, and later variants: the drawer's
+            // steps (plan 20261028_03, steps 6-8) show them.
+            _ => {}
         }
     }
 

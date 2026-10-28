@@ -362,6 +362,9 @@ pub(crate) mod tests {
             focused: false,
             session: None,
             turn,
+            idle_ms: None,
+            subagents_running: None,
+            summary: None,
         }
     }
 
