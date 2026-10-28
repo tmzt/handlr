@@ -69,8 +69,11 @@ pub mod markdown_view;
 pub mod memory;
 pub mod notify;
 pub mod overview;
+#[cfg(all(test, not(target_os = "android")))]
+mod pairing_scan_tests;
 pub mod prompt;
 pub mod remotes;
+pub mod scanner;
 pub mod session_cards;
 pub mod settings;
 pub mod terminal_keys;
@@ -90,6 +93,7 @@ use flankr_companion::{
 };
 use libcontrols::DrawContext;
 use libflankr_proto::common::AgentInfo;
+use libmorph::camera::{CameraEvent, Fit, ScanId, Viewfinder, ViewfinderOptions};
 use libmorph::{
     AudioSetup, Frame, Key, KeyStatus, LimitsRequest, MorphApp, MorphContext, Touch, TouchPhase,
     wgpu,
@@ -109,12 +113,13 @@ use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
 use crate::prompt::keyboard::{FocusedPrompt, Ime, KeyboardRoute, PromptScreen, Typing};
 use crate::prompt::{MessagePrompt, PromptKind, Prompts, Sent};
+use crate::scanner::{Action as CameraAction, Scanner, Touched as ScanTouched};
 use crate::session_cards::{SessionCards, SessionHit, Touched};
 use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
 use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::theme::{Role, theme};
-use crate::ui::{Card, CardState, Hit, Layout, Screen, View, prompt_input};
+use crate::ui::{CameraView, Card, CardState, Hit, Layout, Screen, View, prompt_input};
 
 /// The frame rate: enough for text, and far less heat than the display's
 /// 120 Hz while STT listens.
@@ -151,6 +156,10 @@ struct Args {
     name: Option<String>,
     /// Seconds of silence that submit a dictated message.
     dictation_silence: Option<Duration>,
+    /// `--camera` (tests only): the pairing window's camera on the host, for
+    /// libmorph's scripted camera (plan 20261028_02, decision 18).
+    #[cfg(test)]
+    camera: bool,
 }
 
 /// Seconds as a silence: a positive number, else `None`.
@@ -183,6 +192,8 @@ impl Args {
                 "--pair" => out.pair = value(),
                 "--keys" => out.keys = value().map(PathBuf::from),
                 "--name" => out.name = value(),
+                #[cfg(test)]
+                "--camera" => out.camera = true,
                 "--dictation-silence" => {
                     out.dictation_silence = value().and_then(|v| {
                         let silence = parse_silence(&v);
@@ -241,6 +252,19 @@ pub struct App {
     /// The pairing screen's add mode, and the device code and confirmation
     /// code shown while a pairing waits (`remotes.rs`).
     pairing: remotes::Pairing,
+    /// The pairing window has a camera (Android; scripted tests with
+    /// `--camera`): its viewfinder and Tap to scan (plan 20261028_02).
+    camera: bool,
+    /// The pairing window's camera: placeholder, scan, refusals, pinch.
+    scanner: Scanner,
+    /// Draws the scan's preview frames; made in `init` when there is a
+    /// camera.
+    viewfinder: Option<Viewfinder>,
+    /// Camera calls waiting for the context: run at the end of the hook
+    /// that asked for them.
+    camera_calls: Vec<CameraAction<ScanId>>,
+    /// **Open Settings** was tapped: opened with the context.
+    open_app_settings: bool,
     /// A pairing note or an error, and its colour's role (looked up as it
     /// is drawn, so a theme change recolours it).
     note: Option<(String, Role)>,
@@ -564,6 +588,12 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // Any pairing input stops the camera first (plan 20261028_02,
+        // decision 14); the area says "pairing…" until the daemon answers.
+        let stop = self.scanner.stop();
+        self.call_camera(stop);
+        self.scanner.paste = false;
+        self.scanner.handed_over = self.companion.is_some();
         // A pairing link while a remote is paired pairs another: the add
         // mode's screen, with its pairing words and Cancel, over whatever
         // was shown.
@@ -678,6 +708,8 @@ impl App {
             }
             Event::Paired { name } => {
                 log::info!("pairing: paired as {name}");
+                let stop = self.scanner.reset();
+                self.call_camera(stop);
                 let (server, adding) = self.pairing.paired();
                 if adding {
                     // Back to Settings, where its row now shows.
@@ -696,7 +728,14 @@ impl App {
             Event::PairFailed(why) => {
                 log::warn!("pairing: refused");
                 self.pairing.failed();
-                self.note = Some((format!("pairing failed: {why}"), Role::Warn));
+                if self.camera_window() {
+                    // The placeholder says why, and to scan a new code.
+                    self.scanner.pair_failed(&why);
+                    self.note = None;
+                } else {
+                    self.scanner.handed_over = false;
+                    self.note = Some((format!("pairing failed: {why}"), Role::Warn));
+                }
                 self.screen.invalidate();
             }
             // The card shows the handle; only `text` is spoken.
@@ -842,6 +881,8 @@ impl App {
             // so the add mode closes, back to Settings.
             Event::RemoteUpdated { name, .. } => {
                 let note = remotes::already_note(&name);
+                let stop = self.scanner.reset();
+                self.call_camera(stop);
                 if std::mem::take(&mut self.pairing.adding) {
                     self.pairing.failed();
                     self.note = None;
@@ -1301,6 +1342,8 @@ impl App {
         log::info!("pairing: cancelled");
         let input = self.pairing.cancel();
         self.send(input);
+        let stop = self.scanner.reset();
+        self.call_camera(stop);
         self.field_focused = false;
         self.note = None;
         self.screen.invalidate();
@@ -1368,6 +1411,8 @@ impl App {
         );
         self.paired = false;
         self.online = false;
+        let stop = self.scanner.reset();
+        self.call_camera(stop);
         self.pairing = remotes::Pairing::default();
         self.remotes.clear();
         self.remotes_note = None;
@@ -1938,6 +1983,9 @@ impl App {
         // The add mode's pairing screen, over Settings: no session cards
         // are drawn on it, so none take its taps.
         if self.pairing.adding {
+            if self.pinched(&touch) {
+                return;
+            }
             if touch.phase == TouchPhase::Ended {
                 self.pairing_tap(touch.x, touch.y);
             }
@@ -1981,10 +2029,77 @@ impl App {
             }
             return;
         }
-        if touch.phase != TouchPhase::Ended {
+        if self.pinched(&touch) || touch.phase != TouchPhase::Ended {
             return;
         }
         self.pairing_tap(touch.x, touch.y);
+    }
+
+    /// While the camera runs, every phase of a touch on the pairing window
+    /// goes to the scanner first: two fingers pinch to zoom, and a pinch's
+    /// touches are no tap (plan 20261028_02, decision 12). Whether it took
+    /// the touch.
+    fn pinched(&mut self, touch: &Touch) -> bool {
+        if !self.camera_window() {
+            return false;
+        }
+        match self.scanner.touch(touch.id, touch.phase, touch.x, touch.y) {
+            ScanTouched::Pass => false,
+            ScanTouched::Consumed => true,
+            ScanTouched::Zoom(zoom) => {
+                self.call_camera(Some(zoom));
+                true
+            }
+        }
+    }
+
+    /// The pairing window shows its camera: there is one, the window is
+    /// shown, and no pairing waits (its words are today's quiet screen).
+    fn camera_window(&self) -> bool {
+        self.camera
+            && !self.scanner.no_camera
+            && self.pairing()
+            && !self.pairing.waiting()
+            && (self.pairing.adding || (self.settings_screen.is_none() && self.agent.is_none()))
+    }
+
+    /// Asks for a camera call, made with the context at the end of the
+    /// hook ([`App::run_camera`]).
+    fn call_camera(&mut self, action: Option<CameraAction<ScanId>>) {
+        self.camera_calls.extend(action);
+    }
+
+    /// The camera calls asked for, and **Open Settings**.
+    fn run_camera(&mut self, ctx: &mut MorphContext) {
+        while !self.camera_calls.is_empty() {
+            for action in std::mem::take(&mut self.camera_calls) {
+                match action {
+                    CameraAction::Start => {
+                        let scan = ctx.camera().start_qr(&scanner::qr_options());
+                        log::info!("pairing: scanning (scan {})", scan.id());
+                        self.scanner.started(scan);
+                    }
+                    CameraAction::Stop(scan) => {
+                        log::info!("pairing: camera stopped (scan {})", scan.id());
+                        ctx.camera().stop(scan);
+                        if let Some(viewfinder) = &mut self.viewfinder {
+                            viewfinder.clear();
+                        }
+                    }
+                    CameraAction::ZoomBy(scan, factor) => ctx.camera().zoom_by(scan, factor),
+                    CameraAction::Pair(text) => self.open_url(&text),
+                }
+            }
+        }
+        if std::mem::take(&mut self.open_app_settings) {
+            let opened = ctx.open_app_settings();
+            #[cfg(test)]
+            probe::record(format!("open_app_settings {opened:?}"));
+            match opened {
+                Ok(()) => log::info!("pairing: opened the app's settings for the camera"),
+                Err(e) => log::warn!("pairing: opening the app's settings: {e}"),
+            }
+        }
     }
 
     /// A tap on the pairing screen.
@@ -1997,10 +2112,115 @@ impl App {
                 self.pairing.toggle_details();
                 self.screen.invalidate();
             }
+            // The placeholder's Tap to scan: the camera starts (and CAMERA
+            // is asked for, the first time).
+            Some(Hit::Area) => {
+                self.field_focused = false;
+                let start = self.scanner.tap();
+                self.call_camera(start);
+            }
+            Some(Hit::PasteLink) => {
+                let stop = self.scanner.paste_link();
+                self.call_camera(stop);
+            }
+            Some(Hit::OpenSettings) => self.open_app_settings = true,
             // No tap-to-listen here: the pairing screen is not the home
             // screen, so a tap off its controls only leaves the field.
             None => self.field_focused = false,
         }
+    }
+
+    /// A key ([`MorphApp::on_key`]): Back through the screens, and typing
+    /// into the focused field (desktop): Enter pairs, Escape clears.
+    fn key(&mut self, key: Key) -> KeyStatus {
+        let back = matches!(key, Key::Back | Key::Escape);
+        // The system Back leaves the add mode's pairing screen, back to
+        // Settings, ending its pairing.
+        if back && self.pairing.adding {
+            self.cancel_pairing();
+            return KeyStatus::Handled;
+        }
+        // On the first-run pairing window, Back while the camera runs or
+        // the field shows returns to the placeholder (plan 20261028_02,
+        // decision 15).
+        if back && self.camera_window() && (self.scanner.live() || self.scanner.paste) {
+            let stop = self.scanner.stop();
+            self.call_camera(stop);
+            self.scanner.paste = false;
+            self.field.clear();
+            self.field_focused = false;
+            return KeyStatus::Handled;
+        }
+        // The system Back cancels the settings' modal, or closes them.
+        if back && let Some(screen) = &mut self.settings_screen {
+            if !screen.back() {
+                self.close_settings();
+            }
+            return KeyStatus::Handled;
+        }
+        // Back collapses an expanded prompt card (plan 20261027_03,
+        // decision 4), and leaves what is in it.
+        if back && !self.pairing() && self.prompts().expanded().is_some() {
+            self.with_prompts(|p| {
+                p.back();
+            });
+            return KeyStatus::Handled;
+        }
+        // A physical keyboard types into the armed terminal directly (plan
+        // 20261027_07, decision 7); Escape goes to the pane, Back still
+        // closes the view.
+        if key != Key::Back
+            && self.dictation.is_none()
+            && self.agent.as_ref().is_some_and(AgentScreen::terminal_armed)
+            && let Some(token) = terminal_keys::key_token(key)
+        {
+            self.keyboard.typed_physically();
+            let token = self.modify_typed(&token);
+            self.send_terminal_keys(&token);
+            return KeyStatus::Handled;
+        }
+        // Back or Escape cancels an active prompt card / dictation.
+        if back && self.dictation.is_some() {
+            self.keyboard.close();
+            self.send(Input::Clear);
+            return KeyStatus::Handled;
+        }
+        // A physical keyboard types into the typed prompt directly; the
+        // soft keyboard stays hidden from then on (the keyboard route).
+        if let Some(d) = &self.dictation
+            && d.mode == PromptMode::Keyboard
+        {
+            let Some(text) = self.keyboard.key(&d.text, key) else {
+                return KeyStatus::Unhandled;
+            };
+            self.send(Input::SetText(text));
+            return KeyStatus::Handled;
+        }
+        // The system Back closes the agent view.
+        if self.agent.is_some() && back {
+            self.close_agent();
+            return KeyStatus::Handled;
+        }
+        if !self.field_focused {
+            return KeyStatus::Unhandled;
+        }
+        match key {
+            Key::Character('\r' | '\n') => self.pair(),
+            Key::Character('\u{8}' | '\u{7f}') => {
+                self.field.pop();
+            }
+            Key::Character(c) if !c.is_control() => {
+                if self.field.len() < FIELD_MAX {
+                    self.field.push(c);
+                }
+            }
+            Key::Escape | Key::Back => {
+                self.field.clear();
+                self.field_focused = false;
+            }
+            _ => return KeyStatus::Unhandled,
+        }
+        KeyStatus::Handled
     }
 
     /// The display's scale, as the screens were last laid out at.
@@ -2152,16 +2372,48 @@ impl App {
             .note
             .as_ref()
             .map(|(t, r)| (t.as_str(), theme().get(*r)));
+        let now = Instant::now();
+        let (code, camera) = if self.camera_window() {
+            // The camera's window: one line under the area (decision 3),
+            // and the app's note ("pairing…").
+            let mut code = Vec::new();
+            if let Some((line, role)) = self.scanner.line(now) {
+                remotes::para(&mut code, &layout, &line, theme().get(role), 0.0);
+            }
+            if let Some((note, color)) = note {
+                remotes::para(&mut code, &layout, note, color, 4.0);
+            }
+            let s = &self.scanner;
+            let camera = CameraView {
+                live: s.live(),
+                prompt: s.prompt().map(str::to_string),
+                detail: (self.pairing.adding && s.prompt().is_some())
+                    .then(|| settings::copy::REMOTE_ADD.text.trim().to_string()),
+                zoom: s.zoom_label(now),
+                paste: s.paste,
+                settings: s.settings_button(),
+            };
+            (code, Some(camera))
+        } else {
+            (self.pairing.lines(&layout, note, now), None)
+        };
         let view = View {
             status: vec![self.link.clone(), sound],
-            code: self.pairing.lines(&layout, note, Instant::now()),
+            code,
             field: self.field.clone(),
             field_focused: self.field_focused,
             waiting: self.pairing.waiting(),
             details: self.pairing.details,
             adding: self.pairing.adding,
+            camera,
         };
         self.screen.set(layout, view);
+        #[cfg(test)]
+        probe::screen(
+            self.screen.shown_texts(),
+            self.screen.hits().to_vec(),
+            format!("{:?}", self.scanner.state),
+        );
     }
 }
 
@@ -2230,6 +2482,11 @@ impl MorphApp for App {
         if self.pairing.adding {
             self.read_pair_file();
         }
+        // CAMERA granted in Settings after a refusal only Settings could
+        // undo: plain Tap to scan again.
+        self.scanner
+            .resumed(ctx.permission_granted("android.permission.CAMERA"));
+        self.run_camera(ctx);
     }
 
     /// The answer to the `POST_NOTIFICATIONS` request: refused, the alerts
@@ -2307,17 +2564,14 @@ impl MorphApp for App {
     /// A `flankr://` link opened the app (libmorph 0.3.2). Only a pairing
     /// link (`flankr://<host>:<port>/pair#…`) is acted on; its fragment is
     /// the pairing string, so nothing past the path is logged.
-    fn on_open_url(&mut self, _ctx: &mut MorphContext, url: &str) {
-        let before_fragment = url.split(['#', '?']).next().unwrap_or("");
-        let is_pairing = before_fragment
-            .strip_prefix("flankr://")
-            .is_some_and(|rest| rest.ends_with("/pair"));
-        if is_pairing {
+    fn on_open_url(&mut self, ctx: &mut MorphContext, url: &str) {
+        if remotes::is_pairing_link(url) {
             log::info!("link: a pairing link was opened");
             self.open_url(url);
         } else {
             log::warn!("link: ignoring an opened link that is not a pairing link");
         }
+        self.run_camera(ctx);
     }
 
     fn init(ctx: &mut MorphContext) -> Self {
@@ -2399,6 +2653,12 @@ impl MorphApp for App {
         ));
         let mut overview = Overview::new();
         overview.shader_panels = true;
+        // The pairing window's camera: Android (with `mobile-camera-qr`),
+        // and the host's scripted tests that ask for it.
+        #[cfg(test)]
+        let camera = cfg!(target_os = "android") || args.camera;
+        #[cfg(not(test))]
+        let camera = cfg!(target_os = "android");
         let mut app = Self {
             fonts,
             roboto,
@@ -2424,6 +2684,11 @@ impl MorphApp for App {
             paired: false,
             card: None,
             pairing: remotes::Pairing::default(),
+            camera,
+            scanner: Scanner::default(),
+            viewfinder: camera.then(|| Viewfinder::new(ctx)),
+            camera_calls: Vec::new(),
+            open_app_settings: false,
             note: None,
             field: String::new(),
             field_focused: false,
@@ -2507,28 +2772,33 @@ impl MorphApp for App {
             }
         }
 
+        // Not in the scripted tests, which must not open the Mac's devices.
         #[cfg(not(target_os = "android"))]
-        match AudioSession::open_default(app.audio_config.clone()) {
-            Ok(session) => {
-                app.audio = Some(session);
-                app.sound = "loading the voice\u{2026}".into();
-            }
-            // No microphone (a Mac mini): the replies can still be heard.
-            Err(e) => {
-                log::error!("audio: {e}; trying the speaker alone");
-                let silent = flankr_audio::Format {
-                    rate: 24_000,
-                    channels: 1,
-                };
-                match AudioSession::open_default_output(app.audio_config.clone(), silent) {
-                    Ok((session, mic)) => {
-                        app.audio = Some(session);
-                        app._mic = Some(mic);
-                        app.sound = format!("no microphone ({e})");
-                    }
-                    Err(e) => {
-                        log::error!("audio: {e}");
-                        app.sound = format!("no audio: {e}");
+        if cfg!(test) {
+            app.sound = "no audio in tests".into();
+        } else {
+            match AudioSession::open_default(app.audio_config.clone()) {
+                Ok(session) => {
+                    app.audio = Some(session);
+                    app.sound = "loading the voice\u{2026}".into();
+                }
+                // No microphone (a Mac mini): the replies can still be heard.
+                Err(e) => {
+                    log::error!("audio: {e}; trying the speaker alone");
+                    let silent = flankr_audio::Format {
+                        rate: 24_000,
+                        channels: 1,
+                    };
+                    match AudioSession::open_default_output(app.audio_config.clone(), silent) {
+                        Ok((session, mic)) => {
+                            app.audio = Some(session);
+                            app._mic = Some(mic);
+                            app.sound = format!("no microphone ({e})");
+                        }
+                        Err(e) => {
+                            log::error!("audio: {e}");
+                            app.sound = format!("no audio: {e}");
+                        }
                     }
                 }
             }
@@ -2600,6 +2870,17 @@ impl MorphApp for App {
         } else {
             self.overview.tick(dt);
         }
+        // The camera runs only while the window shows it (plan 20261028_02,
+        // decision 15): the window replaced, or left while suspended, stops
+        // it.
+        if self.scanner.live() && !self.camera_window() {
+            let stop = self.scanner.stop();
+            self.call_camera(stop);
+        }
+        self.run_camera(ctx);
+        if let (Some(scan), Some(viewfinder)) = (self.scanner.running(), &mut self.viewfinder) {
+            viewfinder.update(ctx, scan);
+        }
         self.lay_out(ctx);
         self.sync_terminal();
         // The view's flow came near its top: page in earlier sections
@@ -2631,87 +2912,33 @@ impl MorphApp for App {
         for url in links {
             open_link(ctx, &url);
         }
+        self.run_camera(ctx);
     }
 
     /// Typing into the focused field (desktop): Enter pairs, Escape clears.
-    fn on_key(&mut self, _ctx: &mut MorphContext, key: Key) -> KeyStatus {
-        let back = matches!(key, Key::Back | Key::Escape);
-        // The system Back leaves the add mode's pairing screen, back to
-        // Settings, ending its pairing.
-        if back && self.pairing.adding {
-            self.cancel_pairing();
-            return KeyStatus::Handled;
-        }
-        // The system Back cancels the settings' modal, or closes them.
-        if back && let Some(screen) = &mut self.settings_screen {
-            if !screen.back() {
-                self.close_settings();
+    fn on_key(&mut self, ctx: &mut MorphContext, key: Key) -> KeyStatus {
+        let status = self.key(key);
+        self.run_camera(ctx);
+        status
+    }
+
+    /// The camera's answers (libmorph 0.5.0): the pairing window's scan
+    /// (plan 20261028_02). A scanned pairing link stops the scan and is
+    /// handed to [`App::open_url`].
+    fn on_camera(&mut self, ctx: &mut MorphContext, event: &CameraEvent) {
+        #[cfg(test)]
+        probe::record(format!("camera {}", probe::event(event)));
+        if let Some(event) = scanner::cam(event) {
+            for action in self.scanner.on_event(event, Instant::now()) {
+                self.call_camera(Some(action));
             }
-            return KeyStatus::Handled;
         }
-        // Back collapses an expanded prompt card (plan 20261027_03,
-        // decision 4), and leaves what is in it.
-        if back && !self.pairing() && self.prompts().expanded().is_some() {
-            self.with_prompts(|p| {
-                p.back();
-            });
-            return KeyStatus::Handled;
-        }
-        // A physical keyboard types into the armed terminal directly (plan
-        // 20261027_07, decision 7); Escape goes to the pane, Back still
-        // closes the view.
-        if key != Key::Back
-            && self.dictation.is_none()
-            && self.agent.as_ref().is_some_and(AgentScreen::terminal_armed)
-            && let Some(token) = terminal_keys::key_token(key)
+        if self.scanner.running().is_none()
+            && let Some(viewfinder) = &mut self.viewfinder
         {
-            self.keyboard.typed_physically();
-            let token = self.modify_typed(&token);
-            self.send_terminal_keys(&token);
-            return KeyStatus::Handled;
+            viewfinder.clear();
         }
-        // Back or Escape cancels an active prompt card / dictation.
-        if back && self.dictation.is_some() {
-            self.keyboard.close();
-            self.send(Input::Clear);
-            return KeyStatus::Handled;
-        }
-        // A physical keyboard types into the typed prompt directly; the
-        // soft keyboard stays hidden from then on (the keyboard route).
-        if let Some(d) = &self.dictation
-            && d.mode == PromptMode::Keyboard
-        {
-            let Some(text) = self.keyboard.key(&d.text, key) else {
-                return KeyStatus::Unhandled;
-            };
-            self.send(Input::SetText(text));
-            return KeyStatus::Handled;
-        }
-        // The system Back closes the agent view.
-        if self.agent.is_some() && back {
-            self.close_agent();
-            return KeyStatus::Handled;
-        }
-        if !self.field_focused {
-            return KeyStatus::Unhandled;
-        }
-        match key {
-            Key::Character('\r' | '\n') => self.pair(),
-            Key::Character('\u{8}' | '\u{7f}') => {
-                self.field.pop();
-            }
-            Key::Character(c) if !c.is_control() => {
-                if self.field.len() < FIELD_MAX {
-                    self.field.push(c);
-                }
-            }
-            Key::Escape | Key::Back => {
-                self.field.clear();
-                self.field_focused = false;
-            }
-            _ => return KeyStatus::Unhandled,
-        }
-        KeyStatus::Handled
+        self.run_camera(ctx);
     }
 
     fn on_text_input(&mut self, _ctx: &mut MorphContext, event: &libmorph::TextInputEvent) {
@@ -2843,6 +3070,64 @@ impl MorphApp for App {
                 &[],
                 None,
             );
+        } else if let Some(area) = self
+            .screen
+            .camera_area()
+            .filter(|_| shown == Shown::Pairing)
+        {
+            // The pairing window's camera (plan 20261028_02, decision 17):
+            // one pass clears to the background and draws the viewfinder
+            // into the area, then the list goes over it, kept.
+            let mut encoder =
+                ctx.device()
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("pairing viewfinder"),
+                    });
+            {
+                let bg = theme().bg;
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("pairing viewfinder"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: frame.view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: f64::from(bg[0]),
+                                g: f64::from(bg[1]),
+                                b: f64::from(bg[2]),
+                                a: f64::from(bg[3]),
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                if self.scanner.running().is_some()
+                    && let Some(viewfinder) = &self.viewfinder
+                {
+                    let mut options = ViewfinderOptions::default();
+                    options.fit = Fit::Cover;
+                    viewfinder.draw(ctx, &mut pass, [area.x, area.y, area.w, area.h], &options);
+                }
+            }
+            ctx.queue().submit([encoder.finish()]);
+            let frame_sdf = self.list.lower_with(&self.fonts);
+            self.sdf.upload_chars(ctx.queue(), &frame_sdf.char_buffer);
+            self.sdf.upload_params(ctx.queue(), &frame_sdf.param_bank);
+            self.sdf.render_full_scaled_load(
+                ctx.device(),
+                ctx.queue(),
+                frame.view,
+                w,
+                h,
+                1.0,
+                &frame_sdf.draws,
+                0.0,
+                &[0; 16],
+                &[],
+                None,
+            );
         } else {
             self.sdf.render_draw_list_in(
                 ctx.device(),
@@ -2878,6 +3163,106 @@ fn android_main(app: libmorph::AndroidApp) {
         )
     };
     libmorph::run_android::<App>(app);
+}
+
+/// What a scripted test reads back from the app it runs (plan
+/// 20261028_02, section 5): the camera events and calls in order, and the
+/// pairing window's texts and scanner state as last laid out. Per thread:
+/// a scripted run drives the app on the test's own thread.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::RefCell;
+
+    use libmorph::camera::{CameraError, CameraEvent, ZoomSource};
+
+    use crate::ui::Hit;
+    use libcontrols::Rect;
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Probe {
+        /// The camera events, in order.
+        pub log: Vec<String>,
+        /// The pairing window's texts, as last laid out, and each change.
+        pub texts: Vec<String>,
+        pub history: Vec<Vec<String>>,
+        pub hits: Vec<(Hit, Rect)>,
+        /// The scanner's state, as last laid out.
+        pub state: String,
+    }
+
+    impl Probe {
+        /// The centre of a control, as last laid out.
+        pub fn at(&self, hit: Hit) -> (f32, f32) {
+            let (_, r) = self
+                .hits
+                .iter()
+                .find(|(h, _)| *h == hit)
+                .unwrap_or_else(|| panic!("no {hit:?} in {:?}", self.hits));
+            (r.x + r.w / 2.0, r.y + r.h / 2.0)
+        }
+
+        /// Whether a text shown contains `part`, last laid out.
+        pub fn shows(&self, part: &str) -> bool {
+            self.texts.iter().any(|t| t.contains(part))
+        }
+    }
+
+    thread_local! {
+        static PROBE: RefCell<Probe> = RefCell::new(Probe::default());
+    }
+
+    pub fn record(line: String) {
+        PROBE.with(|p| p.borrow_mut().log.push(line));
+    }
+
+    pub fn screen(texts: Vec<String>, hits: Vec<(Hit, Rect)>, state: String) {
+        PROBE.with(|p| {
+            let mut p = p.borrow_mut();
+            if p.history.last() != Some(&texts) {
+                p.history.push(texts.clone());
+            }
+            p.texts = texts;
+            p.hits = hits;
+            p.state = state;
+        });
+    }
+
+    /// The probe so far, emptied.
+    pub fn take() -> Probe {
+        PROBE.with(|p| std::mem::take(&mut *p.borrow_mut()))
+    }
+
+    /// An event without its payload.
+    pub fn event(event: &CameraEvent) -> String {
+        match event {
+            CameraEvent::Opened { scan, .. } => format!("opened {}", scan.id()),
+            CameraEvent::Closed { scan, reason } => match reason {
+                None => format!("closed {}", scan.id()),
+                Some(CameraError::PermissionDenied { settings_only }) => {
+                    format!("denied {} settings_only={settings_only}", scan.id())
+                }
+                Some(e) => format!("closed {} {e}", scan.id()),
+            },
+            CameraEvent::Suspended { scan } => format!("suspended {}", scan.id()),
+            CameraEvent::Zoom {
+                scan,
+                ratio,
+                source,
+            } => format!(
+                "zoom {} {ratio:.2} {}",
+                scan.id(),
+                if *source == ZoomSource::App {
+                    "app"
+                } else {
+                    "auto"
+                }
+            ),
+            CameraEvent::Qr { scan, code } => {
+                format!("qr {} {} bytes", scan.id(), code.bytes.len())
+            }
+            other => format!("{other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

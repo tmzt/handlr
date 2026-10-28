@@ -21,9 +21,10 @@ use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Rou
 use libflankr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
+use crate::agent::fill;
 use crate::prompt::PromptInput;
 use crate::settings::copy;
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 
 /// Lines of the pairing area (the words, or the Details with the device
 /// code, and the notes).
@@ -31,6 +32,33 @@ const CODE_LINES: usize = 20;
 /// The add mode's back glyph: ASCII, as the pairing screen's face has no
 /// "‹".
 const BACK_GLYPH: &str = "<";
+/// Lines under the placeholder's label (the add mode's what to do).
+const DETAIL_LINES: usize = 6;
+/// The reticle (plan 20261028_02, decision 2): corner marks of this
+/// thickness and length, in points, framing a centred square of this share
+/// of the area's shorter side, in the text colour at these opacities.
+const MARK_PT: f32 = 3.0;
+const MARK_LEN_PT: f32 = 28.0;
+const RETICLE_SHARE: f32 = 0.62;
+const MARK_ALPHA_LIVE: f32 = 0.8;
+const MARK_ALPHA_PLACEHOLDER: f32 = 0.4;
+/// The title's band over the camera's image: the background at 70 %.
+const TITLE_BAND_ALPHA: f32 = 0.7;
+
+/// The camera's area as last laid out, in surface pixels, and what is
+/// drawn over it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CameraDraw {
+    area: Rect,
+    /// The title's band at the top of the area.
+    title_band: Rect,
+    /// The reticle's square.
+    reticle: Rect,
+    live: bool,
+    /// The camera glyph over the placeholder's label: its centre.
+    glyph: Option<[f32; 2]>,
+    scale: f32,
+}
 
 /// One line of text, before layout.
 #[derive(Clone, Debug, PartialEq)]
@@ -318,6 +346,32 @@ pub struct View {
     /// The add mode (**+** in Settings' Remotes): its title, and a "<"
     /// back to Settings.
     pub adding: bool,
+    /// The camera's window (plan 20261028_02), where there is a camera and
+    /// no pairing waits: the viewfinder area, and `code` is the line under
+    /// it. `None`: today's paste screen.
+    pub camera: Option<CameraView>,
+}
+
+/// What the pairing window shows of the camera (plan 20261028_02,
+/// decisions 1-4, 12-14).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CameraView {
+    /// The camera runs: the viewfinder under the area, the corner marks
+    /// bright, no placeholder.
+    pub live: bool,
+    /// The placeholder's label (*Tap to scan*, *Tap to scan again*), over
+    /// its camera glyph; `None` while the camera runs or a scanned code is
+    /// being paired.
+    pub prompt: Option<String>,
+    /// Under the label in the placeholder: the add mode's what to do.
+    pub detail: Option<String>,
+    /// The zoom ratio at the top right of the area, after a pinch.
+    pub zoom: Option<String>,
+    /// **Paste a link** was tapped: the field and Pair in the bottom row.
+    pub paste: bool,
+    /// **Open Settings** in the bottom row (a refusal only Settings can
+    /// undo).
+    pub settings: bool,
 }
 
 /// A control a touch landed on.
@@ -331,6 +385,12 @@ pub enum Hit {
     Details,
     /// The add mode's "<": back to Settings.
     Back,
+    /// The camera's area: the placeholder's Tap to scan.
+    Area,
+    /// **Paste a link**: the field instead of the camera.
+    PasteLink,
+    /// **Open Settings**, after a refusal only Settings can undo.
+    OpenSettings,
 }
 
 /// Surface size, scale factor and safe area top and bottom.
@@ -377,6 +437,15 @@ pub struct Screen {
     pair: NodeId,
     cancel: NodeId,
     details: NodeId,
+    /// The camera's window: the placeholder's label and the lines under
+    /// it, the zoom ratio, **Paste a link** and **Open Settings**.
+    prompt: NodeId,
+    detail: Vec<NodeId>,
+    zoom: NodeId,
+    paste_link: NodeId,
+    open_settings: NodeId,
+    /// The camera's area and what is drawn in it, as last laid out.
+    camera: Option<CameraDraw>,
     /// Where each visible control is, as last laid out.
     hits: Vec<(Hit, Rect)>,
     /// What the screen shows, as last laid out.
@@ -419,6 +488,16 @@ impl Screen {
         let pair = router.add(None, button("Pair", theme().message));
         let cancel = router.add(None, button(copy::CANCEL.text, theme().back));
         let details = router.add(None, button(copy::PAIRING_DETAILS.text, theme().back));
+        let prompt = router.add(None, label("", 20.0, theme().text, TextAlign::Center));
+        let detail = (0..DETAIL_LINES)
+            .map(|_| router.add(None, label("", 15.0, theme().muted, TextAlign::Center)))
+            .collect();
+        let zoom = router.add(None, label("", 18.0, theme().text, TextAlign::Right));
+        let paste_link = router.add(None, button(copy::PAIRING_PASTE_LINK.text, theme().back));
+        let open_settings = router.add(
+            None,
+            button(copy::PAIRING_OPEN_SETTINGS.text, theme().message),
+        );
         Self {
             router,
             title,
@@ -429,6 +508,12 @@ impl Screen {
             pair,
             cancel,
             details,
+            prompt,
+            detail,
+            zoom,
+            paste_link,
+            open_settings,
+            camera: None,
             hits: Vec::new(),
             shown: None,
             dirty: true,
@@ -499,8 +584,22 @@ impl Screen {
                     .push((Hit::Back, Rect::new(0.0, layout.top, back_w + pad, h)));
             }
         }
+        // The camera's window, unless a pairing waits (its six words are
+        // today's quiet screen).
+        let camera = view.camera.clone().filter(|_| !view.waiting);
+        // The title's band over the camera's image, to just below it.
+        let title_bottom = y + 8.0 * s;
+        // The status lines say "not paired", which the camera's window
+        // already says: not shown with it.
         for (i, &id) in self.status.iter().enumerate() {
             let text = view.status.get(i).map_or("", String::as_str);
+            if camera.is_some() {
+                self.router
+                    .get_mut::<Label>(id)
+                    .expect("a label node")
+                    .set_text("");
+                continue;
+            }
             place(
                 &mut self.router,
                 &mut y,
@@ -512,7 +611,8 @@ impl Screen {
         }
 
         // The bottom: the field and Pair, or Details and Cancel while a
-        // pairing waits.
+        // pairing waits, or with the camera, Paste a link (and Open
+        // Settings, and Cancel in the add mode).
         let bottom = layout.h - layout.bottom - 24.0 * s;
         let row_h = Layout::ROW_H * s;
         let row_y = bottom - row_h;
@@ -541,9 +641,35 @@ impl Screen {
             edit.rect = field_rect;
             edit.state.set_active(view.field_focused && !view.waiting);
         }
+        // The field and Pair: today's screen, or the camera's window after
+        // Paste a link.
+        let field_shown = !view.waiting && camera.as_ref().is_none_or(|c| c.paste);
         self.router
-            .set_flags(self.field, NodeFlags::HIDDEN, view.waiting);
-        self.place_button(self.pair, pair_rect, s, !view.waiting);
+            .set_flags(self.field, NodeFlags::HIDDEN, !field_shown);
+        self.place_button(self.pair, pair_rect, s, field_shown);
+        // The camera's row: its buttons side by side.
+        let mut row: Vec<(Hit, NodeId)> = Vec::new();
+        if let Some(c) = camera.as_ref().filter(|c| !c.paste) {
+            row.push((Hit::PasteLink, self.paste_link));
+            if c.settings {
+                row.push((Hit::OpenSettings, self.open_settings));
+            }
+            if view.adding {
+                row.push((Hit::Cancel, self.cancel));
+            }
+        }
+        let n = row.len().max(1) as f32;
+        let each = (layout.w - 2.0 * pad - 12.0 * s * (n - 1.0)) / n;
+        for (i, &(hit, id)) in row.iter().enumerate() {
+            let rect = Rect::new(pad + i as f32 * (each + 12.0 * s), row_y, each, row_h);
+            self.place_button(id, rect, s, true);
+            self.hits.push((hit, rect));
+        }
+        for id in [self.paste_link, self.open_settings] {
+            if !row.iter().any(|&(_, r)| r == id) {
+                self.router.set_flags(id, NodeFlags::HIDDEN, true);
+            }
+        }
         let half = (layout.w - 2.0 * pad - 12.0 * s) / 2.0;
         let details_rect = Rect::new(pad, row_y, half, row_h);
         let cancel_rect = Rect::new(pad + half + 12.0 * s, row_y, half, row_h);
@@ -560,11 +686,14 @@ impl Screen {
             button.text = label.to_string();
         }
         self.place_button(self.details, details_rect, s, view.waiting);
-        self.place_button(self.cancel, cancel_rect, s, view.waiting);
+        let cancel_in_row = row.iter().any(|&(hit, _)| hit == Hit::Cancel);
+        if !cancel_in_row {
+            self.place_button(self.cancel, cancel_rect, s, view.waiting);
+        }
         if view.waiting {
             self.hits.push((Hit::Details, details_rect));
             self.hits.push((Hit::Cancel, cancel_rect));
-        } else {
+        } else if field_shown {
             self.hits.push((Hit::Field, field_rect));
             self.hits.push((Hit::Pair, pair_rect));
         }
@@ -573,7 +702,8 @@ impl Screen {
         let height = |line: &Line| (line.gap + line.size * 1.35) * s;
         let code_lines = &view.code[..view.code.len().min(CODE_LINES)];
         let code_h: f32 = code_lines.iter().map(height).sum();
-        let mut code_y = (row_y - 12.0 * s - code_h).max(y);
+        let code_top = (row_y - 12.0 * s - code_h).max(y);
+        let mut code_y = code_top;
         let mut code_lines = code_lines.iter();
         for &id in &self.code {
             match code_lines.next() {
@@ -597,8 +727,128 @@ impl Screen {
             }
         }
 
+        self.lay_out_camera(layout, camera.as_ref(), code_top, title_bottom);
         self.shown = Some((view, layout));
         self.dirty = true;
+    }
+
+    /// The camera's area, from the top safe area to the line under it,
+    /// full width (decision 1), with the placeholder's label and lines, the
+    /// zoom ratio, and what [`Screen::draw`] draws over it; or nothing
+    /// without the camera's window.
+    fn lay_out_camera(
+        &mut self,
+        layout: Layout,
+        camera: Option<&CameraView>,
+        code_top: f32,
+        title_bottom: f32,
+    ) {
+        let s = layout.scale;
+        let pad = Layout::PAD * s;
+        let mut prompt = None;
+        let mut detail: Vec<String> = Vec::new();
+        let mut zoom = None;
+        self.camera = camera.map(|c| {
+            let top = layout.top;
+            let bottom = (code_top - 12.0 * s).max(title_bottom + 48.0 * s);
+            let area = Rect::new(0.0, top, layout.w, bottom - top);
+            let side = RETICLE_SHARE * area.w.min(area.h - (title_bottom - top));
+            let (cx, cy) = (area.w / 2.0, (title_bottom + bottom) / 2.0);
+            let reticle = Rect::new(cx - side / 2.0, cy - side / 2.0, side, side);
+            self.hits.push((Hit::Area, area));
+            let glyph = c.prompt.as_ref().map(|text| {
+                prompt = Some((text.clone(), Rect::new(0.0, cy, layout.w, 20.0 * s * 1.3)));
+                if let Some(d) = &c.detail {
+                    detail = wrap(d, layout.columns_in(side, 15.0));
+                }
+                [cx, cy - 36.0 * s]
+            });
+            zoom = c.zoom.clone();
+            CameraDraw {
+                area,
+                title_band: Rect::new(0.0, top, layout.w, title_bottom - top),
+                reticle,
+                live: c.live,
+                glyph,
+                scale: s,
+            }
+        });
+        let label = |router: &mut Router, id, text: &str, rect: Rect, size: f32| {
+            let l = router.get_mut::<Label>(id).expect("a label node");
+            l.set_text(text);
+            l.font_size = Some(size * s);
+            l.rect = rect;
+        };
+        match prompt {
+            Some((text, rect)) => label(&mut self.router, self.prompt, &text, rect, 20.0),
+            None => label(&mut self.router, self.prompt, "", Rect::default(), 20.0),
+        }
+        let mut detail_y = self
+            .camera
+            .map_or(0.0, |c| c.reticle.y + c.reticle.h / 2.0 + 34.0 * s);
+        for (i, &id) in self.detail.clone().iter().enumerate() {
+            let text = detail.get(i).map_or("", String::as_str);
+            let rect = Rect::new(pad, detail_y, layout.w - 2.0 * pad, 15.0 * s * 1.3);
+            label(&mut self.router, id, text, rect, 15.0);
+            detail_y += 15.0 * s * 1.35;
+        }
+        let zoom_rect = Rect::new(
+            layout.w - pad - 120.0 * s,
+            title_bottom + 8.0 * s,
+            120.0 * s,
+            18.0 * s * 1.3,
+        );
+        label(
+            &mut self.router,
+            self.zoom,
+            zoom.as_deref().unwrap_or(""),
+            zoom_rect,
+            18.0,
+        );
+    }
+
+    /// The camera's area in surface pixels, while the camera's window
+    /// shows: where the viewfinder is drawn.
+    pub fn camera_area(&self) -> Option<Rect> {
+        self.camera.map(|c| c.area)
+    }
+
+    /// The controls shown, as last laid out, with where they are.
+    #[cfg(test)]
+    pub(crate) fn hits(&self) -> &[(Hit, Rect)] {
+        &self.hits
+    }
+
+    /// Every text shown, labels and buttons, in node order (tests).
+    #[cfg(test)]
+    pub(crate) fn shown_texts(&self) -> Vec<String> {
+        let mut ids = vec![self.title, self.back];
+        ids.extend(self.status);
+        ids.extend(&self.code);
+        ids.push(self.prompt);
+        ids.extend(&self.detail);
+        ids.push(self.zoom);
+        ids.extend([
+            self.field,
+            self.pair,
+            self.cancel,
+            self.details,
+            self.paste_link,
+            self.open_settings,
+        ]);
+        ids.into_iter()
+            .filter(|&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
+            .filter_map(|id| {
+                let text = if let Some(l) = self.router.get::<Label>(id) {
+                    l.text().to_string()
+                } else if let Some(e) = self.router.get::<Edit>(id) {
+                    e.text().to_string()
+                } else {
+                    self.router.get::<Button>(id)?.text.clone()
+                };
+                (!text.is_empty()).then_some(text)
+            })
+            .collect()
     }
 
     fn place_button(&mut self, id: NodeId, rect: Rect, s: f32, visible: bool) {
@@ -628,9 +878,83 @@ impl Screen {
             return false;
         }
         list.clear();
+        if let Some(c) = self.camera {
+            draw_camera(list, &c);
+        }
         self.router.render(list, ctx);
         self.dirty = false;
         true
+    }
+}
+
+/// What the camera's window draws under its labels and buttons: the
+/// placeholder's band and camera glyph (no viewfinder yet), the corner
+/// marks, and the title's band over the image. The viewfinder itself is
+/// drawn before the list, in its own pass (`App::render`).
+fn draw_camera(list: &mut DrawList, c: &CameraDraw) {
+    let s = c.scale;
+    if !c.live {
+        fill(list, c.area, theme().band, 0.0);
+    }
+    // The four corner marks, L shapes.
+    let alpha = if c.live {
+        MARK_ALPHA_LIVE
+    } else {
+        MARK_ALPHA_PLACEHOLDER
+    };
+    let color = with_alpha(theme().text, alpha * theme().text[3]);
+    let (t, l) = (MARK_PT * s, MARK_LEN_PT * s);
+    let r = c.reticle;
+    for (x, y, dx, dy) in [
+        (r.x, r.y, 1.0, 1.0),
+        (r.x + r.w, r.y, -1.0, 1.0),
+        (r.x, r.y + r.h, 1.0, -1.0),
+        (r.x + r.w, r.y + r.h, -1.0, -1.0),
+    ] {
+        // Each arm from the corner inwards.
+        let across = Rect::new(x.min(x + dx * l), y.min(y + dy * t), l, t);
+        let down = Rect::new(x.min(x + dx * t), y.min(y + dy * l), t, l);
+        fill(list, across, color, 0.0);
+        fill(list, down, color, 0.0);
+    }
+    // The camera glyph: a body, its top, and a lens, from the same boxes.
+    if let Some([cx, cy]) = c.glyph {
+        let glyph = with_alpha(theme().text, MARK_ALPHA_LIVE * theme().text[3]);
+        let (w, h) = (56.0 * s, 38.0 * s);
+        fill(
+            list,
+            Rect::new(cx - 12.0 * s, cy - h / 2.0 - 6.0 * s, 24.0 * s, 8.0 * s),
+            glyph,
+            2.0 * s,
+        );
+        fill(
+            list,
+            Rect::new(cx - w / 2.0, cy - h / 2.0, w, h),
+            glyph,
+            6.0 * s,
+        );
+        let lens = 22.0 * s;
+        fill(
+            list,
+            Rect::new(cx - lens / 2.0, cy - lens / 2.0, lens, lens),
+            theme().band,
+            lens / 2.0,
+        );
+        let inner = 12.0 * s;
+        fill(
+            list,
+            Rect::new(cx - inner / 2.0, cy - inner / 2.0, inner, inner),
+            glyph,
+            inner / 2.0,
+        );
+    }
+    if c.live {
+        fill(
+            list,
+            c.title_band,
+            with_alpha(theme().bg, TITLE_BAND_ALPHA),
+            0.0,
+        );
     }
 }
 

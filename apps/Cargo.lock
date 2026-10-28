@@ -569,7 +569,9 @@ dependencies = [
  "libtypedmd",
  "log",
  "serde",
+ "serde_json",
  "tempfile",
+ "tokio",
  "toml 0.8.23",
  "zeroize",
 ]
@@ -1068,7 +1070,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1117,7 +1119,7 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "flankr-audio"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cpal",
  "flankr-companion",
@@ -1688,8 +1690,8 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmobile"
-version = "0.2.5"
-source = "git+https://github.com/tmzt/libmobile#e5221d8d99a416b8d279f6d7f0487082ca1f20a3"
+version = "0.3.1"
+source = "git+https://github.com/tmzt/libmobile#488a698935063cfdd879cb84b4aaf14afb1ac819"
 dependencies = [
  "android-activity",
  "cpal",
@@ -1698,14 +1700,16 @@ dependencies = [
  "log",
  "ndk",
  "ndk-context",
+ "ndk-sys",
  "raw-window-handle",
+ "rqrr",
  "zeroize",
 ]
 
 [[package]]
 name = "libmorph"
-version = "0.4.2"
-source = "git+https://github.com/tmzt/libmorph?rev=0b288e8d1096c0b7441bc953ce745a44a9632be8#0b288e8d1096c0b7441bc953ce745a44a9632be8"
+version = "0.5.0"
+source = "git+https://github.com/tmzt/libmorph?rev=c9b432d80178536576c559d1af616b1f83cabea6#c9b432d80178536576c559d1af616b1f83cabea6"
 dependencies = [
  "block2 0.5.1",
  "cpal",
@@ -1726,8 +1730,8 @@ dependencies = [
 
 [[package]]
 name = "libmorph-build"
-version = "0.2.5"
-source = "git+https://github.com/tmzt/libmorph?rev=0b288e8d1096c0b7441bc953ce745a44a9632be8#0b288e8d1096c0b7441bc953ce745a44a9632be8"
+version = "0.3.0"
+source = "git+https://github.com/tmzt/libmorph?rev=b8eb1010d5886dba636603e189a00262de60447f#b8eb1010d5886dba636603e189a00262de60447f"
 dependencies = [
  "libmobile",
 ]
@@ -2027,7 +2031,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3000,7 +3004,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3409,10 +3413,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4218,7 +4222,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

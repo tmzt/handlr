@@ -153,9 +153,13 @@ impl Pairing {
     ) -> Vec<Line> {
         let mut out = Vec::new();
         match &self.waiting {
-            None if self.adding => {
-                para(&mut out, layout, copy::REMOTE_ADD.text, theme().muted, 0.0)
-            }
+            None if self.adding => para(
+                &mut out,
+                layout,
+                copy::REMOTE_ADD_PASTE.text,
+                theme().muted,
+                0.0,
+            ),
             None => {}
             Some(w) if self.details => details(&mut out, layout, w, now),
             Some(w) => {
@@ -182,7 +186,7 @@ impl Pairing {
 }
 
 /// `text` wrapped at the notes' size, its first line `gap` below the last.
-fn para(out: &mut Vec<Line>, layout: &Layout, text: &str, color: [f32; 4], gap: f32) {
+pub(crate) fn para(out: &mut Vec<Line>, layout: &Layout, text: &str, color: [f32; 4], gap: f32) {
     for (i, t) in wrap(text.trim(), layout.columns(NOTE_PT))
         .into_iter()
         .enumerate()
@@ -336,10 +340,33 @@ pub fn first_paired_note(name: &str) -> String {
         .to_string()
 }
 
+/// Whether `text` is a pairing link, `flankr://<host>:<port>/pair#…`:
+/// the test an opened link and a scanned QR code both pass before they
+/// are acted on (plan 20261028_02, decision 8). Only the part before the
+/// fragment (or a query) is looked at, as the fragment is the pairing
+/// string.
+pub fn is_pairing_link(text: &str) -> bool {
+    let before_fragment = text.trim().split(['#', '?']).next().unwrap_or("");
+    before_fragment
+        .strip_prefix("flankr://")
+        .is_some_and(|rest| rest.ends_with("/pair"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use flankr_companion::RemoteId;
+
+    #[test]
+    fn a_pairing_link_is_flankr_host_port_pair() {
+        assert!(is_pairing_link("flankr://m4.ts.net:7347/pair#flankr1abc"));
+        assert!(is_pairing_link(" flankr://127.0.0.1:7347/pair#x \n"));
+        assert!(!is_pairing_link("https://example.com"));
+        assert!(!is_pairing_link("flankr1abc"));
+        assert!(!is_pairing_link("flankr://m4:7347/other#flankr1abc"));
+        assert!(!is_pairing_link("flankr://m4:7347/x#/pair"));
+        assert!(!is_pairing_link(""));
+    }
 
     const PHONE: Layout = Layout {
         w: 1080.0,

@@ -24,10 +24,11 @@ libflankr_term = { path = "../../crates/libflankr_term" }
 flankr-audio = { path = "../../crates/flankr-audio" }
 # `StaticKey`, which the key store's Noise key implements.
 libflankr_proto = { path = "../../crates/libflankr_proto", features = ["link"] }
-# libmorph 0.4.1: the key store and the secure store (`secure-store`), URL
-# schemes (`on_open_url`), `open_link`, `data_dir` on every host,
+# libmorph 0.5.0 (tag v0.5.0): the key store and the secure store
+# (`secure-store`), the camera (`ctx.camera()`, `on_camera`; plan
+# 20261028_02), URL schemes (`on_open_url`), `open_link`, `data_dir` on every host,
 # `build_info`, and the memory hooks (`on_low_memory`, `on_trim_memory`).
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8", default-features = false, features = ["secure-store"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c9b432d80178536576c559d1af616b1f83cabea6", default-features = false, features = ["secure-store"] }
 # The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
 # 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
@@ -62,15 +63,19 @@ env_logger = "0.11"
 # Android: libmorph's audio and libmobile, and libmorph's Sink and Source;
 # the foreground service and its events (`on_service`), system events, and
 # the battery pages (libmorph 0.4.0, plan 20261024_02's Background and
-# Battery sections).
+# Battery sections); the QR scan and its viewfinder (`mobile-camera-qr`,
+# plan 20261028_02, decision 19), which adds CAMERA and the optional camera
+# `uses-feature` to the manifest.
 [target.'cfg(target_os = "android")'.dependencies]
 flankr-audio = { path = "../../crates/flankr-audio", features = ["morph"] }
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c9b432d80178536576c559d1af616b1f83cabea6", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery", "mobile-camera-qr"] }
 android_logger = "0.14"
 
-# Generates the Gradle project when building for Android; a no-op on the host.
+# Generates the Gradle project when building for Android; a no-op on the
+# host. libmorph-build 0.3.0 (tag libmorph-build-v0.3.0): libmobile 0.3.1,
+# whose manifest metadata carries the camera's.
 [build-dependencies]
-libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8" }
+libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "b8eb1010d5886dba636603e189a00262de60447f" }
 # SETTINGS_COPY.md, read into settings_copy.rs (plan 20261024_04, decision
 # 6), at the revision the root crate pins for ADDITIONAL_PROMPTS.md.
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
@@ -80,11 +85,15 @@ toml = { version = "0.8", features = ["preserve_order"] }
 
 # The key tests use libdevice's memory vault, through libmorph's `script`.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8", default-features = false, features = ["secure-store", "script"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c9b432d80178536576c559d1af616b1f83cabea6", default-features = false, features = ["secure-store", "script"] }
 
 # The settings tests write settings.toml and delete data in a scratch directory.
 [dev-dependencies]
 tempfile = "3"
+# The scripted pairing scan's test daemon in pair mode (plan 20261028_02,
+# section 5, run 2), as flankr-companion's tests/link.rs builds one.
+tokio = { version = "1", features = ["rt", "net", "time", "sync", "macros"] }
+serde_json = "1"
 # The copy generator's own tests (build/copy_gen.rs, also compiled into the
 # library's tests).
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }

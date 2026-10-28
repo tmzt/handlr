@@ -1,7 +1,7 @@
 ---
 title: Scanning flankr pair's QR code in the pairing window
 date: 2026-10-28
-status: Draft
+status: In implementation
 covers:
   - "The companion app's pairing window redesigned around a camera
     viewfinder: a placeholder with **Tap to scan** when it opens, the
@@ -670,3 +670,10 @@ once libmobile 0.3.1 was published and libmorph's camera work merged as
 libmorph 0.5.0 (tag `v0.5.0`, with libmorph-build 0.3.0). The plan is
 approved with its amendments; the status becomes `In implementation` with
 its first code commit.
+
+## Amendment — 2026-10-28 17:20 EDT: implementation has started; the document is now immutable
+
+Implementation has started: every step that does not need the phone, with
+flankr-audio 0.2.0 on libmorph 0.5.0. The status is `In implementation`,
+and the document is now immutable: it changes only on the owner's explicit
+instruction.
