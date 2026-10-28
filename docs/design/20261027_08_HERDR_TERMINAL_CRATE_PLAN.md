@@ -920,3 +920,10 @@ the body or the earlier amendments, it wins.
 
 All open questions are now answered. The plan stays `Draft` until the
 owner approves it.
+
+## Amendment — 2026-10-27 23:44 EDT: approved
+
+The owner (2026-10-27): "approve and impl". The plan is approved with its
+amendments of 23:24, 23:32 and 23:42 EDT, and is built on the branch
+`main-terminal`. The status becomes `In implementation` with step 1's
+commit.
