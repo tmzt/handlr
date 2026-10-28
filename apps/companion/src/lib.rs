@@ -640,14 +640,23 @@ impl App {
                 code,
                 server,
                 confirmation,
+                replace,
             } => {
                 // Public: a public key and digits from the daemon's, safe
                 // to log, and readable over adb.
-                log::info!("pairing: device code {code}, confirmation code {confirmation}");
+                log::info!(
+                    "pairing: device code {code}, confirmation code {confirmation}{}",
+                    if replace {
+                        ", for flankr pair --replace"
+                    } else {
+                        ""
+                    }
+                );
                 self.pairing.show(remotes::Code {
                     code,
                     server,
                     confirmation,
+                    replace,
                 });
                 self.note = None;
                 self.screen.invalidate();

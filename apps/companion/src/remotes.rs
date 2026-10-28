@@ -18,7 +18,7 @@
 use flankr_companion::{Input, RemoteInfo};
 
 use crate::settings::copy;
-use crate::theme::theme;
+use crate::theme::{Role, theme};
 use crate::ui::{Layout, Line, chunk, wrap};
 
 /// The confirmation code's size, in points: large, to be read against the
@@ -38,6 +38,9 @@ pub struct Code {
     pub server: String,
     /// Six digits from the daemon's static key, as `flankr pair` prints.
     pub confirmation: String,
+    /// The remote is listed and this phone's key for it was lost: the
+    /// daemon adds this code only with `flankr pair --replace`.
+    pub replace: bool,
 }
 
 /// The pairing screen's state.
@@ -114,11 +117,19 @@ impl Pairing {
             None => {}
             Some(c) => {
                 let server = [("server", c.server.as_str())];
+                if c.replace {
+                    para(
+                        &mut out,
+                        &copy::PAIRING_REPLACE.fill(None, &server),
+                        theme().get(Role::Warn),
+                        0.0,
+                    );
+                }
                 para(
                     &mut out,
                     &copy::PAIRING_PASTE.fill(None, &server),
                     theme().muted,
-                    0.0,
+                    if c.replace { 8.0 } else { 0.0 },
                 );
                 // Base58 is mostly capitals and wide letters: wider than the
                 // half an em `columns` assumes.
@@ -224,7 +235,32 @@ mod tests {
             code: "flankrkey1".to_string() + &"Ab3".repeat(20),
             server: "m4".into(),
             confirmation: "543268".into(),
+            replace: false,
         }
+    }
+
+    #[test]
+    fn a_lost_key_says_flankr_pair_replace_is_needed() {
+        let mut p = Pairing::default();
+        p.show(code());
+        let plain: Vec<String> = p.lines(&PHONE, None).into_iter().map(|l| l.text).collect();
+        assert!(!plain.join(" ").contains("--replace"), "{plain:?}");
+
+        p.show(Code {
+            replace: true,
+            ..code()
+        });
+        let texts: Vec<String> = p.lines(&PHONE, None).into_iter().map(|l| l.text).collect();
+        let at = texts
+            .iter()
+            .position(|t| t.starts_with("Paste this code"))
+            .expect("the paste line");
+        let before = texts[..at].join(" ");
+        assert!(
+            before.starts_with("This phone's key for m4 was lost")
+                && before.contains("flankr pair --replace"),
+            "{before}"
+        );
     }
 
     #[test]

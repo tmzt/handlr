@@ -442,6 +442,20 @@ title is `remote_add`'s.
 - text: |
     Paste this code into flankr pair on {{ [abc] server }}:
 
+`pairing_replace` is shown above `pairing_paste` when the remote is
+already listed and this phone's key for it was lost: the daemon still lists
+the old key under this phone's name, and refuses a second entry of that
+name without `--replace` (plan 20261028_01, the 14:37 EDT amendment,
+item 4).
+
+# [Copy] pairing_replace
+
+- [abc] server: the daemon's name, from the pairing URL
+- text: |
+    This phone's key for {{ [abc] server }} was lost, and {{ [abc] server }}
+    still lists the old one under this phone's name: run
+    flankr pair --replace there to paste this code over it.
+
 # [Copy] pairing_confirmation
 
 - text: Confirmation code

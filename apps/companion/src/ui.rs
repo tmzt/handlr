@@ -753,6 +753,7 @@ mod tests {
             code: "flankrkey1".to_string() + &"Ab3".repeat(20),
             server: "m4".into(),
             confirmation: "543268".into(),
+            replace: false,
         });
         screen.set(PHONE, view(&p));
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Cancel));
