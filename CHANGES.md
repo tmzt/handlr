@@ -2702,3 +2702,58 @@ rule of that name.
    "No". The parser also refuses a key given twice, `command: true` with
    `starts`, and a rule without `offers`; a `when` or `unless`
    alternative may be a phrase of consecutive words.
+
+## 2026-10-27 21:25 EDT — plan 20261027_07 steps 1-6's departures (terminal mode, branch `main-terminal`)
+
+Plan: docs/design/20261027_07_TERMINAL_MODE_PLAN.md. Steps 2 (`571f6c4`,
+tag `libflankr_proto-v0.4.0`, with `1ef8733`), the libherdr read
+(`b718b38`, tag `libherdr-v0.3.1`), 1 (`5e36e10`), 4 (`597e815`),
+3 and 6's daemon half (`b9fb089`), and 5 and 6's app half (`9d4326b`).
+Not yet tried on the S23.
+
+1. **libflankr_term:** the run encoding after the header is, per row,
+   `u16 row, u16 run_count`, then per run `u32 fg, u32 bg, u8 flags,
+   u16 len` and the UTF-8 bytes; colours are `0` default,
+   `0x0100_00NN` palette, `0x02RRGGBB` RGB. `Mirror::retransmit` is
+   added (a lost last frame of an unchanged screen is resent on the 2 s
+   tick); a diff is sent only from a base fewer than 16 frames old;
+   `reset` also clears the sent history; trailing spaces that draw nothing
+   are cut, whatever their foreground; `decode` also refuses `seq == 0`
+   and a diff whose base is not older. Characters count one column each.
+   The crate depends on `serde` only, not `libflankr_proto`.
+2. **libflankr_proto:** `TerminalOpenParams` names the pane `pane_id`
+   (alias `session`), as `agents.read` does; `send_kind` takes a typed
+   `Kind`; `terminal` is appended to the companion `HelloResult` only,
+   not the harness one; the arm returns `expires_in_s`.
+3. **libherdr 0.3.1:** `revision` and `truncated` are not surfaced, since
+   the read's result is returned as raw JSON.
+4. **The daemon:** `terminal.*` is served on link companion connections
+   only (a companion on the daemon socket is `NOT_PERMITTED`, a harness
+   client `METHOD_NOT_FOUND`); herdr over SSH gives `terminal: None` and
+   `HERDR_UNAVAILABLE`, tested on constructed transports, not end to end.
+   herdr's `pane.scroll_changed` arrives as `HerdrEvent::Other` and is
+   picked up by the watcher, which subscribes per terminal pane. The read
+   is always 1000 lines of the visible frame; the size hints are accepted
+   and unused. A terminal frame from the phone closes the link. Frames
+   share the connection's unbounded queue (no replace-latest yet).
+5. **Keys (step 6):** herdr takes one key per token, so the syntax is
+   space-separated tokens: a named key (`enter`, `escape`/`esc`, `tab`,
+   `backspace`, `space`, the arrows), `ctrl+<a-z>`, or text sent as one
+   key per character. Bad keys and batches over 64 bytes are
+   `INVALID_PARAMS`; signals without `terminal_signals` and every gate
+   are `NOT_PERMITTED`. `InputRevoked` is never sent: `[terminal]` and
+   `[[agents]]` are read only at start, and a revoked device's link is
+   closed. The notice kind `terminal_input` is a daemon constant, not in
+   `companion::notice_kinds`. `policy::reach` is a new helper sharing the
+   send path's check.
+6. **The client:** the ack is sent automatically when a frame is shown,
+   not by the app after each draw (step 5's wording); the screen is read
+   with `Terminals::screen` (a clone) or `with_screen`; the arm's time is
+   `status().armed_for`; errors arrive as `Event::Error`. The tests are
+   in `tests/terminal.rs`, not `cross.rs`.
+7. **The app:** the terminal and list glyphs are drawn from lines and
+   rounded rects, not added to libmsdf; `FocusedPrompt` is an enum
+   (`Card` or `Terminal`); the first frame lands at the fit-width size
+   (at least 7 pt) at the bottom rows, at the left edge when wider. Every
+   typed character is its own token, so a typed word is never read as a
+   named key. libmorph's `Key` has no arrows, so arrows are not sent yet.
