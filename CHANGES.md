@@ -2859,3 +2859,13 @@ now sends one `terminal_input` notice per arm window for keys ("Typing
 into <name>'s terminal."), as it already did for the mouse, and the
 companion client logs a `terminal_input` notice and never says it. Each
 batch is still logged in the daemon, without the keys.
+
+## 2026-10-28 10:33 EDT — no "Typing into" pill over the armed terminal (plan 20261027_07, decision 6)
+
+Plan: docs/design/20261027_07_TERMINAL_MODE_PLAN.md, decision 6 (armed
+input "shown as a coloured frame with 'Typing into <agent>'"). The app had
+drawn that label as a pill with the arm's seconds left. The owner: "what's
+with the countdown? that wasn't asked for", then "just remove the pill,
+that was missed in reviewing plan 07". The armed terminal now shows the
+coloured frame only, and the app no longer redraws each second for the
+countdown.
