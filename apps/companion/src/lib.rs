@@ -466,8 +466,12 @@ fn key_store(
             Box::new(FileKeyStore::new(dir))
         }
     };
-    let server = keys.server()?.map(|s| s.name);
-    let key = keys.static_key()?.is_some();
+    let active = keys.remotes()?.active_record().cloned();
+    let server = active.as_ref().map(|s| s.name.clone());
+    let key = match &active {
+        Some(record) => keys.static_key(&record.key_name)?.is_some(),
+        None => false,
+    };
     log::info!(
         "keys: static key {}, paired server {}",
         if key { "present" } else { "none yet" },
@@ -605,7 +609,9 @@ impl App {
                     "not paired \u{b7} paste a pairing URL below".into()
                 };
             }
-            Event::PairingCode { code, server } => {
+            // TODO(plan 20261028_01, step 5): show `confirmation` on the
+            // pairing screen.
+            Event::PairingCode { code, server, .. } => {
                 // A public key, safe to log, and readable over adb.
                 log::info!("pairing: device code {code}");
                 self.paired = true;
@@ -744,6 +750,20 @@ impl App {
                 if let Some(screen) = &mut self.settings_screen {
                     screen.set_cache(bytes);
                 }
+            }
+            // TODO(plan 20261028_01, step 5): the Remotes section.
+            Event::Remotes(rows) => log::debug!("remotes: {} paired", rows.len()),
+            Event::RemoteRemoved { name, daemon, .. } => {
+                log::info!(
+                    "remotes: removed {name}{}",
+                    if daemon { "" } else { " here only" }
+                );
+            }
+            Event::RemoteUpdated { name, .. } => {
+                self.note = Some((
+                    format!("Already paired with {name}: its addresses are updated."),
+                    Role::Muted,
+                ));
             }
             Event::Unpaired { daemon } => self.unpaired(daemon),
             Event::SessionCards(cards) => {
@@ -2309,6 +2329,8 @@ impl MorphApp for App {
                 let mut config = CompanionConfig::new(CLIENT);
                 config.device_name = device_name(&args);
                 config.voice = args.voice.clone();
+                // Each remote's state.redb (plan 20261028_01, decision 14).
+                config.data_dir = ctx.data_dir().map(std::path::Path::to_path_buf);
                 if let Some(silence) = dictation_silence(ctx, &args) {
                     config.dictation_silence = silence;
                 }
