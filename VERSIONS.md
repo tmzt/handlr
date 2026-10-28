@@ -451,3 +451,33 @@ item 7), behind the `link` feature:
   modulo 1,000,000.
 
 `companion::VERSION` stays 1 and the link prologue `flankr.link/1`.
+
+## flankr-companion 0.2.0 — 2026-10-28 (the commit tagged `flankr-companion-v0.2.0`)
+
+The crate's first entry; 0.1.0 had none. Several paired remotes (plan
+20261028_01, steps 2-4). Not strictly additive:
+
+- **Breaking:** `KeyStore`: `server`, `set_server` and `forget` removed;
+  `remotes`, `set_remotes` and `delete_static_key` added; `static_key` and
+  `generate_static_key` take a key name.
+- **Breaking:** `ServerRecord` gains `id: RemoteId`, `paired_at:
+  Option<u64>`, `key_name: String` and `signing_key: Option<String>`
+  (reserved); `ServerRecord::new` and `host` added.
+- **Breaking:** `Input::CancelPairing` and `Input::RemoveRemote(RemoteId)`
+  added to the closed `Input`; `Input::Unpair` now removes the active remote.
+- **Breaking:** `Event::Remotes(Vec<RemoteInfo>)`, `Event::RemoteRemoved
+  { id, name, daemon }` and `Event::RemoteUpdated { id, name }` added to the
+  closed `Event`; `Event::PairingCode` gains `confirmation`; `Event::Unpaired`
+  is given when the last remote is removed.
+- **Breaking:** `Output::Forget { daemon }` becomes `Output::Remove { id,
+  daemon }`.
+- **Breaking:** `CompanionConfig` gains `data_dir` and `pairing_window`.
+- **Breaking (behaviour):** a second pairing no longer replaces the first:
+  it pairs beside the open connection and is added to the list; each remote
+  gets its own phone key (`noise.static.<id>`); nothing is stored until the
+  daemon accepts; the single `server` record is migrated into the `remotes`
+  list on first read.
+- **Added:** `RemoteId`, `Remotes`, `RemoteInfo`, `RemoteState` (redb
+  4.4.0, a `meta` table per remote), `LEGACY_KEY_NAME`, `MAX_REMOTES`,
+  `REVOKE_TIMEOUT`, `State::hello_request`, `keys::{encode_remotes,
+  decode_remotes, decode_legacy_server, migrated}`.

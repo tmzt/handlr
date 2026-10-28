@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use flankr_companion::{
-    Companion, CompanionConfig, FileKeyStore, KeyStore, ServerRecord, TerminalClosedReason,
+    Companion, CompanionConfig, FileKeyStore, KeyStore, LEGACY_KEY_NAME, Remotes, ServerRecord,
+    TerminalClosedReason,
 };
 use flankr_companion::{Cursor, MouseButton, TerminalMouseKind, TerminalSource};
 use libflankr_proto::link::{self, StaticKeypair};
@@ -372,13 +373,13 @@ fn paired(buffer: &str, old: Old) -> (Daemon, Companion, tempfile::TempDir) {
 fn paired_with(buffer: &str, old: Old, attached: bool) -> (Daemon, Companion, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut keys = FileKeyStore::new(dir.path().join("keys"));
-    let client = keys.generate_static_key().unwrap().public();
+    let client = keys.generate_static_key(LEGACY_KEY_NAME).unwrap().public();
     let daemon = Daemon::start(client, buffer, old, attached);
-    keys.set_server(ServerRecord {
-        name: "phone".into(),
-        public_key: daemon.key.public,
-        addresses: vec![daemon.addr.clone()],
-        session_id: None,
+    let mut record = ServerRecord::new("phone", daemon.key.public, vec![daemon.addr.clone()]);
+    record.key_name = LEGACY_KEY_NAME.into();
+    keys.set_remotes(&Remotes {
+        active: Some(record.id),
+        list: vec![record],
     })
     .unwrap();
     let mut config = CompanionConfig::new("test");

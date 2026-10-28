@@ -23,6 +23,7 @@ use libflankr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::keys::RemoteId;
 use crate::terminal::{Act, Terminals};
 use crate::view::{Outline, Sections, ViewSection, ViewWindow};
 use crate::wire;
@@ -32,9 +33,21 @@ use crate::wire;
 pub enum Input {
     /// What `flankr pair` shows: the pairing URL, the bare `flankr1…`
     /// string, or the QR code's `data:image/png;base64,` URL. The `net`
-    /// thread stores the server, gives [`Event::PairingCode`] and connects;
-    /// [`State`] itself cannot, and gives [`Event::PairFailed`].
+    /// thread makes this remote's key, gives [`Event::PairingCode`], and
+    /// tries the remote beside the open connection until it answers
+    /// `paired: true` (plan 20261028_01, decision 10); [`State`] itself
+    /// cannot, and gives [`Event::PairFailed`].
     Pair(String),
+    /// Leaving the pairing screen: the pairing in progress, if any, ends,
+    /// and its new key is deleted (plan 20261028_01, decision 10).
+    CancelPairing,
+    /// A remote's X, confirmed (plan 20261028_01, decision 22): the daemon
+    /// is asked to forget this phone (`link.unpair`: over the open link
+    /// for the active remote, over one short connection for any other),
+    /// then the remote's state directory, key and record are deleted here,
+    /// answered or not, and [`Event::RemoteRemoved`] is given. Removing the
+    /// active remote makes the most recently paired of the rest active.
+    RemoveRemote(RemoteId),
     /// What STT heard, or a typed line.
     Utterance(String),
     /// The tap, or Enter.
@@ -116,9 +129,10 @@ pub enum Input {
     /// The settings screen's toggles, as they are now (plan 20261024_02,
     /// decisions 3 and 4). Given at start and on every change.
     Settings(Settings),
-    /// Unpair this device (decision 3's *Unpair this device*): the daemon
-    /// is asked to forget it (`link.unpair`), then the pairing is forgotten
-    /// here, answered or not. Offline, it is forgotten here at once.
+    /// Removes the active remote, as its [`Input::RemoveRemote`] does
+    /// (plan 20261024_02's *Unpair this device*, which plan 20261028_01's
+    /// Remotes section replaces). With no active remote, it gives
+    /// [`Event::Unpaired`] at once.
     Unpair,
     /// The agent view was pulled past its end and let go (plan 20261022_03,
     /// the L3 amendment of 2026-10-24 12:22 EDT): a timed ping
@@ -460,9 +474,15 @@ pub enum Event {
     /// The device's code, `flankrkey1…`, for the user to paste into
     /// `flankr pair` on `server` (show it with a Copy button). The client
     /// keeps connecting until the server knows its key.
+    ///
+    /// `confirmation` is the six-digit code derived from the server's key
+    /// (`libflankr_proto::link::confirmation_code`), which `flankr pair`
+    /// prints too: the owner checks they match (plan 20261028_01, the
+    /// 13:03 EDT amendment, item 7).
     PairingCode {
         code: String,
         server: String,
+        confirmation: String,
     },
     /// The server answered `hello` with `paired: true`: the code was added.
     /// `name` is the name this device asked to be paired as.
@@ -587,12 +607,33 @@ pub enum Event {
     /// list or in the agent view (plan 20261024_02, decision 3). Play the
     /// ding. Given once per card, and not with the ding or sound off.
     Ding,
-    /// The pairing was forgotten ([`Input::Unpair`]): the link key and the
-    /// server record are gone, and the client is unpaired. `daemon`: the
-    /// daemon answered that it forgot this device too; otherwise it still
-    /// lists it until it is removed from `auth.toml`.
+    /// The last remote was removed (or [`Input::Unpair`] came with none):
+    /// no remote is left, and the app shows the pairing screen. `daemon`:
+    /// the last remote's daemon answered that it forgot this device too;
+    /// otherwise it still lists it until it is removed from `auth.toml`.
+    /// Given after that remote's [`Event::RemoteRemoved`].
     Unpaired {
         daemon: bool,
+    },
+    /// The paired remotes, in pairing order, at start and whenever the list,
+    /// the active remote or its connection changes (plan 20261028_01,
+    /// decision 26).
+    Remotes(Vec<crate::keys::RemoteInfo>),
+    /// A remote was removed ([`Input::RemoveRemote`]): its key, record and
+    /// state directory are gone. `daemon`: its daemon answered that it
+    /// forgot this phone; otherwise it lists it until the entry is removed
+    /// from its `auth.toml` (decision 22).
+    RemoteRemoved {
+        id: RemoteId,
+        name: String,
+        daemon: bool,
+    },
+    /// A pairing named a remote already in the list: no row was added, and
+    /// its name and addresses were refreshed from the pairing (decision
+    /// 11, *Already paired with m4: its addresses are updated*).
+    RemoteUpdated {
+        id: RemoteId,
+        name: String,
     },
     /// A refresh ([`Input::Refresh`]) is done: `new` sections came that
     /// the view did not hold before it.
@@ -628,10 +669,10 @@ pub enum Output {
     Send(Request),
     /// Close the connection, for this reason, and reconnect later.
     Close(String),
-    /// Forget the pairing: delete the link key and the server record,
-    /// close the connection, and give [`Event::Unpaired`] with `daemon`
-    /// (plan 20261024_02, decision 3).
-    Forget { daemon: bool },
+    /// Remove the active remote `id`: close the connection, delete its
+    /// state directory, key and record, and give [`Event::RemoteRemoved`]
+    /// with `daemon` (plan 20261028_01, decision 22).
+    Remove { id: RemoteId, daemon: bool },
     /// Offline: connect again now, not after the backoff (a refresh).
     Reconnect,
     /// Send this notification to the daemon (`terminal.ack`).
@@ -1114,8 +1155,9 @@ pub struct State {
     /// What the daemon's `[llm]` makes available, as last told; both, from
     /// a daemon that does not say (plan 20261027_02, decision 7).
     llm: wire::LlmInfo,
-    /// A `link.unpair` is on its way, since this time.
-    unpairing: Option<Duration>,
+    /// A `link.unpair` for the active remote is on its way, since this
+    /// time.
+    unpairing: Option<(Duration, RemoteId)>,
     /// Panes whose finished turn the agent view has dinged: the list's
     /// next stopped turn for them is the same one, and is not dinged again.
     dinged: HashSet<String>,
@@ -1613,6 +1655,19 @@ impl State {
         self.notices.len()
     }
 
+    /// The `hello` a pairing probe sends to a remote beside the open
+    /// connection: this client's, with no session to continue, and the
+    /// state left as it was (plan 20261028_01, decision 10).
+    pub fn hello_request(&self) -> Request {
+        let params = wire::HelloParams {
+            protocol: protocols::COMPANION.to_string(),
+            version: wire::VERSION,
+            client: self.client.clone(),
+            session_id: None,
+        };
+        Request::new(Id::Number(1), methods::HELLO, params)
+    }
+
     /// A connection was made: say `hello`.
     pub fn connected(&mut self) -> Vec<Output> {
         self.link = Link::Greeting;
@@ -1843,8 +1898,8 @@ impl State {
         self.read_in_order();
         self.flush_notices(&mut out);
         // `link.unpair` will not be answered now: forgotten here.
-        if self.unpairing.take().is_some() {
-            out.push(Output::Forget { daemon: false });
+        if let Some((_, id)) = self.unpairing.take() {
+            out.push(Output::Remove { id, daemon: false });
         }
         self.gate(out)
     }
@@ -1962,7 +2017,11 @@ impl State {
                 }
             }
             Input::Settings(settings) => self.set_settings(settings, &mut out),
-            Input::Unpair => self.unpair(&mut out),
+            Input::RemoveRemote(id) => self.unpair(id, &mut out),
+            // The net thread's: it knows the remotes.
+            Input::Unpair | Input::CancelPairing => {
+                log::debug!("{input:?}: handled by the net thread");
+            }
             Input::Refresh => self.refresh(&mut out),
             Input::Replay(text) => {
                 if self.settings.sound && !text.trim().is_empty() {
@@ -2279,9 +2338,10 @@ impl State {
         }
     }
 
-    /// Asks the daemon to forget this device, or, offline, forgets the
-    /// pairing at once (plan 20261024_02, decision 6).
-    fn unpair(&mut self, out: &mut Vec<Output>) {
+    /// Asks the daemon of the active remote `id` to forget this device,
+    /// or, offline, removes the remote at once (plan 20261024_02, decision
+    /// 6; plan 20261028_01, decision 22).
+    fn unpair(&mut self, id: RemoteId, out: &mut Vec<Output>) {
         if self.unpairing.is_some() {
             return;
         }
@@ -2290,7 +2350,7 @@ impl State {
         self.show_cache(out);
         if self.online() {
             log::info!("unpairing: asking the daemon to forget this device");
-            self.unpairing = Some(self.now);
+            self.unpairing = Some((self.now, id));
             out.push(self.request(
                 methods::LINK_UNPAIR,
                 common::LinkUnpairParams {},
@@ -2298,7 +2358,7 @@ impl State {
             ));
         } else {
             log::info!("unpairing: offline; forgetting the pairing here only");
-            out.push(Output::Forget { daemon: false });
+            out.push(Output::Remove { id, daemon: false });
         }
     }
 
@@ -3066,11 +3126,11 @@ impl State {
         self.keep_alive(out);
         if self
             .unpairing
-            .is_some_and(|at| self.now >= at + UNPAIR_WAIT)
+            .is_some_and(|(at, _)| self.now >= at + UNPAIR_WAIT)
+            && let Some((_, id)) = self.unpairing.take()
         {
             log::warn!("unpairing: no answer in time; forgetting the pairing here");
-            self.unpairing = None;
-            out.push(Output::Forget { daemon: false });
+            out.push(Output::Remove { id, daemon: false });
         }
         if let Some(by_button) = d_waiting(&self.dictation).filter(|_| !self.unheard()) {
             self.submit(by_button, out);
@@ -3784,8 +3844,8 @@ impl State {
                 Sent::Ping => {}
                 Sent::Unpair => {
                     log::warn!("link.unpair: {message}; forgetting the pairing here");
-                    if self.unpairing.take().is_some() {
-                        out.push(Output::Forget { daemon: false });
+                    if let Some((_, id)) = self.unpairing.take() {
+                        out.push(Output::Remove { id, daemon: false });
                     }
                 }
                 sent @ Sent::Content { .. } => {
@@ -4108,8 +4168,8 @@ impl State {
             Sent::Unpair => {
                 // The daemon forgot this device and closes the link.
                 log::info!("unpairing: the daemon forgot this device");
-                if self.unpairing.take().is_some() {
-                    out.push(Output::Forget { daemon: true });
+                if let Some((_, id)) = self.unpairing.take() {
+                    out.push(Output::Remove { id, daemon: true });
                 }
             }
         }
@@ -8980,25 +9040,53 @@ mod tests {
         assert_eq!(dings(&out), 0, "{out:?}");
     }
 
+    /// The active remote of the unpairing tests.
+    const ID: RemoteId = RemoteId([7; 8]);
+
+    #[test]
+    fn the_probes_hello_has_no_session_and_changes_nothing() {
+        let mut s = online();
+        s.set_session_id(Some("companion:phone".into()));
+        let hello = s.hello_request();
+        assert_eq!(hello.method, "hello");
+        assert_eq!(hello.params["client"], "test");
+        assert!(
+            hello.params.get("session_id").is_none(),
+            "{:?}",
+            hello.params
+        );
+        assert!(s.online());
+        assert_eq!(s.session_id(), Some("companion:phone"));
+        // The net thread's inputs do nothing here.
+        assert!(s.input(Input::Unpair).is_empty());
+        assert!(s.input(Input::CancelPairing).is_empty());
+    }
+
     #[test]
     fn unpairing_online_asks_the_daemon_then_forgets() {
         let mut s = online();
-        let out = s.input(Input::Unpair);
+        let out = s.input(Input::RemoveRemote(ID));
         let asked = requests(&out, "link.unpair");
         assert_eq!(asked.len(), 1, "{out:?}");
         assert_eq!(asked[0].params, json!({}));
         let id = asked[0].id.clone();
         // Asked once.
-        assert!(requests(&s.input(Input::Unpair), "link.unpair").is_empty());
+        assert!(requests(&s.input(Input::RemoveRemote(ID)), "link.unpair").is_empty());
         let out = s.incoming(response(id, json!({})));
-        assert_eq!(out, [Output::Forget { daemon: true }]);
+        assert_eq!(
+            out,
+            [Output::Remove {
+                id: ID,
+                daemon: true
+            }]
+        );
     }
 
     #[test]
     fn unpairing_forgets_on_a_refusal_a_timeout_or_a_disconnect() {
         // Refused (the local socket): forgotten here.
         let mut s = online();
-        let out = s.input(Input::Unpair);
+        let out = s.input(Input::RemoveRemote(ID));
         let id = requests(&out, "link.unpair")[0].id.clone();
         let out = s.incoming(Incoming::Response(Response::err(
             Some(id),
@@ -9007,34 +9095,46 @@ mod tests {
                 "link.unpair is served only over a paired link",
             ),
         )));
-        assert_eq!(out, [Output::Forget { daemon: false }]);
+        assert_eq!(
+            out,
+            [Output::Remove {
+                id: ID,
+                daemon: false
+            }]
+        );
 
         // No answer in UNPAIR_WAIT.
         let mut s = online();
         s.input(Input::Tick(secs(10.0)));
-        s.input(Input::Unpair);
-        assert!(
-            !s.input(Input::Tick(secs(14.9)))
-                .contains(&Output::Forget { daemon: false })
-        );
-        assert!(
-            s.input(Input::Tick(secs(15.0)))
-                .contains(&Output::Forget { daemon: false })
-        );
+        s.input(Input::RemoveRemote(ID));
+        assert!(!s.input(Input::Tick(secs(14.9))).contains(&Output::Remove {
+            id: ID,
+            daemon: false
+        }));
+        assert!(s.input(Input::Tick(secs(15.0))).contains(&Output::Remove {
+            id: ID,
+            daemon: false
+        }));
 
         // The link closes first.
         let mut s = online();
-        s.input(Input::Unpair);
-        assert!(
-            s.disconnected(1000)
-                .contains(&Output::Forget { daemon: false })
-        );
+        s.input(Input::RemoveRemote(ID));
+        assert!(s.disconnected(1000).contains(&Output::Remove {
+            id: ID,
+            daemon: false
+        }));
     }
 
     #[test]
     fn unpairing_offline_forgets_at_once() {
         let mut s = State::new("test");
-        assert_eq!(s.input(Input::Unpair), [Output::Forget { daemon: false }]);
+        assert_eq!(
+            s.input(Input::RemoveRemote(ID)),
+            [Output::Remove {
+                id: ID,
+                daemon: false
+            }]
+        );
     }
 
     /// The last agent view given in `out`.

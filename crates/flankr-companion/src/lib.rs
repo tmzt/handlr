@@ -11,16 +11,19 @@
 //! [`KeyStore`], the client reconnects to it over flankr link (`IK`, with
 //! `hello` and its `session_id` in the handshake); without one, it uses the
 //! daemon's Unix socket. [`Input::Pair`] pairs from the pairing URL, the
-//! bare `flankr1…` string or the QR code's `data:` URL: the client stores
-//! the server, shows its device code as [`Event::PairingCode`] for the user
-//! to paste into `flankr pair`, and connects once the server knows its key
-//! (plan 20261022_02, amendment of 23:07 EDT). `examples/text.rs` drives it
+//! bare `flankr1…` string or the QR code's `data:` URL: the client shows
+//! its device code as [`Event::PairingCode`] for the user to paste into
+//! `flankr pair`, and adds the remote once the server knows its key (plan
+//! 20261022_02, amendment of 23:07 EDT). The phone keeps several paired
+//! remotes ([`Remotes`]), connects to the active one, and removes one with
+//! [`Input::RemoveRemote`] (plan 20261028_01). `examples/text.rs` drives it
 //! from typed lines.
 
 pub mod client;
 pub mod cross;
 pub mod keys;
 mod net;
+pub mod remote_state;
 pub mod scan;
 pub mod terminal;
 pub mod view;
@@ -37,8 +40,12 @@ pub use client::{
     Settings, Speaker, Suggestion,
 };
 pub use cross::{SessionCard, SessionCardKind, is_terminal_only};
-pub use keys::{FileKeyStore, KeyStore, ServerRecord};
-pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
+pub use keys::{
+    FileKeyStore, KeyStore, LEGACY_KEY_NAME, MAX_REMOTES, RemoteId, RemoteInfo, Remotes,
+    ServerRecord,
+};
+pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW, REVOKE_TIMEOUT};
+pub use remote_state::RemoteState;
 pub use terminal::{TerminalStatus, Terminals, key_batches};
 // What the app draws and reads of a terminal.
 pub use libflankr_proto::common::{
@@ -67,6 +74,13 @@ pub struct CompanionConfig {
     /// 20261023_02, the 01:57 EDT amendment). Shorter than
     /// [`DICTATION_SILENCE`] is raised to it.
     pub dictation_silence: Duration,
+    /// The app's data directory, where each remote's state lives in
+    /// `remotes/<id>/state.redb` ([`RemoteState`]; plan 20261028_01,
+    /// decision 14). `None`: no state is kept.
+    pub data_dir: Option<PathBuf>,
+    /// How long a pairing waits for its code to be added
+    /// ([`PAIRING_WINDOW`]; shorter in tests).
+    pub pairing_window: Duration,
 }
 
 impl CompanionConfig {
@@ -81,6 +95,8 @@ impl CompanionConfig {
             backoff_initial: Duration::from_secs(1),
             backoff_max: Duration::from_secs(30),
             dictation_silence: DICTATION_SILENCE,
+            data_dir: None,
+            pairing_window: PAIRING_WINDOW,
         }
     }
 }

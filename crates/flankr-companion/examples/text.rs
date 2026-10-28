@@ -129,9 +129,14 @@ fn print_event(event: Event) {
         Event::Disconnected { retry_in_ms } => {
             println!("* disconnected; retrying in {retry_in_ms} ms")
         }
-        Event::PairingCode { code, server } => {
+        Event::PairingCode {
+            code,
+            server,
+            confirmation,
+        } => {
             println!("* paste this code into flankr pair on {server}:");
             println!("{code}");
+            println!("* flankr pair should show the confirmation code {confirmation}");
         }
         Event::Paired { name } => println!("* paired as {name}"),
         Event::PairFailed(why) => println!("! pairing failed: {why}"),
@@ -144,6 +149,24 @@ fn print_event(event: Event) {
             for c in cards {
                 println!("* {:?} from {}: {}", c.kind, c.agent, c.text);
             }
+        }
+        Event::Remotes(rows) => {
+            for r in rows {
+                let use_ = if r.online {
+                    " (in use)"
+                } else if r.active {
+                    " (in use, offline)"
+                } else {
+                    ""
+                };
+                println!("* remote {} {} {}{use_}", r.name, r.host, r.fingerprint);
+            }
+        }
+        Event::RemoteRemoved { name, daemon, .. } => {
+            println!("* removed {name}{}", if daemon { "" } else { " here only" })
+        }
+        Event::RemoteUpdated { name, .. } => {
+            println!("* already paired with {name}: its addresses are updated")
         }
         Event::Unpaired { daemon } => {
             println!("* unpaired{}", if daemon { "" } else { " here only" })

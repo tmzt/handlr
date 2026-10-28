@@ -3,25 +3,33 @@
 //! [`State`](crate::client::State) (plan 20261022_04, decision 2, and the
 //! 18:10 EDT amendment's steps 1 and 2).
 //!
-//! With a paired server in the [`KeyStore`] (a server record and this
-//! client's static key), it connects over flankr link: TCP to the record's
-//! addresses in order, `IK`, and `hello` carried in the handshake. Without
-//! one, it connects to the daemon's local socket.
+//! The phone keeps a list of paired remotes ([`Remotes`], plan 20261028_01)
+//! in the [`KeyStore`]. With an active remote, the thread connects to it
+//! over flankr link: TCP to the record's addresses in order, `IK` with that
+//! remote's own phone key, and `hello` carried in the handshake. Without
+//! one, it connects to the daemon's local socket. The active remote's
+//! `state.redb` ([`RemoteState`]) is open while it is active.
 //!
 //! [`Input::Pair`] takes the pairing URL, the bare string or the QR code's
-//! data URL (plan 20261022_06, step 5). The client stores the server's key
-//! and addresses, makes its own key if it has none, and gives its device
-//! code as [`Event::PairingCode`]. It then connects with `IK` as usual,
-//! but retries every [`PAIRING_RETRY`] for [`PAIRING_WINDOW`] while the
-//! server drops it, until the user pastes the code into `flankr pair`;
-//! after that it falls back to the usual backoff. The `hello` answered with
-//! `paired: true` gives [`Event::Paired`] (plan 20261022_02, amendment of
-//! 23:07 EDT).
+//! data URL (plan 20261022_06, step 5). The thread makes the new remote's
+//! key (`noise.static.<id>`), gives its device code as
+//! [`Event::PairingCode`] with the confirmation code, and starts a
+//! **pairing probe** beside the open connection: a task that tries `IK`
+//! with `hello` every [`PAIRING_RETRY`] for the pairing window while the
+//! server drops it, until the user pastes the code into `flankr pair`.
+//! Once `hello` is answered, the remote is added to the list (and made
+//! active only if none was) and [`Event::Paired`] and [`Event::Remotes`]
+//! are given. Nothing is stored before then; a probe that gives up or is
+//! cancelled ([`Input::CancelPairing`]) deletes its key (plan 20261028_01,
+//! decisions 10-12).
 //!
-//! [`Input::Unpair`] asks the daemon to forget this device, and the state
-//! answers with [`Output::Forget`]: the key and the server record are
-//! deleted, the connection ends, and [`Event::Unpaired`] is given (plan
-//! 20261024_02, decision 6). The next connection is the local socket's.
+//! [`Input::RemoveRemote`] asks the remote's daemon to forget this phone:
+//! the state sends `link.unpair` over the open link for the active remote
+//! and answers with [`Output::Remove`]; any other is asked by a **revoke
+//! probe**, one short connection bounded by [`REVOKE_TIMEOUT`]. Then its
+//! state directory and key are deleted and the list written without it
+//! (decision 22); removing the active remote makes the most recently
+//! paired of the rest active, and the last one gives [`Event::Unpaired`].
 //!
 //! Liveness is the operating system's: link sockets have `SO_KEEPALIVE`,
 //! and a connection ends only on an error or end of stream. The client does
@@ -32,7 +40,7 @@
 //! notification's "n MB this session" (CHANGES.md, 2026-10-24 12:59 EDT,
 //! item 3). A socket line counts its newline; a link message counts its
 //! plaintext, without the Noise framing, and `hello` in the handshake is
-//! not counted.
+//! not counted. The probes' connections are not counted.
 //!
 //! The link is read with `recv`, by kind (plan 20261027_07, step 4): a
 //! JSON-RPC message goes to the state as before, and a terminal frame to
@@ -43,8 +51,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use libflankr_proto::Incoming;
 use libflankr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, Message, StaticKey};
+use libflankr_proto::{Id, Incoming, Request, common, common::methods};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{TcpSocket, TcpStream, UnixStream};
@@ -53,8 +61,9 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::CompanionConfig;
-use crate::client::{Event, Input, Output, State, TICK};
-use crate::keys::{KeyStore, ServerRecord};
+use crate::client::{Event, Input, Output, State, TICK, UNPAIR_WAIT};
+use crate::keys::{KeyStore, MAX_REMOTES, RemoteId, RemoteInfo, Remotes, ServerRecord};
+use crate::remote_state::RemoteState;
 use crate::scan::{self, Pairing};
 use crate::terminal::Terminals;
 
@@ -71,8 +80,11 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// While pairing, how often to try again while the server drops the
 /// connection (it does until the code is added).
 pub const PAIRING_RETRY: Duration = Duration::from_secs(2);
-/// How long to retry at [`PAIRING_RETRY`] after a pairing input.
+/// How long a pairing tries at [`PAIRING_RETRY`] before it gives up.
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// How long asking a remote that is not active to forget this phone may
+/// take in all (plan 20261028_01, decision 22).
+pub const REVOKE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Delays between reconnects: `initial`, doubling up to `max` (1, 2, 4 …
 /// 30 s by default), back to `initial` once a connection says hello.
@@ -126,14 +138,23 @@ pub(crate) fn run(
     };
     let mut state = State::with_terminals(config.client.clone(), terminals);
     state.set_dictation_silence(config.dictation_silence);
+    let (tasks_tx, tasks) = tokio::sync::mpsc::unbounded_channel();
     let net = Net {
         state,
         start: tokio::time::Instant::now(),
         backoff: Backoff::new(config.backoff_initial, config.backoff_max),
         config,
         keys,
+        remotes: Remotes::default(),
         server: None,
-        pairing_until: None,
+        remote_state: None,
+        probe: None,
+        next_probe: 0,
+        removing: Vec::new(),
+        switch: false,
+        shown: None,
+        tasks_tx,
+        tasks,
         inputs,
         events,
         bytes,
@@ -145,15 +166,29 @@ pub(crate) fn run(
 struct Net {
     config: CompanionConfig,
     keys: Box<dyn KeyStore>,
-    /// The paired server of the current link connection, as last stored.
-    /// `None` on the local socket.
+    /// The paired remotes, as last read or written.
+    remotes: Remotes,
+    /// The remote of the current link connection. `None` on the local
+    /// socket.
     server: Option<ServerRecord>,
+    /// The active remote's `state.redb`, open while it is active.
+    remote_state: Option<RemoteState>,
+    /// The pairing in progress.
+    probe: Option<Probe>,
+    /// The token of the next probe.
+    next_probe: u64,
+    /// Remotes whose removal has begun.
+    removing: Vec<RemoteId>,
+    /// The active remote changed: leave the current connection.
+    switch: bool,
+    /// The rows last given as [`Event::Remotes`].
+    shown: Option<Vec<RemoteInfo>>,
+    tasks_tx: UnboundedSender<Done>,
+    tasks: UnboundedReceiver<Done>,
     state: State,
     /// The clock [`Input::Tick`] carries: the time since the thread began.
     start: tokio::time::Instant,
     backoff: Backoff,
-    /// While pairing: until when to retry at [`PAIRING_RETRY`].
-    pairing_until: Option<tokio::time::Instant>,
     inputs: UnboundedReceiver<Input>,
     events: mpsc::Sender<Event>,
     /// The bytes sent and received since the thread began.
@@ -162,18 +197,38 @@ struct Net {
     tap: Tap,
 }
 
+/// A pairing in progress beside the open connection (decision 10).
+struct Probe {
+    token: u64,
+    /// The remote it pairs: a new record, or the listed one whose key was
+    /// missing.
+    record: ServerRecord,
+    /// Whether the record is already in the list.
+    listed: bool,
+    task: JoinHandle<()>,
+}
+
+/// What a probe task found.
+enum Done {
+    /// The pairing probe `token`'s `hello` was answered.
+    Paired { token: u64 },
+    /// The pairing probe `token`'s window ended.
+    GaveUp { token: u64 },
+    /// The revoke probe for `id` ended; `daemon`: the daemon answered
+    /// `link.unpair`.
+    Revoked { id: RemoteId, daemon: bool },
+}
+
 /// A function that sees each event on the `net` thread, with the bytes
 /// over the link so far ([`Companion::spawn_tapped`](crate::Companion::spawn_tapped)).
 pub(crate) type Tap = Box<dyn Fn(&Event, u64) + Send>;
 
 /// How a session ended.
 enum End {
-    /// The connection closed; reconnect.
+    /// The connection closed, or the active remote changed; reconnect.
     Closed,
     /// The app is gone; stop.
     AppGone,
-    /// The app gave a valid pairing input; pair with it now.
-    Pair(Pairing),
 }
 
 /// A connection, its handshake done.
@@ -214,69 +269,351 @@ impl Writer {
     }
 }
 
+/// Unix seconds now.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 impl Net {
     async fn run(mut self) {
-        let mut pairing: Option<Pairing> = None;
+        self.load_remotes();
         loop {
-            if let Some(p) = pairing.take() {
-                self.begin_pairing(p);
-            }
-            let conn = self.connect().await;
-            if let Some(conn) = conn {
-                self.pairing_until = None;
+            self.switch = false;
+            if let Some(conn) = self.connect().await {
                 match self.session(conn).await {
                     End::AppGone => return,
-                    End::Pair(p) => {
-                        // Leave this connection for the new server at once.
-                        let outputs = self.state.disconnected(0);
-                        self.emit_offline(outputs);
-                        self.backoff.reset();
-                        pairing = Some(p);
-                        continue;
-                    }
                     End::Closed => {}
                 }
             }
-            if self.state.online() {
+            if self.state.online() || self.switch {
                 self.backoff.reset();
             }
-            let delay = match self.pairing_until {
-                Some(until) if tokio::time::Instant::now() < until => PAIRING_RETRY,
-                _ => {
-                    self.pairing_until = None;
-                    self.backoff.next_delay()
-                }
+            let delay = if self.switch {
+                Duration::ZERO
+            } else {
+                self.backoff.next_delay()
             };
             let retry_in_ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
             let outputs = self.state.disconnected(retry_in_ms);
-            self.emit_offline(outputs);
+            if self.emit_offline(outputs) {
+                self.backoff.reset();
+                continue;
+            }
+            self.show_remotes();
+            if self.switch {
+                continue;
+            }
             let sleep = tokio::time::sleep(delay);
             tokio::pin!(sleep);
             loop {
                 tokio::select! {
                     _ = &mut sleep => break,
-                    input = self.inputs.recv() => match input {
-                        Some(Input::Pair(text)) => {
-                            if let Some(p) = self.check_pairing(&text) {
-                                pairing = Some(p);
+                    done = self.tasks.recv() => {
+                        if let Some(done) = done {
+                            self.task_done(done);
+                        }
+                        if self.switch {
+                            break;
+                        }
+                    }
+                    input = self.inputs.recv() => {
+                        let Some(input) = input else { return };
+                        let Some(input) = self.net_input(input) else {
+                            if self.switch {
                                 break;
                             }
+                            continue;
+                        };
+                        let tick = self.tick();
+                        let mut outputs = self.state.input(tick);
+                        outputs.extend(self.state.input(input));
+                        if self.emit_offline(outputs) {
+                            // A refresh: connect now, the backoff
+                            // started over.
+                            self.backoff.reset();
+                            break;
                         }
-                        Some(input) => {
-                            let tick = self.tick();
-                            let mut outputs = self.state.input(tick);
-                            outputs.extend(self.state.input(input));
-                            if self.emit_offline(outputs) {
-                                // A refresh: connect now, the backoff
-                                // started over.
-                                self.backoff.reset();
-                                break;
-                            }
+                        if self.switch {
+                            break;
                         }
-                        None => return,
-                    },
+                    }
                 }
             }
+        }
+    }
+
+    /// Reads the list (migrating the old single record), moves the data
+    /// plan's app-wide store in, sweeps state directories no remote lists,
+    /// opens the active remote's state, and gives [`Event::Remotes`].
+    fn load_remotes(&mut self) {
+        match self.keys.remotes() {
+            Ok(remotes) => self.remotes = remotes,
+            Err(e) => {
+                log::error!("keys: {e}");
+                self.emit(Event::Error(format!("reading the paired remotes: {e}")));
+            }
+        }
+        if let Some(dir) = self.config.data_dir.clone() {
+            if let Err(e) = RemoteState::adopt_sessions(&dir, self.remotes.active_record()) {
+                log::warn!("state: {e}");
+            }
+            RemoteState::sweep(&dir, &self.remotes);
+        }
+        self.open_state();
+        self.show_remotes();
+    }
+
+    /// Opens the active remote's `state.redb`, closing any other.
+    fn open_state(&mut self) {
+        let active = self.remotes.active_record().cloned();
+        if self.remote_state.as_ref().map(RemoteState::id) == active.as_ref().map(|r| r.id) {
+            return;
+        }
+        self.remote_state = None;
+        let (Some(dir), Some(remote)) = (self.config.data_dir.as_deref(), active) else {
+            return;
+        };
+        match RemoteState::open(dir, &remote) {
+            Ok(state) => self.remote_state = Some(state),
+            Err(e) => log::warn!("state: opening {}'s: {e}", remote.name),
+        }
+    }
+
+    /// Gives [`Event::Remotes`] if the rows changed since last given.
+    fn show_remotes(&mut self) {
+        let online = self.state.online() && self.server.is_some();
+        let rows = self.remotes.info(online);
+        if self.shown.as_ref() != Some(&rows) {
+            self.shown = Some(rows.clone());
+            self.emit(Event::Remotes(rows));
+        }
+    }
+
+    /// Writes the list; a failure is given as an error.
+    fn write_remotes(&mut self) -> bool {
+        match self.keys.set_remotes(&self.remotes) {
+            Ok(()) => true,
+            Err(e) => {
+                log::error!("keys: writing the remotes: {e}");
+                self.emit(Event::Error(format!("writing the paired remotes: {e}")));
+                false
+            }
+        }
+    }
+
+    /// The inputs the thread handles itself: pairing and removing remotes.
+    /// Others are returned for the state; so is [`Input::RemoveRemote`] of
+    /// the active remote, which goes over the open link.
+    fn net_input(&mut self, input: Input) -> Option<Input> {
+        match input {
+            Input::Pair(text) => {
+                if let Some(p) = self.check_pairing(&text) {
+                    self.begin_pairing(p);
+                }
+                None
+            }
+            Input::CancelPairing => {
+                self.end_probe("cancelled");
+                None
+            }
+            Input::Unpair => match self.remotes.active {
+                Some(id) => self.remove(id),
+                None => {
+                    self.emit(Event::Unpaired { daemon: false });
+                    None
+                }
+            },
+            Input::RemoveRemote(id) => self.remove(id),
+            input => Some(input),
+        }
+    }
+
+    /// Starts removing `id`: the active remote's `link.unpair` goes to the
+    /// state (returned); any other gets a revoke probe.
+    fn remove(&mut self, id: RemoteId) -> Option<Input> {
+        let Some(record) = self.remotes.get(id).cloned() else {
+            self.emit(Event::Error(format!("no remote {id} is paired")));
+            return None;
+        };
+        if self.removing.contains(&id) {
+            return None;
+        }
+        self.removing.push(id);
+        if self.probe.as_ref().is_some_and(|p| p.record.id == id) {
+            self.end_probe("its remote is being removed");
+        }
+        if self.remotes.active == Some(id) {
+            log::info!("remotes: removing {} (in use)", record.name);
+            return Some(Input::RemoveRemote(id));
+        }
+        log::info!(
+            "remotes: removing {}; asking it to forget this phone",
+            record.name
+        );
+        let key = match self.keys.static_key(&record.key_name) {
+            Ok(key) => key,
+            Err(e) => {
+                log::warn!("remotes: {}'s key: {e}", record.name);
+                None
+            }
+        };
+        let tasks = self.tasks_tx.clone();
+        match key {
+            Some(key) => {
+                let hello = serde_json::to_vec(&self.state.hello_request()).unwrap_or_default();
+                tokio::spawn(async move {
+                    let daemon = revoke(&record, key, &hello).await;
+                    let _ = tasks.send(Done::Revoked { id, daemon });
+                });
+            }
+            // No key: nothing can ask, and nothing can use its entry.
+            None => {
+                let _ = tasks.send(Done::Revoked { id, daemon: false });
+            }
+        }
+        None
+    }
+
+    /// Removes `id` here: its state closed and its directory deleted, its
+    /// key deleted, the list written without it (last), then the events
+    /// (decisions 22 and 23). Removing the active remote makes the most
+    /// recently paired of the rest active.
+    fn finish_remove(&mut self, id: RemoteId, daemon: bool) {
+        self.removing.retain(|r| *r != id);
+        let Some(record) = self.remotes.get(id).cloned() else {
+            return;
+        };
+        let was_active = self.remotes.active == Some(id);
+        if was_active {
+            self.remote_state = None;
+            self.server = None;
+            self.state.set_session_id(None);
+        }
+        if let Some(dir) = self.config.data_dir.as_deref()
+            && let Err(e) = RemoteState::delete(dir, id)
+        {
+            // Swept at the next start.
+            log::warn!("state: deleting {}'s: {e}", record.name);
+        }
+        if let Err(e) = self.keys.delete_static_key(&record.key_name) {
+            log::error!("keys: deleting {}'s key: {e}", record.name);
+            self.emit(Event::Error(format!(
+                "deleting the key for {}: {e}",
+                record.name
+            )));
+        }
+        self.remotes.list.retain(|r| r.id != id);
+        if was_active {
+            self.remotes.active = self.remotes.most_recent(&self.removing);
+            self.switch = true;
+            // Another daemon's sessions are not to be shown from the cache.
+            let outputs = self.state.input(Input::ClearCache);
+            for output in outputs {
+                if let Output::Event(e) = output {
+                    self.emit(e);
+                }
+            }
+        }
+        self.write_remotes();
+        log::info!(
+            "remotes: removed {}{}",
+            record.name,
+            if daemon { "" } else { " here only" }
+        );
+        self.open_state();
+        self.emit(Event::RemoteRemoved {
+            id,
+            name: record.name,
+            daemon,
+        });
+        self.show_remotes();
+        if self.remotes.list.is_empty() {
+            self.emit(Event::Unpaired { daemon });
+        }
+    }
+
+    /// A probe task ended.
+    fn task_done(&mut self, done: Done) {
+        match done {
+            Done::Paired { token } => {
+                let Some(probe) = self.probe.take_if(|p| p.token == token) else {
+                    return;
+                };
+                self.paired(probe);
+            }
+            Done::GaveUp { token } => {
+                if self.probe.as_ref().is_some_and(|p| p.token == token) {
+                    let server = self.probe.as_ref().map(|p| p.record.name.clone());
+                    self.end_probe("not accepted in time");
+                    self.emit(Event::PairFailed(format!(
+                        "{} did not accept this phone's code in time; pair again",
+                        server.unwrap_or_default()
+                    )));
+                }
+            }
+            Done::Revoked { id, daemon } => self.finish_remove(id, daemon),
+        }
+    }
+
+    /// The probe's `hello` was answered: the remote goes into the list,
+    /// active only if none was (decisions 8 and 10).
+    fn paired(&mut self, probe: Probe) {
+        let mut record = probe.record;
+        record.paired_at = Some(unix_now());
+        if probe.listed {
+            match self.remotes.get_mut(record.id) {
+                Some(listed) => *listed = record.clone(),
+                None => self.remotes.list.push(record.clone()),
+            }
+        } else {
+            if self.remotes.list.len() >= MAX_REMOTES {
+                let _ = self.keys.delete_static_key(&record.key_name);
+                self.emit(Event::PairFailed(full_note()));
+                return;
+            }
+            self.remotes.list.push(record.clone());
+        }
+        let first = self.remotes.active.is_none();
+        if first {
+            self.remotes.active = Some(record.id);
+        }
+        if !self.write_remotes() {
+            return;
+        }
+        log::info!(
+            "remotes: paired with {} ({}){}",
+            record.name,
+            record.id.fingerprint(),
+            if first { ", now in use" } else { "" }
+        );
+        self.emit(Event::Paired {
+            name: self.config.device_name.clone(),
+        });
+        if first {
+            self.switch = true;
+            let outputs = self.state.input(Input::ClearCache);
+            for output in outputs {
+                if let Output::Event(e) = output {
+                    self.emit(e);
+                }
+            }
+            self.open_state();
+        }
+        self.show_remotes();
+    }
+
+    /// Ends the pairing probe, if any, deleting the key it made for a
+    /// remote that is not in the list.
+    fn end_probe(&mut self, why: &str) {
+        let Some(probe) = self.probe.take() else {
+            return;
+        };
+        probe.task.abort();
+        log::info!("pairing with {}: {why}", probe.record.name);
+        if let Err(e) = self.keys.delete_static_key(&probe.record.key_name) {
+            log::warn!("pairing: deleting the probe's key: {e}");
         }
     }
 
@@ -294,36 +631,21 @@ impl Net {
         let _ = self.events.send(event);
     }
 
-    /// Gives events while there is no connection, and forgets the pairing
-    /// when told to. The state sends nothing while offline, so anything
-    /// else is only logged. Whether the state asked to connect now
-    /// ([`Output::Reconnect`]).
+    /// Gives events while there is no connection, and removes the active
+    /// remote when told to. The state sends nothing while offline, so
+    /// anything else is only logged. Whether the state asked to connect
+    /// now ([`Output::Reconnect`]).
     fn emit_offline(&mut self, outputs: Vec<Output>) -> bool {
         let mut reconnect = false;
         for output in outputs {
             match output {
                 Output::Event(e) => self.emit(e),
-                Output::Forget { daemon } => self.forget(daemon),
+                Output::Remove { id, daemon } => self.finish_remove(id, daemon),
                 Output::Reconnect => reconnect = true,
                 other => log::warn!("nothing to send it on: {other:?}"),
             }
         }
         reconnect
-    }
-
-    /// Deletes the key and the server record, so the next connection is
-    /// the local socket's, and gives [`Event::Unpaired`].
-    fn forget(&mut self, daemon: bool) {
-        if let Err(e) = self.keys.forget() {
-            log::error!("unpairing: {e}");
-            self.emit(Event::Error(format!("forgetting the pairing: {e}")));
-            return;
-        }
-        log::info!("unpairing: the pairing is forgotten");
-        self.server = None;
-        self.pairing_until = None;
-        self.state.set_session_id(None);
-        self.emit(Event::Unpaired { daemon });
     }
 
     /// Starts a connection in the state and returns its `hello`, serialized.
@@ -341,21 +663,14 @@ impl Net {
         hello.ok_or_else(|| "the state gave no hello".to_string())
     }
 
-    /// Connects to the paired server over the link, or, with none, to the
+    /// Connects to the active remote over the link, or, with none, to the
     /// daemon's socket.
     async fn connect(&mut self) -> Option<Conn> {
         self.server = None;
-        let server = match self.keys.server() {
-            Ok(server) => server,
-            Err(e) => {
-                self.emit(Event::Error(format!("reading the paired server: {e}")));
-                return None;
-            }
-        };
-        let Some(server) = server else {
+        let Some(server) = self.remotes.active_record().cloned() else {
             return self.connect_local().await;
         };
-        let key = match self.keys.static_key() {
+        let key = match self.keys.static_key(&server.key_name) {
             Ok(Some(key)) => key,
             Ok(None) => {
                 self.emit(Event::Error(format!(
@@ -431,12 +746,56 @@ impl Net {
         }
     }
 
-    /// Stores the server, makes this client's key if it has none, gives the
-    /// device code, and opens the window of quick retries. The connection
-    /// itself is the usual `IK`, which the server drops until the code is
-    /// added. Nothing is stored if the key or the code cannot be made.
+    /// Pairs with `p` beside the open connection (decisions 10-12): a
+    /// listed remote's name and addresses are refreshed; a new one (or a
+    /// listed one whose key is missing) gets its key, its device code and a
+    /// pairing probe. Nothing new is stored until the probe's `hello` is
+    /// answered.
     fn begin_pairing(&mut self, p: Pairing) {
-        let key = match self.static_key() {
+        let server_key = p.payload.server_key;
+        let id = RemoteId::of(&server_key);
+        self.end_probe("replaced by a new pairing");
+        let mut record = ServerRecord::new(p.server.clone(), server_key, p.payload.addresses);
+        let listed = match self.remotes.get_mut(id) {
+            Some(listed) if listed.public_key != server_key => {
+                self.emit(Event::PairFailed(
+                    "a remote with the same id is already paired".to_string(),
+                ));
+                return;
+            }
+            Some(listed) => {
+                listed.name = record.name.clone();
+                listed.addresses = record.addresses.clone();
+                record = listed.clone();
+                true
+            }
+            None => false,
+        };
+        if listed {
+            if !self.write_remotes() {
+                return;
+            }
+            match self.keys.static_key(&record.key_name) {
+                Ok(Some(_)) => {
+                    log::info!(
+                        "pairing: already paired with {}; addresses updated",
+                        record.name
+                    );
+                    self.emit(Event::RemoteUpdated {
+                        id,
+                        name: record.name,
+                    });
+                    self.show_remotes();
+                    return;
+                }
+                Ok(None) => log::info!("pairing: {}'s key is missing; pairing again", record.name),
+                Err(e) => log::warn!("pairing: {}'s key: {e}; pairing again", record.name),
+            }
+        } else if self.remotes.list.len() >= MAX_REMOTES {
+            self.emit(Event::PairFailed(full_note()));
+            return;
+        }
+        let key = match self.keys.generate_static_key(&record.key_name) {
             Ok(key) => key,
             Err(e) => {
                 self.emit(Event::PairFailed(format!("this client's key: {e}")));
@@ -447,10 +806,11 @@ impl Net {
             key: key.public(),
             name: self.config.device_name.clone(),
         }
-        .encode(&p.payload.server_key);
+        .encode(&server_key);
         let code = match code {
             Ok(code) => code,
             Err(e) => {
+                let _ = self.keys.delete_static_key(&record.key_name);
                 self.emit(Event::PairFailed(format!(
                     "the device name '{}': {e}",
                     self.config.device_name
@@ -458,37 +818,39 @@ impl Net {
                 return;
             }
         };
-        let record = ServerRecord {
-            name: p.server.clone(),
-            public_key: p.payload.server_key,
-            addresses: p.payload.addresses,
-            // A new server: no session to continue.
-            session_id: None,
-        };
-        if let Err(e) = self.keys.set_server(record) {
-            self.emit(Event::PairFailed(format!("storing the server: {e}")));
-            return;
-        }
         log::info!(
-            "pairing with {}; waiting for the code to be added",
-            p.server
+            "pairing with {} ({}); waiting for the code to be added",
+            record.name,
+            id.fingerprint()
         );
-        self.pairing_until = Some(tokio::time::Instant::now() + PAIRING_WINDOW);
+        let token = self.next_probe;
+        self.next_probe += 1;
+        let hello = serde_json::to_vec(&self.state.hello_request()).unwrap_or_default();
+        let tasks = self.tasks_tx.clone();
+        let window = self.config.pairing_window;
+        let addresses = record.addresses.clone();
+        let task = tokio::spawn(async move {
+            let done = if probe(&addresses, key, &server_key, &hello, window).await {
+                Done::Paired { token }
+            } else {
+                Done::GaveUp { token }
+            };
+            let _ = tasks.send(done);
+        });
+        self.probe = Some(Probe {
+            token,
+            record,
+            listed,
+            task,
+        });
         self.emit(Event::PairingCode {
             code,
             server: p.server,
+            confirmation: link::confirmation_code(&server_key),
         });
     }
 
-    /// This client's static key, made and stored on first use.
-    fn static_key(&mut self) -> Result<Arc<dyn StaticKey>, String> {
-        if let Some(key) = self.keys.static_key()? {
-            return Ok(key);
-        }
-        self.keys.generate_static_key()
-    }
-
-    /// Stores a `session_id` that `hello` changed in the server record.
+    /// Stores a `session_id` that `hello` changed in the active record.
     fn persist_session(&mut self) {
         let Some(server) = self.server.as_mut() else {
             return;
@@ -498,7 +860,12 @@ impl Net {
             return;
         }
         server.session_id = current.map(str::to_string);
-        if let Err(e) = self.keys.set_server(server.clone()) {
+        let (id, session_id) = (server.id, server.session_id.clone());
+        let Some(listed) = self.remotes.get_mut(id) else {
+            return;
+        };
+        listed.session_id = session_id;
+        if let Err(e) = self.keys.set_remotes(&self.remotes) {
             log::warn!("storing the session id: {e}");
         }
     }
@@ -562,34 +929,35 @@ impl Net {
                         Ok(message) => {
                             let tick = self.tick();
                             let mut outputs = self.state.input(tick);
-                            if is_paired_hello(&message) {
-                                self.emit(Event::Paired {
-                                    name: self.config.device_name.clone(),
-                                });
-                            }
                             outputs.extend(self.state.incoming(message));
                             self.persist_session();
                             end = self.carry_out(outputs, &mut write).await;
+                            self.show_remotes();
                         }
                         Err(e) => log::warn!("a message from the daemon is not JSON-RPC: {e}"),
                     },
                     Some(other) => log::debug!("ignoring a link message of kind {:?}", other.kind()),
                     None => end = Some(End::Closed),
                 },
-                input = self.inputs.recv() => match input {
-                    Some(Input::Pair(text)) => {
-                        if let Some(p) = self.check_pairing(&text) {
-                            end = Some(End::Pair(p));
-                        }
+                done = self.tasks.recv() => {
+                    if let Some(done) = done {
+                        self.task_done(done);
                     }
+                }
+                input = self.inputs.recv() => match input {
                     Some(input) => {
-                        let tick = self.tick();
-                        let mut outputs = self.state.input(tick);
-                        outputs.extend(self.state.input(input));
-                        end = self.carry_out(outputs, &mut write).await;
+                        if let Some(input) = self.net_input(input) {
+                            let tick = self.tick();
+                            let mut outputs = self.state.input(tick);
+                            outputs.extend(self.state.input(input));
+                            end = self.carry_out(outputs, &mut write).await;
+                        }
                     }
                     None => end = Some(End::AppGone),
                 },
+            }
+            if end.is_none() && self.switch {
+                end = Some(End::Closed);
             }
         }
         reader.abort();
@@ -631,9 +999,9 @@ impl Net {
                     log::warn!("closing the connection: {reason}");
                     return Some(End::Closed);
                 }
-                // Unpaired: the connection was the pairing's.
-                Output::Forget { daemon } => {
-                    self.forget(daemon);
+                // The active remote is removed: the connection was its.
+                Output::Remove { id, daemon } => {
+                    self.finish_remove(id, daemon);
                     return Some(End::Closed);
                 }
                 // Already connected.
@@ -644,15 +1012,124 @@ impl Net {
     }
 }
 
-/// Whether `message` is a response saying `paired: true`: the `hello` of
-/// the first connection after the code was added. Only `hello` results
-/// carry `paired`.
-fn is_paired_hello(message: &Incoming) -> bool {
-    matches!(
-        message,
-        Incoming::Response(response)
-            if response.result.as_ref().and_then(|r| r.get("paired")) == Some(&serde_json::Value::Bool(true))
-    )
+/// The note when the list is full (decision 12).
+fn full_note() -> String {
+    format!("{MAX_REMOTES} remotes is the most this phone keeps: remove one to pair another")
+}
+
+/// Opens a link to one of `addresses` with `IK` and `hello`, each address
+/// bounded by [`HANDSHAKE_TIMEOUT`].
+async fn probe_connect(
+    addresses: &[String],
+    key: &Arc<dyn StaticKey>,
+    server_key: &[u8; 32],
+    hello: &[u8],
+) -> Option<LinkStream<TcpStream>> {
+    for addr in addresses {
+        let attempt = async {
+            let stream = tcp_connect(addr).await.map_err(|e| e.to_string())?;
+            link::reconnect(stream, key, server_key, Some(hello))
+                .await
+                .map_err(|e| e.to_string())
+        };
+        match timeout(HANDSHAKE_TIMEOUT, attempt).await {
+            Ok(Ok(stream)) => return Some(stream),
+            Ok(Err(e)) => log::debug!("probe: {addr}: {e}"),
+            Err(_) => log::debug!("probe: {addr}: timed out"),
+        }
+    }
+    None
+}
+
+/// Reads JSON-RPC messages from `stream` until the response to `id`, for
+/// up to `wait`.
+async fn response_to(
+    stream: &mut LinkStream<TcpStream>,
+    id: Option<&Id>,
+    wait: Duration,
+) -> Option<libflankr_proto::Response> {
+    let read = async {
+        loop {
+            let Ok(message) = stream.recv().await else {
+                return None;
+            };
+            let Message::Json(bytes) = message else {
+                continue;
+            };
+            if let Ok(Incoming::Response(response)) = serde_json::from_slice::<Incoming>(&bytes)
+                && (id.is_none() || response.id.as_ref() == id)
+            {
+                return Some(response);
+            }
+        }
+    };
+    timeout(wait, read).await.ok().flatten()
+}
+
+/// The pairing probe (decision 10): tries `IK` with `hello` every
+/// [`PAIRING_RETRY`] for `window`, until a `hello` is answered: the daemon
+/// knows this key, the code having been added. The connection is then
+/// closed. Whether it was answered.
+async fn probe(
+    addresses: &[String],
+    key: Arc<dyn StaticKey>,
+    server_key: &[u8; 32],
+    hello: &[u8],
+    window: Duration,
+) -> bool {
+    let until = tokio::time::Instant::now() + window;
+    loop {
+        if let Some(mut stream) = probe_connect(addresses, &key, server_key, hello).await {
+            let answered = response_to(&mut stream, None, HANDSHAKE_TIMEOUT).await;
+            let _ = stream.shutdown().await;
+            match answered {
+                Some(response) if response.error.is_none() => return true,
+                Some(response) => log::warn!("probe: hello refused: {:?}", response.error),
+                None => log::debug!("probe: hello not answered"),
+            }
+        }
+        let now = tokio::time::Instant::now();
+        if now >= until {
+            return false;
+        }
+        tokio::time::sleep(PAIRING_RETRY.min(until - now)).await;
+    }
+}
+
+/// The revoke probe (decision 22): one `IK` connection to the remote with
+/// its key, `hello`, then `link.unpair`, all within [`REVOKE_TIMEOUT`].
+/// Whether the daemon answered that it forgot this phone.
+async fn revoke(record: &ServerRecord, key: Arc<dyn StaticKey>, hello: &[u8]) -> bool {
+    let ask = async {
+        let mut stream = probe_connect(&record.addresses, &key, &record.public_key, hello).await?;
+        response_to(&mut stream, None, HANDSHAKE_TIMEOUT).await?;
+        let id = Id::Number(2);
+        let request = Request::new(
+            id.clone(),
+            methods::LINK_UNPAIR,
+            common::LinkUnpairParams {},
+        );
+        let message = serde_json::to_vec(&request).ok()?;
+        stream.send_message(&message).await.ok()?;
+        let response = response_to(&mut stream, Some(&id), UNPAIR_WAIT).await;
+        let _ = stream.shutdown().await;
+        Some(response.is_some_and(|r| r.error.is_none()))
+    };
+    let daemon = timeout(REVOKE_TIMEOUT, ask)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false);
+    log::info!(
+        "remotes: {} {}",
+        record.name,
+        if daemon {
+            "forgot this phone"
+        } else {
+            "was not reached; removed here only"
+        }
+    );
+    daemon
 }
 
 /// Reads lines from the daemon's socket into `lines` until it closes,

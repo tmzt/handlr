@@ -27,8 +27,14 @@ fn companion(socket: &Path, keys: &Path, initial_ms: u64, max_ms: u64) -> Compan
     Companion::spawn(config, Box::new(FileKeyStore::new(keys)))
 }
 
+/// The next event but the remotes list, which no test here pairs.
 fn next_event(c: &Companion) -> Event {
-    c.wait_timeout(TIMEOUT).expect("an event within 5 s")
+    loop {
+        match c.wait_timeout(TIMEOUT).expect("an event within 5 s") {
+            Event::Remotes(rows) => assert!(rows.is_empty(), "{rows:?}"),
+            e => return e,
+        }
+    }
 }
 
 /// Accepts one connection, failing after 5 s.
