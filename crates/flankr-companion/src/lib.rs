@@ -22,6 +22,7 @@ pub mod cross;
 pub mod keys;
 mod net;
 pub mod scan;
+pub mod terminal;
 pub mod view;
 pub mod wire;
 
@@ -38,6 +39,10 @@ pub use client::{
 pub use cross::{SessionCard, SessionCardKind};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
+pub use terminal::{TerminalStatus, Terminals, key_batches};
+// What the app draws and reads of a terminal.
+pub use libflankr_proto::common::TerminalClosedReason;
+pub use libflankr_term::{Grid, Screen};
 pub use view::{AgentCard, Bookend, CardKind, Shows, ViewSection};
 
 /// How the client runs.
@@ -124,6 +129,8 @@ pub struct Companion {
     events: mpsc::Receiver<Event>,
     /// The `net` thread's count of bytes over the link.
     bytes: Arc<AtomicU64>,
+    /// The terminals the `net` thread keeps (plan 20261027_07, step 4).
+    terminals: Arc<Terminals>,
 }
 
 impl Companion {
@@ -149,15 +156,68 @@ impl Companion {
         let (events_tx, events) = mpsc::channel();
         let bytes = Arc::new(AtomicU64::new(0));
         let counted = Arc::clone(&bytes);
+        let terminals = Arc::new(Terminals::default());
+        let kept = Arc::clone(&terminals);
         thread::Builder::new()
             .name("net".into())
-            .spawn(move || net::run(config, keys, inputs_rx, events_tx, counted, Box::new(tap)))
+            .spawn(move || {
+                net::run(
+                    config,
+                    keys,
+                    inputs_rx,
+                    events_tx,
+                    counted,
+                    kept,
+                    Box::new(tap),
+                )
+            })
             .expect("spawning the net thread");
         Companion {
             inputs,
             events,
             bytes,
+            terminals,
         }
+    }
+
+    /// The terminals (plan 20261027_07, step 4): read from any thread.
+    /// Whether the daemon offers them ([`Terminals::supported`]), each
+    /// session's [`Screen`] and [`TerminalStatus`], and a change counter
+    /// ([`Terminals::changes`]) to redraw on. The `net` thread writes them;
+    /// each read takes a short lock.
+    pub fn terminals(&self) -> &Terminals {
+        &self.terminals
+    }
+
+    /// Opens the session's terminal ([`Input::TerminalOpen`]): frames
+    /// follow, each acknowledged as it is shown.
+    pub fn terminal_open(&self, session: &str, cols_hint: Option<u16>, rows_hint: Option<u16>) {
+        self.send(Input::TerminalOpen {
+            session: session.to_string(),
+            cols_hint,
+            rows_hint,
+        });
+    }
+
+    /// Closes the session's terminal ([`Input::TerminalClose`]).
+    pub fn terminal_close(&self, session: &str) {
+        self.send(Input::TerminalClose(session.to_string()));
+    }
+
+    /// Arms keyboard input on the session's terminal
+    /// ([`Input::TerminalArm`]); [`TerminalStatus::armed_for`] says how long
+    /// once the daemon answers.
+    pub fn terminal_arm_input(&self, session: &str) {
+        self.send(Input::TerminalArm(session.to_string()));
+    }
+
+    /// Sends keys into the session's armed terminal
+    /// ([`Input::TerminalKeys`]).
+    pub fn terminal_send_keys(&self, session: &str, keys: &str) {
+        self.send(Input::TerminalKeys {
+            session: session.to_string(),
+            keys: keys.to_string(),
+        });
     }
 
     /// The bytes sent to and received from the daemon since the client

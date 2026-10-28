@@ -33,13 +33,18 @@
 //! item 3). A socket line counts its newline; a link message counts its
 //! plaintext, without the Noise framing, and `hello` in the handshake is
 //! not counted.
+//!
+//! The link is read with `recv`, by kind (plan 20261027_07, step 4): a
+//! JSON-RPC message goes to the state as before, and a terminal frame to
+//! [`State::terminal_frame`], which shows it on its terminal's screen and
+//! acknowledges it. Terminal bytes count like any other message's.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use libflankr_proto::Incoming;
-use libflankr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, StaticKey};
+use libflankr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, Message, StaticKey};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{TcpSocket, TcpStream, UnixStream};
@@ -51,6 +56,7 @@ use crate::CompanionConfig;
 use crate::client::{Event, Input, Output, State, TICK};
 use crate::keys::{KeyStore, ServerRecord};
 use crate::scan::{self, Pairing};
+use crate::terminal::Terminals;
 
 /// The longest line read from the daemon's socket (the daemon's own limit).
 /// The link has the same limit on its messages.
@@ -105,6 +111,7 @@ pub(crate) fn run(
     inputs: UnboundedReceiver<Input>,
     events: mpsc::Sender<Event>,
     bytes: Arc<AtomicU64>,
+    terminals: Arc<Terminals>,
     tap: Tap,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -117,7 +124,7 @@ pub(crate) fn run(
             return;
         }
     };
-    let mut state = State::new(config.client.clone());
+    let mut state = State::with_terminals(config.client.clone(), terminals);
     state.set_dictation_silence(config.dictation_silence);
     let net = Net {
         state,
@@ -513,9 +520,9 @@ impl Net {
                 let reader = tokio::spawn(async move {
                     let mut read = read;
                     loop {
-                        match read.recv_message().await {
+                        match read.recv().await {
                             Ok(message) => {
-                                bytes.fetch_add(message.len() as u64, Ordering::Relaxed);
+                                bytes.fetch_add(message.bytes().len() as u64, Ordering::Relaxed);
                                 if messages_tx.send(message).is_err() {
                                     break;
                                 }
@@ -547,7 +554,11 @@ impl Net {
                     end = self.carry_out(outputs, &mut write).await;
                 }
                 message = messages.recv() => match message {
-                    Some(message) => match serde_json::from_slice::<Incoming>(&message) {
+                    Some(Message::Terminal(frame)) => {
+                        let outputs = self.state.terminal_frame(&frame);
+                        end = self.carry_out(outputs, &mut write).await;
+                    }
+                    Some(Message::Json(message)) => match serde_json::from_slice::<Incoming>(&message) {
                         Ok(message) => {
                             let tick = self.tick();
                             let mut outputs = self.state.input(tick);
@@ -562,6 +573,7 @@ impl Net {
                         }
                         Err(e) => log::warn!("a message from the daemon is not JSON-RPC: {e}"),
                     },
+                    Some(other) => log::debug!("ignoring a link message of kind {:?}", other.kind()),
                     None => end = Some(End::Closed),
                 },
                 input = self.inputs.recv() => match input {
@@ -602,6 +614,19 @@ impl Net {
                         return Some(End::Closed);
                     }
                 }
+                Output::Notify(note) => {
+                    let message = match serde_json::to_vec(&note) {
+                        Ok(message) => message,
+                        Err(e) => {
+                            log::error!("serializing {}: {e}", note.method);
+                            continue;
+                        }
+                    };
+                    if let Err(e) = write.send(&message, &self.bytes).await {
+                        log::debug!("writing to the daemon: {e}");
+                        return Some(End::Closed);
+                    }
+                }
                 Output::Close(reason) => {
                     log::warn!("closing the connection: {reason}");
                     return Some(End::Closed);
@@ -631,10 +656,11 @@ fn is_paired_hello(message: &Incoming) -> bool {
 }
 
 /// Reads lines from the daemon's socket into `lines` until it closes,
-/// adding each line's bytes, its newline included, to `bytes`.
+/// adding each line's bytes, its newline included, to `bytes`. Each is a
+/// JSON-RPC message: the socket has no other kind.
 fn read_lines(
     read: tokio::net::unix::OwnedReadHalf,
-    lines: UnboundedSender<Vec<u8>>,
+    lines: UnboundedSender<Message>,
     bytes: Arc<AtomicU64>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -650,7 +676,7 @@ fn read_lines(
                 }
                 Ok(n) => {
                     bytes.fetch_add(n as u64, Ordering::Relaxed);
-                    if lines.send(line).is_err() {
+                    if lines.send(Message::Json(line)).is_err() {
                         break;
                     }
                 }

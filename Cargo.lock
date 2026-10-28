@@ -1383,6 +1383,7 @@ dependencies = [
  "flankr-speech",
  "libc",
  "libflankr_proto",
+ "libflankr_term",
  "log",
  "png",
  "qrcodeurl",

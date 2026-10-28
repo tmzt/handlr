@@ -14,7 +14,8 @@
 //! likes.
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use flankr_speech::LocalTime;
 use libflankr_proto::common::{self, methods, protocols};
@@ -22,6 +23,7 @@ use libflankr_proto::{Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
+use crate::terminal::{Act, Terminals};
 use crate::view::{Outline, Sections, ViewSection, ViewWindow};
 use crate::wire;
 
@@ -139,6 +141,26 @@ pub enum Input {
     /// amendment of 2026-10-24 15:56 EDT, item 3): that pane's newest card
     /// goes. A question or approval stays away while the same is asked.
     DismissCard(String),
+    /// Open the terminal of this session (a pane id or name), as
+    /// `terminal.open` with what the phone could show (plan 20261027_07,
+    /// step 4). It stays open across connections until
+    /// [`Input::TerminalClose`] or the daemon's `terminal.closed`; see
+    /// [`Terminals`].
+    TerminalOpen {
+        session: String,
+        cols_hint: Option<u16>,
+        rows_hint: Option<u16>,
+    },
+    /// Close the session's terminal: it is forgotten.
+    TerminalClose(String),
+    /// Arm keyboard input on the session's open terminal
+    /// (`terminal.input_arm`, step 6): [`Terminals::status`]'s `armed_for`
+    /// says for how long.
+    TerminalArm(String),
+    /// Keys into the session's armed terminal, in herdr's `send_keys`
+    /// syntax: sent as `terminal.input` in batches of at most
+    /// `TERMINAL_INPUT_MAX` bytes ([`crate::terminal::key_batches`]).
+    TerminalKeys { session: String, keys: String },
 }
 
 /// A grade of memory pressure (plan 20261022_03, the L3 amendment of
@@ -587,6 +609,8 @@ pub enum Output {
     Forget { daemon: bool },
     /// Offline: connect again now, not after the backoff (a refresh).
     Reconnect,
+    /// Send this notification to the daemon (`terminal.ack`).
+    Notify(Notification),
 }
 
 /// Notices held at most, the oldest dropped beyond it (decision 4).
@@ -828,6 +852,14 @@ enum Sent {
         /// A refresh's fetch of the newest screen.
         refresh: bool,
     },
+    /// `terminal.open` of this session.
+    TerminalOpen(String),
+    /// `terminal.close`.
+    TerminalClose,
+    /// `terminal.input_arm` of this session.
+    TerminalArm(String),
+    /// `terminal.input` of this session.
+    TerminalInput(String),
 }
 
 /// The most `session.content` requests in flight at once.
@@ -1063,6 +1095,8 @@ pub struct State {
     refresh: Option<Refresh>,
     /// Other sessions' cards, and the interactions they follow.
     cross: crate::cross::Cross,
+    /// The terminals, shared with the app (plan 20261027_07, step 4).
+    terminals: Arc<Terminals>,
 }
 
 /// A refresh running (plan 20261022_03, the L3 amendment of 2026-10-24
@@ -1449,7 +1483,14 @@ fn same_view(a: &Event, b: &Event) -> bool {
 impl State {
     /// A client that calls itself `client` in `hello`.
     pub fn new(client: impl Into<String>) -> Self {
+        Self::with_terminals(client, Arc::default())
+    }
+
+    /// As [`new`](Self::new), keeping its terminals in `terminals`, which
+    /// the app reads from its own thread.
+    pub fn with_terminals(client: impl Into<String>, terminals: Arc<Terminals>) -> Self {
         State {
+            terminals,
             client: client.into(),
             link: Link::Offline,
             session_id: None,
@@ -1553,6 +1594,79 @@ impl State {
         vec![self.request(methods::HELLO, params, Sent::Hello)]
     }
 
+    /// The terminals, as the app reads them.
+    pub fn terminals(&self) -> &Arc<Terminals> {
+        &self.terminals
+    }
+
+    /// A message of the link's terminal kind came: a frame, shown when it
+    /// can be and then acknowledged. Bytes that are not a frame are logged
+    /// and dropped.
+    pub fn terminal_frame(&mut self, bytes: &[u8]) -> Vec<Output> {
+        let mut out = Vec::new();
+        self.last_heard = self.now;
+        self.ping_sent = None;
+        match libflankr_term::Frame::decode(bytes) {
+            Ok(frame) => {
+                let acts = self.terminals.update(|b| b.frame(frame));
+                self.terminal_acts(acts, &mut out);
+            }
+            Err(e) => log::warn!("a terminal frame from the daemon does not decode: {e}"),
+        }
+        out
+    }
+
+    /// Carries out what the terminals asked for.
+    fn terminal_acts(&mut self, acts: Vec<Act>, out: &mut Vec<Output>) {
+        for act in acts {
+            match act {
+                Act::Open {
+                    session,
+                    cols_hint,
+                    rows_hint,
+                } => {
+                    let params = common::TerminalOpenParams {
+                        pane_id: session.clone(),
+                        cols_hint,
+                        rows_hint,
+                    };
+                    out.push(self.request(
+                        methods::TERMINAL_OPEN,
+                        params,
+                        Sent::TerminalOpen(session),
+                    ));
+                }
+                Act::Close { terminal_id } => out.push(self.request(
+                    methods::TERMINAL_CLOSE,
+                    common::TerminalCloseParams { terminal_id },
+                    Sent::TerminalClose,
+                )),
+                Act::Ack { terminal_id, seq } => out.push(Output::Notify(Notification::new(
+                    methods::TERMINAL_ACK,
+                    common::TerminalAckParams { terminal_id, seq },
+                ))),
+                Act::Arm {
+                    session,
+                    terminal_id,
+                } => out.push(self.request(
+                    methods::TERMINAL_INPUT_ARM,
+                    common::TerminalInputArmParams { terminal_id },
+                    Sent::TerminalArm(session),
+                )),
+                Act::Keys {
+                    session,
+                    terminal_id,
+                    keys,
+                } => out.push(self.request(
+                    methods::TERMINAL_INPUT,
+                    common::TerminalInputParams { terminal_id, keys },
+                    Sent::TerminalInput(session),
+                )),
+                Act::Error(message) => out.push(event(Event::Error(message))),
+            }
+        }
+    }
+
     /// The settings as last given.
     pub fn settings(&self) -> Settings {
         self.settings
@@ -1610,6 +1724,8 @@ impl State {
         let mut out = Vec::new();
         self.link = Link::Offline;
         self.sent.clear();
+        // Terminals are opened again on the next connection.
+        self.terminals.update(|b| ((), b.disconnected()));
         // The next connection's first list is given, changed or not.
         self.listing = false;
         self.listed = false;
@@ -1789,6 +1905,29 @@ impl State {
                 self.show_cache(&mut out);
             }
             Input::DismissCard(pane_id) => self.cross.dismiss(&pane_id, false),
+            Input::TerminalOpen {
+                session,
+                cols_hint,
+                rows_hint,
+            } => {
+                let acts = self
+                    .terminals
+                    .update(|b| b.open(session, cols_hint, rows_hint));
+                self.terminal_acts(acts, &mut out);
+            }
+            Input::TerminalClose(session) => {
+                let acts = self.terminals.update(|b| b.close(&session));
+                self.terminal_acts(acts, &mut out);
+            }
+            Input::TerminalArm(session) => {
+                let acts = self.terminals.update(|b| b.arm(&session));
+                self.terminal_acts(acts, &mut out);
+            }
+            Input::TerminalKeys { session, keys } => {
+                let now = Instant::now();
+                let acts = self.terminals.update(|b| b.send_keys(&session, &keys, now));
+                self.terminal_acts(acts, &mut out);
+            }
         }
         self.show_cards(&mut out);
         self.gate(out)
@@ -2803,6 +2942,9 @@ impl State {
     fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
         self.now = self.now.max(now);
         self.keep_alive(out);
+        // Arms that ran out (the app's "Typing into" frame drops).
+        let wall = Instant::now();
+        self.terminals.update(|b| ((), b.expire(wall)));
         if self
             .unpairing
             .is_some_and(|at| self.now >= at + UNPAIR_WAIT)
@@ -3545,6 +3687,28 @@ impl State {
                     self.finish_refresh(out);
                 }
                 Sent::Unsubscribe => log::debug!("session.unsubscribe: {message}"),
+                Sent::TerminalOpen(session) => {
+                    let no_method =
+                        error.code == libflankr_proto::envelope::codes::METHOD_NOT_FOUND;
+                    let acts = self
+                        .terminals
+                        .update(|b| b.open_failed(&session, message, no_method));
+                    self.terminal_acts(acts, out);
+                }
+                Sent::TerminalClose => log::debug!("terminal.close: {message}"),
+                Sent::TerminalArm(session) => {
+                    let now = Instant::now();
+                    let acts = self
+                        .terminals
+                        .update(|b| b.armed(&session, Err(message), now));
+                    self.terminal_acts(acts, out);
+                }
+                Sent::TerminalInput(session) => {
+                    let acts = self
+                        .terminals
+                        .update(|b| b.keys_sent(&session, Err(message)));
+                    self.terminal_acts(acts, out);
+                }
                 Sent::History(id) => {
                     if let Some(v) = self.view.as_mut().filter(|v| v.subscription == Some(id)) {
                         v.history = false;
@@ -3594,6 +3758,28 @@ impl State {
         }
         let result = response.result.unwrap_or(Value::Null);
         match sent {
+            Sent::TerminalOpen(session) => {
+                let acts = match parse::<common::TerminalOpenResult>(result) {
+                    Ok(r) => self.terminals.update(|b| b.opened(&session, r)),
+                    Err(e) => self
+                        .terminals
+                        .update(|b| b.open_failed(&session, format!("a bad result: {e}"), false)),
+                };
+                self.terminal_acts(acts, out);
+            }
+            Sent::TerminalClose => {}
+            Sent::TerminalArm(session) => {
+                let secs = parse::<common::TerminalInputArmResult>(result)
+                    .map(|r| r.expires_in_s)
+                    .map_err(|e| format!("a bad result: {e}"));
+                let now = Instant::now();
+                let acts = self.terminals.update(|b| b.armed(&session, secs, now));
+                self.terminal_acts(acts, out);
+            }
+            Sent::TerminalInput(session) => {
+                let acts = self.terminals.update(|b| b.keys_sent(&session, Ok(())));
+                self.terminal_acts(acts, out);
+            }
             Sent::Hello => match parse::<wire::HelloResult>(result) {
                 Ok(hello) => {
                     self.link = Link::Online;
@@ -3607,6 +3793,10 @@ impl State {
                     // What `[llm]` offers; an older daemon's is both.
                     let llm = hello.llm.unwrap_or_else(wire::LlmInfo::available);
                     self.set_llm(llm, out);
+                    // The terminal mode, if offered: what was open opens
+                    // again (plan 20261027_07, step 4).
+                    let acts = self.terminals.update(|b| b.set_info(hello.terminal));
+                    self.terminal_acts(acts, out);
                     // The connection's options start off: say read aloud's.
                     self.send_options(out);
                     // herdr's focus, for the dictation mode's target.
@@ -4212,10 +4402,20 @@ impl State {
                 }
             }
             wire::methods::SERVER_CAPABILITIES => {
-                if let Some(c) = parse_or_log::<wire::ServerCapabilities>(note)
-                    && let Some(llm) = c.llm
-                {
-                    self.set_llm(llm, out);
+                if let Some(c) = parse_or_log::<wire::ServerCapabilities>(note) {
+                    // `terminal` is always sent while offered: none is
+                    // none.
+                    let acts = self.terminals.update(|b| b.set_info(c.terminal));
+                    self.terminal_acts(acts, out);
+                    if let Some(llm) = c.llm {
+                        self.set_llm(llm, out);
+                    }
+                }
+            }
+            methods::TERMINAL_CLOSED => {
+                if let Some(c) = parse_or_log::<common::TerminalClosedParams>(note) {
+                    log::info!("terminal {} closed: {:?}", c.terminal_id, c.reason);
+                    self.terminals.update(|b| ((), b.closed(c)));
                 }
             }
             wire::methods::FOCUS_CHANGED => {
