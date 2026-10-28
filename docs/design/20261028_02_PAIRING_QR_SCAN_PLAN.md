@@ -662,3 +662,11 @@ recommendations: "Yes, you all", taken as yes to each as asked.
 
 All open questions are answered; the plan stays `Draft` until the owner
 approves it.
+
+## Amendment — 2026-10-28 16:57 EDT: approved
+
+The owner (2026-10-28): "Approve and start the work when that's done",
+once libmobile 0.3.1 was published and libmorph's camera work merged as
+libmorph 0.5.0 (tag `v0.5.0`, with libmorph-build 0.3.0). The plan is
+approved with its amendments; the status becomes `In implementation` with
+its first code commit.
