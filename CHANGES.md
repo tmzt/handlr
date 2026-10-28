@@ -2837,3 +2837,15 @@ serves it.
    TUI that reports the mouse, a horizontal drag is a mouse drag and does
    not pan; a click on an unarmed terminal waits for the arm. herdr's
    cursor `shape` is DECSCUSR: 3-4 underline, 5-6 bar, else block.
+
+## 2026-10-28 01:00 EDT — shell panes, terminal only (plan 20261022_03 L3)
+
+Plan: docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md, the L3 amendment
+on shell panes. The daemon already listed shell panes; the app's overview
+filtered them out, and no longer does. The built-in `shell` entry also
+sets `interrupt_key = ""`, so an interrupt never sends esc into a shell,
+and the global `allow_arbitrary_commands` override (`--allow-arbitrary-commands`)
+no longer turns arbitrary commands on for `shell`, since typed text would
+run as a command line; the shell's own entry can still allow it. In a
+shell's view the keyboard glyph shows only while typing is armed; the
+general agent's centre button stays.
