@@ -984,3 +984,21 @@ and that a 32-bit fingerprint can be matched by a targeted attacker in about
    offer or after the run ends is refused; a substituted device code in
    the fallback shows different words; and the review's item 4 changes
    have tests.
+
+## Amendment — 2026-10-28 14:40 EDT: the pairing offer lasts 60 s by default, at most 300 s
+
+The owner (2026-10-28): "the timeout can default to 60 seconds and the
+link offer expires, this can be overridden with an argument max 300 sec".
+This replaces the previous amendment's run timeout of 5 minutes (item 1.3).
+
+1. A `flankr pair` run's offer expires **60 seconds** after the link is
+   shown by default. After that the daemon refuses any request with that
+   offer and `flankr pair` ends, saying the link expired; a new run makes a
+   new offer and link.
+2. **`flankr pair --timeout <seconds>`** sets it, from 1 to **300**; a larger
+   value is refused with the limit in the message.
+3. The time to answer the six-word prompt with **yes** counts within the
+   same limit: a request whose offer has expired before **yes** is not
+   added, and both sides say so.
+4. The phone shows the time left for the offer it is pairing with (from
+   the daemon's acknowledgement), and says when it expired.
