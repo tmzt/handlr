@@ -2849,3 +2849,13 @@ no longer turns arbitrary commands on for `shell`, since typed text would
 run as a command line; the shell's own entry can still allow it. In a
 shell's view the keyboard glyph shows only while typing is armed; the
 general agent's centre button stays.
+
+## 2026-10-28 01:15 EDT — typing into a terminal is not spoken (plan 20261027_07, decision 6)
+
+Plan: docs/design/20261027_07_TERMINAL_MODE_PLAN.md, decision 6 ("Every
+input batch is logged as a confirm-style notice"). The owner, on hearing
+the app read each batch aloud: "why is it speaking the keys?". The daemon
+now sends one `terminal_input` notice per arm window for keys ("Typing
+into <name>'s terminal."), as it already did for the mouse, and the
+companion client logs a `terminal_input` notice and never says it. Each
+batch is still logged in the daemon, without the keys.
