@@ -891,3 +891,96 @@ whether the readable form is three BIP-39 words, "yes".
 4. The step added by the per-offer amendment includes these; its **Done
    when:** adds that `flankr pair` and the phone show the same three words
    for a daemon, from fixed test vectors.
+
+## Amendment — 2026-10-28 14:37 EDT: pairing confirmed by six words on both sides; the review's changes
+
+The owner (2026-10-28), after a review of this plan's design and security
+(read-only, recorded in this conversation; findings summarised below): on
+binding the check to both keys, "that's fine, 6 words only as a check on
+the proposed connection, drop the digits. nothing is entered on the Mac?";
+then, restating the flow: "the url/qr is sent to the phone with the Mac in
+pair mode, both sides exchange a message then both print the same 6 words,
+the user types yes to confirm on the Mac only if both sides match, nothing
+is added to auth.toml until that confirmation?"; asked to write it, "yes".
+This replaces the amendments of 13:59 EDT (the per-offer six-digit code)
+and 14:06 EDT (three BIP-39 words) where they disagree, and decision 11's
+device-code paste as the primary flow.
+
+**Why.** The review found that the six-digit code, from public inputs an
+attacker chooses, can be matched by trying about 2^20 offers (milliseconds),
+so it only catches mistakes; that the device code's checksum (the server's
+key in it, `pairing.rs:247`) is the one mechanical guard against a
+substituted link, but nothing guards a substituted *device code* on its way
+to the Mac (an attacker's key built for the real daemon would be added);
+and that a 32-bit fingerprint can be matched by a targeted attacker in about
+50 core-hours.
+
+1. **The flow.**
+   1. `flankr pair` puts the daemon in pair mode for this run: it makes a
+      fresh random 16-byte `offer` and shows the URL/QR carrying the
+      daemon's static key, its addresses and the offer (payload version 3,
+      as the 13:59 amendment has it). The link reaches the phone by QR,
+      link or intent.
+   2. The phone makes a new static key `D` for this daemon and connects to
+      an address from the link with Noise **NK** (the daemon's static key
+      pinned from the link, so only that daemon can read the request). It
+      sends one request: `D`'s public key, the device name and the offer.
+   3. The daemon accepts a request only while a `flankr pair` run is in
+      pair mode and only with that run's current offer (one offer per run;
+      at most 3 requests per run; the run ends at its timeout, 5 minutes,
+      or Ctrl-C). It answers with an acknowledgement and holds the request
+      in memory; nothing is written.
+   4. Both sides print the same **six words**: the first 66 bits of
+      BLAKE2s-256 over `flankr.pair.words/1` ‖ daemon key ‖ offer ‖ `D`, as
+      six 11-bit indexes into the BIP-39 English list. The phone shows them
+      large; `flankr pair` prints them and asks "Do the six words on the
+      phone match? Type yes to pair:".
+   5. Only on **yes** does the daemon add `D` to `auth.toml` (under the
+      device name) and tell the phone over the open NK session, after which
+      the phone stores the remote, its key and its `state.redb` and
+      connects with `IK` as today. Anything other than `yes`, a timeout, or
+      Cancel on the phone adds nothing on either side, and the phone
+      discards `D`. A second request with another key in the same run shows
+      its own words and needs its own `yes`.
+   The daemon's pair-mode listener is a new, unauthenticated entry point:
+   it is open only during a `flankr pair` run, takes only this one
+   request, and can do nothing but propose a key that the owner then
+   confirms or refuses.
+2. **The device-code flow stays as a fallback** for a phone that cannot
+   reach the daemon directly at pairing time; with it, `flankr pair` also
+   prints the six words computed from the pasted device code's key and asks
+   for **yes** before adding it, and the phone shows them beside its device
+   code. The six-digit confirmation code is dropped everywhere.
+3. **The fingerprint** shown to compare a daemon's identity is **six
+   BIP-39 words** (66 bits of `fingerprint(key)`) in the phone's Details and
+   in `flankr pair`, replacing the 14:06 amendment's three words;
+   `3f9a 12c4` stays as the Remotes row's label only (telling remotes
+   apart). The pairing words (item 1) and the fingerprint words are
+   different and are labelled so: "pairing words" and "daemon fingerprint".
+4. **The review's other changes:**
+   - a pairing link for the key already being paired keeps the phone's
+     pending key and request, and does not regenerate it (`net.rs:757`);
+   - a listed remote's new addresses from a link are saved only after a
+     verified connection to them (`net.rs:772-775`);
+   - `state.redb` and its directory are created 0600/0700 atomically, not
+     chmod'd after (`remote_state.rs:127`, `:242`), and a
+     `state.redb.mismatch-*` file is deleted rather than kept;
+   - the copy for re-pairing a listed remote whose phone key was lost says
+     that `flankr pair --replace` is needed on the daemon;
+   - the plan notes that the app must be updated before the daemon (an
+     older app refuses a version 3 link), and that `libflankr_proto`
+     0.4.3 shipped the key-only `confirmation_code`, removed in 0.5.0
+     (**Breaking**).
+   - Out of this plan, for later: a daemon-side "last seen" for paired
+     devices and a prune command for entries left by an offline removal.
+5. **Steps.** The step added by the 13:59 amendment becomes: payload
+   version 3 with the offer; the NK pairing request and the daemon's pair
+   mode; the six pairing words on both sides with **yes** on the Mac; the
+   device-code fallback's words; the fingerprint words; the review's
+   changes in item 4. **Done when:** a phone pairs with a daemon through
+   the request, both show the same six words, `auth.toml` is unchanged
+   until **yes** and has the key after it; a refusal, a timeout and a
+   phone Cancel each leave both sides unchanged; a request with a wrong
+   offer or after the run ends is refused; a substituted device code in
+   the fallback shows different words; and the review's item 4 changes
+   have tests.
