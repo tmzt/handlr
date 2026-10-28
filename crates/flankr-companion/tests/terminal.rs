@@ -7,6 +7,12 @@
 //! reconnect opens it again, bytes that are not a frame are not fatal, and
 //! keys over 64 bytes go in batches. Scrolls need the arm, coalesce while
 //! one is in flight, and their offset lands in the status.
+//!
+//! Plan 20261027_08, step 9: with an "attached" daemon (`source: attached`,
+//! `mouse` in hello), `terminal.open` asks for the cursor and a frame's
+//! cursor trailer reaches `Screen::cursor`; `terminal.resize` is
+//! deduplicated, one in flight and the newest wins, and the fit is the
+//! reopen's hints; `terminal.mouse` needs the arm.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -15,6 +21,7 @@ use std::time::{Duration, Instant};
 use flankr_companion::{
     Companion, CompanionConfig, FileKeyStore, KeyStore, ServerRecord, TerminalClosedReason,
 };
+use flankr_companion::{Cursor, MouseButton, TerminalMouseKind, TerminalSource};
 use libflankr_proto::link::{self, StaticKeypair};
 use libflankr_term::{Mirror, parse_ansi};
 use serde_json::{Value, json};
@@ -33,6 +40,10 @@ enum Cmd {
     Closed(&'static str),
     /// Answer the `terminal.scroll`s held while `hold_scroll` was set.
     ReleaseScrolls,
+    /// Answer the `terminal.resize`s held while `hold_resize` was set.
+    ReleaseResizes,
+    /// The pane's cursor is now this: a frame from the mirror.
+    Cursor(Cursor),
     /// End the connection.
     Hangup,
 }
@@ -58,6 +69,9 @@ struct Daemon {
     /// While set, `terminal.scroll` is not answered until
     /// [`Cmd::ReleaseScrolls`].
     hold_scroll: Arc<AtomicBool>,
+    /// While set, `terminal.resize` is not answered until
+    /// [`Cmd::ReleaseResizes`].
+    hold_resize: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -71,10 +85,14 @@ struct Ctx {
     next_id: Arc<AtomicU32>,
     old: Old,
     hold_scroll: Arc<AtomicBool>,
+    hold_resize: Arc<AtomicBool>,
+    /// Answers `terminal.open` as an attached terminal, and offers the
+    /// mouse in hello.
+    attached: bool,
 }
 
 impl Daemon {
-    fn start(client: [u8; 32], buffer: &str, old: Old) -> Daemon {
+    fn start(client: [u8; 32], buffer: &str, old: Old, attached: bool) -> Daemon {
         let key = link::generate_keypair().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -82,6 +100,7 @@ impl Daemon {
         let (seen_tx, seen) = mpsc::channel();
         let (cmds, cmds_rx) = unbounded_channel();
         let hold_scroll = Arc::new(AtomicBool::new(false));
+        let hold_resize = Arc::new(AtomicBool::new(false));
         let ctx = Ctx {
             key: key.clone(),
             client,
@@ -91,6 +110,8 @@ impl Daemon {
             next_id: Arc::new(AtomicU32::new(7)),
             old,
             hold_scroll: hold_scroll.clone(),
+            hold_resize: hold_resize.clone(),
+            attached,
         };
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -114,6 +135,7 @@ impl Daemon {
             seen,
             cmds,
             hold_scroll,
+            hold_resize,
         }
     }
 
@@ -164,7 +186,7 @@ impl Ctx {
             "session_id": "companion:phone", "vocabulary": []
         });
         if self.old != Old::Daemon {
-            result["terminal"] = json!({"input": true});
+            result["terminal"] = json!({"input": true, "mouse": self.attached});
         }
         let (mut read, mut write) = accepted.stream.into_split();
         let hello = json!({"jsonrpc": "2.0", "id": first["id"], "result": result});
@@ -189,6 +211,10 @@ impl Ctx {
         // The pane's scroll offset, and the scrolls not answered yet.
         let mut offset: i64 = 0;
         let mut held: Vec<Value> = Vec::new();
+        let mut held_resizes: Vec<Value> = Vec::new();
+        // The open asked for the cursor trailer; the cursor last set.
+        let mut trailer = false;
+        let mut cursor: Option<Cursor> = None;
         loop {
             tokio::select! {
                 m = from.recv() => {
@@ -201,6 +227,11 @@ impl Ctx {
                         let _ = self.seen.send(m);
                         continue;
                     }
+                    if method == "terminal.resize" && self.hold_resize.load(Ordering::SeqCst) {
+                        held_resizes.push(m.clone());
+                        let _ = self.seen.send(m);
+                        continue;
+                    }
                     let result = if self.old != Old::No && method.starts_with("terminal.") {
                         Err((-32601, "method not found"))
                     } else {
@@ -208,11 +239,18 @@ impl Ctx {
                             "terminal.open" => {
                                 let id = self.next_id.fetch_add(1, Ordering::SeqCst);
                                 let mut mi = Mirror::new(id);
-                                let grid = parse_ansi(&self.buffer.lock().unwrap());
+                                let mut grid = parse_ansi(&self.buffer.lock().unwrap());
+                                trailer = self.attached && m["params"]["cursor"] == true;
+                                grid.cursor = cursor.filter(|_| trailer);
                                 let (cols, rows) = (grid.cols, grid.rows);
                                 frame = mi.update(grid);
                                 mirror = Some(mi);
-                                Ok(json!({"terminal_id": id, "cols": cols, "rows": rows}))
+                                if self.attached {
+                                    Ok(json!({"terminal_id": id, "cols": cols, "rows": rows,
+                                        "cursor": trailer, "source": "attached"}))
+                                } else {
+                                    Ok(json!({"terminal_id": id, "cols": cols, "rows": rows}))
+                                }
                             }
                             "terminal.ack" => {
                                 if let Some(mi) = mirror.as_mut() {
@@ -240,7 +278,7 @@ impl Ctx {
                     }
                     // The first frame after the answer.
                     if let Some(frame) = frame
-                        && write.send_terminal(&frame.encode()).await.is_err()
+                        && write.send_terminal(&frame.encode_with(trailer)).await.is_err()
                     {
                         break;
                     }
@@ -251,10 +289,36 @@ impl Ctx {
                     let bytes = match cmd {
                         Cmd::Buffer(text) => {
                             *self.buffer.lock().unwrap() = text.clone();
-                            let Some(frame) = mirror.as_mut().and_then(|mi| mi.update(parse_ansi(&text))) else {
+                            let mut grid = parse_ansi(&text);
+                            grid.cursor = cursor.filter(|_| trailer);
+                            let Some(frame) = mirror.as_mut().and_then(|mi| mi.update(grid)) else {
                                 continue;
                             };
-                            frame.encode()
+                            frame.encode_with(trailer)
+                        }
+                        Cmd::Cursor(c) => {
+                            cursor = Some(c);
+                            let mut grid = parse_ansi(&self.buffer.lock().unwrap());
+                            grid.cursor = cursor.filter(|_| trailer);
+                            let Some(frame) = mirror.as_mut().and_then(|mi| mi.update(grid)) else {
+                                continue;
+                            };
+                            frame.encode_with(trailer)
+                        }
+                        Cmd::ReleaseResizes => {
+                            self.hold_resize.store(false, Ordering::SeqCst);
+                            let mut failed = false;
+                            for m in held_resizes.drain(..) {
+                                let response = json!({"jsonrpc": "2.0", "id": m["id"], "result": {}});
+                                if write.send_message(&serde_json::to_vec(&response).unwrap()).await.is_err() {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                            if failed {
+                                break;
+                            }
+                            continue;
                         }
                         Cmd::Raw(bytes) => bytes,
                         Cmd::ReleaseScrolls => {
@@ -298,10 +362,16 @@ impl Ctx {
 
 /// A companion paired with a daemon started on `buffer`.
 fn paired(buffer: &str, old: Old) -> (Daemon, Companion, tempfile::TempDir) {
+    paired_with(buffer, old, false)
+}
+
+/// As [`paired`], the daemon attached (`source: attached`, the mouse
+/// offered) when `attached`.
+fn paired_with(buffer: &str, old: Old, attached: bool) -> (Daemon, Companion, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut keys = FileKeyStore::new(dir.path().join("keys"));
     let client = keys.generate_static_key().unwrap().public();
-    let daemon = Daemon::start(client, buffer, old);
+    let daemon = Daemon::start(client, buffer, old, attached);
     keys.set_server(ServerRecord {
         name: "phone".into(),
         public_key: daemon.key.public,
@@ -330,7 +400,11 @@ fn until(c: &Companion, what: &str, f: impl Fn(&Companion) -> bool) {
 
 fn shows(c: &Companion, text: &str) -> bool {
     c.terminals()
-        .with_screen(SESSION, |s| s.grid() == &parse_ansi(text))
+        // The rows only: an attached frame carries the cursor beside them.
+        .with_screen(SESSION, |s| {
+            let want = parse_ansi(text);
+            (s.grid().cols, s.grid().rows, &s.grid().lines) == (want.cols, want.rows, &want.lines)
+        })
         .unwrap_or(false)
 }
 
@@ -358,7 +432,7 @@ fn a_full_frame_then_a_diff_match_the_buffer_and_are_acked() {
     let open = daemon.next("terminal.open");
     assert_eq!(
         open["params"],
-        json!({"pane_id": SESSION, "cols_hint": 60, "rows_hint": 30})
+        json!({"pane_id": SESSION, "cols_hint": 60, "rows_hint": 30, "cursor": true})
     );
     let ack = daemon.next("terminal.ack");
     assert_eq!(ack["params"], json!({"terminal_id": 7, "seq": 1}));
@@ -562,4 +636,152 @@ fn scrolls_coalesce_while_one_is_in_flight_and_the_offset_lands_in_the_status() 
     assert_eq!(status.scroll_max, Some(500));
     assert!(c.terminals().changes() > changes);
     assert!(!daemon.comes("terminal.scroll", Duration::from_millis(200)));
+}
+
+/// An attached terminal open (terminal 7) at a fit of 60x30.
+fn attached_terminal() -> (Daemon, Companion, tempfile::TempDir) {
+    let (daemon, c, dir) = paired_with(ONE, Old::No, true);
+    until(&c, "the terminal mode", |c| c.terminals().supported());
+    assert!(c.terminals().mouse_allowed());
+    c.terminal_open(SESSION, Some(60), Some(30));
+    assert_eq!(daemon.next("terminal.open")["params"]["cursor"], true);
+    daemon.next("terminal.ack");
+    until(&c, "open", |c| {
+        c.terminals().status(SESSION).is_some_and(|s| s.open)
+    });
+    (daemon, c, dir)
+}
+
+#[test]
+fn the_open_asks_for_the_cursor_and_a_trailer_reaches_the_screen() {
+    let (daemon, c, _dir) = attached_terminal();
+    let status = c.terminals().status(SESSION).unwrap();
+    assert!(status.cursor);
+    assert_eq!(status.source, TerminalSource::Attached);
+    assert_eq!(c.terminals().screen(SESSION).unwrap().cursor(), None);
+    let cursor = Cursor {
+        col: 2,
+        row: 1,
+        visible: true,
+        shape: 6,
+        mouse_reporting: true,
+        alternate_screen: false,
+        stale: false,
+    };
+    daemon.send(Cmd::Cursor(cursor));
+    // A cursor-only change is a frame of its own, acknowledged.
+    assert_eq!(
+        daemon.next("terminal.ack")["params"],
+        json!({"terminal_id": 7, "seq": 2})
+    );
+    until(&c, "the cursor", |c| {
+        c.terminals()
+            .with_screen(SESSION, |s| s.cursor() == Some(cursor))
+            .unwrap_or(false)
+    });
+    assert!(shows(&c, ONE));
+    // Stale, then a new buffer: the cursor rides along.
+    let stale = Cursor {
+        stale: true,
+        ..cursor
+    };
+    daemon.send(Cmd::Cursor(stale));
+    daemon.send(Cmd::Buffer(TWO.into()));
+    until(&c, "the diff with the stale cursor", |c| {
+        shows(c, TWO)
+            && c.terminals()
+                .with_screen(SESSION, |s| s.cursor() == Some(stale))
+                .unwrap_or(false)
+    });
+}
+
+#[test]
+fn a_polled_daemon_answers_the_poll_and_sends_no_cursor() {
+    let (daemon, c, _dir) = open_terminal(false);
+    let status = c.terminals().status(SESSION).unwrap();
+    assert!(!status.cursor);
+    assert_eq!(status.source, TerminalSource::Poll);
+    assert!(!c.terminals().mouse_allowed());
+    // A polled pane is not resized.
+    c.terminal_resize(SESSION, 50, 20);
+    assert!(!daemon.comes("terminal.resize", Duration::from_millis(300)));
+}
+
+#[test]
+fn resizes_are_deduplicated_and_the_newest_wins() {
+    let (daemon, c, _dir) = attached_terminal();
+    // The open's own size: nothing.
+    c.terminal_resize(SESSION, 60, 30);
+    assert!(!daemon.comes("terminal.resize", Duration::from_millis(200)));
+    daemon.hold_resize.store(true, Ordering::SeqCst);
+    c.terminal_resize(SESSION, 60, 18);
+    assert_eq!(
+        daemon.next("terminal.resize")["params"],
+        json!({"terminal_id": 7, "cols": 60, "rows": 18})
+    );
+    // While it is in flight, three more: only the last goes.
+    c.terminal_resize(SESSION, 60, 17);
+    c.terminal_resize(SESSION, 58, 17);
+    c.terminal_resize(SESSION, 44, 17);
+    assert!(!daemon.comes("terminal.resize", Duration::from_millis(300)));
+    daemon.send(Cmd::ReleaseResizes);
+    assert_eq!(
+        daemon.next("terminal.resize")["params"],
+        json!({"terminal_id": 7, "cols": 44, "rows": 17})
+    );
+    c.terminal_resize(SESSION, 44, 17);
+    assert!(!daemon.comes("terminal.resize", Duration::from_millis(200)));
+
+    // A reconnect reopens at the current fit.
+    daemon.send(Cmd::Hangup);
+    let open = daemon.next("terminal.open");
+    assert_eq!(
+        open["params"],
+        json!({"pane_id": SESSION, "cols_hint": 44, "rows_hint": 17, "cursor": true})
+    );
+}
+
+#[test]
+fn a_mouse_event_needs_the_arm_and_extends_it() {
+    let (daemon, c, _dir) = attached_terminal();
+    let down = TerminalMouseKind::Down {
+        button: MouseButton::Left,
+    };
+    c.terminal_mouse(SESSION, down, 4, 2, 0);
+    until(&c, "the refusal", |c| {
+        c.terminals()
+            .status(SESSION)
+            .is_some_and(|s| s.error.as_deref() == Some("terminal input is not armed"))
+    });
+    assert!(!daemon.comes("terminal.mouse", Duration::from_millis(200)));
+    c.terminal_arm_input(SESSION);
+    daemon.next("terminal.input_arm");
+    until(&c, "armed", |c| c.terminals().armed(SESSION));
+    let before = c.terminals().status(SESSION).unwrap().armed_for.unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+    c.terminal_mouse(SESSION, down, 4, 2, 0);
+    c.terminal_mouse(
+        SESSION,
+        TerminalMouseKind::Up {
+            button: MouseButton::Left,
+        },
+        4,
+        2,
+        0,
+    );
+    assert_eq!(
+        daemon.next("terminal.mouse")["params"],
+        json!({"terminal_id": 7, "kind": "down", "button": "left", "col": 4, "row": 2})
+    );
+    assert_eq!(
+        daemon.next("terminal.mouse")["params"],
+        json!({"terminal_id": 7, "kind": "up", "button": "left", "col": 4, "row": 2})
+    );
+    // Accepted: the arm runs from the answer again.
+    until(&c, "the arm extended", |c| {
+        c.terminals()
+            .status(SESSION)
+            .and_then(|s| s.armed_for)
+            .is_some_and(|d| d > before)
+    });
 }

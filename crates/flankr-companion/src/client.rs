@@ -166,6 +166,25 @@ pub enum Input {
     /// flight at a time, the lines asked for meanwhile summed into the next
     /// (plan 20261022_03, the L3 amendment of 2026-10-27 21:58 EDT).
     TerminalScroll { session: String, lines: i32 },
+    /// The columns and rows that fit the phone's terminal area now (plan
+    /// 20261027_08, the 23:24 EDT amendment): kept for the next open, and
+    /// sent as `terminal.resize` when it differs from the size last sent,
+    /// one in flight, the newest winning.
+    TerminalResize {
+        session: String,
+        cols: u16,
+        rows: u16,
+    },
+    /// A mouse event at a pane-local cell of the session's armed terminal
+    /// (`terminal.mouse`, plan 20261027_08 decision 10): sent in order, one
+    /// in flight, a drag behind a drag replacing it.
+    TerminalMouse {
+        session: String,
+        kind: common::TerminalMouseKind,
+        col: u16,
+        row: u16,
+        modifiers: u8,
+    },
 }
 
 /// A grade of memory pressure (plan 20261022_03, the L3 amendment of
@@ -867,6 +886,10 @@ enum Sent {
     TerminalInput(String),
     /// `terminal.scroll` of this session.
     TerminalScroll(String),
+    /// `terminal.resize` of this session.
+    TerminalResize(String),
+    /// `terminal.mouse` of this session.
+    TerminalMouse(String),
 }
 
 /// The most `session.content` requests in flight at once.
@@ -1636,7 +1659,8 @@ impl State {
                         pane_id: session.clone(),
                         cols_hint,
                         rows_hint,
-                        cursor: false,
+                        // libflankr_term 0.1.1 decodes the trailer.
+                        cursor: true,
                     };
                     out.push(self.request(
                         methods::TERMINAL_OPEN,
@@ -1678,6 +1702,35 @@ impl State {
                     methods::TERMINAL_SCROLL,
                     common::TerminalScrollParams { terminal_id, lines },
                     Sent::TerminalScroll(session),
+                )),
+                Act::Resize {
+                    session,
+                    terminal_id,
+                    cols,
+                    rows,
+                } => out.push(self.request(
+                    methods::TERMINAL_RESIZE,
+                    common::TerminalResizeParams {
+                        terminal_id,
+                        cols,
+                        rows,
+                    },
+                    Sent::TerminalResize(session),
+                )),
+                Act::Mouse {
+                    session,
+                    terminal_id,
+                    event: e,
+                } => out.push(self.request(
+                    methods::TERMINAL_MOUSE,
+                    common::TerminalMouseParams {
+                        terminal_id,
+                        kind: e.kind,
+                        col: e.col,
+                        row: e.row,
+                        modifiers: e.modifiers,
+                    },
+                    Sent::TerminalMouse(session),
                 )),
                 Act::Error(message) => out.push(event(Event::Error(message))),
             }
@@ -1948,6 +2001,31 @@ impl State {
             Input::TerminalScroll { session, lines } => {
                 let now = Instant::now();
                 let acts = self.terminals.update(|b| b.scroll(&session, lines, now));
+                self.terminal_acts(acts, &mut out);
+            }
+            Input::TerminalResize {
+                session,
+                cols,
+                rows,
+            } => {
+                let acts = self.terminals.update(|b| b.resize(&session, cols, rows));
+                self.terminal_acts(acts, &mut out);
+            }
+            Input::TerminalMouse {
+                session,
+                kind,
+                col,
+                row,
+                modifiers,
+            } => {
+                let now = Instant::now();
+                let e = crate::terminal::MouseEvent {
+                    kind,
+                    col,
+                    row,
+                    modifiers,
+                };
+                let acts = self.terminals.update(|b| b.mouse(&session, e, now));
                 self.terminal_acts(acts, &mut out);
             }
         }
@@ -3739,6 +3817,21 @@ impl State {
                         .update(|b| b.scrolled(&session, Err(message), now));
                     self.terminal_acts(acts, out);
                 }
+                Sent::TerminalResize(session) => {
+                    let no_method =
+                        error.code == libflankr_proto::envelope::codes::METHOD_NOT_FOUND;
+                    let acts = self
+                        .terminals
+                        .update(|b| b.resized(&session, Err(message), no_method));
+                    self.terminal_acts(acts, out);
+                }
+                Sent::TerminalMouse(session) => {
+                    let now = Instant::now();
+                    let acts = self
+                        .terminals
+                        .update(|b| b.mouse_sent(&session, Err(message), now));
+                    self.terminal_acts(acts, out);
+                }
                 Sent::History(id) => {
                     if let Some(v) = self.view.as_mut().filter(|v| v.subscription == Some(id)) {
                         v.history = false;
@@ -3818,6 +3911,19 @@ impl State {
                     .map_err(|e| format!("a bad result: {e}"));
                 let now = Instant::now();
                 let acts = self.terminals.update(|b| b.scrolled(&session, r, now));
+                self.terminal_acts(acts, out);
+            }
+            Sent::TerminalResize(session) => {
+                let acts = self
+                    .terminals
+                    .update(|b| b.resized(&session, Ok(()), false));
+                self.terminal_acts(acts, out);
+            }
+            Sent::TerminalMouse(session) => {
+                let now = Instant::now();
+                let acts = self
+                    .terminals
+                    .update(|b| b.mouse_sent(&session, Ok(()), now));
                 self.terminal_acts(acts, out);
             }
             Sent::Hello => match parse::<wire::HelloResult>(result) {

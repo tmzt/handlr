@@ -30,9 +30,28 @@
 //! together when it is answered. The answer's offset is kept for the app
 //! ([`TerminalStatus::scroll_offset`]).
 //!
-//! An accepted `terminal.input` or `terminal.scroll` extends the local arm
-//! to [`TERMINAL_INPUT_ARM_SECS`] from its answer, as the daemon extends its
-//! own window on each one it accepts.
+//! An accepted `terminal.input`, `terminal.scroll` or `terminal.mouse`
+//! extends the local arm to [`TERMINAL_INPUT_ARM_SECS`] from its answer, as
+//! the daemon extends its own window on each one it accepts.
+//!
+//! Plan 20261027_08, step 9:
+//!
+//! - `terminal.open` asks for the cursor trailer (`cursor: true`); the
+//!   answer's `cursor` and `source` land in [`TerminalStatus`], and each
+//!   frame's cursor in the [`Screen`] ([`Screen::cursor`]).
+//! - The phone's fit ([`Input::TerminalResize`](crate::Input::TerminalResize))
+//!   is kept as the terminal's hints, so a reopen after a reconnect asks
+//!   for the current fit, and is sent as `terminal.resize` to an open
+//!   terminal whose source is not the poll (a polled pane cannot be
+//!   sized): never the size last sent (the open's hints included), one in
+//!   flight at most, and the newest fit asked for meanwhile goes when it is
+//!   answered. A refusal is logged, not shown; `METHOD_NOT_FOUND` stops
+//!   resizes on that terminal.
+//! - Mouse events ([`Input::TerminalMouse`](crate::Input::TerminalMouse))
+//!   need an open, armed terminal and a daemon that serves
+//!   `terminal.mouse` ([`Terminals::mouse_allowed`]). They go in order, one
+//!   in flight at a time; a drag queued behind a drag replaces it (only
+//!   the newest position matters), and a refusal drops the rest.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,7 +60,7 @@ use std::time::{Duration, Instant};
 
 use libflankr_proto::common::{
     TERMINAL_INPUT_ARM_SECS, TERMINAL_INPUT_MAX, TerminalClosedParams, TerminalClosedReason,
-    TerminalOpenResult, TerminalScrollResult,
+    TerminalMouseKind, TerminalOpenResult, TerminalScrollResult, TerminalSource,
 };
 use libflankr_proto::companion::TerminalInfo;
 use libflankr_term::{Frame, HISTORY, Screen};
@@ -82,6 +101,13 @@ pub struct TerminalStatus {
     pub scroll_offset: Option<u64>,
     /// The furthest the pane can scroll back, when the daemon said.
     pub scroll_max: Option<u64>,
+    /// The daemon writes the cursor trailer on this terminal's frames
+    /// (`terminal.open`'s answer; plan 20261027_08, decision 10). False
+    /// before the answer.
+    pub cursor: bool,
+    /// Where the daemon reads the terminal from, as its `terminal.open`
+    /// answer said; [`TerminalSource::Poll`] before it.
+    pub source: TerminalSource,
 }
 
 impl Terminals {
@@ -99,6 +125,14 @@ impl Terminals {
     pub fn input_allowed(&self) -> bool {
         let book = self.lock();
         book.online && book.info.is_some_and(|i| i.input)
+    }
+
+    /// Whether the daemon serves `terminal.mouse` on this connection
+    /// (`TerminalInfo::mouse`, plan 20261027_08 decision 10). Its own gates
+    /// and the arm still apply.
+    pub fn mouse_allowed(&self) -> bool {
+        let book = self.lock();
+        book.online && book.info.is_some_and(|i| i.mouse)
     }
 
     /// Counts every change the app may draw: a frame shown, a terminal
@@ -152,6 +186,8 @@ impl Terminals {
             keys_pending: t.keys.len() + usize::from(t.keys_in_flight),
             scroll_offset: t.scroll_offset,
             scroll_max: t.scroll_max,
+            cursor: t.cursor,
+            source: t.source,
         })
     }
 
@@ -210,8 +246,32 @@ pub(crate) enum Act {
         terminal_id: u32,
         lines: i32,
     },
+    Resize {
+        session: String,
+        terminal_id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    Mouse {
+        session: String,
+        terminal_id: u32,
+        event: MouseEvent,
+    },
     Error(String),
 }
+
+/// One mouse event, pane-local, as `terminal.mouse` carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MouseEvent {
+    pub kind: TerminalMouseKind,
+    pub col: u16,
+    pub row: u16,
+    pub modifiers: u8,
+}
+
+/// The most mouse events held behind the one in flight; older ones are
+/// dropped first.
+const MOUSE_QUEUE: usize = 64;
 
 #[derive(Debug, Default)]
 pub(crate) struct Book {
@@ -251,6 +311,18 @@ struct Term {
     scroll_in_flight: bool,
     scroll_offset: Option<u64>,
     scroll_max: Option<u64>,
+    /// From `terminal.open`'s answer.
+    cursor: bool,
+    source: TerminalSource,
+    /// The size last sent for this terminal (the open's hints, then each
+    /// `terminal.resize`): not sent again.
+    fit_sent: Option<(u16, u16)>,
+    resize_in_flight: bool,
+    /// The daemon has no `terminal.resize`: none is sent on this terminal.
+    resize_unsupported: bool,
+    /// Mouse events not yet sent, and whether one is in flight.
+    mouse: VecDeque<MouseEvent>,
+    mouse_in_flight: bool,
 }
 
 impl Term {
@@ -261,6 +333,13 @@ impl Term {
         self.keys_in_flight = false;
         self.scroll_pending = 0;
         self.scroll_in_flight = false;
+        self.mouse.clear();
+        self.mouse_in_flight = false;
+    }
+
+    /// The fit, when the app gave both of its parts.
+    fn fit(&self) -> Option<(u16, u16)> {
+        self.cols_hint.zip(self.rows_hint)
     }
 
     /// An accepted input or scroll: armed for the daemon's window again,
@@ -321,6 +400,9 @@ impl Book {
             {
                 t.opening = true;
                 t.error = None;
+                t.fit_sent = t.fit();
+                t.resize_in_flight = false;
+                t.resize_unsupported = false;
             }
         }
         acts
@@ -335,6 +417,7 @@ impl Book {
         for t in self.sessions.values_mut() {
             t.opening = false;
             t.terminal_id = None;
+            t.resize_in_flight = false;
             t.disarm();
         }
         changed
@@ -393,7 +476,10 @@ impl Book {
         t.fresh = true;
         t.scroll_offset = None;
         t.scroll_max = None;
-        let mut acts = Vec::new();
+        t.cursor = result.cursor;
+        t.source = result.source;
+        // A fit that changed while the open was on its way.
+        let mut acts = self.next_resize(session);
         let early: Vec<Frame> = self.early.iter().cloned().collect();
         self.early.retain(|f| f.terminal_id != terminal_id);
         let mut early: Vec<Frame> = early
@@ -702,6 +788,159 @@ impl Book {
         }
     }
 
+    /// The app's fit for the session's terminal changed: kept as its hints
+    /// (a reopen asks for it), and sent to an open terminal unless it is
+    /// the size last sent or one is in flight (then it goes when that is
+    /// answered, the newest fit winning).
+    pub(crate) fn resize(&mut self, session: &str, cols: u16, rows: u16) -> (Vec<Act>, bool) {
+        let Some(t) = self.sessions.get_mut(session).filter(|t| t.wanted) else {
+            return (Vec::new(), false);
+        };
+        t.cols_hint = Some(cols);
+        t.rows_hint = Some(rows);
+        (self.next_resize(session), false)
+    }
+
+    fn next_resize(&mut self, session: &str) -> Vec<Act> {
+        let Some(t) = self.sessions.get_mut(session) else {
+            return Vec::new();
+        };
+        let (Some(terminal_id), Some(fit)) = (t.terminal_id, t.fit()) else {
+            return Vec::new();
+        };
+        // A polled pane cannot be sized (the 23:24 EDT amendment, item 1).
+        if t.source == TerminalSource::Poll
+            || t.resize_unsupported
+            || t.resize_in_flight
+            || t.fit_sent == Some(fit)
+        {
+            return Vec::new();
+        }
+        t.fit_sent = Some(fit);
+        t.resize_in_flight = true;
+        vec![Act::Resize {
+            session: session.to_string(),
+            terminal_id,
+            cols: fit.0,
+            rows: fit.1,
+        }]
+    }
+
+    /// A `terminal.resize` was answered: the newest fit goes if it is not
+    /// the one sent. A refusal is only logged; `no_method` (an older
+    /// daemon) stops resizes on this terminal.
+    pub(crate) fn resized(
+        &mut self,
+        session: &str,
+        result: Result<(), String>,
+        no_method: bool,
+    ) -> (Vec<Act>, bool) {
+        let Some(t) = self
+            .sessions
+            .get_mut(session)
+            .filter(|t| t.resize_in_flight)
+        else {
+            return (Vec::new(), false);
+        };
+        t.resize_in_flight = false;
+        if let Err(message) = result {
+            log::info!("terminal.resize of {session}: {message}");
+            if no_method {
+                t.resize_unsupported = true;
+                return (Vec::new(), false);
+            }
+        }
+        (self.next_resize(session), false)
+    }
+
+    /// The app sends a mouse event: queued, and sent if none is in flight.
+    /// Refused here unless the daemon serves `terminal.mouse` and the
+    /// terminal is open and armed.
+    pub(crate) fn mouse(
+        &mut self,
+        session: &str,
+        event: MouseEvent,
+        now: Instant,
+    ) -> (Vec<Act>, bool) {
+        let allowed = self.online && self.info.is_some_and(|i| i.mouse);
+        let Some(t) = self.sessions.get_mut(session) else {
+            return (
+                vec![Act::Error(format!(
+                    "terminal.mouse: no terminal open for {session}"
+                ))],
+                false,
+            );
+        };
+        if !allowed {
+            let message = "the daemon does not serve the mouse".to_string();
+            t.error = Some(message.clone());
+            return (vec![Act::Error(format!("terminal.mouse: {message}"))], true);
+        }
+        if t.terminal_id.is_none() || !t.armed(now) {
+            let message = "terminal input is not armed".to_string();
+            t.error = Some(message.clone());
+            return (vec![Act::Error(format!("terminal.mouse: {message}"))], true);
+        }
+        let drag = |e: &MouseEvent| matches!(e.kind, TerminalMouseKind::Drag { .. });
+        match t.mouse.back_mut() {
+            // Only the newest position of a drag matters.
+            Some(last) if drag(last) && drag(&event) && last.kind == event.kind => *last = event,
+            _ => {
+                if t.mouse.len() == MOUSE_QUEUE {
+                    t.mouse.pop_front();
+                }
+                t.mouse.push_back(event);
+            }
+        }
+        (self.next_mouse(session), false)
+    }
+
+    fn next_mouse(&mut self, session: &str) -> Vec<Act> {
+        let Some(t) = self.sessions.get_mut(session) else {
+            return Vec::new();
+        };
+        let Some(terminal_id) = t.terminal_id else {
+            return Vec::new();
+        };
+        if t.mouse_in_flight {
+            return Vec::new();
+        }
+        let Some(event) = t.mouse.pop_front() else {
+            return Vec::new();
+        };
+        t.mouse_in_flight = true;
+        vec![Act::Mouse {
+            session: session.to_string(),
+            terminal_id,
+            event,
+        }]
+    }
+
+    /// A `terminal.mouse` was answered: the next event goes and the arm is
+    /// extended, or, refused, the rest are dropped.
+    pub(crate) fn mouse_sent(
+        &mut self,
+        session: &str,
+        result: Result<(), String>,
+        now: Instant,
+    ) -> (Vec<Act>, bool) {
+        let Some(t) = self.sessions.get_mut(session).filter(|t| t.mouse_in_flight) else {
+            return (Vec::new(), false);
+        };
+        t.mouse_in_flight = false;
+        match result {
+            Ok(()) => {
+                t.extend_arm(now);
+                (self.next_mouse(session), true)
+            }
+            Err(message) => {
+                t.mouse.clear();
+                t.error = Some(message.clone());
+                (vec![Act::Error(format!("terminal.mouse: {message}"))], true)
+            }
+        }
+    }
+
     /// Arms that ran out by `now` are dropped.
     pub(crate) fn expire(&mut self, now: Instant) -> bool {
         let mut changed = false;
@@ -710,6 +949,7 @@ impl Book {
                 t.armed_until = None;
                 t.keys.clear();
                 t.scroll_pending = 0;
+                t.mouse.clear();
                 changed = true;
             }
         }
@@ -979,6 +1219,191 @@ mod tests {
         let mut b = online(false);
         opened(&mut b, "claude", 7);
         assert!(matches!(&b.arm("claude").0[..], [Act::Error(_)]));
+    }
+
+    /// Opened with hints 60x30 as an attached terminal `id`.
+    fn attached(b: &mut Book, session: &str, id: u32) {
+        let (acts, _) = b.open(session.to_string(), Some(60), Some(30));
+        assert!(matches!(&acts[..], [Act::Open { .. }]));
+        let (acts, _) = b.opened(
+            session,
+            TerminalOpenResult {
+                terminal_id: id,
+                cols: 60,
+                rows: 30,
+                cursor: true,
+                source: TerminalSource::Attached,
+            },
+        );
+        assert_eq!(acts, vec![], "the open's own hints are not resent");
+    }
+
+    fn resize_act(cols: u16, rows: u16) -> Act {
+        Act::Resize {
+            session: "claude".into(),
+            terminal_id: 7,
+            cols,
+            rows,
+        }
+    }
+
+    #[test]
+    fn resizes_are_deduplicated_one_in_flight_and_the_newest_wins() {
+        let mut b = online(true);
+        attached(&mut b, "claude", 7);
+        let st = b.sessions["claude"].source;
+        assert_eq!(st, TerminalSource::Attached);
+        assert_eq!(b.resize("claude", 60, 30).0, vec![], "the size sent");
+        assert_eq!(b.resize("claude", 60, 20).0, vec![resize_act(60, 20)]);
+        // While it is in flight: held, the newest kept.
+        assert_eq!(b.resize("claude", 60, 18).0, vec![]);
+        assert_eq!(b.resize("claude", 50, 18).0, vec![]);
+        assert_eq!(
+            b.resized("claude", Ok(()), false).0,
+            vec![resize_act(50, 18)]
+        );
+        // Back to what was in flight, then answered: nothing new.
+        assert_eq!(b.resize("claude", 50, 18).0, vec![]);
+        assert_eq!(b.resized("claude", Ok(()), false).0, vec![]);
+        // Held, then the fit returns to the size sent: nothing goes.
+        assert_eq!(b.resize("claude", 40, 18).0, vec![resize_act(40, 18)]);
+        b.resize("claude", 30, 10);
+        b.resize("claude", 40, 18);
+        assert_eq!(b.resized("claude", Ok(()), false).0, vec![]);
+        // A refusal is only logged; the next change still goes.
+        assert_eq!(b.resize("claude", 41, 18).0, vec![resize_act(41, 18)]);
+        assert_eq!(
+            b.resized("claude", Err("busy".into()), false).0,
+            vec![],
+            "no error shown"
+        );
+        assert_eq!(b.sessions["claude"].error, None);
+        assert_eq!(b.resize("claude", 42, 18).0, vec![resize_act(42, 18)]);
+        // An older daemon: no more resizes on this terminal.
+        b.resized("claude", Err("no".into()), true);
+        assert_eq!(b.resize("claude", 43, 18).0, vec![]);
+    }
+
+    #[test]
+    fn the_fit_is_the_reopens_hints_and_a_polled_pane_is_not_resized() {
+        let mut b = online(true);
+        opened(&mut b, "claude", 7);
+        // The poll: kept, not sent.
+        assert_eq!(b.resize("claude", 70, 25).0, vec![]);
+        b.disconnected();
+        let (acts, _) = b.set_info(Some(TerminalInfo {
+            input: true,
+            mouse: true,
+        }));
+        assert_eq!(
+            acts,
+            vec![Act::Open {
+                session: "claude".into(),
+                cols_hint: Some(70),
+                rows_hint: Some(25)
+            }]
+        );
+        // A fit that changed while the open was on its way goes with its
+        // answer.
+        b.resize("claude", 72, 25);
+        let (acts, _) = b.opened(
+            "claude",
+            TerminalOpenResult {
+                terminal_id: 9,
+                cols: 70,
+                rows: 25,
+                cursor: true,
+                source: TerminalSource::Attached,
+            },
+        );
+        assert_eq!(
+            acts,
+            vec![Act::Resize {
+                session: "claude".into(),
+                terminal_id: 9,
+                cols: 72,
+                rows: 25
+            }]
+        );
+        let st = Terminals::default();
+        *st.lock() = std::mem::take(&mut b);
+        let status = st.status("claude").unwrap();
+        assert!(status.cursor);
+        assert_eq!(status.source, TerminalSource::Attached);
+    }
+
+    fn click(kind: TerminalMouseKind, col: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            col,
+            row: 2,
+            modifiers: 0,
+        }
+    }
+
+    #[test]
+    fn mouse_events_need_the_arm_go_in_order_and_extend_it() {
+        use libflankr_proto::common::MouseButton::Left;
+        let mut b = Book::default();
+        b.set_info(Some(TerminalInfo {
+            input: true,
+            mouse: true,
+        }));
+        attached(&mut b, "claude", 7);
+        let now = Instant::now();
+        let down = click(TerminalMouseKind::Down { button: Left }, 1);
+        assert!(matches!(
+            &b.mouse("claude", down, now).0[..],
+            [Act::Error(_)]
+        ));
+        b.arm("claude");
+        b.armed("claude", Ok(60), now);
+        let sent = |e| Act::Mouse {
+            session: "claude".into(),
+            terminal_id: 7,
+            event: e,
+        };
+        assert_eq!(b.mouse("claude", down, now).0, vec![sent(down)]);
+        let drag = |c| click(TerminalMouseKind::Drag { button: Left }, c);
+        let up = click(TerminalMouseKind::Up { button: Left }, 5);
+        assert_eq!(b.mouse("claude", drag(2), now).0, vec![]);
+        assert_eq!(b.mouse("claude", drag(3), now).0, vec![]);
+        assert_eq!(b.mouse("claude", drag(4), now).0, vec![]);
+        assert_eq!(b.mouse("claude", up, now).0, vec![]);
+        let later = now + Duration::from_secs(30);
+        // The drags behind the down became the newest one.
+        assert_eq!(b.mouse_sent("claude", Ok(()), later).0, vec![sent(drag(4))]);
+        assert_eq!(
+            b.sessions["claude"].armed_until,
+            Some(later + Duration::from_secs(60))
+        );
+        assert_eq!(b.mouse_sent("claude", Ok(()), later).0, vec![sent(up)]);
+        assert_eq!(b.mouse_sent("claude", Ok(()), later).0, vec![]);
+        // A refusal drops what is queued.
+        b.mouse("claude", down, later);
+        b.mouse("claude", up, later);
+        let (acts, _) = b.mouse_sent("claude", Err("no".into()), later);
+        assert!(matches!(&acts[..], [Act::Error(_)]));
+        assert!(b.sessions["claude"].mouse.is_empty());
+    }
+
+    #[test]
+    fn mouse_events_need_a_daemon_that_serves_them() {
+        let mut b = online(true);
+        attached(&mut b, "claude", 7);
+        let now = Instant::now();
+        b.arm("claude");
+        b.armed("claude", Ok(60), now);
+        let down = click(
+            TerminalMouseKind::Down {
+                button: libflankr_proto::common::MouseButton::Left,
+            },
+            1,
+        );
+        assert!(matches!(
+            &b.mouse("claude", down, now).0[..],
+            [Act::Error(_)]
+        ));
     }
 
     #[test]

@@ -41,8 +41,10 @@ pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
 pub use terminal::{TerminalStatus, Terminals, key_batches};
 // What the app draws and reads of a terminal.
-pub use libflankr_proto::common::TerminalClosedReason;
-pub use libflankr_term::{Grid, Screen};
+pub use libflankr_proto::common::{
+    MouseButton, TerminalClosedReason, TerminalMouseKind, TerminalSource,
+};
+pub use libflankr_term::{Cursor, Grid, Screen};
 pub use view::{AgentCard, Bookend, CardKind, Shows, ViewSection};
 
 /// How the client runs.
@@ -232,6 +234,41 @@ impl Companion {
                 lines,
             });
         }
+    }
+
+    /// The columns and rows that fit the phone's terminal area now, keyboard
+    /// included ([`Input::TerminalResize`]; plan 20261027_08, the 23:24 EDT
+    /// amendment). Call it whenever the fit changes; the same size twice
+    /// sends nothing, one `terminal.resize` is in flight at a time and the
+    /// newest fit wins. A reopen after a reconnect asks for this fit.
+    pub fn terminal_resize(&self, session: &str, cols: u16, rows: u16) {
+        self.send(Input::TerminalResize {
+            session: session.to_string(),
+            cols,
+            rows,
+        });
+    }
+
+    /// A mouse event at pane-local cell `col`, `row` of the session's armed
+    /// terminal ([`Input::TerminalMouse`]), for a TUI that reports the mouse
+    /// ([`Cursor::mouse_reporting`]) on a daemon that serves it
+    /// ([`Terminals::mouse_allowed`]). Refused here unless armed; an
+    /// accepted one extends the arm.
+    pub fn terminal_mouse(
+        &self,
+        session: &str,
+        kind: TerminalMouseKind,
+        col: u16,
+        row: u16,
+        modifiers: u8,
+    ) {
+        self.send(Input::TerminalMouse {
+            session: session.to_string(),
+            kind,
+            col,
+            row,
+            modifiers,
+        });
     }
 
     /// The bytes sent to and received from the daemon since the client
