@@ -1023,3 +1023,13 @@ trims what the phone's pairing screen shows.
 4. `flankr pair` on the Mac keeps printing what it does (the link, the QR
    code, the fingerprint, the six words and the prompt); the Mac is where
    the owner reads and confirms.
+
+## Amendment — 2026-10-28 14:42 EDT: `flankr pair` just exits when the offer expires
+
+The owner (2026-10-28): "pair just exits when the time is up". This
+replaces the 14:44 EDT amendment's item 1 ("`flankr pair` ends, saying the
+link expired") and its item 3's "both sides say so" for the Mac: when the
+offer's time is up, `flankr pair` exits with a non-zero status, adding
+nothing to `auth.toml` (a pending request, even mid-prompt, is dropped),
+with no message beyond ending its prompt line. The phone shows "expired"
+as the 14:48 EDT amendment has it.
