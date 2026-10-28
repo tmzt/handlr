@@ -53,6 +53,16 @@ pub enum Input {
     /// answered or not, and [`Event::RemoteRemoved`] is given. Removing the
     /// active remote makes the most recently paired of the rest active.
     RemoveRemote(RemoteId),
+    /// A remote's nickname, set (`Some`) or cleared back to the default
+    /// (`None`, or empty) in its details (plan 20261024_02, the 2026-10-28
+    /// 17:56 EDT amendment). The `net` thread keeps it as
+    /// [`keys::nickname`](crate::keys::nickname) makes it, writes the
+    /// remotes list, and gives [`Event::Remotes`] with the new
+    /// [`RemoteInfo::display_name`](crate::RemoteInfo::display_name)s.
+    SetNickname {
+        id: RemoteId,
+        nickname: Option<String>,
+    },
     /// What STT heard, or a typed line.
     Utterance(String),
     /// The tap, or Enter.
@@ -519,6 +529,10 @@ pub enum Event {
         /// The daemon's fingerprint as six words, for Details: a different
         /// check from `words`, labelled "daemon fingerprint".
         fingerprint: String,
+        /// The whole fingerprint, BLAKE2s-256 of the daemon's key, as 64
+        /// lower-case hex digits ([`crate::keys::fingerprint_hex`]), for
+        /// Details.
+        fingerprint_hex: String,
         /// The seconds the offer had left when the daemon accepted the
         /// request; `None` in the fallback.
         expires_in_secs: Option<u16>,
@@ -2067,7 +2081,7 @@ impl State {
             Input::Settings(settings) => self.set_settings(settings, &mut out),
             Input::RemoveRemote(id) => self.unpair(id, &mut out),
             // The net thread's: it knows the remotes.
-            Input::Unpair | Input::CancelPairing => {
+            Input::Unpair | Input::CancelPairing | Input::SetNickname { .. } => {
                 log::debug!("{input:?}: handled by the net thread");
             }
             Input::Refresh => self.refresh(&mut out),

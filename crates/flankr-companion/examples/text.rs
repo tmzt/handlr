@@ -136,6 +136,7 @@ fn print_event(event: Event) {
             fingerprint,
             expires_in_secs,
             fallback,
+            ..
         } => {
             if let Some(fallback) = &fallback {
                 if fallback.replace {

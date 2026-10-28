@@ -128,6 +128,10 @@ pub struct ServerRecord {
     /// Reserved for plan 20261023_08 (2.5 step 3), base64; this crate never
     /// sets it, and keeps it as read.
     pub signing_key: Option<String>,
+    /// The owner's name for it, set in its details (plan 20261024_02, the
+    /// 2026-10-28 17:56 EDT amendment); `None`: the default
+    /// ([`RemoteInfo::display_name`]). Kept as [`nickname`] makes it.
+    pub nickname: Option<String>,
 }
 
 impl ServerRecord {
@@ -144,6 +148,7 @@ impl ServerRecord {
             paired_at: None,
             key_name: id.key_name(),
             signing_key: None,
+            nickname: None,
         }
     }
 
@@ -151,6 +156,64 @@ impl ServerRecord {
     pub fn host(&self) -> &str {
         self.addresses.first().map_or("", String::as_str)
     }
+
+    /// The name shown when it has no nickname and no other listed remote
+    /// shows the same: [`base_hostname`] of its first address, or its
+    /// `name` with no address.
+    fn default_name(&self) -> String {
+        match self.addresses.first() {
+            Some(address) => base_hostname(address),
+            None => self.name.clone(),
+        }
+    }
+}
+
+/// The longest nickname kept, in characters.
+pub const NICKNAME_MAX: usize = 40;
+
+/// A nickname as it is kept: control characters dropped, trimmed, and cut
+/// to [`NICKNAME_MAX`] characters; empty is `None` (the default).
+pub fn nickname(text: Option<&str>) -> Option<String> {
+    let cleaned: String = text?.chars().filter(|c| !c.is_control()).collect();
+    let cut: String = cleaned.trim().chars().take(NICKNAME_MAX).collect();
+    let cut = cut.trim_end();
+    (!cut.is_empty()).then(|| cut.to_string())
+}
+
+/// `host:port` split at the port: the host (an IPv6 address keeps its
+/// brackets) and the port, if there is one.
+fn split_port(address: &str) -> (&str, Option<&str>) {
+    match address.rsplit_once(':') {
+        Some((host, port))
+            if !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && (!host.contains(':') || host.ends_with(']')) =>
+        {
+            (host, Some(port))
+        }
+        _ => (address, None),
+    }
+}
+
+/// The base hostname of `host:port` (plan 20261024_02, the 2026-10-28
+/// 17:56 EDT amendment): the host's first DNS label, `m4` for
+/// `m4.tail1a2b3c.ts.net:7347`; an IP address whole, `127.0.0.1`.
+pub fn base_hostname(address: &str) -> String {
+    let (host, _) = split_port(address.trim());
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        return host.to_string();
+    }
+    host.split('.').next().unwrap_or(host).to_string()
+}
+
+/// BLAKE2s-256 of `public_key`, the whole fingerprint, as 64 lower-case
+/// hex digits.
+pub fn fingerprint_hex(public_key: &[u8; 32]) -> String {
+    link::fingerprint(public_key)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// The paired remotes, in pairing order (oldest first), and the one
@@ -178,6 +241,41 @@ impl Remotes {
 
     /// The most recently paired remote, by `paired_at` and then list
     /// order, leaving out `except` (decision 8: the next active remote).
+    /// Sets `id`'s nickname, as [`nickname`] keeps it. Whether it changed.
+    pub fn set_nickname(&mut self, id: RemoteId, text: Option<&str>) -> bool {
+        let kept = nickname(text);
+        match self.get_mut(id) {
+            Some(r) if r.nickname != kept => {
+                r.nickname = kept;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The name each listed remote shows, in list order (plan 20261024_02,
+    /// the 17:56 and 17:57 EDT amendments): its nickname if it has one;
+    /// otherwise its base hostname, with `:port` added only when two or
+    /// more listed remotes would otherwise show the same.
+    pub fn display_names(&self) -> Vec<String> {
+        let plain: Vec<String> = self
+            .list
+            .iter()
+            .map(|r| r.nickname.clone().unwrap_or_else(|| r.default_name()))
+            .collect();
+        self.list
+            .iter()
+            .zip(&plain)
+            .map(|(r, name)| {
+                let clash = plain.iter().filter(|n| *n == name).count() > 1;
+                match (&r.nickname, clash, split_port(r.host()).1) {
+                    (None, true, Some(port)) => format!("{name}:{port}"),
+                    _ => name.clone(),
+                }
+            })
+            .collect()
+    }
+
     pub fn most_recent(&self, except: &[RemoteId]) -> Option<RemoteId> {
         self.list
             .iter()
@@ -204,6 +302,17 @@ pub struct RemoteInfo {
     pub active: bool,
     /// The remote in use, and its `hello` answered on the open connection.
     pub online: bool,
+    /// The whole fingerprint, BLAKE2s-256 of the daemon's key, as 64
+    /// lower-case hex digits ([`fingerprint_hex`]; plan 20261024_02, the
+    /// 2026-10-28 17:46 EDT amendment).
+    pub fingerprint_hex: String,
+    /// The daemon's fingerprint as six words, as `flankr pair` prints them
+    /// ([`libflankr_proto::link::fingerprint_words_text`]).
+    pub fingerprint_words: String,
+    /// The owner's nickname for it; `None`: the default.
+    pub nickname: Option<String>,
+    /// The name shown ([`Remotes::display_names`]).
+    pub display_name: String,
 }
 
 impl Remotes {
@@ -212,7 +321,8 @@ impl Remotes {
     pub fn info(&self, online: bool) -> Vec<RemoteInfo> {
         self.list
             .iter()
-            .map(|r| {
+            .zip(self.display_names())
+            .map(|(r, display_name)| {
                 let active = self.active == Some(r.id);
                 RemoteInfo {
                     id: r.id,
@@ -222,6 +332,10 @@ impl Remotes {
                     paired_at: r.paired_at,
                     active,
                     online: active && online,
+                    fingerprint_hex: fingerprint_hex(&r.public_key),
+                    fingerprint_words: link::fingerprint_words_text(&r.public_key),
+                    nickname: r.nickname.clone(),
+                    display_name,
                 }
             })
             .collect()
@@ -252,6 +366,8 @@ struct RemoteFile {
     key_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     signing_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    nickname: Option<String>,
 }
 
 /// The layout version of the `remotes` blob.
@@ -274,6 +390,7 @@ pub fn encode_remotes(remotes: &Remotes) -> Result<String, String> {
                 paired_at: r.paired_at,
                 key_name: r.key_name.clone(),
                 signing_key: r.signing_key.clone(),
+                nickname: r.nickname.clone(),
             })
             .collect(),
     };
@@ -306,6 +423,7 @@ pub fn decode_remotes(text: &str) -> Result<Remotes, String> {
             paired_at: r.paired_at,
             key_name: r.key_name,
             signing_key: r.signing_key,
+            nickname: nickname(r.nickname.as_deref()),
         });
     }
     let active = file.active.map(|a| a.parse::<RemoteId>()).transpose()?;
@@ -746,6 +864,110 @@ mod tests {
             .unwrap();
         let err = keys.static_key(LEGACY_KEY_NAME).err().expect("refused");
         assert!(err.contains("16 bytes"), "{err}");
+    }
+
+    /// A remote at `address`, its key `[n; 32]`.
+    fn at(n: u8, address: &str) -> ServerRecord {
+        ServerRecord::new(format!("m{n}"), [n; 32], vec![address.into()])
+    }
+
+    #[test]
+    fn the_base_hostname_is_the_first_label_or_the_whole_ip() {
+        assert_eq!(base_hostname("m4.tail1a2b3c.ts.net:7347"), "m4");
+        assert_eq!(base_hostname("m4:7347"), "m4");
+        assert_eq!(base_hostname("m4.local"), "m4");
+        assert_eq!(base_hostname("127.0.0.1:7347"), "127.0.0.1");
+        assert_eq!(base_hostname("100.64.0.7"), "100.64.0.7");
+        assert_eq!(base_hostname("[fd7a::1]:7347"), "[fd7a::1]");
+    }
+
+    #[test]
+    fn a_default_name_adds_the_port_only_on_a_conflict() {
+        let mut remotes = Remotes {
+            active: None,
+            list: vec![at(1, "m4.tail.ts.net:7347"), at(2, "mini.tail.ts.net:7348")],
+        };
+        // Not the default port, but no conflict: the base hostname alone.
+        assert_eq!(remotes.display_names(), ["m4", "mini"]);
+        // Two that would both show m4: each shows host:port, whatever the
+        // port; the other is left alone.
+        remotes.list.push(at(3, "m4.lan:7347"));
+        assert_eq!(remotes.display_names(), ["m4:7347", "mini", "m4:7347"]);
+        remotes.list[2].addresses = vec!["m4.lan:7400".into()];
+        assert_eq!(remotes.display_names(), ["m4:7347", "mini", "m4:7400"]);
+        // A nickname is shown as set, and ends the conflict it was in.
+        assert!(remotes.set_nickname(remotes.list[2].id, Some("  Studio  ")));
+        assert_eq!(remotes.display_names(), ["m4", "mini", "Studio"]);
+        // A nickname equal to another's default: the default takes the
+        // port, the nickname does not.
+        assert!(remotes.set_nickname(remotes.list[2].id, Some("mini")));
+        assert_eq!(remotes.display_names(), ["m4", "mini:7348", "mini"]);
+        // Cleared (empty is the default): back to the conflict.
+        assert!(remotes.set_nickname(remotes.list[2].id, Some("   ")));
+        assert_eq!(remotes.list[2].nickname, None);
+        assert_eq!(remotes.display_names(), ["m4:7347", "mini", "m4:7400"]);
+        assert!(!remotes.set_nickname(remotes.list[2].id, None), "unchanged");
+        // With no address, its name.
+        let bare = Remotes {
+            active: None,
+            list: vec![ServerRecord::new("m9", [9; 32], Vec::new())],
+        };
+        assert_eq!(bare.display_names(), ["m9"]);
+    }
+
+    #[test]
+    fn a_nickname_is_trimmed_cut_and_without_control_characters() {
+        assert_eq!(nickname(None), None);
+        assert_eq!(nickname(Some("")), None);
+        assert_eq!(nickname(Some(" \t ")), None);
+        assert_eq!(nickname(Some(" Mac\nmini ")).as_deref(), Some("Macmini"));
+        let long = "x".repeat(NICKNAME_MAX + 10);
+        assert_eq!(
+            nickname(Some(&long)).map(|n| n.chars().count()),
+            Some(NICKNAME_MAX)
+        );
+    }
+
+    #[test]
+    fn info_carries_the_whole_fingerprint_and_the_display_name() {
+        let mut remotes = Remotes {
+            active: Some(at(1, "m4.tail.ts.net:7347").id),
+            list: vec![at(1, "m4.tail.ts.net:7347"), at(2, "m4.lan:7350")],
+        };
+        remotes.list[1].nickname = Some("Office".into());
+        let info = remotes.info(true);
+        let key = [1u8; 32];
+        assert_eq!(info[0].fingerprint_hex, fingerprint_hex(&key));
+        assert_eq!(info[0].fingerprint_hex.len(), 64);
+        assert!(info[0].fingerprint_hex.starts_with(&link::remote_id(&key)));
+        assert_eq!(
+            info[0].fingerprint_words,
+            link::fingerprint_words_text(&key)
+        );
+        assert_eq!(info[0].nickname, None);
+        assert_eq!(info[0].display_name, "m4");
+        assert_eq!(info[1].nickname.as_deref(), Some("Office"));
+        assert_eq!(info[1].display_name, "Office");
+        assert!(info[0].active && info[0].online && !info[1].active);
+    }
+
+    #[test]
+    fn a_nickname_round_trips_and_an_old_list_reads_without_one() {
+        let (_dir, mut keys) = store();
+        let mut named = record(1, Some(5));
+        named.nickname = Some("Studio".into());
+        let remotes = Remotes {
+            active: Some(named.id),
+            list: vec![named, record(2, None)],
+        };
+        keys.set_remotes(&remotes).unwrap();
+        let text = fs::read_to_string(keys.remotes_path()).unwrap();
+        assert_eq!(text.matches("nickname = ").count(), 1, "{text}");
+        assert_eq!(keys.remotes().unwrap(), remotes);
+        // A list written before nicknames: none.
+        let old = text.replace("nickname = \"Studio\"\n", "");
+        let read = decode_remotes(&old).unwrap();
+        assert!(read.list.iter().all(|r| r.nickname.is_none()));
     }
 
     #[test]

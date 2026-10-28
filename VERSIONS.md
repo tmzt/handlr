@@ -540,3 +540,19 @@ additive:
   `AudioSession::spawn_morph` (feature `morph`) takes `libmorph::CaptureFormat`
   and returns `libmorph::Sink` and `libmorph::Source` from libmorph 0.5.0,
   which is not semver-compatible with 0.4 (Rule 5.5). No other API change.
+
+## flankr-companion 0.4.0 — 2026-10-28 (the commit tagged `flankr-companion-v0.4.0`)
+
+The settings follow-up (`docs/design/20261024_02_SETTINGS_SCREEN_PLAN.md`,
+the living section's 2026-10-28 entries). Not strictly additive:
+
+- **Breaking:** `Input::SetNickname { id, nickname }` sets or clears a
+  remote's nickname, kept in the remotes list (`Input` is exhaustive).
+- **Breaking:** `Event::PairingWords` gains `fingerprint_hex` (BLAKE2s-256 of
+  the daemon's key, 64 hex digits; a field on an exhaustive enum's variant).
+- **Added:** `RemoteInfo::fingerprint_hex`, `fingerprint_words`, `nickname`
+  and `display_name` (the nickname, or else the base hostname, with `:port`
+  only when two listed remotes would otherwise show the same name).
+- **Added:** `ServerRecord::nickname`; `Remotes::set_nickname`,
+  `Remotes::display_names`; `keys::nickname`, `base_hostname`,
+  `fingerprint_hex`, `NICKNAME_MAX` (40).

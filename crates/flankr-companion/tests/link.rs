@@ -446,9 +446,14 @@ fn expect_fallback(
             address,
             words,
             fingerprint,
+            fingerprint_hex,
             expires_in_secs,
             fallback: Some(fallback),
         } => {
+            assert_eq!(
+                fingerprint_hex,
+                flankr_companion::keys::fingerprint_hex(&server.key.public)
+            );
             let device = DeviceCode::decode(&fallback.code, &server.key.public)
                 .expect("a code for this server");
             assert_eq!(
@@ -482,9 +487,15 @@ fn expect_words(c: &Companion, server: &Server) -> Held {
             address,
             words,
             fingerprint,
+            fingerprint_hex,
             expires_in_secs,
             fallback: None,
         } => {
+            assert_eq!(fingerprint_hex.len(), 64);
+            assert_eq!(
+                fingerprint_hex,
+                flankr_companion::keys::fingerprint_hex(&server.key.public)
+            );
             let offer = server.pair_mode.lock().unwrap().unwrap().offer;
             assert_eq!(held.request.offer, offer);
             assert_eq!(held.request.name, DEVICE);
@@ -1105,6 +1116,52 @@ fn removing_an_unreachable_remote_deletes_it_here_only() {
     assert!(!key_exists(&dir, &b.key_name));
     assert_eq!(ids(&dir), [a.id]);
     assert_turn(&c);
+}
+
+#[test]
+fn a_nickname_is_saved_and_shown_and_cleared_back_to_the_default() {
+    let first = Server::start();
+    let second = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut keys = FileKeyStore::new(keys_dir(&dir));
+    let a = remote(&mut keys, &first, vec![first.addr.clone()], Some(10), true);
+    let b = remote(&mut keys, &second, vec![closed_addr()], Some(20), true);
+    keys.set_remotes(&Remotes {
+        active: Some(a.id),
+        list: vec![a.clone(), b.clone()],
+    })
+    .unwrap();
+    let c = companion(&dir);
+    // Both at 127.0.0.1: each default shows its port.
+    let port = |r: &ServerRecord| r.host().rsplit_once(':').unwrap().1.to_string();
+    let rows = expect_remotes(&c, "both listed", |rows| rows.len() == 2);
+    assert_eq!(rows[0].display_name, format!("127.0.0.1:{}", port(&a)));
+    assert_eq!(rows[1].display_name, format!("127.0.0.1:{}", port(&b)));
+
+    c.send(Input::SetNickname {
+        id: b.id,
+        nickname: Some(" Office ".into()),
+    });
+    let rows = expect_remotes(&c, "b named", |rows| {
+        rows.get(1).is_some_and(|r| r.nickname.is_some())
+    });
+    assert_eq!(rows[1].nickname.as_deref(), Some("Office"));
+    assert_eq!(rows[1].display_name, "Office");
+    // No conflict left: the base hostname alone.
+    assert_eq!(rows[0].display_name, "127.0.0.1");
+    let kept = stored(&dir);
+    assert_eq!(kept.get(b.id).unwrap().nickname.as_deref(), Some("Office"));
+    assert_eq!(kept.get(a.id).unwrap().nickname, None);
+
+    c.send(Input::SetNickname {
+        id: b.id,
+        nickname: Some(String::new()),
+    });
+    let rows = expect_remotes(&c, "b cleared", |rows| {
+        rows.get(1).is_some_and(|r| r.nickname.is_none())
+    });
+    assert_eq!(rows[1].display_name, format!("127.0.0.1:{}", port(&b)));
+    assert_eq!(stored(&dir).get(b.id).unwrap().nickname, None);
 }
 
 #[test]

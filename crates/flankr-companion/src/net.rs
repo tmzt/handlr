@@ -514,7 +514,35 @@ impl Net {
                 }
             },
             Input::RemoveRemote(id) => self.remove(id),
+            Input::SetNickname { id, nickname } => {
+                self.set_nickname(id, nickname.as_deref());
+                None
+            }
             input => Some(input),
+        }
+    }
+
+    /// Sets `id`'s nickname and writes the list; [`Event::Remotes`] follows
+    /// when what it shows changed (plan 20261024_02, the 2026-10-28 17:56
+    /// EDT amendment).
+    fn set_nickname(&mut self, id: RemoteId, nickname: Option<&str>) {
+        if self.remotes.get(id).is_none() {
+            self.emit(Event::Error(format!("no remote {id} is paired")));
+            return;
+        }
+        if !self.remotes.set_nickname(id, nickname) {
+            return;
+        }
+        let kept = self.remotes.get(id).and_then(|r| r.nickname.clone());
+        if let Some(server) = self.server.as_mut().filter(|s| s.id == id) {
+            server.nickname = kept.clone();
+        }
+        log::info!(
+            "remotes: {id}'s nickname {}",
+            if kept.is_some() { "set" } else { "cleared" }
+        );
+        if self.write_remotes() {
+            self.show_remotes();
         }
     }
 
@@ -1093,6 +1121,7 @@ impl Net {
                 &probe.key.public(),
             )),
             fingerprint: link::fingerprint_words_text(&server_key),
+            fingerprint_hex: crate::keys::fingerprint_hex(&server_key),
             expires_in_secs: Some(expires_in_secs),
             fallback: None,
         };
@@ -1162,6 +1191,7 @@ impl Net {
                 .offer
                 .map(|offer| link::pairing_words_text(&server_key, &offer, &device_key)),
             fingerprint: link::fingerprint_words_text(&server_key),
+            fingerprint_hex: crate::keys::fingerprint_hex(&server_key),
             expires_in_secs: None,
             fallback: Some(DeviceCodeFallback {
                 code,

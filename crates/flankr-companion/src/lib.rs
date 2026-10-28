@@ -43,8 +43,8 @@ pub use client::{
 };
 pub use cross::{SessionCard, SessionCardKind, is_terminal_only};
 pub use keys::{
-    FileKeyStore, KeyStore, LEGACY_KEY_NAME, MAX_REMOTES, RemoteId, RemoteInfo, Remotes,
-    ServerRecord,
+    FileKeyStore, KeyStore, LEGACY_KEY_NAME, MAX_REMOTES, NICKNAME_MAX, RemoteId, RemoteInfo,
+    Remotes, ServerRecord, base_hostname, fingerprint_hex,
 };
 pub use net::{
     Backoff, CHECK_TIMEOUT, PAIRING_RETRY, PAIRING_WINDOW, RESULT_GRACE, REVOKE_TIMEOUT,
