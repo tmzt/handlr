@@ -741,3 +741,50 @@ needs 4.
 8. **The settings plan** is frozen; this plan adds a section to its
    decision 3. Should that plan get a short amendment pointing here, as it
    did for *Tab follows focus*?
+
+## Amendment — 2026-10-28 13:03 EDT: the open questions answered
+
+The owner (2026-10-28): "yes to all of those, the storage limit should be
+what's reasonable if that's 50mb per session that's fine. Unpair gets
+replaced with this section. I think the general agent and tab_follows_focus
+stay global, and I'd like the general agent to work across remotes, but
+that might require more thinking. yes it shold print the fingerprint, but
+the standard qr/code based pairing is still used, maybe with a numeric
+confirmation code (which is derived from the daemon key). yes, an
+amendment, settings becomes living". Where this disagrees with the body, it
+wins.
+
+1. **Removing the active remote** switches to the most recently paired
+   remaining one, as decision 8 has it (open question 1).
+2. **General agent and Tab follows focus stay app-wide** (open question 2),
+   as decision 10 has it. A general agent that works across remotes is
+   wanted later and needs its own plan; nothing here precludes it.
+3. **The data plan's phone store lives in each remote's `state.redb`**
+   (open question 3). Its cap applies per remote, at the data plan's
+   values (20 sessions, 50 MB), which the owner finds reasonable. The data
+   plan gets one amendment saying so when either plan is built.
+4. **At most 8 remotes** (open question 4).
+5. **+ pairs beside the open connection** (open question 5), as decision 5
+   has it.
+6. **`Unpair this device` is replaced by the Remotes section** (open
+   question 6; replaces decision 11's "acts as the active remote's X"): the
+   Device section's row is removed, and each remote's X is the way to
+   unpair.
+7. **The daemon's fingerprint and a confirmation code** (open question 7;
+   this is now in scope). `flankr pair` prints the daemon's fingerprint
+   (decision 1's 8 hex digits) beside the QR code and pairing code, and a
+   six-digit **confirmation code** derived from the daemon's link static
+   public key (the first 20 bits of BLAKE2s-256 over the key with a fixed
+   context string, as a zero-padded decimal number). The pairing flow is
+   unchanged (QR or code); while pairing, the phone shows the same
+   confirmation code, computed from the key it was given, so the owner can
+   check they match before the remote is added. The Remotes row shows the
+   fingerprint as decision 12 has it. A daemon step is added: `flankr
+   pair`'s output and `libflankr_proto::link::confirmation_code` beside
+   `fingerprint` (additive, 0.4.3).
+8. **The settings plan gets an amendment and becomes living** (open
+   question 8): `docs/design/20261024_02_SETTINGS_SCREEN_PLAN.md` records
+   that its list of sections and rows is a living section, and points to
+   this plan's Remotes section and the removal of `Unpair this device`.
+
+The plan stays `Draft` until the owner approves it.

@@ -283,3 +283,19 @@ section, after *General agent (Gemini)*:
   herdr's tab focus and the `focus` tool it does not affect.
 
 The row is built by plan 20261027_04's step 6, once that plan is approved.
+
+## Amendment — 2026-10-28 13:03 EDT: the sections and rows become living; Remotes replaces Unpair this device
+
+The owner (2026-10-28), answering
+`docs/design/20261028_01_MULTIPLE_REMOTES_PLAN.md`'s open question 8: "yes,
+an amendment, settings becomes living".
+
+1. **Living section.** The settings screen's list of sections and their
+   rows is a living section from now on: a later plan that adds, moves or
+   removes a section or row records it here by amendment, naming the plan,
+   and the entry is fixed once implemented.
+2. **Remotes.** A **Remotes** section, between Battery and Device, lists
+   the paired daemons with an X each and a + to pair another
+   (`20261028_01_MULTIPLE_REMOTES_PLAN.md`).
+3. **`Unpair this device` is removed** from the Device section when that
+   plan is built; each remote's X replaces it.
