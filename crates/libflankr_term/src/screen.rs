@@ -3,12 +3,13 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::{Frame, Grid, HISTORY, Row};
+use crate::{Cursor, Frame, Grid, HISTORY, Row};
 
 static EMPTY: Grid = Grid {
     cols: 0,
     rows: 0,
     lines: Vec::new(),
+    cursor: None,
 };
 
 /// One open terminal on the phone's side (decision 5).
@@ -68,6 +69,7 @@ impl Screen {
             cols: frame.cols,
             rows: frame.rows,
             lines,
+            cursor: frame.cursor,
         };
         self.shown.push_back((frame.seq, Arc::new(grid)));
         true
@@ -81,6 +83,12 @@ impl Screen {
     /// The grid shown; empty before the first frame.
     pub fn grid(&self) -> &Grid {
         self.shown.back().map_or(&EMPTY, |(_, grid)| grid)
+    }
+
+    /// The cursor of the frame shown: every frame carries the cursor whole,
+    /// so this is the newest frame's, `None` when it carried none.
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.grid().cursor
     }
 
     /// The width of the grid shown.

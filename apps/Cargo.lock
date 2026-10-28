@@ -1624,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "libflankr_proto"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "blake2",
  "bs58",
@@ -1636,7 +1636,7 @@ dependencies = [
 
 [[package]]
 name = "libflankr_term"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
 ]

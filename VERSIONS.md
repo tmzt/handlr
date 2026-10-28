@@ -366,3 +366,32 @@ the terminal view's drag):
   scrollback) and `TerminalScrollResult { offset_from_bottom,
   max_offset_from_bottom }`, the pane scrolled as a mouse wheel does, gated
   as `terminal.input` is.
+
+## libflankr_term 0.1.1 — 2026-10-28 (the commit tagged `libflankr_term-v0.1.1`)
+
+This is the crate's first entry: 0.1.0, its first release (plan
+20261027_07, step 1), had none.
+
+Additive (a new type and appended fields, by the owner's ruling that
+appending to a struct is additive; plan 20261027_08, decision 9):
+
+- **Added:** `Cursor { col, row, visible, shape, mouse_reporting,
+  alternate_screen, stale }`.
+- **Added:** `Grid::cursor: Option<Cursor>` (appended, `serde(default)`).
+  `Grid::from_lines`, and so `parse_ansi`, give `None`.
+- **Added:** `Frame::cursor: Option<Cursor>` (appended, `serde(default)`),
+  written by `Frame::encode` as a 7-byte trailer after the rows when
+  `Some` (`u8 1, u16 col, u16 row, u8 bits, u8 shape`; bits 0-3 visible,
+  mouse reporting, alternate screen, stale; bits 4-7 zero) and read by
+  `Frame::decode` when present. A frame without a cursor encodes byte for
+  byte as in 0.1.0, and 0.1.0 bytes decode unchanged; any other trailing
+  bytes are still `DecodeError::TrailingBytes`.
+- **Added:** `Frame::encode_with(cursor: bool)` and
+  `Frame::encoded_len_with(cursor: bool)`: `encode_with(false)` leaves the
+  trailer out, for a phone that did not ask for it. `CURSOR_TRAILER_LEN`
+  (7).
+- **Added:** `Screen::cursor()`, the newest frame's cursor.
+- `Mirror` carries a grid's cursor in every frame made from it, and a
+  grid that differs from the last only in its cursor makes a frame with no
+  rows.
+

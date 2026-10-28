@@ -4,7 +4,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{Color, Grid, Row, Run};
+use crate::{Color, Cursor, Grid, Row, Run};
 
 /// One row of a [`Frame`]: its index and its runs.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -35,6 +35,25 @@ pub struct RowDiff {
 /// A run whose text is longer than 65535 bytes is written as several runs
 /// of the same style, and a row is cut at 65535 runs. Neither happens for
 /// a [`crate::parse_ansi`] grid, whose rows are at most 1000 characters.
+///
+/// ## The cursor trailer (0.1.1)
+///
+/// When [`Frame::cursor`] is `Some`, [`Frame::encode`] writes
+/// [`CURSOR_TRAILER_LEN`] more bytes after the rows
+/// (docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md, decision 9):
+///
+/// ```text
+/// u8 1, u16 col, u16 row, u8 bits, u8 shape
+/// ```
+///
+/// `bits`: bit 0 visible, 1 mouse reporting, 2 alternate screen, 3 stale;
+/// bits 4-7 are zero. A frame without the trailer is byte for byte the
+/// 0.1.0 frame, and [`Frame::decode`] reads it as before, with `cursor:
+/// None`. A phone that has not asked for the cursor (its `terminal.open`
+/// without `cursor: true`, libflankr_proto 0.4.2) cannot read the trailer
+/// (0.1.0 decodes it as `TrailingBytes`), so the daemon writes that
+/// phone's frames with [`Frame::encode_with`]`(false)`, which leaves it
+/// out.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Frame {
     pub terminal_id: u32,
@@ -43,7 +62,24 @@ pub struct Frame {
     pub cols: u16,
     pub rows: u16,
     pub diffs: Vec<RowDiff>,
+    /// The terminal's cursor, written as the trailer when `Some`. Every
+    /// frame of a terminal whose grids carry a cursor carries it whole, a
+    /// diff included. Added in 0.1.1.
+    #[serde(default)]
+    pub cursor: Option<Cursor>,
 }
+
+/// The length of the cursor trailer that follows a frame's rows when it
+/// carries a cursor.
+pub const CURSOR_TRAILER_LEN: usize = 1 + 2 + 2 + 1 + 1;
+
+const CURSOR_TAG: u8 = 1;
+const CURSOR_VISIBLE: u8 = 1 << 0;
+const CURSOR_MOUSE_REPORTING: u8 = 1 << 1;
+const CURSOR_ALTERNATE_SCREEN: u8 = 1 << 2;
+const CURSOR_STALE: u8 = 1 << 3;
+const CURSOR_BITS: u8 =
+    CURSOR_VISIBLE | CURSOR_MOUSE_REPORTING | CURSOR_ALTERNATE_SCREEN | CURSOR_STALE;
 
 const HEADER_LEN: usize = 4 + 4 + 4 + 2 + 2 + 2;
 const ROW_HEADER_LEN: usize = 2 + 2;
@@ -145,6 +181,7 @@ impl Frame {
                     runs: runs.clone(),
                 })
                 .collect(),
+            cursor: grid.cursor,
         }
     }
 
@@ -153,9 +190,21 @@ impl Frame {
         self.base_seq == 0
     }
 
-    /// The length of [`Frame::encode`]'s bytes, without encoding.
+    /// The length of [`Frame::encode`]'s bytes, without encoding: the
+    /// cursor trailer included when the frame carries a cursor.
     pub fn encoded_len(&self) -> usize {
-        HEADER_LEN
+        self.encoded_len_with(true)
+    }
+
+    /// The length of [`Frame::encode_with`]`(cursor)`'s bytes.
+    pub fn encoded_len_with(&self, cursor: bool) -> usize {
+        let trailer = if cursor && self.cursor.is_some() {
+            CURSOR_TRAILER_LEN
+        } else {
+            0
+        };
+        trailer
+            + HEADER_LEN
             + self
                 .diffs
                 .iter()
@@ -169,9 +218,17 @@ impl Frame {
                 .sum::<usize>()
     }
 
-    /// The frame's bytes. At most `u16::MAX` rows are written.
+    /// The frame's bytes, with the cursor trailer when the frame carries a
+    /// cursor. At most `u16::MAX` rows are written.
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.encoded_len());
+        self.encode_with(true)
+    }
+
+    /// The frame's bytes, with the cursor trailer only when `cursor` is
+    /// true and the frame carries one. `encode_with(false)` is the 0.1.0
+    /// encoding, for a phone that did not ask for the cursor.
+    pub fn encode_with(&self, cursor: bool) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.encoded_len_with(cursor));
         out.extend_from_slice(&self.terminal_id.to_be_bytes());
         out.extend_from_slice(&self.seq.to_be_bytes());
         out.extend_from_slice(&self.base_seq.to_be_bytes());
@@ -194,10 +251,31 @@ impl Frame {
             }
             out[count_at..count_at + 2].copy_from_slice(&count.to_be_bytes());
         }
+        if cursor && let Some(c) = &self.cursor {
+            let mut bits = 0;
+            for (on, bit) in [
+                (c.visible, CURSOR_VISIBLE),
+                (c.mouse_reporting, CURSOR_MOUSE_REPORTING),
+                (c.alternate_screen, CURSOR_ALTERNATE_SCREEN),
+                (c.stale, CURSOR_STALE),
+            ] {
+                if on {
+                    bits |= bit;
+                }
+            }
+            out.push(CURSOR_TAG);
+            out.extend_from_slice(&c.col.to_be_bytes());
+            out.extend_from_slice(&c.row.to_be_bytes());
+            out.push(bits);
+            out.push(c.shape);
+        }
         out
     }
 
-    /// Read a frame's bytes. Every byte must belong to the frame; rows are
+    /// Read a frame's bytes, with or without the cursor trailer. Every byte
+    /// must belong to the frame: after the rows only a whole trailer (tag
+    /// 1, bits 4-7 zero) is read, and anything else is
+    /// [`DecodeError::TrailingBytes`]. Rows are
     /// below `rows` and appear once; a full frame carries every row; `seq`
     /// is not 0 and a diff's `base_seq` is older than its `seq`.
     pub fn decode(bytes: &[u8]) -> Result<Frame, DecodeError> {
@@ -238,9 +316,19 @@ impl Frame {
             }
             diffs.push(RowDiff { row, runs });
         }
-        if !r.bytes.is_empty() {
-            return Err(DecodeError::TrailingBytes(r.bytes.len()));
-        }
+        let cursor = match *r.bytes {
+            [] => None,
+            [CURSOR_TAG, c0, c1, r0, r1, bits, shape] if bits & !CURSOR_BITS == 0 => Some(Cursor {
+                col: u16::from_be_bytes([c0, c1]),
+                row: u16::from_be_bytes([r0, r1]),
+                visible: bits & CURSOR_VISIBLE != 0,
+                shape,
+                mouse_reporting: bits & CURSOR_MOUSE_REPORTING != 0,
+                alternate_screen: bits & CURSOR_ALTERNATE_SCREEN != 0,
+                stale: bits & CURSOR_STALE != 0,
+            }),
+            ref rest => return Err(DecodeError::TrailingBytes(rest.len())),
+        };
         if base_seq == 0 && count != rows {
             return Err(DecodeError::MissingRows { count, rows });
         }
@@ -251,6 +339,7 @@ impl Frame {
             cols,
             rows,
             diffs,
+            cursor,
         })
     }
 }
@@ -320,8 +409,94 @@ mod tests {
                     }],
                 },
             ],
+            cursor: None,
         };
         assert_eq!(Frame::decode(&diff.encode()).unwrap(), diff);
+    }
+
+    fn a_cursor() -> Cursor {
+        Cursor {
+            col: 0x0102,
+            row: 3,
+            visible: true,
+            shape: 2,
+            mouse_reporting: false,
+            alternate_screen: true,
+            stale: true,
+        }
+    }
+
+    #[test]
+    fn a_frame_without_a_trailer_is_the_old_frame() {
+        // The 0.1.0 bytes of `the_header_is_big_endian` and of `sample`
+        // decode unchanged, with no cursor.
+        let old = [1, 2, 3, 4, 0, 0, 0, 5, 0, 0, 0, 0, 0x0a, 0x0b, 0, 0, 0, 0];
+        let frame = Frame::decode(&old).unwrap();
+        assert_eq!(frame.cursor, None);
+        assert_eq!(frame.encode(), old);
+        let sample = sample();
+        assert_eq!(sample.cursor, None, "parse_ansi grids carry no cursor");
+        assert_eq!(Frame::decode(&sample.encode()).unwrap(), sample);
+    }
+
+    #[test]
+    fn the_cursor_trailer_round_trips() {
+        let mut frame = sample();
+        let plain = frame.encode();
+        frame.cursor = Some(a_cursor());
+        let bytes = frame.encode();
+        assert_eq!(bytes.len(), frame.encoded_len());
+        assert_eq!(bytes.len(), plain.len() + CURSOR_TRAILER_LEN);
+        assert_eq!(&bytes[..plain.len()], &plain[..]);
+        assert_eq!(&bytes[plain.len()..], [1, 0x01, 0x02, 0, 3, 0b1101, 2]);
+        assert_eq!(Frame::decode(&bytes).unwrap(), frame);
+
+        // Each bit alone.
+        for (bit, set) in [
+            (
+                0b0001,
+                (|c: &mut Cursor| c.visible = true) as fn(&mut Cursor),
+            ),
+            (0b0010, |c| c.mouse_reporting = true),
+            (0b0100, |c| c.alternate_screen = true),
+            (0b1000, |c| c.stale = true),
+        ] {
+            let mut c = Cursor::default();
+            set(&mut c);
+            frame.cursor = Some(c);
+            let bytes = frame.encode();
+            assert_eq!(bytes[bytes.len() - 2], bit);
+            assert_eq!(Frame::decode(&bytes).unwrap().cursor, Some(c));
+        }
+
+        // Left out for a phone that did not ask.
+        frame.cursor = Some(a_cursor());
+        assert_eq!(frame.encode_with(false), plain);
+        assert_eq!(frame.encoded_len_with(false), plain.len());
+    }
+
+    #[test]
+    fn other_trailing_bytes_are_refused() {
+        let mut frame = sample();
+        frame.cursor = Some(a_cursor());
+        let bytes = frame.encode();
+        let rows_end = bytes.len() - CURSOR_TRAILER_LEN;
+        // A cut trailer, a wrong tag, a high bit and one byte too many.
+        for n in 1..CURSOR_TRAILER_LEN {
+            assert_eq!(
+                Frame::decode(&bytes[..rows_end + n]),
+                Err(DecodeError::TrailingBytes(n))
+            );
+        }
+        let mut tag = bytes.clone();
+        tag[rows_end] = 2;
+        assert_eq!(Frame::decode(&tag), Err(DecodeError::TrailingBytes(7)));
+        let mut high = bytes.clone();
+        high[rows_end + 5] |= 0x10;
+        assert_eq!(Frame::decode(&high), Err(DecodeError::TrailingBytes(7)));
+        let mut long = bytes;
+        long.push(0);
+        assert_eq!(Frame::decode(&long), Err(DecodeError::TrailingBytes(8)));
     }
 
     #[test]
@@ -333,6 +508,7 @@ mod tests {
             cols: 0x0a0b,
             rows: 0,
             diffs: vec![],
+            cursor: None,
         }
         .encode();
         assert_eq!(
@@ -357,6 +533,7 @@ mod tests {
                     ..Run::default()
                 }],
             }],
+            cursor: None,
         };
         let bytes = frame.encode();
         assert_eq!(bytes.len(), frame.encoded_len());
@@ -416,6 +593,7 @@ mod tests {
             cols: 0,
             rows: 3,
             diffs: vec![RowDiff::default(), RowDiff::default()],
+            cursor: None,
         };
         assert_eq!(
             Frame::decode(&dup.encode()),
@@ -451,6 +629,7 @@ mod tests {
             cols: 0,
             rows: 1,
             diffs: vec![],
+            cursor: None,
         };
         assert_eq!(
             Frame::decode(&diff.encode()),

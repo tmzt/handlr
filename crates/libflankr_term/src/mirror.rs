@@ -13,6 +13,11 @@ use crate::{Frame, Grid, HISTORY, RowDiff};
 /// acknowledged, the size changed, the acknowledged frame is [`HISTORY`]
 /// or more frames old, or the diff would not be smaller.
 ///
+/// A grid's [`crate::Cursor`] (0.1.1) is part of the grid: every frame
+/// carries the cursor of the grid it was made from, a diff included, and a
+/// grid that differs from the last one only in its cursor makes a frame
+/// with no rows that carries the new cursor.
+///
 /// A frame that is lost is not resent as such: the next frame is diffed
 /// from what the phone holds, so it carries the lost changes too. When the
 /// grid stops changing before the phone has acknowledged the newest frame,
@@ -150,7 +155,7 @@ impl Mirror {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Screen, parse_ansi};
+    use crate::{Cursor, Screen, parse_ansi};
 
     #[test]
     fn unchanged_grids_send_nothing_until_reset() {
@@ -247,6 +252,59 @@ mod tests {
             assert!(!f.is_full(), "{i}");
         }
         assert!(m.update(grid(HISTORY)).unwrap().is_full());
+    }
+
+    #[test]
+    fn a_cursor_change_alone_makes_a_frame_with_no_rows() {
+        let with = |col: u16, visible: bool| Grid {
+            cursor: Some(Cursor {
+                col,
+                row: 1,
+                visible,
+                ..Cursor::default()
+            }),
+            ..parse_ansi("$ ls\nsome fixed text\nmore fixed text")
+        };
+        let mut m = Mirror::new(1);
+        let mut s = Screen::default();
+        let f = m.update(with(2, true)).unwrap();
+        assert_eq!(f.cursor, with(2, true).cursor, "a full frame carries it");
+        assert!(s.apply(&Frame::decode(&f.encode()).unwrap()));
+        assert_eq!(s.cursor(), with(2, true).cursor);
+        m.ack(s.seq());
+        assert!(m.update(with(2, true)).is_none(), "nothing changed");
+
+        let f = m.update(with(3, true)).unwrap();
+        assert_eq!((f.base_seq, f.diffs.len()), (1, 0));
+        assert_eq!(f.cursor, with(3, true).cursor);
+        assert!(s.apply(&Frame::decode(&f.encode()).unwrap()));
+        assert_eq!(s.grid(), &with(3, true));
+
+        // A row change carries the cursor too, unchanged or not.
+        let mut changed = with(3, true);
+        changed.lines[0] = parse_ansi("$ ls -l").lines.remove(0);
+        let f = m.update(changed.clone()).unwrap();
+        assert_eq!((f.base_seq, f.diffs.len()), (1, 1));
+        assert_eq!(f.cursor, changed.cursor);
+        assert!(s.apply(&Frame::decode(&f.encode()).unwrap()));
+        assert_eq!(s.grid(), &changed);
+        m.ack(s.seq());
+
+        // Visibility alone is a change; the screen keeps the newest.
+        let mut hidden = changed.clone();
+        hidden.cursor.as_mut().unwrap().visible = false;
+        let f = m.update(hidden.clone()).unwrap();
+        assert!(f.diffs.is_empty());
+        assert!(s.apply(&f));
+        assert_eq!(s.cursor(), hidden.cursor);
+
+        // A grid without one (the poll again) clears it.
+        let polled = Grid {
+            cursor: None,
+            ..hidden
+        };
+        assert!(s.apply(&m.update(polled).unwrap()));
+        assert_eq!(s.cursor(), None);
     }
 
     #[test]

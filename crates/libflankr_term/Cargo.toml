@@ -1,6 +1,6 @@
 [package]
 name = "libflankr_term"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A terminal mirrored over flankr's link: ANSI to styled runs, frames and their diffs, the daemon's Mirror and the app's Screen"
 

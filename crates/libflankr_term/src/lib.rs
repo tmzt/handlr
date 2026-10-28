@@ -14,6 +14,9 @@
 //!   applies what it can and ignores what is older than what it shows, and
 //!   both converge on the newest frame (the sync model of mosh, without its
 //!   emulator or prediction).
+//! * Since 0.1.1 a grid and a frame may carry a [`Cursor`]
+//!   (docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md, decision 9),
+//!   written as a trailer after a frame's rows; see [`Frame`].
 //!
 //! The crate is pure state: no herdr, link or protocol dependency.
 
@@ -23,7 +26,7 @@ mod mirror;
 mod screen;
 
 pub use ansi::{MAX_COLS, MAX_ROWS, parse_ansi};
-pub use frame::{DecodeError, Frame, RowDiff};
+pub use frame::{CURSOR_TRAILER_LEN, DecodeError, Frame, RowDiff};
 pub use mirror::Mirror;
 pub use screen::Screen;
 
@@ -132,17 +135,46 @@ pub struct Grid {
     pub cols: u16,
     pub rows: u16,
     pub lines: Vec<Row>,
+    /// The terminal's cursor, when the source knows it (herdr's attached
+    /// surface does; [`parse_ansi`]'s text does not, so its grids have
+    /// `None`). Added in 0.1.1.
+    #[serde(default)]
+    pub cursor: Option<Cursor>,
+}
+
+/// A terminal's cursor and the modes that go with it
+/// (docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md, decision 9).
+/// Added in 0.1.1.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Cursor {
+    /// The cursor's column, from 0 at the left.
+    pub col: u16,
+    /// The cursor's row, from 0 at the top.
+    pub row: u16,
+    /// False while the program has hidden it.
+    pub visible: bool,
+    /// The cursor's shape as the source numbers it (herdr's
+    /// `CursorShape`), passed through unread.
+    pub shape: u8,
+    /// The program asked for mouse reports.
+    pub mouse_reporting: bool,
+    /// The program is on the alternate screen.
+    pub alternate_screen: bool,
+    /// The view is not the one flankr asked for: the desktop has the tab
+    /// (plan 20261027_08, the amendment of 23:32 EDT).
+    pub stale: bool,
 }
 
 impl Grid {
     /// A grid of `lines`, `cols` the widest of them (both clamped to
-    /// `u16`).
+    /// `u16`), with no cursor.
     pub fn from_lines(lines: Vec<Row>) -> Grid {
         let cols = lines.iter().map(row_width).max().unwrap_or(0);
         Grid {
             cols: cols.min(u16::MAX as usize) as u16,
             rows: lines.len().min(u16::MAX as usize) as u16,
             lines,
+            cursor: None,
         }
     }
 

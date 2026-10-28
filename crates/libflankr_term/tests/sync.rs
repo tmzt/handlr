@@ -1,9 +1,10 @@
 //! Plan 20261027_07, step 1's Done-when: 1000 random frame sequences
 //! through `Mirror` and `Screen`, with frames and acks dropped, delayed and
 //! reordered, end with the screen equal to the newest grid once the last
-//! frame is delivered.
+//! frame is delivered. Plan 20261027_08, step 5: the same with cursors on,
+//! some steps changing only the cursor.
 
-use libflankr_term::{Frame, Grid, Mirror, Screen, parse_ansi};
+use libflankr_term::{Cursor, Frame, Grid, Mirror, Screen, parse_ansi};
 
 /// xorshift64*: small, deterministic, good enough for a test.
 struct Rng(u64);
@@ -91,6 +92,18 @@ fn next_lines(rng: &mut Rng, lines: &mut Vec<String>) {
     }
 }
 
+fn random_cursor(rng: &mut Rng) -> Cursor {
+    Cursor {
+        col: rng.below(80) as u16,
+        row: rng.below(16) as u16,
+        visible: rng.chance(80),
+        shape: rng.below(7) as u8,
+        mouse_reporting: rng.chance(20),
+        alternate_screen: rng.chance(20),
+        stale: rng.chance(10),
+    }
+}
+
 fn deliver(screen: &mut Screen, bytes: &[u8], acks: &mut Vec<u32>, rng: &mut Rng) {
     let frame = Frame::decode(bytes).expect("a mirror's frame decodes");
     if screen.apply(&frame) && !rng.chance(30) {
@@ -98,8 +111,9 @@ fn deliver(screen: &mut Screen, bytes: &[u8], acks: &mut Vec<u32>, rng: &mut Rng
     }
 }
 
-fn run_sequence(seed: u64) {
+fn run_sequence(seed: u64, cursors: bool) {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let mut cursor = Cursor::default();
     let mut mirror = Mirror::new(seed as u32);
     let mut screen = Screen::default();
     let mut lines: Vec<String> = (0..1 + rng.below(16))
@@ -112,8 +126,17 @@ fn run_sequence(seed: u64) {
     for _ in 0..10 + rng.below(60) {
         match rng.below(10) {
             0..=3 => {
-                next_lines(&mut rng, &mut lines);
+                // With cursors on, some steps move only the cursor.
+                if !cursors || !rng.chance(30) {
+                    next_lines(&mut rng, &mut lines);
+                }
                 newest = parse_ansi(&lines.join("\n"));
+                if cursors {
+                    if rng.chance(50) {
+                        cursor = random_cursor(&mut rng);
+                    }
+                    newest.cursor = Some(cursor);
+                }
                 if let Some(frame) = mirror.update(newest.clone()) {
                     assert_eq!(frame.terminal_id, seed as u32);
                     if !rng.chance(25) {
@@ -155,6 +178,7 @@ fn run_sequence(seed: u64) {
     }
     assert_eq!(screen.grid(), &newest, "seed {seed}");
     assert_eq!(screen.seq(), mirror.seq(), "seed {seed}");
+    assert_eq!(screen.cursor(), newest.cursor, "seed {seed}");
 
     // Stale frames still in flight change nothing.
     for bytes in frames {
@@ -167,6 +191,13 @@ fn run_sequence(seed: u64) {
 #[test]
 fn a_thousand_random_sequences_converge() {
     for seed in 1..=1000 {
-        run_sequence(seed);
+        run_sequence(seed, false);
+    }
+}
+
+#[test]
+fn a_thousand_random_sequences_converge_with_cursors_on() {
+    for seed in 1..=1000 {
+        run_sequence(seed, true);
     }
 }
