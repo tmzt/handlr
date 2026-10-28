@@ -3060,3 +3060,29 @@ on a key defined twice, a missing key or a bad slot.
    no host or device test yet.
 7. `Event::PairingWords.fingerprint_hex` replaces the app's workaround of
    recomputing the hex from the scanned link.
+
+## 2026-10-28 19:10 EDT — plan 20261028_03, steps 1-4: departures
+
+Plan: docs/design/20261028_03_SESSION_DRAWER_PLAN.md. Steps 1 (`bc17150`,
+tag `libflankr_proto-v0.5.1`), 2 (`55357a7`), 3-4 (flankr-companion 0.5.0,
+tag `flankr-companion-v0.5.0`, and the app's mechanical commit after it).
+
+1. **The summary** is listed only while the latest Finished card is at the
+   session's newest reply, and only for sessions a tailer has read (an
+   agent view opened them); a session never opened shows none yet.
+2. **A missing or unreadable subagent meta file** counts as not finished,
+   so the 60 s write rule alone decides.
+3. **`Input::ToRemote { remote, input }`** is added, beyond the plan, so the
+   app can answer a background remote's approval or question.
+4. **`leave_foreground`** drops a prompt aimed at one of the old remote's
+   panes; a general-agent turn in progress on the old daemon keeps running,
+   its later events arriving as that remote's background events.
+5. **`replay()`** always gives the agents, pending panes, focus, cards,
+   dictation and cache, even empty, so the app clears the old remote's.
+6. **Offline links' states are ticked** every tick; requests while offline
+   are logged at debug and dropped.
+7. **Not yet done:** `Remotes::display_names` does not add the
+   fingerprint group for two remotes with the same host and port (the
+   18:48 EDT amendment's item 5); the app does not yet handle
+   `Event::Background` or the switch's replay (a wildcard arm drops them
+   until steps 6-8).
