@@ -1070,3 +1070,11 @@ and needs its own yes".
 The previous amendment ("one attempt per `flankr pair` run") cites "the
 14:33 EDT amendment"; it is the **14:37 EDT** amendment (pairing confirmed
 by six words on both sides). Its content is unchanged.
+
+## Amendment — 2026-10-28 14:47 EDT: the pairing amendments approved
+
+The owner (2026-10-28): "approve this and the camera plans". The
+amendments of 13:59, 14:03, 14:06, 14:37, 14:40, 14:42 (both), 14:45 EDT
+and their corrections, which together define the six-word pairing flow,
+the fingerprint words, the review's changes and the step they add, are
+approved, and that step is built now.
