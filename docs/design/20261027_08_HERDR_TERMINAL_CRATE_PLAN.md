@@ -880,3 +880,43 @@ body or the earlier amendments, it wins.
    split gets its share of the phone-sized tab.
 
 The plan stays `Draft`.
+
+## Amendment — 2026-10-27 23:42 EDT: the remaining open questions answered: the poll is the only fallback, attach on for testing, the pin at herdr's HEAD or latest release tracked by its protocol version
+
+The owner (2026-10-27), answering open questions 3, 4 and 5 in turn:
+"1. stays json, no changes 2. for testing, yes 3. should be HEAD ir la5est
+release but tracked via the proto version (22)". Where this disagrees with
+the body or the earlier amendments, it wins.
+
+1. **The fallback stays the JSON poll, unchanged** (open question 3). When
+   the attachment cannot be used (herdr refuses generation 1, a payload
+   fails to decode, the connection is down, or herdr is remote), the
+   terminal is served by plan 20261027_07's `pane.read` poll exactly as
+   today. `libherdr_term` does not speak `herdr terminal session
+   observe` or any other read-only bridge.
+2. **`[terminal] attach = true` is the default for testing** (open
+   question 4), as decision 13 has it; `false` keeps the poll. The default
+   is to be reviewed before this leaves the `main-terminal` branch.
+3. **The pin follows herdr's HEAD or its latest release, tracked by
+   herdr's `PROTOCOL_VERSION`** (open question 5; replaces decision 14's
+   "until step 1's audit chooses the commit matching the owner's installed
+   herdr" and step 1's `herdr --version` dependency).
+   - `vendor/herdr` is pinned to herdr's HEAD or latest release tag at the
+     time of each update, whichever the update names; the first pin is
+     `2713feb` (HEAD on 2026-10-27, `PROTOCOL_VERSION = 22`).
+   - `libherdr_term`'s `build.rs` reads `PROTOCOL_VERSION` from the
+     submodule's `src/protocol/wire.rs` along with the types and exposes it
+     as `libherdr_term::HERDR_PROTOCOL_VERSION` (22 today), beside
+     `ENDPOINT_PROTOCOL_GENERATION` (1). The daemon logs both at start and
+     with every incompatibility.
+   - `docs/HERDR_WIRE.md` (step 1's append-only log) gets one section per
+     pin update, named by the protocol version it moves to ("22", then
+     "23" …): the herdr commit or tag, the `wire.rs` and `endpoint.rs`
+     changes since the previous pin, and whether any type flankr extracts
+     changed. Moving to a new `PROTOCOL_VERSION` always gets that audit; a
+     pin update within the same version gets a short section.
+   - Step 1's audit is done against the first pin (22) from herdr's
+     history; it no longer waits on the owner's `herdr --version`.
+
+All open questions are now answered. The plan stays `Draft` until the
+owner approves it.
