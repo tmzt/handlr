@@ -565,3 +565,48 @@ which finishes the connection (`mod.rs:99-100`). Both peers reassemble with
 9. An ANSI visible frame of a colourful 200x60 TUI is several times its text
    size. Is the 8 Hz cap with the unchanged-string skip enough, or should
    remote mode default to 2 Hz as risk 1 suggests?
+
+## Amendment — 2026-10-27 20:44 EDT: approved: local mode only, a minor bump of the protocol crate, the glyph between play and the centre
+
+The owner (2026-10-27): "impl the terminal plan on a branch main-terminal,
+bunp the proto crate a minor as a special case, use subagents as needed (up
+to 3 opus) with path exclusion. yes, the icon goes between the play and
+center buttons. only impl local mode, not ssh between the flankr daemon and
+herdr".
+
+The plan is approved with its 14:23 EDT amendment and this one, and is built
+on the branch `main-terminal`. Where this amendment disagrees with the body or
+the 14:23 amendment, it wins.
+
+1. **The bottom bar** (open question 3): the terminal/list glyph is a fifth
+   button between play and the centre button, as decision 7 has it.
+2. **Local mode only** (open question 8; risk 1's remote clause; the 14:23
+   amendment's finding 4 and question 9's remote half). The terminal is
+   built only for a daemon that reaches herdr over its local socket. When
+   herdr is reached over SSH (`--remote`), `hello` and
+   `server.capabilities` report `terminal: None` and `terminal.open` is
+   refused with `HERDR_UNAVAILABLE`. No remote-mode rate cap is added.
+3. **`libflankr_proto` takes a minor bump, 0.3.13 to 0.4.0**, by the owner's
+   ruling for this change only, although its changes are additive. This
+   replaces "0.3.13" in decision 4, step 2 and the 14:23 amendment's
+   "Version under Rule 5" (0.3.13 went to plan 20261027_06). The tag is
+   `libflankr_proto-v0.4.0`. `companion::VERSION` stays 1 and the prologue
+   `flankr.link/1`, so capability discovery is through the appended
+   `terminal` field (open question 2, as decision 4 has it). The split flag
+   byte of the 14:23 amendment stands.
+4. **The open questions not answered keep the body's answer:**
+   - herdr is not changed (questions 1 and 7): the frame is
+     `pane.read { source: "visible", format: "ansi" }` through libherdr's
+     `InspectPane`, which gains the serde-defaulted `format` field (libherdr
+     0.3.0 to 0.3.1, a patch); the size is the longest row and the row
+     count, and there is no cursor;
+   - the per-session choice is not persisted (question 4);
+   - keyboard input is built as step 6, off unless both settings are on
+     (question 5);
+   - `terminal.*` is served to the companion protocol only (question 6);
+   - the cap is 8 frames a second with the unchanged-string skip
+     (question 9).
+5. **Related:** `docs/design/20261022_04_COMPANION_APP_PLAN.md` (the agent
+   view and its bottom bar) is also related; the front matter is not edited.
+
+The status becomes `In implementation` with step 1's commit.
