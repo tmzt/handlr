@@ -1002,3 +1002,24 @@ This replaces the previous amendment's run timeout of 5 minutes (item 1.3).
    added, and both sides say so.
 4. The phone shows the time left for the offer it is pairing with (from
    the daemon's acknowledgement), and says when it expired.
+
+## Amendment — 2026-10-28 14:42 EDT: a quiet phone: scan, then the six words
+
+The owner (2026-10-28): "app is too noisy, likely path is immediate qr scan
+then confirm on Mac". This replaces the previous amendment's item 4 and
+trims what the phone's pairing screen shows.
+
+1. **The likely path** is: the owner runs `flankr pair`, scans its QR code
+   with the phone at once (the camera-based pairing screen), compares the
+   words, and types **yes** on the Mac.
+2. **The phone shows only what that path needs:** the camera while
+   scanning; then the **six pairing words**, large, with one line saying to
+   confirm on the Mac, and Cancel; then "Paired with <name>" or the reason
+   it was not (refused, expired, unreachable). No countdown, no offer time,
+   no device code, no fingerprint on the screen by default.
+3. **Everything else is behind Details:** the daemon's fingerprint words
+   and `host:port`, the time the offer has left, and the device-code
+   fallback (for a phone that cannot reach the daemon).
+4. `flankr pair` on the Mac keeps printing what it does (the link, the QR
+   code, the fingerprint, the six words and the prompt); the Mac is where
+   the owner reads and confirms.
