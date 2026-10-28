@@ -356,3 +356,12 @@ for the remote details modal:
 2. **The fingerprint in the details modal is collapsible:** a "Fingerprint"
    section, collapsed by default, that expands to the six words and the
    64-hex fingerprint.
+
+## Amendment — 2026-10-28 17:57 EDT: the default nickname adds the port only on a conflict (living section)
+
+The owner (2026-10-28): "port if there's a conflict between two with the
+same hostname, not just if non-default". This replaces the previous
+amendment's item 1 default: a remote's default nickname is the base
+hostname alone; `:port` is added only when two or more listed remotes
+would otherwise show the same nickname (then each of them shows
+`host:port`), whatever the port.
