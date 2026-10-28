@@ -9,6 +9,10 @@
 //! - **working:** the newest line, dim;
 //! - no session: herdr's status word, dim.
 //!
+//! A shell's card (terminal only: plan 20261022_03, the L3 amendment of
+//! 2026-10-28 00:47 EDT) has its name on the heading line, "Terminal" as its
+//! state, dim, and its folder under it; no turn, question or outline.
+//!
 //! A card that needs input (a question, or a flankr confirmation pending
 //! for the pane) says so on itself, with an outline and its label in the
 //! same colour: amber for an approval, blue for a question. It never moves.
@@ -160,9 +164,17 @@ impl AgentCard<'_> {
         theme().session(flankr_companion::cross::colour_of(self.agent))
     }
 
+    /// Whether the card is a shell's, which has only the terminal.
+    pub fn terminal_only(&self) -> bool {
+        flankr_companion::is_terminal_only(self.agent)
+    }
+
     /// What the card needs from the user, if anything: an approval first.
+    /// A shell needs nothing.
     pub fn needs_input(&self) -> Option<NeedsInput> {
-        if self.approval {
+        if self.terminal_only() {
+            None
+        } else if self.approval {
             Some(NeedsInput::Approval)
         } else if matches!(self.agent.turn, Some(Turn::Asking { .. })) {
             Some(NeedsInput::Question)
@@ -176,7 +188,7 @@ impl AgentCard<'_> {
     pub fn outline_color(&self) -> Option<[f32; 4]> {
         if let Some(n) = self.needs_input() {
             Some(n.colour())
-        } else if self.agent.status == "broke" {
+        } else if self.agent.status == "broke" && !self.terminal_only() {
             Some(theme().red)
         } else {
             None
@@ -187,8 +199,17 @@ impl AgentCard<'_> {
     pub fn heading(&self) -> String {
         let a = self.agent;
         let mut parts = vec![shown_agent(&a.agent)];
-        if let Some(p) = a.project.as_deref().filter(|p| !p.is_empty()) {
-            parts.push(p.to_string());
+        // A shell without a project is named by its folder.
+        let folder = || {
+            a.cwd
+                .as_deref()
+                .filter(|_| self.terminal_only())
+                .and_then(|c| c.trim_end_matches('/').rsplit('/').next())
+                .filter(|f| !f.is_empty())
+                .map(str::to_string)
+        };
+        if let Some(p) = a.project.clone().filter(|p| !p.is_empty()).or_else(folder) {
+            parts.push(p);
         }
         let tab = a
             .tab_label
@@ -201,6 +222,9 @@ impl AgentCard<'_> {
 
     /// The state line and its colour.
     pub fn state(&self) -> (String, [f32; 4]) {
+        if self.terminal_only() {
+            return ("Terminal".to_string(), theme().dim);
+        }
         if let Some(need) = self.needs_input() {
             return (need.label().to_string(), need.colour());
         }
@@ -215,6 +239,10 @@ impl AgentCard<'_> {
 
     /// The text under the state line, its colour and its most lines.
     fn body(&self) -> Option<(&str, [f32; 4], usize)> {
+        if self.terminal_only() {
+            let cwd = self.agent.cwd.as_deref().filter(|c| !c.is_empty())?;
+            return Some((cwd, theme().dim, 1));
+        }
         match self.agent.turn.as_ref()? {
             Turn::Asking { question } => Some((question, theme().fg, Self::QUESTION_LINES)),
             Turn::Stopped { line } => Some((line, theme().fg, Self::LINE_LINES)),
@@ -270,7 +298,7 @@ impl AgentCard<'_> {
             }
         }
         let mut buttons = Vec::new();
-        if matches!(self.agent.turn, Some(Turn::Asking { .. })) {
+        if !self.terminal_only() && matches!(self.agent.turn, Some(Turn::Asking { .. })) {
             ty += 6.0 * s;
             let (bw, bh) = (Self::BUTTON_W * s, Self::BUTTON_H * s);
             for (i, label) in ["Yes", "No"].into_iter().enumerate() {
@@ -416,6 +444,48 @@ pub(crate) mod tests {
                 "{r:?}"
             );
         }
+    }
+
+    /// Plan 20261022_03, the 2026-10-28 00:47 EDT amendment: a shell's
+    /// card names it and its folder, with no transcript state.
+    #[test]
+    fn a_shells_card_shows_its_name_and_folder_without_a_turn() {
+        let shell = AgentInfo {
+            agent: "shell".to_string(),
+            name: Some("Shell in src, tab 3".to_string()),
+            project: None,
+            cwd: Some("/Users/me/src/htop-dir/".to_string()),
+            tab_label: None,
+            tab_number: Some(3),
+            status: "broke".to_string(),
+            ..agent("p1", "w1", 3, asking("Never shown?"))
+        };
+        let c = lay(AgentCard {
+            agent: &shell,
+            approval: true,
+        });
+        assert_eq!(
+            texts(&c),
+            [
+                "Shell \u{b7} htop-dir \u{b7} tab 3",
+                "Terminal",
+                "/Users/me/src/htop-dir/"
+            ]
+        );
+        assert_eq!(colour_of(&c, "Terminal"), theme().dim);
+        assert_eq!(c.outline, None);
+        assert!(c.buttons.is_empty());
+        // With a project, the project; without a folder, no body.
+        let named = AgentInfo {
+            project: Some("flankr".to_string()),
+            cwd: None,
+            ..shell.clone()
+        };
+        let c = lay(AgentCard {
+            agent: &named,
+            approval: false,
+        });
+        assert_eq!(texts(&c), ["Shell \u{b7} flankr \u{b7} tab 3", "Terminal"]);
     }
 
     #[test]

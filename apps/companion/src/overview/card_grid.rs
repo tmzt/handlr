@@ -1,8 +1,8 @@
 //! The overview's cards: one card per agent pane, two per row, in tab
 //! order (plan 20261023_04, the 17:04 EDT amendment, A2), on the whole
 //! screen between the status lines and the bottom row (the 18:07 EDT
-//! amendment, 1). Shells are left
-//! out. The order is by `(workspace_id, tab_number)` and never changes as
+//! amendment, 1). Shells have cards too, terminal only (plan 20261022_03,
+//! the L3 amendment of 2026-10-28 00:47 EDT). The order is by `(workspace_id, tab_number)` and never changes as
 //! turns change: a card that needs input is marked where it is. Cards are
 //! equal width, 12 pt apart and from the edges, at least 112 pt high; the
 //! two of a row share its height. The grid scrolls on its own.
@@ -37,14 +37,10 @@ fn workspace_key(id: Option<&str>) -> (u64, String) {
 }
 
 /// The agents of `agents` that have a card, in tab order: by workspace,
-/// then tab number (a tab without one last), then pane id. Shells are left
-/// out.
+/// then tab number (a tab without one last), then pane id. Shells are
+/// among them.
 pub fn tab_order(agents: &[AgentInfo]) -> Vec<AgentInfo> {
-    let mut shown: Vec<AgentInfo> = agents
-        .iter()
-        .filter(|a| a.agent != "shell")
-        .cloned()
-        .collect();
+    let mut shown: Vec<AgentInfo> = agents.to_vec();
     shown.sort_by(|a, b| {
         workspace_key(a.workspace_id.as_deref())
             .cmp(&workspace_key(b.workspace_id.as_deref()))
@@ -316,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn cards_are_in_tab_order_without_shells() {
+    fn cards_are_in_tab_order_with_shells_among_them() {
         let agents = [
             agent("p9", "w10", 1, None),
             agent("p3", "w2", 5, None),
@@ -325,8 +321,10 @@ mod tests {
             agent("p2", "w2", 5, None),
         ];
         let g = grid(&agents);
-        // w2 before w10; within a tab, by pane.
-        assert_eq!(g.panes(), ["p2", "p3", "p1", "p9"]);
+        // w1 before w2 before w10; within a tab, by pane. The shell has
+        // its card in its place (plan 20261022_03, the 2026-10-28 00:47
+        // EDT amendment).
+        assert_eq!(g.panes(), ["p4", "p2", "p3", "p1", "p9"]);
     }
 
     #[test]
@@ -439,9 +437,12 @@ mod tests {
         let mut g = CardGrid::new();
         g.set_viewport(HALF, 2.0);
         assert_eq!(g.empty_line(), Some("Looking for agents\u{2026}"));
-        g.set_agents(&[shell("p1")], &[]);
+        g.set_agents(&[], &[]);
         assert_eq!(g.empty_line(), Some("No agents in herdr."));
         g.set_agents(&[agent("p2", "w1", 1, None)], &[]);
+        assert_eq!(g.empty_line(), None);
+        // A shell alone is a card.
+        g.set_agents(&[shell("p1")], &[]);
         assert_eq!(g.empty_line(), None);
     }
 }

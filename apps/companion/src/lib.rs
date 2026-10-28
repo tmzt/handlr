@@ -810,8 +810,17 @@ impl App {
             p.gemini_mut().set_listening(listening);
             p.gemini_mut().set_expanded(expanded);
         });
-        // The terminal again, if the session was left showing it.
-        if self.terminal_panes.shown(&pane_id) {
+        // A shell has only its terminal, shown at once (plan 20261022_03,
+        // the L3 amendment of 2026-10-28 00:47 EDT); otherwise the terminal
+        // again, if the session was left showing it.
+        let terminal_only = self
+            .agents
+            .iter()
+            .any(|a| a.pane_id == pane_id && flankr_companion::is_terminal_only(a));
+        if terminal_only {
+            log::info!("agent view: a shell, terminal only");
+            agent.set_terminal_only();
+        } else if self.terminal_panes.shown(&pane_id) {
             agent.set_terminal_shown(true);
         }
         self.agent = Some(agent);

@@ -2393,6 +2393,10 @@ pub struct AgentScreen {
     /// The terminal shows in place of the transcript (plan 20261027_07,
     /// step 5); the transcript keeps its place under it.
     term_shown: bool,
+    /// The session has only the terminal (a shell; plan 20261022_03, the
+    /// L3 amendment of 2026-10-28 00:47 EDT): it shows at once, there is
+    /// no terminal/list glyph, and nothing is sent to an agent.
+    terminal_only: bool,
     term: TermView,
     term_state: TermState,
     term_stamp: Option<TermStamp>,
@@ -3346,11 +3350,26 @@ impl AgentScreen {
                 self.general_agent_listening,
             )
         };
+        // A terminal-only session takes no message: no record button, and
+        // the keyboard glyph only while the terminal is armed, where it
+        // raises the terminal's keyboard.
+        if self.terminal_only {
+            let armed = self.terminal_armed();
+            buttons.retain(|b| match b.hit {
+                AgentHit::Message => false,
+                AgentHit::Keyboard => armed,
+                _ => true,
+            });
+        }
         // The terminal/list glyph, wherever the keyboard glyph is: between
         // play and the centre, mirroring the keyboard glyph's place right
         // of it, with its hit box and no background (plan 20261027_07,
-        // decision 7).
-        if let Some(keys) = buttons.iter().find(|b| b.hit == AgentHit::Keyboard) {
+        // decision 7). Not for a terminal-only session, which has no list.
+        if let Some(keys) = buttons
+            .iter()
+            .find(|b| b.hit == AgentHit::Keyboard)
+            .filter(|_| !self.terminal_only)
+        {
             let sq = BUTTON_H * s;
             let rect = Rect::new(pad + sq + 12.0 * s, keys.rect.y, sq, sq);
             buttons.push(FlowButton {
@@ -4471,7 +4490,7 @@ impl AgentScreen {
     /// Shows the terminal, or the transcript again, which kept its place.
     /// Showing it asks the client to open it, hiding it to close it.
     pub fn set_terminal_shown(&mut self, on: bool) {
-        if on == self.term_shown {
+        if on == self.term_shown || (self.terminal_only && !on) {
             return;
         }
         log::info!("terminal: {}", if on { "shown" } else { "transcript" });
@@ -4495,6 +4514,27 @@ impl AgentScreen {
     /// The fifth button's tap: the other view.
     pub fn toggle_terminal(&mut self) {
         self.set_terminal_shown(!self.term_shown);
+    }
+
+    /// Makes the session terminal only (a shell, plan 20261022_03, the L3
+    /// amendment of 2026-10-28 00:47 EDT): the terminal shows at once and
+    /// stays, without the terminal/list glyph, the record button, or the
+    /// keyboard glyph while the terminal is not armed.
+    pub fn set_terminal_only(&mut self) {
+        if self.terminal_only {
+            return;
+        }
+        self.terminal_only = true;
+        if self.term_shown {
+            self.settle();
+        } else {
+            self.set_terminal_shown(true);
+        }
+    }
+
+    /// Whether the session has only the terminal.
+    pub fn terminal_only(&self) -> bool {
+        self.terminal_only
     }
 
     /// Where the terminal is drawn: below the header, down to what the
@@ -4525,9 +4565,15 @@ impl AgentScreen {
 
     /// The terminal as the client has it now.
     pub fn set_terminal_state(&mut self, stamp: TermStamp, state: TermState) {
+        let armed = self.terminal_armed();
         self.term_stamp = Some(stamp);
         self.term_state = state;
         self.dirty = true;
+        // A terminal-only session's keyboard glyph comes and goes with the
+        // arm.
+        if self.terminal_only && armed != self.terminal_armed() {
+            self.settle();
+        }
     }
 
     /// What fits the terminal's area now at the view's type size: the
@@ -6332,6 +6378,73 @@ mod tests {
                 .iter()
                 .all(|b| b.hit != AgentHit::TerminalToggle)
         );
+    }
+
+    /// Plan 20261022_03, the 2026-10-28 00:47 EDT amendment: a shell's view
+    /// opens on the terminal and stays there; no terminal/list glyph, no
+    /// record button, and the keyboard glyph only while the terminal is
+    /// armed.
+    #[test]
+    fn a_shells_view_is_the_terminal_alone() {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_only();
+        assert!(a.terminal_only() && a.terminal_shown());
+        assert!(matches!(
+            a.take_terminal_asks().as_slice(),
+            [TermAsk::Open { .. }]
+        ));
+        let hits = |a: &AgentScreen| -> Vec<AgentHit> {
+            a.frame().buttons.iter().map(|b| b.hit).collect()
+        };
+        let none_of = |a: &AgentScreen, gone: &[AgentHit]| {
+            let h = hits(a);
+            assert!(gone.iter().all(|g| !h.contains(g)), "{h:?}");
+        };
+        none_of(
+            &a,
+            &[
+                AgentHit::TerminalToggle,
+                AgentHit::Message,
+                AgentHit::Keyboard,
+            ],
+        );
+        assert!(hits(&a).contains(&AgentHit::ReadAloud));
+        // Their places take no tap.
+        assert!(a.rect_of(AgentHit::TerminalToggle).is_none());
+        assert!(a.rect_of(AgentHit::Message).is_none());
+        // Offered and open: still no glyph; the transcript cannot come back.
+        a.set_terminal_state((1, true, true, None), offered(true));
+        none_of(&a, &[AgentHit::TerminalToggle, AgentHit::Keyboard]);
+        a.toggle_terminal();
+        a.set_terminal_shown(false);
+        assert!(a.terminal_shown());
+        assert!(
+            a.take_terminal_asks().is_empty(),
+            "never closed by a toggle"
+        );
+        // Armed: the keyboard glyph comes, for the terminal's keyboard.
+        let mut state = offered(true);
+        state.status = Some(flankr_companion::TerminalStatus {
+            open: true,
+            opening: false,
+            cols: 80,
+            rows: 24,
+            closed: None,
+            error: None,
+            armed_for: Some(Duration::from_secs(60)),
+            keys_pending: 0,
+            scroll_offset: None,
+            scroll_max: None,
+            cursor: false,
+            source: flankr_companion::TerminalSource::Poll,
+        });
+        a.set_terminal_state((2, true, true, Some(60)), state);
+        assert!(a.terminal_armed());
+        assert!(hits(&a).contains(&AgentHit::Keyboard));
+        none_of(&a, &[AgentHit::TerminalToggle, AgentHit::Message]);
+        // The arm ends: it goes again.
+        a.set_terminal_state((3, true, true, None), offered(true));
+        none_of(&a, &[AgentHit::Keyboard]);
     }
 
     #[test]
