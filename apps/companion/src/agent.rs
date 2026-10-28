@@ -54,10 +54,12 @@ use crate::theme::{theme, with_alpha};
 use crate::ui::Layout;
 
 mod input_box;
+pub mod keys_row;
 pub mod link_spans;
 mod notice_line;
 pub mod terminal_view;
 use input_box::InputBox;
+pub use keys_row::{KEYS_H, Latch, TermKey};
 pub use terminal_view::{MouseAt, TermAsk, TermState, TermView};
 
 /// The fifth button's labels: which glyph it draws (plan 20261027_07,
@@ -332,6 +334,10 @@ pub enum AgentHit {
     PromptCollapse,
     /// Gemini's bars while its card is hidden: open it again.
     PromptBars,
+    /// A key of the terminal's keys row (plan 20261022_03, the L3
+    /// amendment of 2026-10-28 10:42 EDT): its keys go to the pane, and a
+    /// tap on it never reaches the terminal or the soft keyboard.
+    TermKey(TermKey),
 }
 
 /// A button, in the flow or on the screen.
@@ -1990,6 +1996,11 @@ pub struct Frame {
     /// Where the prompt cards sit: above the bottom row, the suggestions
     /// and a response just sent (plan 20261027_03).
     pub prompt_bottom: f32,
+    /// The terminal's keys row, just above the soft keyboard while it is
+    /// raised into the terminal, and its keys (plan 20261022_03, the L3
+    /// amendment of 2026-10-28 10:42 EDT).
+    pub keys_row: Option<Rect>,
+    pub keys: Vec<(TermKey, Rect)>,
 }
 
 /// The one-line "jump to end" message below the scrollback, while
@@ -2415,6 +2426,11 @@ pub struct AgentScreen {
     /// Mouse events not yet asked for: held until the terminal is armed
     /// (the gesture's own arm on its way), as `term_lines` are.
     term_mouse: Vec<MouseAt>,
+    /// The soft keyboard is raised into the terminal, as the app says: the
+    /// keys row shows above it.
+    keys_row: bool,
+    /// CTRL and ALT latched on the keys row, for the next key.
+    term_latch: Latch,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -3335,7 +3351,16 @@ impl AgentScreen {
         // the right, square. While a message is taken, record becomes send
         // and a cancel sits in the middle. Replying to a card, the row is
         // in that card instead, and the screen's is hidden.
-        let row_bottom = l.h - l.bottom - 16.0 * s;
+        // The keys row, just above the soft keyboard (the layout's bottom
+        // carries its inset), lifts everything above it by its height, so
+        // the terminal shrinks by it.
+        let keys_row = self.keys_row_shown().then(|| {
+            let h = KEYS_H * s;
+            Rect::new(0.0, l.h - l.bottom - h, l.w, h)
+        });
+        let keys = keys_row.map_or_else(Vec::new, |r| keys_row::lay_out(r, s));
+        let keys_h = keys_row.map_or(0.0, |r| r.h);
+        let row_bottom = l.h - l.bottom - keys_h - 16.0 * s;
         let dictating = self.dictating();
         let replying = self.replying();
         let mut buttons = if replying.is_some() {
@@ -3562,6 +3587,8 @@ impl AgentScreen {
             jump,
             cross_bottom,
             prompt_bottom,
+            keys_row,
+            keys,
         }
     }
 
@@ -4116,6 +4143,11 @@ impl AgentScreen {
     /// and the flow's that are in the window.
     fn place_hits(&mut self) {
         self.hits.clear();
+        let s = self.scale();
+        for &(key, r) in &self.frame.keys {
+            self.hits
+                .push((AgentHit::TermKey(key), keys_row::tap_area(r, s)));
+        }
         for b in &self.frame.buttons {
             self.hits.push((b.hit, b.rect));
         }
@@ -4267,7 +4299,8 @@ impl AgentScreen {
     ) -> Option<AgentHit> {
         // The prompt cards, their bars and their overlay take what starts on
         // them; the bottom row stays live under the overlay.
-        let on_row = self.frame.buttons.iter().any(|b| b.rect.contains([x, y]));
+        let on_row = self.frame.buttons.iter().any(|b| b.rect.contains([x, y]))
+            || self.frame.keys_row.is_some_and(|r| r.contains([x, y]));
         if !(phase == TouchPhase::Started && on_row)
             && let Some(touched) = self.prompts.touch(id, phase, x, y, now)
         {
@@ -4499,6 +4532,7 @@ impl AgentScreen {
         self.term_lines = 0;
         self.term_fit_sent = None;
         self.term_mouse.clear();
+        self.term_latch = Latch::default();
         if on {
             self.term = TermView::default();
             self.term_asks.push(TermAsk::Open {
@@ -4556,6 +4590,55 @@ impl AgentScreen {
     /// Keys may be typed into the terminal now: it shows, and is armed.
     pub fn terminal_armed(&self) -> bool {
         self.term_shown && self.term_state.armed()
+    }
+
+    /// The soft keyboard is raised into the terminal, or no longer is: the
+    /// keys row shows above it, or goes, and the terminal's area shrinks
+    /// or grows by its height (plan 20261022_03, the L3 amendment of
+    /// 2026-10-28 10:42 EDT). The latch clears with the row.
+    pub fn set_keys_row(&mut self, on: bool) {
+        if on == self.keys_row {
+            return;
+        }
+        log::info!("terminal: keys row {}", if on { "shown" } else { "hidden" });
+        self.keys_row = on;
+        if !on {
+            self.term_latch = Latch::default();
+        }
+        self.settle();
+    }
+
+    /// Whether the keys row shows: the terminal does, and the soft keyboard
+    /// is raised into it.
+    pub fn keys_row_shown(&self) -> bool {
+        self.keys_row && self.term_shown
+    }
+
+    /// CTRL and ALT as latched for the next key.
+    pub fn latch(&self) -> Latch {
+        self.term_latch
+    }
+
+    /// A tap on the keys row's `key`: CTRL and ALT latch or clear, and
+    /// `None` is sent; the others are their token with the latched
+    /// modifiers, and the latch clears.
+    pub fn press_term_key(&mut self, key: TermKey) -> Option<String> {
+        self.dirty = true;
+        let Some(token) = key.token() else {
+            self.term_latch.toggle(key);
+            return None;
+        };
+        Some(std::mem::take(&mut self.term_latch).apply(token))
+    }
+
+    /// `keys` typed on the keyboard into the terminal, with the latched
+    /// modifiers on the first key; the latch clears.
+    pub fn modify_typed(&mut self, keys: &str) -> String {
+        if self.term_latch.is_empty() || keys.trim().is_empty() {
+            return keys.to_string();
+        }
+        self.dirty = true;
+        std::mem::take(&mut self.term_latch).apply_first(keys)
     }
 
     /// What the view was last given, for the app to compare.
@@ -5039,6 +5122,9 @@ impl AgentScreen {
                 recording,
                 self.live(b.hit),
             );
+        }
+        if let Some(row) = self.frame.keys_row {
+            keys_row::draw(list, ctx, row, &self.frame.keys, self.term_latch, s);
         }
     }
 
@@ -6432,7 +6518,7 @@ mod tests {
             rows: 24,
             closed: None,
             error: None,
-            armed_for: Some(Duration::from_secs(60)),
+            armed_for: Some(Duration::MAX),
             keys_pending: 0,
             scroll_offset: None,
             scroll_max: None,
@@ -6530,7 +6616,7 @@ mod tests {
             rows: 30,
             closed: None,
             error: None,
-            armed_for: armed.then(|| Duration::from_secs(60)),
+            armed_for: armed.then_some(Duration::MAX),
             keys_pending: 0,
             scroll_offset: None,
             scroll_max: None,
@@ -6916,7 +7002,7 @@ mod tests {
     }
 
     #[test]
-    fn the_terminal_draws_its_runs_and_the_armed_frame() {
+    fn the_terminal_draws_its_runs_and_no_frame_when_armed() {
         use libflankr_term::{Frame as TermFrame, parse_ansi};
         let mut a = screen(conversation(3), vec![], None);
         a.toggle_terminal();
@@ -6934,21 +7020,219 @@ mod tests {
             rows: 2,
             closed: None,
             error: None,
-            armed_for: Some(Duration::from_secs(60)),
+            armed_for: Some(Duration::MAX),
             keys_pending: 0,
             scroll_offset: None,
             scroll_max: None,
             cursor: false,
             source: flankr_companion::TerminalSource::Poll,
         });
-        a.set_terminal_state((3, true, true, Some(60)), state);
+        let mut unarmed = state.clone();
+        a.set_terminal_state((3, true, true, Some(0)), state);
         assert!(a.terminal_armed());
         assert!(a.draw(&mut list, &ctx, None));
         let colours: Vec<[f32; 4]> = list.instances.iter().map(|i| i.color).collect();
         let red = terminal_view::palette_colour(1, terminal_view::dark_theme());
         assert!(colours.contains(&red), "the red background is filled");
-        assert!(colours.contains(&theme().warn), "the armed frame");
         assert!(!a.draw(&mut list, &ctx, None), "only on change");
+        // No frame (plan 20261022_03, the L3 amendment of 2026-10-28 10:42
+        // EDT): armed draws just what unarmed does.
+        let armed: Vec<_> = list
+            .instances
+            .iter()
+            .map(|i| (i.position, i.size, i.color))
+            .collect();
+        unarmed.status.as_mut().unwrap().armed_for = None;
+        a.set_terminal_state((4, true, true, None), unarmed);
+        assert!(!a.terminal_armed());
+        assert!(a.draw(&mut list, &ctx, None));
+        let drawn: Vec<_> = list
+            .instances
+            .iter()
+            .map(|i| (i.position, i.size, i.color))
+            .collect();
+        assert_eq!(armed, drawn);
+    }
+
+    /// An armed terminal with the soft keyboard raised into it, over the
+    /// phone's keyboard inset.
+    fn keys_row_screen() -> (AgentScreen, Layout) {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_state((1, true, true, Some(0)), attached_state(true, false));
+        a.toggle_terminal();
+        let l = Layout {
+            bottom: PHONE.bottom + 700.0,
+            ..PHONE
+        };
+        a.set_layout(l);
+        a.take_terminal_asks();
+        (a, l)
+    }
+
+    #[test]
+    fn the_keys_row_sits_on_the_keyboard_and_the_terminal_shrinks_by_it() {
+        let (mut a, l) = keys_row_screen();
+        let s = l.scale;
+        assert!(a.frame().keys_row.is_none());
+        let before = a.terminal_rect();
+        let fit = a.terminal_fit().unwrap();
+        a.set_keys_row(true);
+        assert!(a.keys_row_shown());
+        let row = a.frame().keys_row.expect("the keys row");
+        // The full width, one row high, just above the keyboard's inset.
+        assert_eq!(
+            row,
+            Rect::new(0.0, l.h - l.bottom - KEYS_H * s, l.w, KEYS_H * s)
+        );
+        assert_eq!(a.frame().keys.len(), TermKey::ALL.len());
+        // Every key in it, and nothing else of the screen's in it.
+        for (key, r) in &a.frame().keys {
+            assert!(r.y >= row.y && r.y + r.h <= row.y + row.h + 0.01, "{key:?}");
+        }
+        for b in &a.frame().buttons {
+            assert!(b.rect.y + b.rect.h <= row.y, "{:?} above the row", b.hit);
+        }
+        // The terminal loses the row's height, and fits fewer rows.
+        let after = a.terminal_rect();
+        assert_eq!(after.y, before.y);
+        assert!((before.h - after.h - KEYS_H * s).abs() < 0.01);
+        let [(c, r)] = resizes(&a.take_terminal_asks())[..] else {
+            panic!("one resize");
+        };
+        assert_eq!(c, fit.0);
+        let px = terminal_view::START_PT * s;
+        assert!(fit.1 - r >= (KEYS_H * s / term_h(px)).floor() as u16);
+        assert_eq!(a.terminal_fit(), Some((c, r)));
+        // Gone with the keyboard: the terminal is whole again.
+        a.set_keys_row(false);
+        assert!(a.frame().keys_row.is_none());
+        assert_eq!(a.terminal_rect(), before);
+        assert_eq!(resizes(&a.take_terminal_asks()), vec![fit]);
+        // Not over the transcript.
+        a.set_keys_row(true);
+        a.toggle_terminal();
+        assert!(!a.keys_row_shown());
+        assert!(a.frame().keys_row.is_none());
+    }
+
+    #[test]
+    fn the_keys_rows_taps_are_its_keys_not_the_terminals() {
+        let (mut a, _) = keys_row_screen();
+        a.set_keys_row(true);
+        // The row's own resize.
+        assert_eq!(resizes(&a.take_terminal_asks()).len(), 1);
+        let keys = a.frame().keys.clone();
+        for (i, (key, r)) in keys.iter().enumerate() {
+            let t = Duration::from_secs(i as u64);
+            assert_eq!(
+                tap(&mut a, 10 + i as u64, *r, t),
+                Some(AgentHit::TermKey(*key))
+            );
+            assert_eq!(
+                a.rect_of(AgentHit::TermKey(*key))
+                    .map(|h| h.contains([r.x, r.y])),
+                Some(true)
+            );
+        }
+        // No arm, no keyboard, no click: the terminal never saw them.
+        assert!(a.take_terminal_asks().is_empty());
+        // Unarmed, a tap on the row arms nothing either.
+        a.set_terminal_state((2, true, true, None), attached_state(false, false));
+        let esc = keys[0].1;
+        assert_eq!(
+            tap(&mut a, 30, esc, Duration::from_secs(20)),
+            Some(AgentHit::TermKey(TermKey::Esc))
+        );
+        assert!(a.take_terminal_asks().is_empty());
+    }
+
+    #[test]
+    fn ctrl_and_alt_latch_for_the_next_key() {
+        let (mut a, _) = keys_row_screen();
+        a.set_keys_row(true);
+        // The keys send at once.
+        assert_eq!(a.press_term_key(TermKey::Esc).as_deref(), Some("escape"));
+        assert_eq!(a.press_term_key(TermKey::Tab).as_deref(), Some("tab"));
+        for (key, token) in [
+            (TermKey::Up, "up"),
+            (TermKey::Down, "down"),
+            (TermKey::Left, "left"),
+            (TermKey::Right, "right"),
+        ] {
+            assert_eq!(a.press_term_key(key).as_deref(), Some(token));
+        }
+        // CTRL latches, and applies to an arrow of the row; then clears.
+        assert_eq!(a.press_term_key(TermKey::Ctrl), None);
+        assert_eq!(
+            a.latch(),
+            Latch {
+                ctrl: true,
+                alt: false
+            }
+        );
+        assert_eq!(
+            a.press_term_key(TermKey::Left).as_deref(),
+            Some("ctrl+left")
+        );
+        assert!(a.latch().is_empty());
+        assert_eq!(a.press_term_key(TermKey::Up).as_deref(), Some("up"));
+        // Tapped again: cleared.
+        a.press_term_key(TermKey::Alt);
+        a.press_term_key(TermKey::Alt);
+        assert!(a.latch().is_empty());
+        // Both, on the next typed character, lowercased; then cleared.
+        a.press_term_key(TermKey::Ctrl);
+        a.press_term_key(TermKey::Alt);
+        assert_eq!(a.modify_typed("X"), "ctrl+alt+x");
+        assert_eq!(a.modify_typed("y"), "y");
+        // ALT on a typed character; CTRL on the keyboard's Backspace and
+        // Enter, which the daemon takes modified.
+        a.press_term_key(TermKey::Alt);
+        assert_eq!(a.modify_typed("."), "alt+.");
+        a.press_term_key(TermKey::Ctrl);
+        assert_eq!(a.modify_typed("backspace"), "ctrl+backspace");
+        a.press_term_key(TermKey::Ctrl);
+        assert_eq!(a.modify_typed("enter"), "ctrl+enter");
+        // What the daemon takes no modifier on goes as it is, and clears.
+        a.press_term_key(TermKey::Ctrl);
+        assert_eq!(a.modify_typed("space"), "space");
+        assert!(a.latch().is_empty());
+        // ESC with CTRL and ALT.
+        a.press_term_key(TermKey::Ctrl);
+        a.press_term_key(TermKey::Alt);
+        assert_eq!(
+            a.press_term_key(TermKey::Esc).as_deref(),
+            Some("ctrl+alt+escape")
+        );
+        // The row goes with the keyboard, and the latch with it.
+        a.press_term_key(TermKey::Ctrl);
+        a.set_keys_row(false);
+        assert!(a.latch().is_empty());
+    }
+
+    #[test]
+    fn a_latched_modifier_is_drawn_highlighted() {
+        let (mut a, _) = keys_row_screen();
+        a.set_keys_row(true);
+        let ctx = DrawContext::default();
+        let mut list = DrawList::new();
+        let accents = |a: &mut AgentScreen, list: &mut DrawList| {
+            a.invalidate();
+            a.draw(list, &ctx, None);
+            let row = a.frame().keys_row.unwrap();
+            list.instances
+                .iter()
+                .filter(|i| i.color == theme().accent && i.position[1] >= row.y)
+                .count()
+        };
+        let none = accents(&mut a, &mut list);
+        a.press_term_key(TermKey::Ctrl);
+        assert_eq!(accents(&mut a, &mut list), none + 1);
+        a.press_term_key(TermKey::Alt);
+        assert_eq!(accents(&mut a, &mut list), none + 2);
+        a.press_term_key(TermKey::Ctrl);
+        a.press_term_key(TermKey::Alt);
+        assert_eq!(accents(&mut a, &mut list), none);
     }
 
     #[test]

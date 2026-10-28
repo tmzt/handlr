@@ -86,9 +86,8 @@ pub const MAX_PT: f32 = 16.0;
 const DOUBLE_TAP: Duration = Duration::from_millis(400);
 /// The status line's type size, in points.
 const STATUS_PT: f32 = 14.0;
-/// The armed frame's width and its label's type size, in points.
-const ARMED_EDGE: f32 = 3.0;
-const ARMED_PT: f32 = 13.0;
+/// The pills' type size (the scroll offset, the stale tab), in points.
+const PILL_PT: f32 = 13.0;
 /// The stale pill's words (plan 20261027_08, the 23:32 EDT amendment).
 pub const STALE_LABEL: &str = "Desktop has the tab \u{2014} touch to take it back";
 /// A fit's cells are counted with this much slack, so a size that fills
@@ -973,23 +972,11 @@ impl TermView {
                 );
             }
         }
-        // Armed: a coloured frame, nothing over the terminal (the owner,
-        // 2026-10-28: the "Typing into" pill is removed).
-        if state.armed() {
-            let c = theme().warn;
-            let e = ARMED_EDGE * s;
-            for r in [
-                Rect::new(rect.x, rect.y, rect.w, e),
-                Rect::new(rect.x, rect.y + rect.h - e, rect.w, e),
-                Rect::new(rect.x, rect.y, e, rect.h),
-                Rect::new(rect.x + rect.w - e, rect.y, e, rect.h),
-            ] {
-                fill(list, r, c, 0.0);
-            }
-        }
+        // Armed: nothing is drawn for it, no frame and no pill (plan
+        // 20261022_03, the L3 amendment of 2026-10-28 10:42 EDT, item 2).
         // Scrolled back: how far, at the top left.
         if let Some(label) = scroll_label(state) {
-            let px = ARMED_PT * s;
+            let px = PILL_PT * s;
             let w = label.chars().count() as f32 * px * 0.5 + 16.0 * s;
             let h = line_h(px) + 6.0 * s;
             let pill = Rect::new(rect.x + 8.0 * s, rect.y + 8.0 * s, w, h);
@@ -1004,7 +991,7 @@ impl TermView {
         }
         // The desktop has the tab: the frames keep coming, at its size.
         if let Some(label) = stale_label(state) {
-            let px = ARMED_PT * s;
+            let px = PILL_PT * s;
             let w = (label.chars().count() as f32 * px * 0.5 + 16.0 * s).min(rect.w - 16.0 * s);
             let h = line_h(px) + 6.0 * s;
             let pill = Rect::new(
@@ -1157,7 +1144,7 @@ mod tests {
     fn armed_needs_an_open_terminal() {
         let mut st = TermState::default();
         let mut s = status(true);
-        s.armed_for = Some(Duration::from_millis(41_200));
+        s.armed_for = Some(Duration::MAX);
         st.status = Some(s.clone());
         assert!(st.armed());
         s.open = false;

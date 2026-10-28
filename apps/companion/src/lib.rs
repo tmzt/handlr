@@ -1410,6 +1410,14 @@ impl App {
             AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars => {
                 self.remember_prompts();
             }
+            // The keys row (plan 20261022_03, the L3 amendment of
+            // 2026-10-28 10:42 EDT): CTRL and ALT latch, the others go to
+            // the pane with them. The soft keyboard is left as it is.
+            AgentHit::TermKey(key) => {
+                if let Some(keys) = self.agent.as_mut().and_then(|a| a.press_term_key(key)) {
+                    self.send_terminal_keys(&keys);
+                }
+            }
             // The terminal/list glyph: the other view, for this session.
             AgentHit::TerminalToggle => {
                 if let (Some(agent), Some(pane)) = (&mut self.agent, &self.agent_pane) {
@@ -1439,8 +1447,8 @@ impl App {
         let t = companion.terminals();
         let shown = agent.terminal_shown();
         let status = shown.then(|| t.status(pane)).flatten();
-        // Armed or not, not the seconds left: no countdown is shown (the
-        // owner, 2026-10-28), and the client's changes() moves at expiry.
+        // Armed or not: the arm has no expiry (plan 20261022_03, the L3
+        // amendment of 2026-10-28 10:42 EDT).
         let armed = status
             .as_ref()
             .filter(|s| s.open)
@@ -1487,6 +1495,15 @@ impl App {
         }
         if !agent.terminal_armed() && self.term_ime.take().is_some() {
             log::info!("terminal: no longer armed; the keyboard leaves it");
+        }
+    }
+
+    /// `keys` typed into the terminal with the keys row's latched CTRL and
+    /// ALT on the first, which clears the latch.
+    fn modify_typed(&mut self, keys: &str) -> String {
+        match &mut self.agent {
+            Some(agent) => agent.modify_typed(keys),
+            None => keys.to_string(),
         }
     }
 
@@ -1845,6 +1862,18 @@ impl App {
         }
     }
 
+    /// Whether the soft keyboard is up and types into the terminal: the
+    /// terminal takes the keys, the route focuses it, the soft keyboard was
+    /// not dismissed and no physical keyboard types, and libmorph reports
+    /// its `inset`.
+    fn terminal_keyboard_up(&self, inset: f32) -> bool {
+        self.term_ime.is_some()
+            && self.keyboard.focused() == Some(FocusedPrompt::Terminal)
+            && !self.keyboard.dismissed()
+            && !self.keyboard.physical()
+            && inset > 0.0
+    }
+
     /// Gives the screen what it shows now; it changes only what differs.
     fn lay_out(&mut self, ctx: &MorphContext) {
         let (w, h) = ctx.surface_size();
@@ -1900,7 +1929,12 @@ impl App {
             o.set_play(self.read_aloud, self.speaking, self.viewed);
         }
 
+        // The soft keyboard raised into the terminal: the keys row shows
+        // just above it (plan 20261022_03, the L3 amendment of 2026-10-28
+        // 10:42 EDT).
+        let keys_row = self.terminal_keyboard_up(ctx.keyboard_inset());
         if let Some(agent) = &mut self.agent {
+            agent.set_keys_row(keys_row);
             agent.set_layout(layout);
             agent.set_general_agent_listening(ga_listening);
             agent.set_dictation(message);
@@ -2459,6 +2493,7 @@ impl MorphApp for App {
             && let Some(token) = terminal_keys::key_token(key)
         {
             self.keyboard.typed_physically();
+            let token = self.modify_typed(&token);
             self.send_terminal_keys(&token);
             return KeyStatus::Handled;
         }
@@ -2514,9 +2549,13 @@ impl MorphApp for App {
                 libmorph::TextInputEvent::Changed(text) => {
                     let keys = terminal_keys::edit_keys(old, text);
                     self.term_ime = Some(text.clone());
+                    let keys = self.modify_typed(&keys);
                     self.send_terminal_keys(&keys);
                 }
-                libmorph::TextInputEvent::Action(_) => self.send_terminal_keys("enter"),
+                libmorph::TextInputEvent::Action(_) => {
+                    let keys = self.modify_typed("enter");
+                    self.send_terminal_keys(&keys);
+                }
                 libmorph::TextInputEvent::Dismissed => self.keyboard.dismiss(),
                 _ => {}
             }
