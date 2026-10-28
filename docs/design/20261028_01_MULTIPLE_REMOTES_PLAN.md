@@ -1064,3 +1064,9 @@ and needs its own yes".
    malformed request, a second request once one is held) are refused at
    once and do not count; while a sequence is held, any other request is
    refused.
+
+## Amendment — 2026-10-28 14:44 EDT: correction of a cited time
+
+The previous amendment ("one attempt per `flankr pair` run") cites "the
+14:33 EDT amendment"; it is the **14:37 EDT** amendment (pairing confirmed
+by six words on both sides). Its content is unchanged.
