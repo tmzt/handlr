@@ -2928,3 +2928,41 @@ before this one). Not yet tried on the S23.
    confirmation code).
 7. **`apps/Cargo.lock`** took `libflankr_proto` 0.4.3 with a few
    Windows-only and `tempfile` entries moved by cargo.
+
+## 2026-10-28 15:12 EDT — plan 20261028_01, the six-word pairing step and the review's changes: departures
+
+Plan: docs/design/20261028_01_MULTIPLE_REMOTES_PLAN.md, the amendments from
+13:59 to 14:44 EDT. Commits: `5568c2c`, `1bffe09` (the review's item 4),
+`a8fabb6` (libflankr_proto 0.5.0), `b248bbf` (the daemon), `1699bd2`
+(flankr-companion 0.3.0), `15a5bf1` (the app). Not yet tried on the S23.
+
+1. **Protocol:** `PairRefusal::Malformed` added beside wrong offer,
+   expired and busy; `LinkError::Pairing` carries message errors; the
+   pairing result is one binary message on the NK session;
+   `accept_incoming` lets one listener take both IK and NK. NK does not
+   prove the phone holds its key's private half; the words bind the key,
+   and the phone's first IK connection proves it. A payload without an
+   offer is still written as version 2.
+2. **Daemon:** the new local methods and notifications (`link.pair_code`,
+   `link.pair_answer`, `link.pair_request`, `link.pair_ended`,
+   `timeout_secs` and `expires_in_secs` on `link.pair_begin`) live in
+   `src/server/link/pair_mode.rs`, to move into libflankr_proto later;
+   proto's doc on `LINK_PAIR_BEGIN` ("nothing is held pending") is out of
+   date. A second `link.pair_begin` replaces the running run (the old one
+   is told `replaced`, a held phone `Refused`). `link.pair_add` (no
+   words) stays on the local socket for tools; `flankr pair` no longer
+   uses it. After the fallback's yes, `flankr pair` exits without waiting
+   for the device's first connection. Anything a held phone sends is taken
+   as a cancel.
+3. **Phone:** `Event::PairingCode` became `Event::PairingWords`, with
+   `replace` in `DeviceCodeFallback`. A daemon that closes NK without a
+   reply is treated as unreachable and gets the device-code fallback (it
+   cannot be told from an older daemon); an immediate refusal does not fall
+   back. A held request gives up 10 s (`RESULT_GRACE`) after the offer's
+   time. A new offer for the daemon already being paired keeps the key and
+   asks again. With an offer, the fallback still probes for the full 10
+   minutes.
+4. **Review fixes:** a listed remote's new addresses count as reached if
+   any address in the link answers (within 30 s, `CHECK_TIMEOUT`);
+   `keys.rs` still chmods its key files after creating them (only
+   `state.redb` was in scope).
