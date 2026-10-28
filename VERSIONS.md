@@ -355,3 +355,14 @@ serde-defaulted field on a request variant, and two new functions (plan
     byte-identical;
   - `HerdrRequest::inspect_pane_as(pane_id, lines, source, format)` and
     `HerdrClient::inspect_pane_as(pane_id, lines, source, format)`.
+
+## libflankr_proto 0.4.1 — 2026-10-27 (the commit tagged `libflankr_proto-v0.4.1`)
+
+Additive (a new method and its types; plan 20261022_03's L3 amendment on
+the terminal view's drag):
+
+- **Added:** `common::methods::TERMINAL_SCROLL` (`terminal.scroll`),
+  `TerminalScrollParams { terminal_id, lines }` (positive back into the
+  scrollback) and `TerminalScrollResult { offset_from_bottom,
+  max_offset_from_bottom }`, the pane scrolled as a mouse wheel does, gated
+  as `terminal.input` is.

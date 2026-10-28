@@ -92,6 +92,11 @@ pub mod methods {
     /// Keys into an armed terminal
     /// ([`TerminalInputParams`](super::TerminalInputParams)), answered `{}`.
     pub const TERMINAL_INPUT: &str = "terminal.input";
+    /// Scroll an armed terminal's pane, as a mouse wheel does
+    /// ([`TerminalScrollParams`](super::TerminalScrollParams) →
+    /// [`TerminalScrollResult`](super::TerminalScrollResult)). Gated as
+    /// [`TERMINAL_INPUT`] is.
+    pub const TERMINAL_SCROLL: &str = "terminal.scroll";
     /// Notification, daemon → phone: a terminal ended
     /// ([`TerminalClosedParams`](super::TerminalClosedParams)).
     pub const TERMINAL_CLOSED: &str = "terminal.closed";
@@ -1360,6 +1365,25 @@ pub struct TerminalInputParams {
     pub keys: String,
 }
 
+/// `terminal.scroll`: scroll an armed terminal's pane by `lines`, as a
+/// mouse wheel does: positive goes back into the scrollback, negative
+/// towards the bottom. The daemon sets herdr's `pane.scroll` offset, so the
+/// pane scrolls wherever it is shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalScrollParams {
+    pub terminal_id: u32,
+    pub lines: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalScrollResult {
+    /// The pane's scroll offset afterwards, in rows above the bottom.
+    pub offset_from_bottom: u64,
+    /// The furthest it can go back, when herdr reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_offset_from_bottom: Option<u64>,
+}
+
 /// Why a terminal ended. Open: a reason this crate does not know reads as
 /// `Unknown`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2427,6 +2451,7 @@ mod tests {
         assert_eq!(methods::TERMINAL_INPUT_ARM, "terminal.input_arm");
         assert_eq!(methods::TERMINAL_INPUT, "terminal.input");
         assert_eq!(methods::TERMINAL_CLOSED, "terminal.closed");
+        assert_eq!(methods::TERMINAL_SCROLL, "terminal.scroll");
 
         let open = TerminalOpenParams {
             pane_id: "w2:p4".into(),
@@ -2465,6 +2490,17 @@ mod tests {
             keys: "ls enter".into(),
         });
         assert_eq!(TERMINAL_INPUT_MAX, 64);
+        round_trip(TerminalScrollParams {
+            terminal_id: 1,
+            lines: -3,
+        });
+        round_trip(TerminalScrollResult {
+            offset_from_bottom: 12,
+            max_offset_from_bottom: Some(400),
+        });
+        let bare: TerminalScrollResult =
+            serde_json::from_value(json!({"offset_from_bottom": 0})).unwrap();
+        assert_eq!(bare.max_offset_from_bottom, None);
 
         for (reason, wire) in [
             (TerminalClosedReason::PaneClosed, "pane_closed"),
