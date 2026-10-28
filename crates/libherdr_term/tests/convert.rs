@@ -361,7 +361,7 @@ fn each_named_key_token() {
         Vec::<ClientPaneInputEvent>::from(KeyToken::parse("aB").unwrap()),
         ab
     );
-    for bad in ["", "ctrl+1", "ctrl+enter", "\u{1b}"] {
+    for bad in ["", "ctrl+1", "ctrl+home", "\u{1b}"] {
         assert_eq!(KeyToken::parse(bad), None, "{bad:?}");
     }
 }
@@ -384,4 +384,57 @@ fn parse_keys_tokens_become_key_events() {
             .any(|e| matches!(e, ClientPaneInputEvent::TextCommit(_)))
     );
     assert_eq!(key_events(&["a", "ctrl+1"]), Err("ctrl+1".to_string()));
+}
+
+/// The L3 amendment of 2026-10-28 10:42 EDT: `alt+`, `ctrl+alt+` and
+/// modified named keys carry crossterm's bits (Shift 1, Ctrl 2, Alt 4).
+#[test]
+fn alt_and_ctrl_alt_combos_carry_their_modifier_bits() {
+    let events = |token: &str| Vec::<ClientPaneInputEvent>::from(KeyToken::parse(token).unwrap());
+    for (token, code, modifiers) in [
+        ("alt+x", ClientKeyCode::Char('x'), 4),
+        ("alt+X", ClientKeyCode::Char('X'), 4),
+        ("alt+.", ClientKeyCode::Char('.'), 4),
+        ("alt++", ClientKeyCode::Char('+'), 4),
+        ("alt+é", ClientKeyCode::Char('é'), 4),
+        ("ctrl+alt+x", ClientKeyCode::Char('x'), 6),
+        ("alt+ctrl+Y", ClientKeyCode::Char('y'), 6),
+        ("ctrl+alt+c", ClientKeyCode::Char('c'), 6),
+        ("ctrl+alt+\\", ClientKeyCode::Char('\\'), 6),
+        ("ctrl+left", ClientKeyCode::Left, 2),
+        ("ctrl+right", ClientKeyCode::Right, 2),
+        ("alt+up", ClientKeyCode::Up, 4),
+        ("ctrl+alt+down", ClientKeyCode::Down, 6),
+        ("ctrl+tab", ClientKeyCode::Tab, 2),
+        ("alt+escape", ClientKeyCode::Esc, 4),
+        ("ctrl+esc", ClientKeyCode::Esc, 2),
+        ("alt+enter", ClientKeyCode::Enter, 4),
+        ("ctrl+enter", ClientKeyCode::Enter, 2),
+        ("ctrl+backspace", ClientKeyCode::Backspace, 2),
+        ("alt+backspace", ClientKeyCode::Backspace, 4),
+    ] {
+        assert_eq!(events(token), press_release(code, modifiers), "{token}");
+    }
+    // ctrl+<a-z> alone stays its own token.
+    assert_eq!(KeyToken::parse("ctrl+R"), Some(KeyToken::Ctrl('r')));
+    for bad in [
+        "alt+",
+        "ctrl+alt+",
+        "alt+xy",
+        "alt+space",
+        "alt+\u{1b}",
+        "ctrl+alt+1",
+        "ctrl+.",
+        "ctrl+home",
+        "alt+f1",
+        "alt+alt+x",
+        "ctrl+ctrl+a",
+        "ctrl+shift+a",
+    ] {
+        assert_eq!(KeyToken::parse(bad), None, "{bad:?}");
+    }
+    let tokens = ["alt+b", "ctrl+left"];
+    let mut want = press_release(ClientKeyCode::Char('b'), 4);
+    want.extend(press_release(ClientKeyCode::Left, 2));
+    assert_eq!(key_events(&tokens).unwrap(), want);
 }

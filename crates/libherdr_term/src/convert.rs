@@ -171,7 +171,7 @@ impl From<&PaneView<'_>> for Grid {
 }
 
 /// One key token as the daemon's `parse_keys` makes them
-/// (`src/server/terminal.rs`): a named key, `ctrl+<a-z>` (or `ctrl+\`), or
+/// (`src/server/terminal.rs`): a named key, a `ctrl+`/`alt+` combo, or
 /// text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyToken {
@@ -189,42 +189,96 @@ pub enum KeyToken {
     /// `ctrl+<c>`, sent as `Char(c)` with Ctrl (modifiers 2), pressed and
     /// released.
     Ctrl(char),
+    /// Any other combo `parse_keys` makes (the L3 amendment of 2026-10-28
+    /// 10:42 EDT of plan 20261022_03): `alt+<printable>` (its case kept),
+    /// `ctrl+alt+<a-z or \>`, and `ctrl+`, `alt+` or both before a
+    /// [`KeyToken::Named`] key, with crossterm's modifier bits (Ctrl 2,
+    /// Alt 4), pressed and released.
+    Modified { code: ClientKeyCode, modifiers: u8 },
 }
 
 /// crossterm's Ctrl bit, as herdr's `modifiers` carry it.
 const CTRL: u8 = 2;
+/// crossterm's Alt bit, as herdr's `modifiers` carry it.
+const ALT: u8 = 4;
+
+fn named_key(lower: &str) -> Option<ClientKeyCode> {
+    Some(match lower {
+        "enter" => ClientKeyCode::Enter,
+        "escape" | "esc" => ClientKeyCode::Esc,
+        "tab" => ClientKeyCode::Tab,
+        "backspace" => ClientKeyCode::Backspace,
+        "up" => ClientKeyCode::Up,
+        "down" => ClientKeyCode::Down,
+        "left" => ClientKeyCode::Left,
+        "right" => ClientKeyCode::Right,
+        _ => return None,
+    })
+}
 
 impl KeyToken {
     /// The token `token`, or `None` for an empty one, a control character
-    /// or a `ctrl+` combo `parse_keys` does not make.
+    /// or a combo `parse_keys` does not make.
     pub fn parse(token: &str) -> Option<KeyToken> {
         let lower = token.to_lowercase();
-        let named = match lower.as_str() {
-            "enter" => Some(ClientKeyCode::Enter),
-            "escape" | "esc" => Some(ClientKeyCode::Esc),
-            "tab" => Some(ClientKeyCode::Tab),
-            "backspace" => Some(ClientKeyCode::Backspace),
-            "up" => Some(ClientKeyCode::Up),
-            "down" => Some(ClientKeyCode::Down),
-            "left" => Some(ClientKeyCode::Left),
-            "right" => Some(ClientKeyCode::Right),
-            "space" => return Some(KeyToken::Text(" ".into())),
-            _ => None,
-        };
-        if let Some(code) = named {
+        if lower == "space" {
+            return Some(KeyToken::Text(" ".into()));
+        }
+        if let Some(code) = named_key(&lower) {
             return Some(KeyToken::Named(code));
         }
-        if let Some(rest) = lower.strip_prefix("ctrl+") {
-            let mut chars = rest.chars();
-            return match (chars.next(), chars.next()) {
-                (Some(c), None) if c.is_ascii_lowercase() || c == '\\' => Some(KeyToken::Ctrl(c)),
-                _ => None,
+        let mut modifiers = 0;
+        let mut rest = token;
+        loop {
+            let l = rest.to_ascii_lowercase();
+            let bit = if l.starts_with("ctrl+") {
+                CTRL
+            } else if l.starts_with("alt+") {
+                ALT
+            } else {
+                break;
             };
+            if modifiers & bit != 0 {
+                return None;
+            }
+            modifiers |= bit;
+            rest = &rest[l.find('+')? + 1..];
         }
-        if token.is_empty() || token.chars().any(char::is_control) {
+        if modifiers == 0 {
+            if token.is_empty() || token.chars().any(char::is_control) {
+                return None;
+            }
+            return Some(KeyToken::Text(token.to_owned()));
+        }
+        if let Some(code) = named_key(&rest.to_lowercase()) {
+            return Some(KeyToken::Modified { code, modifiers });
+        }
+        let mut chars = rest.chars();
+        let c = match (chars.next(), chars.next()) {
+            (Some(c), None) => c,
+            _ => return None,
+        };
+        if modifiers & CTRL != 0 {
+            let c = c.to_ascii_lowercase();
+            if !(c.is_ascii_lowercase() || c == '\\') {
+                return None;
+            }
+            return Some(if modifiers == CTRL {
+                KeyToken::Ctrl(c)
+            } else {
+                KeyToken::Modified {
+                    code: ClientKeyCode::Char(c),
+                    modifiers,
+                }
+            });
+        }
+        if c.is_control() || c.is_whitespace() {
             return None;
         }
-        Some(KeyToken::Text(token.to_owned()))
+        Some(KeyToken::Modified {
+            code: ClientKeyCode::Char(c),
+            modifiers,
+        })
     }
 }
 
@@ -244,7 +298,7 @@ fn key(code: ClientKeyCode, modifiers: u8, kind: ClientKeyKind) -> ClientPaneInp
 
 impl From<KeyToken> for Vec<ClientPaneInputEvent> {
     /// Each key is a `Press` and then a `Release`, so herdr's held-key
-    /// tracking ends clean: a named key or `ctrl+` combo is one key, a text
+    /// tracking ends clean: a named key or combo is one key, a text
     /// token one key per character. No `TextCommit` is made (it stays in
     /// herdr's types for a paste).
     fn from(token: KeyToken) -> Vec<ClientPaneInputEvent> {
@@ -261,6 +315,7 @@ impl From<KeyToken> for Vec<ClientPaneInputEvent> {
                 .collect(),
             KeyToken::Named(code) => press_release(code, 0).to_vec(),
             KeyToken::Ctrl(c) => press_release(ClientKeyCode::Char(c), CTRL).to_vec(),
+            KeyToken::Modified { code, modifiers } => press_release(code, modifiers).to_vec(),
         }
     }
 }

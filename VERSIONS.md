@@ -423,3 +423,13 @@ open enums; plan 20261027_08, decision 10):
   `TerminalResizeParams { terminal_id, cols, rows }`, answered `{}`.
 
 `companion::VERSION` stays 1 and the link prologue `flankr.link/1`.
+
+## libherdr_term 0.2.0 — 2026-10-28 (the commit tagged `libherdr_term-v0.2.0`)
+
+The crate's first entry; 0.1.0 (plan 20261027_08, steps 2-4, with the
+fake server and typed characters as key events of steps 7-8) had none. Not
+strictly additive (plan 20261022_03's L3 amendment on the keys row):
+
+- **Breaking:** `convert::KeyToken` gains `Modified { code, modifiers }`
+  (crossterm bits: Ctrl 2, Alt 4), for `alt+<char>`, `ctrl+alt+<a-z>` and
+  `ctrl+`/`alt+` before the named keys; `KeyToken` is an exhaustive enum.

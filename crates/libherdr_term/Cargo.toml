@@ -1,6 +1,6 @@
 [package]
 name = "libherdr_term"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Attaching to the local herdr as one of herdr's own shell clients, with herdr's protocol types extracted from the vendor/herdr submodule"
 # The crate's own code is flankr's; build.rs generates `libherdr_term::herdr`
