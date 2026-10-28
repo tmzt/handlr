@@ -317,3 +317,23 @@ sections and rows (the 2026-10-28 amendment that made it living):
    confirm modal as the X) and **Close**.
 2. The companion crate's `RemoteInfo` gains the full fingerprint (hex and
    words), additively, for this.
+
+## Amendment — 2026-10-28 17:48 EDT: the Remotes section is standard rows only (living section)
+
+The owner (2026-10-28): "I'm not sure what the 'already paired' line is
+supposed to mean, but the settings rows should be standardized, not extra
+text after them"; asked to queue the change, "yes".
+
+1. **No note under the Remotes rows.** The section is standard rows only
+   (name and status, the details line, the X); the note line that showed
+   "Removing…", "Removed", "Removed on this phone only", "Paired with…" and
+   "Already paired…" is removed.
+2. **Each message moves to where the action happened:** "Paired with…" and
+   "Already paired with <name>; addresses updated" (a scan of a daemon
+   already listed, whose stored addresses were refreshed) are the pairing
+   window's success state; removal results show in the remove confirm
+   modal ("Removing…" until the daemon answers, then it closes; "removed on
+   this phone only" stays in the modal until it is closed); full details
+   are in the row's details modal (the previous amendment).
+3. **Empty and full:** with no remotes the section shows one standard row,
+   "No remotes paired"; with 8 remotes the + is dimmed and its ⓘ says why.
