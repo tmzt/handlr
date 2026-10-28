@@ -2990,3 +2990,13 @@ tried on the S23.
    app's own "pairing failed" note; the tests skip audio devices.
 7. The "pairing…" state between a scan and the six words is covered only
    by a unit test (the local test daemon answers in the same frame).
+
+## 2026-10-28 17:38 EDT — plan 20261028_02: the placeholder's copy cut to one line
+
+Plan: docs/design/20261028_02_PAIRING_QR_SCAN_PLAN.md (decision 21's copy).
+The owner, on the S23: "the copy in the tap to scan is too long, it just
+needs to tell the user to scan the new QR code to add an additional
+remote", and "it already says Pair another remote". `remote_add`'s text is
+now "Scan the QR code shown by flankr pair.", drawn under Tap to scan in
+both the add mode and the first run; the idle window shows no status line
+(`pairing_camera_why` is no longer drawn; the key stays in the copy file).
