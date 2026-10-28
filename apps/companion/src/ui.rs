@@ -4,12 +4,16 @@
 //! the nodes; the draw list is rebuilt only when something changed.
 //!
 //! From the top: the title and two status lines. From the bottom: the
-//! pairing field and its Pair button, and above them the device code and
-//! any pairing note. It shows while the phone is not paired and not
-//! connected, or shows its device code; otherwise the overview is the home
-//! screen (plan 20261023_04), and the conversation, the confirmation and
-//! the dictation cards, and their buttons, are there. The lines those
-//! cards show are built here.
+//! pairing field and its Pair button, and above them the device code, its
+//! confirmation code and any pairing note. While a pairing waits for its
+//! code to be added, a Cancel button takes the field's place. It shows
+//! while the phone is not paired and not connected, or shows its device
+//! code, or is in its **add** mode, opened by the **+** in Settings'
+//! Remotes (plan 20261028_01, decision 9): titled *Pair another remote*,
+//! with a "<" at the top left back to Settings. Otherwise the overview is
+//! the home screen (plan 20261023_04), and the conversation, the
+//! confirmation and the dictation cards, and their buttons, are there. The
+//! lines those cards show are built here.
 
 use flankr_companion::{Dictation, DictationPhase, PromptMode};
 use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Router, TextAlign};
@@ -17,10 +21,15 @@ use libflankr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
 use crate::prompt::PromptInput;
+use crate::settings::copy;
 use crate::theme::theme;
 
-/// Lines of the pairing area (the code and its notes).
-const CODE_LINES: usize = 8;
+/// Lines of the pairing area (the code, its confirmation code and the
+/// notes).
+const CODE_LINES: usize = 16;
+/// The add mode's back glyph: ASCII, as the pairing screen's face has no
+/// "‹".
+const BACK_GLYPH: &str = "<";
 
 /// One line of text, before layout.
 #[derive(Clone, Debug, PartialEq)]
@@ -298,10 +307,13 @@ pub struct View {
     pub field: String,
     /// The field has the keyboard.
     pub field_focused: bool,
-    /// Hide the pairing field and its Pair button: the app is paired. The
-    /// pairing area (a device code, notes) still shows above where they
-    /// were.
-    pub paired: bool,
+    /// A pairing waits for its code to be added: the field and Pair are
+    /// hidden, and Cancel shows in their place. The pairing area (the
+    /// device code, the confirmation code, notes) shows above it.
+    pub waiting: bool,
+    /// The add mode (**+** in Settings' Remotes): its title, and a "<"
+    /// back to Settings.
+    pub adding: bool,
 }
 
 /// A control a touch landed on.
@@ -309,6 +321,10 @@ pub struct View {
 pub enum Hit {
     Field,
     Pair,
+    /// Cancel, while a pairing waits.
+    Cancel,
+    /// The add mode's "<": back to Settings.
+    Back,
 }
 
 /// Surface size, scale factor and safe area top and bottom.
@@ -326,6 +342,8 @@ impl Layout {
     /// The Pair button's width and the row's height, in points.
     const PAIR_W: f32 = 96.0;
     const ROW_H: f32 = 48.0;
+    /// The add mode's "<" target, in points.
+    const BACK_W: f32 = 56.0;
     const FIELD_SIZE: f32 = 16.0;
 
     /// How many characters of `size` points fit on a line: roughly half an
@@ -346,10 +364,12 @@ const PLACEHOLDER: &str = "paste a pairing URL";
 pub struct Screen {
     router: Router,
     title: NodeId,
+    back: NodeId,
     status: [NodeId; 2],
     code: Vec<NodeId>,
     field: NodeId,
     pair: NodeId,
+    cancel: NodeId,
     /// Where each visible control is, as last laid out.
     hits: Vec<(Hit, Rect)>,
     /// What the screen shows, as last laid out.
@@ -373,6 +393,7 @@ impl Screen {
                 .with_font_size(18.0)
         };
         let title = router.add(None, label("flankr", 32.0, theme().text, TextAlign::Center));
+        let back = router.add(None, label(BACK_GLYPH, 28.0, theme().text, TextAlign::Left));
         let status = [
             router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
             router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
@@ -389,13 +410,16 @@ impl Screen {
                 .with_font_size(Layout::FIELD_SIZE),
         );
         let pair = router.add(None, button("Pair", theme().message));
+        let cancel = router.add(None, button(copy::CANCEL.text, theme().back));
         Self {
             router,
             title,
+            back,
             status,
             code,
             field,
             pair,
+            cancel,
             hits: Vec::new(),
             shown: None,
             dirty: true,
@@ -437,14 +461,35 @@ impl Screen {
             label.rect = Rect::new(x, *y, layout.w - 2.0 * x, size * s * 1.3);
             *y += size * s * 1.35;
         };
+        // The add mode's title (smaller, to fit beside the "<").
+        let (title, title_pt) = if view.adding {
+            (copy::REMOTE_ADD.label(), 24.0)
+        } else {
+            ("flankr", 32.0)
+        };
+        let title_y = y;
         place(
             &mut self.router,
             &mut y,
             self.title,
-            None,
-            (32.0, theme().text),
+            Some(title),
+            (title_pt, theme().text),
             0.0,
         );
+        {
+            let back_w = Layout::BACK_W * s;
+            let label = self.router.get_mut::<Label>(self.back).expect("the back");
+            label.font_size = Some(28.0 * s);
+            label.color = Some(theme().text);
+            label.rect = Rect::new(pad, title_y, back_w, title_pt * s * 1.3);
+            self.router
+                .set_flags(self.back, NodeFlags::HIDDEN, !view.adding);
+            if view.adding {
+                let h = (y - layout.top).max(44.0 * s);
+                self.hits
+                    .push((Hit::Back, Rect::new(0.0, layout.top, back_w + pad, h)));
+            }
+        }
         for (i, &id) in self.status.iter().enumerate() {
             let text = view.status.get(i).map_or("", String::as_str);
             place(
@@ -457,10 +502,10 @@ impl Screen {
             );
         }
 
-        // The bottom: the field and Pair, hidden once paired.
+        // The bottom: the field and Pair, or Cancel while a pairing waits.
         let bottom = layout.h - layout.bottom - 24.0 * s;
         let row_h = Layout::ROW_H * s;
-        let row_y = if view.paired { bottom } else { bottom - row_h };
+        let row_y = bottom - row_h;
         let pair_w = Layout::PAIR_W * s;
         let field_w = layout.w - 2.0 * pad - pair_w - 12.0 * s;
         let field_rect = Rect::new(pad, row_y, field_w, row_h);
@@ -484,12 +529,16 @@ impl Screen {
             edit.font_size = Some(Layout::FIELD_SIZE * s);
             edit.corner_radius = Some(8.0 * s);
             edit.rect = field_rect;
-            edit.state.set_active(view.field_focused && !view.paired);
+            edit.state.set_active(view.field_focused && !view.waiting);
         }
         self.router
-            .set_flags(self.field, NodeFlags::HIDDEN, view.paired);
-        self.place_button(self.pair, pair_rect, s, !view.paired);
-        if !view.paired {
+            .set_flags(self.field, NodeFlags::HIDDEN, view.waiting);
+        self.place_button(self.pair, pair_rect, s, !view.waiting);
+        let cancel_rect = Rect::new(pad, row_y, layout.w - 2.0 * pad, row_h);
+        self.place_button(self.cancel, cancel_rect, s, view.waiting);
+        if view.waiting {
+            self.hits.push((Hit::Cancel, cancel_rect));
+        } else {
             self.hits.push((Hit::Field, field_rect));
             self.hits.push((Hit::Pair, pair_rect));
         }
@@ -632,15 +681,16 @@ mod tests {
     }
 
     #[test]
-    fn the_pairing_row_is_hidden_once_paired() {
+    fn the_pairing_row_is_cancel_while_a_pairing_waits() {
         let mut screen = Screen::new();
         screen.set(PHONE, View::default());
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Field));
+        assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Cancel));
         screen.set(
             PHONE,
             View {
-                paired: true,
+                waiting: true,
                 code: vec![line("flankrkey1abc")],
                 ..View::default()
             },
@@ -651,6 +701,18 @@ mod tests {
                 .iter()
                 .any(|(h, _)| matches!(h, Hit::Pair | Hit::Field))
         );
+        let cancel = screen
+            .hits
+            .iter()
+            .find(|(h, _)| *h == Hit::Cancel)
+            .expect("a Cancel")
+            .1;
+        assert_eq!(
+            screen.hit(cancel.x + 1.0, cancel.y + 1.0),
+            Some(Hit::Cancel)
+        );
+        let label = screen.router.get::<Button>(screen.cancel).unwrap();
+        assert_eq!(label.text, "Cancel");
     }
 
     #[test]
@@ -661,6 +723,61 @@ mod tests {
         assert_eq!(screen.hit(pair.x + 1.0, pair.y + 1.0), Some(Hit::Pair));
         // The middle of the screen is no control: a tap.
         assert_eq!(screen.hit(540.0, 1200.0), None);
+    }
+
+    #[test]
+    fn the_add_mode_has_its_title_a_back_and_the_confirmation_code() {
+        use crate::remotes::{CONFIRMATION_PT, Code, Pairing};
+        let mut screen = Screen::new();
+        screen.set(PHONE, View::default());
+        let title = |s: &Screen| s.router.get::<Label>(s.title).unwrap().text().to_string();
+        assert_eq!(title(&screen), "flankr");
+        assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Back));
+        // The + in Settings: the add mode, with the field and Pair.
+        let mut p = Pairing::default();
+        p.open_add();
+        let view = |p: &Pairing| View {
+            code: p.lines(&PHONE, None),
+            waiting: p.waiting(),
+            adding: p.adding,
+            ..View::default()
+        };
+        screen.set(PHONE, view(&p));
+        assert_eq!(title(&screen), "Pair another remote");
+        let back = screen.hits.iter().find(|(h, _)| *h == Hit::Back).unwrap().1;
+        assert_eq!(screen.hit(back.x + 1.0, back.y + 1.0), Some(Hit::Back));
+        assert!(back.y >= PHONE.top && back.x == 0.0, "top left");
+        assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
+        // A pairing waits: its codes show, and Cancel replaces the field.
+        p.show(Code {
+            code: "flankrkey1".to_string() + &"Ab3".repeat(20),
+            server: "m4".into(),
+            confirmation: "543268".into(),
+        });
+        screen.set(PHONE, view(&p));
+        assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Cancel));
+        assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
+        let shown: Vec<(String, f32)> = screen
+            .code
+            .iter()
+            .map(|&id| {
+                let l = screen.router.get::<Label>(id).unwrap();
+                (l.text().to_string(), l.font_size.unwrap_or(0.0))
+            })
+            .filter(|(t, _)| !t.is_empty())
+            .collect();
+        let digits = shown
+            .iter()
+            .find(|(t, _)| t == "543268")
+            .expect("the confirmation code is drawn");
+        assert_eq!(digits.1, CONFIRMATION_PT * PHONE.scale, "large");
+        assert!(shown.iter().any(|(t, _)| t == "Confirmation code"));
+        assert!(
+            shown
+                .iter()
+                .any(|(t, _)| t.starts_with("Check that it matches")),
+            "{shown:?}"
+        );
     }
 
     fn card(state: CardState) -> Card {

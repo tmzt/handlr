@@ -1,5 +1,5 @@
-//! The confirming modal of *Unpair this device* and *Delete data*
-//! (decision 3): its question, in Markdown from `SETTINGS_COPY.md`, and
+//! The confirming modal of a remote's X (plan 20261028_01, decision 21)
+//! and *Delete data* (decision 3): its question, in Markdown from `SETTINGS_COPY.md`, and
 //! *Cancel* and the action (in red) under it. It is libcontrols' `ModalDialog`, centred, over a dimmed
 //! screen; both buttons are its close controls, so the modal stack says
 //! which one closed it, and a tap outside it or Back is *Cancel*.

@@ -26,6 +26,7 @@ pub mod danger_row;
 pub mod info;
 pub mod link_row;
 pub mod option_row;
+pub mod remote_row;
 pub mod screen;
 pub mod toggle_row;
 pub mod voice;

@@ -46,9 +46,18 @@
 //! `settings.toml` in libmorph's data directory on every host (on macOS,
 //! `~/Library/Application Support/dev.flankr.companion`; a file at the old
 //! desktop place, `~/.config/flankr-companion`, is moved once), given to the client as
-//! [`Input::Settings`], and read by every control they turn off. *Unpair
-//! this device* sends [`Input::Unpair`]; once [`Event::Unpaired`] comes,
-//! the app is back on the pairing screen, and *Delete data* then removes
+//! [`Input::Settings`], and read by every control they turn off.
+//!
+//! The paired remotes (plan 20261028_01, step 5; `remotes.rs`): Settings'
+//! Remotes section lists them from [`Event::Remotes`]. A remote's X, once
+//! confirmed, sends [`Input::RemoveRemote`], and [`Event::RemoteRemoved`]
+//! leaves a note there saying whether its daemon was told. The **+** opens
+//! the pairing screen in its add mode, over Settings; Cancel, its "<" or
+//! the system Back send [`Input::CancelPairing`] and return. While a
+//! pairing waits, the pairing screen shows the device code and the
+//! six-digit confirmation code to check against `flankr pair`'s. Once
+//! [`Event::Unpaired`] comes (the last remote gone) the app is back on the
+//! pairing screen; *Delete data* removes every remote first, then
 //! everything in the data directory but the voice models.
 
 pub mod agent;
@@ -59,6 +68,7 @@ pub mod memory;
 pub mod notify;
 pub mod overview;
 pub mod prompt;
+pub mod remotes;
 pub mod session_cards;
 pub mod settings;
 pub mod terminal_keys;
@@ -74,7 +84,7 @@ use flankr_audio::libvoicexn::vad::GateState;
 use flankr_audio::{AudioConfig, AudioEvent, AudioSession};
 use flankr_companion::{
     Companion, CompanionConfig, Dictation, DictationPhase, Event, FileKeyStore, Input, KeyStore,
-    Pressure, PromptMode, Speaker, Suggestion,
+    Pressure, PromptMode, RemoteId, RemoteInfo, Speaker, Suggestion,
 };
 use libcontrols::DrawContext;
 use libflankr_proto::common::AgentInfo;
@@ -102,7 +112,7 @@ use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, Turned
 use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::theme::{Role, theme};
-use crate::ui::{Card, CardState, Hit, Layout, Line, Screen, View, chunk, prompt_input, wrap};
+use crate::ui::{Card, CardState, Hit, Layout, Screen, View, prompt_input};
 
 /// The frame rate: enough for text, and far less heat than the display's
 /// 120 Hz while STT listens.
@@ -226,8 +236,9 @@ pub struct App {
     /// The confirmation being asked, or the last one, with its outcome,
     /// until the next utterance (plan 20261023_01, section 4).
     card: Option<Card>,
-    /// The device code to paste into `flankr pair`, and the server's name.
-    code: Option<(String, String)>,
+    /// The pairing screen's add mode, and the device code and confirmation
+    /// code shown while a pairing waits (`remotes.rs`).
+    pairing: remotes::Pairing,
     /// A pairing note or an error, and its colour's role (looked up as it
     /// is drawn, so a theme change recolours it).
     note: Option<(String, Role)>,
@@ -261,9 +272,15 @@ pub struct App {
     data_dir: Option<PathBuf>,
     /// The settings screen, while it is open.
     settings_screen: Option<SettingsScreen>,
-    /// The paired server's name, for the unpair modal.
-    server_name: Option<String>,
-    /// *Delete data* waits for the unpairing to finish.
+    /// The paired remotes, as the client last gave them (plan 20261028_01).
+    remotes: Vec<RemoteInfo>,
+    /// The note under them in Settings: the last removal's or pairing's
+    /// result.
+    remotes_note: Option<String>,
+    /// The name this phone pairs as: its `[[client]]` entry's in a
+    /// daemon's `auth.toml`.
+    device: String,
+    /// *Delete data* waits for every remote's removal to finish.
     deleting: bool,
     /// The voice models, which *Delete data* keeps.
     models: Vec<PathBuf>,
@@ -609,24 +626,40 @@ impl App {
                     "not paired \u{b7} paste a pairing URL below".into()
                 };
             }
-            // TODO(plan 20261028_01, step 5): show `confirmation` on the
-            // pairing screen.
-            Event::PairingCode { code, server, .. } => {
-                // A public key, safe to log, and readable over adb.
-                log::info!("pairing: device code {code}");
-                self.paired = true;
-                self.server_name = Some(server.clone());
-                self.code = Some((code, server));
+            Event::PairingCode {
+                code,
+                server,
+                confirmation,
+            } => {
+                // Public: a public key and digits from the daemon's, safe
+                // to log, and readable over adb.
+                log::info!("pairing: device code {code}, confirmation code {confirmation}");
+                self.pairing.show(remotes::Code {
+                    code,
+                    server,
+                    confirmation,
+                });
                 self.note = None;
+                self.screen.invalidate();
             }
             Event::Paired { name } => {
                 log::info!("pairing: paired as {name}");
-                self.code = None;
-                self.note = Some((format!("paired as {name}"), Role::Muted));
+                let (server, adding) = self.pairing.paired();
+                if adding {
+                    // Back to Settings, where its row now shows.
+                    self.note = None;
+                    let note = remotes::paired_note(server.as_deref().unwrap_or_default());
+                    self.set_remotes_note(Some(note));
+                } else {
+                    self.note = Some((format!("paired as {name}"), Role::Muted));
+                }
+                self.screen.invalidate();
             }
             Event::PairFailed(why) => {
                 log::warn!("pairing: refused");
+                self.pairing.failed();
                 self.note = Some((format!("pairing failed: {why}"), Role::Warn));
+                self.screen.invalidate();
             }
             // The card shows the handle; only `text` is spoken.
             Event::Confirm {
@@ -751,19 +784,34 @@ impl App {
                     screen.set_cache(bytes);
                 }
             }
-            // TODO(plan 20261028_01, step 5): the Remotes section.
-            Event::Remotes(rows) => log::debug!("remotes: {} paired", rows.len()),
+            Event::Remotes(rows) => {
+                log::debug!("remotes: {} paired", rows.len());
+                self.paired = !rows.is_empty();
+                self.remotes = rows;
+                if let Some(screen) = &mut self.settings_screen {
+                    screen.set_remotes(self.remotes.clone());
+                }
+            }
             Event::RemoteRemoved { name, daemon, .. } => {
                 log::info!(
                     "remotes: removed {name}{}",
                     if daemon { "" } else { " here only" }
                 );
+                let note = remotes::removed_note(&name, daemon, &self.device);
+                self.set_remotes_note(Some(note));
             }
+            // A pairing named a remote already listed: nothing is pending,
+            // so the add mode closes, back to Settings.
             Event::RemoteUpdated { name, .. } => {
-                self.note = Some((
-                    format!("Already paired with {name}: its addresses are updated."),
-                    Role::Muted,
-                ));
+                let note = remotes::already_note(&name);
+                if std::mem::take(&mut self.pairing.adding) {
+                    self.pairing.failed();
+                    self.note = None;
+                    self.screen.invalidate();
+                } else {
+                    self.note = Some((note.trim().to_string(), Role::Muted));
+                }
+                self.set_remotes_note(Some(note));
             }
             Event::Unpaired { daemon } => self.unpaired(daemon),
             Event::SessionCards(cards) => {
@@ -1095,7 +1143,9 @@ impl App {
         .with_background(Box::new(background::Morph(std::rc::Rc::clone(
             &self.notify_ask,
         ))));
-        screen.set_daemon(self.server_name.as_deref().unwrap_or("flankr"), self.online);
+        screen.set_remotes(self.remotes.clone());
+        screen.set_remotes_note(self.remotes_note.clone());
+        screen.set_device(&self.device);
         screen.set_cache(self.cache);
         self.settings_screen = Some(screen);
     }
@@ -1117,8 +1167,9 @@ impl App {
                 self.apply_settings(settings);
                 self.preview_voice();
             }
-            SettingsHit::Unpair => self.unpair(false),
-            SettingsHit::DeleteData => self.unpair(true),
+            SettingsHit::AddRemote => self.open_add(),
+            SettingsHit::RemoveRemote(id) => self.remove_remote(id),
+            SettingsHit::DeleteData => self.delete_everything(),
             SettingsHit::ClearCache => {
                 log::info!("settings: clearing the cache");
                 self.send(Input::ClearCache);
@@ -1186,23 +1237,88 @@ impl App {
         self.previewing = true;
     }
 
-    /// *Unpair this device*, and *Delete data* (`delete`) after it.
-    fn unpair(&mut self, delete: bool) {
+    /// The note under Settings' remotes, there now and when it next opens.
+    fn set_remotes_note(&mut self, note: Option<String>) {
+        self.remotes_note = note;
+        if let Some(screen) = &mut self.settings_screen {
+            screen.set_remotes_note(self.remotes_note.clone());
+        }
+    }
+
+    /// The **+** in Remotes: the pairing screen in its add mode, over
+    /// Settings, with a pushed `pair.txt` read at once (decision 9).
+    fn open_add(&mut self) {
+        log::info!("remotes: pairing another");
+        self.pairing.open_add();
+        self.field.clear();
+        self.field_focused = false;
+        self.note = None;
+        self.screen.invalidate();
+        self.read_pair_file();
+    }
+
+    /// Cancel, the add mode's "<", or the system Back there: the pairing
+    /// in progress ends, and the add mode returns to Settings.
+    fn cancel_pairing(&mut self) {
+        log::info!("pairing: cancelled");
+        let input = self.pairing.cancel();
+        self.send(input);
+        self.field_focused = false;
+        self.note = None;
+        self.screen.invalidate();
+        if let Some(screen) = &mut self.settings_screen {
+            screen.invalidate();
+        }
+    }
+
+    /// A remote's X, confirmed: the client asks its daemon to forget this
+    /// phone and removes it here, answered or not.
+    fn remove_remote(&mut self, id: RemoteId) {
+        let name = self
+            .remotes
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.name.clone())
+            .unwrap_or_default();
+        log::info!("remotes: removing {name}");
+        self.set_remotes_note(Some(remotes::removing_note(&name)));
+        self.send(Input::RemoveRemote(id));
+    }
+
+    /// *Delete data*: every remote removed (each daemon asked to forget
+    /// this phone), then, once `Unpaired` comes, the data directory.
+    fn delete_everything(&mut self) {
         log::info!(
-            "settings: {}",
-            if delete {
-                "deleting the data"
-            } else {
-                "unpairing"
-            }
+            "settings: deleting the data; removing {} remotes first",
+            self.remotes.len()
         );
-        self.deleting = delete;
-        if self.companion.is_some() {
-            self.send(Input::Unpair);
-        } else {
+        self.deleting = true;
+        if self.companion.is_none() {
             // No key storage, so no pairing to forget.
             self.unpaired(false);
+            return;
         }
+        for input in remotes::delete_all(&self.remotes) {
+            self.send(input);
+        }
+    }
+
+    /// A pairing input pushed as `pair.txt` into the data directory
+    /// (`scripts/push-pair.sh`): read once and deleted, whatever comes of
+    /// it. At start, on opening the add mode, and on each resume while it
+    /// is open (plan 20261028_01, decision 9).
+    fn read_pair_file(&mut self) {
+        let Some(path) = self.data_dir.as_ref().map(|dir| dir.join("pair.txt")) else {
+            return;
+        };
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        log::info!("pairing: read {}", path.display());
+        if let Err(e) = std::fs::remove_file(&path) {
+            log::warn!("pairing: deleting {}: {e}", path.display());
+        }
+        self.open_url(&text);
     }
 
     /// The pairing is forgotten: back to the pairing screen, and the data
@@ -1214,8 +1330,9 @@ impl App {
         );
         self.paired = false;
         self.online = false;
-        self.code = None;
-        self.server_name = None;
+        self.pairing = remotes::Pairing::default();
+        self.remotes.clear();
+        self.remotes_note = None;
         self.card = None;
         self.dictation = None;
         self.agents.clear();
@@ -1707,7 +1824,7 @@ impl App {
     /// Whether the pairing screen shows: neither paired nor connected, or a
     /// device code to paste.
     fn pairing(&self) -> bool {
-        self.code.is_some() || (!self.paired && !self.online)
+        self.pairing.adding || self.pairing.waiting() || (!self.paired && !self.online)
     }
 
     /// A touch on the screen shown: on the overview and in the agent view,
@@ -1778,6 +1895,14 @@ impl App {
             }
         }
 
+        // The add mode's pairing screen, over Settings: no session cards
+        // are drawn on it, so none take its taps.
+        if self.pairing.adding {
+            if touch.phase == TouchPhase::Ended {
+                self.pairing_tap(touch.x, touch.y);
+            }
+            return;
+        }
         // Another session's card, over whichever screen is shown, unless a
         // prompt card's overlay is over it.
         let s = self.scale();
@@ -1819,12 +1944,20 @@ impl App {
         if touch.phase != TouchPhase::Ended {
             return;
         }
-        match self.screen.hit(touch.x, touch.y) {
+        self.pairing_tap(touch.x, touch.y);
+    }
+
+    /// A tap on the pairing screen.
+    fn pairing_tap(&mut self, x: f32, y: f32) {
+        match self.screen.hit(x, y) {
             Some(Hit::Field) => self.field_focused = true,
             Some(Hit::Pair) => self.pair(),
+            Some(Hit::Cancel | Hit::Back) => self.cancel_pairing(),
             None => {
                 self.field_focused = false;
-                self.send(Input::Tap);
+                if !self.pairing.adding {
+                    self.send(Input::Tap);
+                }
             }
         }
     }
@@ -1923,7 +2056,6 @@ impl App {
 
         if let Some(screen) = &mut self.settings_screen {
             screen.set_layout(layout);
-            screen.set_daemon(self.server_name.as_deref().unwrap_or("flankr"), self.online);
         }
         // Without the microphone, nothing listens: the sound line says so.
         let sound = if self.settings.microphone {
@@ -1975,42 +2107,17 @@ impl App {
             return;
         }
 
-        let line = |text: String, size: f32, color, gap| Line {
-            text,
-            size,
-            color,
-            gap,
-        };
-        let mut code = Vec::new();
-        if let Some((device_code, server)) = &self.code {
-            code.push(line(
-                format!("Paste this code into flankr pair on {server}:"),
-                15.0,
-                theme().muted,
-                0.0,
-            ));
-            // Base58 is mostly capitals and wide letters: wider than the
-            // half an em `columns` assumes.
-            for part in chunk(device_code, layout.columns(26.0 * 1.3)) {
-                code.push(line(part, 26.0, theme().code, 4.0));
-            }
-        }
-        if let Some((note, color)) = &self.note {
-            for (i, t) in wrap(note, layout.columns(15.0)).into_iter().enumerate() {
-                code.push(line(
-                    t,
-                    15.0,
-                    theme().get(*color),
-                    if i == 0 { 8.0 } else { 0.0 },
-                ));
-            }
-        }
+        let note = self
+            .note
+            .as_ref()
+            .map(|(t, r)| (t.as_str(), theme().get(*r)));
         let view = View {
             status: vec![self.link.clone(), sound],
-            code,
+            code: self.pairing.lines(&layout, note),
             field: self.field.clone(),
             field_focused: self.field_focused,
-            paired: self.paired,
+            waiting: self.pairing.waiting(),
+            adding: self.pairing.adding,
         };
         self.screen.set(layout, view);
     }
@@ -2076,6 +2183,10 @@ impl MorphApp for App {
         // Back from Android's battery dialog or pages, perhaps.
         if let Some(screen) = &mut self.settings_screen {
             screen.refresh_battery();
+        }
+        // A pairing pushed while the add mode was open.
+        if self.pairing.adding {
+            self.read_pair_file();
         }
     }
 
@@ -2270,7 +2381,7 @@ impl MorphApp for App {
             sound: "waiting for the microphone\u{2026}".into(),
             paired: false,
             card: None,
-            code: None,
+            pairing: remotes::Pairing::default(),
             note: None,
             field: String::new(),
             field_focused: false,
@@ -2287,7 +2398,9 @@ impl MorphApp for App {
             settings,
             data_dir,
             settings_screen: None,
-            server_name: None,
+            remotes: Vec::new(),
+            remotes_note: None,
+            device: device_name(&args),
             deleting: false,
             models,
             cache: 0,
@@ -2321,13 +2434,12 @@ impl MorphApp for App {
         match key_store(ctx, &args) {
             Ok((keys, server)) => {
                 app.paired = server.is_some();
-                app.server_name = server.clone();
                 app.link = match server {
                     Some(name) => format!("connecting to {name}\u{2026}"),
                     None => "not paired \u{b7} paste a pairing URL below".into(),
                 };
                 let mut config = CompanionConfig::new(CLIENT);
-                config.device_name = device_name(&args);
+                config.device_name = app.device.clone();
                 config.voice = args.voice.clone();
                 // Each remote's state.redb (plan 20261028_01, decision 14).
                 config.data_dir = ctx.data_dir().map(std::path::Path::to_path_buf);
@@ -2383,17 +2495,8 @@ impl MorphApp for App {
         if let Some(text) = args.pair.as_deref() {
             app.open_url(text);
         }
-        // Android: a pairing input pushed with scripts/push-pair.sh. It is
-        // read once and deleted, whatever comes of it.
-        if let Some(path) = ctx.data_dir().map(|dir| dir.join("pair.txt"))
-            && let Ok(text) = std::fs::read_to_string(&path)
-        {
-            log::info!("pairing: read {}", path.display());
-            if let Err(e) = std::fs::remove_file(&path) {
-                log::warn!("pairing: deleting {}: {e}", path.display());
-            }
-            app.open_url(&text);
-        }
+        // Android: a pairing input pushed with scripts/push-pair.sh.
+        app.read_pair_file();
         // The launch Intent's data (`am start -d <url>`) cannot reach the app
         // yet: libmobile delivers it as `MobileEvent::Intent`, but libmorph
         // 0.3.1's Android runner drops that event. Once libmorph releases its
@@ -2491,6 +2594,12 @@ impl MorphApp for App {
     /// Typing into the focused field (desktop): Enter pairs, Escape clears.
     fn on_key(&mut self, _ctx: &mut MorphContext, key: Key) -> KeyStatus {
         let back = matches!(key, Key::Back | Key::Escape);
+        // The system Back leaves the add mode's pairing screen, back to
+        // Settings, ending its pairing.
+        if back && self.pairing.adding {
+            self.cancel_pairing();
+            return KeyStatus::Handled;
+        }
         // The system Back cancels the settings' modal, or closes them.
         if back && let Some(screen) = &mut self.settings_screen {
             if !screen.back() {
@@ -2614,6 +2723,7 @@ impl MorphApp for App {
             px_range: BUNDLED_ATLAS_PX_RANGE,
         };
         let shown = match (&self.agent, self.pairing()) {
+            _ if self.pairing.adding => Shown::Pairing,
             _ if self.settings_screen.is_some() => Shown::Settings,
             (Some(_), _) => Shown::Agent,
             (None, true) => Shown::Pairing,
@@ -2643,6 +2753,9 @@ impl MorphApp for App {
             }
         }
         let drew = match (&mut self.settings_screen, &mut self.agent) {
+            _ if shown == Shown::Pairing && self.pairing.adding => {
+                self.screen.draw(&mut self.list, &draw)
+            }
             (Some(screen), _) => screen.draw(&mut self.list, &draw, Some(&term)),
             (None, Some(agent)) => agent.draw(&mut self.list, &draw, Some(&term)),
             (None, None) if shown == Shown::Pairing => self.screen.draw(&mut self.list, &draw),

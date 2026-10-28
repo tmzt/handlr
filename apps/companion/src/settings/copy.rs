@@ -125,12 +125,13 @@ mod tests {
 
     #[test]
     fn slots_fill() {
-        let text = UNPAIR.fill(None, &[("daemon", "m4")]);
-        assert!(text.contains("from m4?"), "{text}");
+        let text = REMOVE_REMOTE_NEXT.fill(None, &[("next", "m4")]);
+        assert!(text.contains("connects to m4 next."), "{text}");
         assert!(!text.contains("{{"));
-        assert_eq!(UNPAIR.slots, ["daemon"]);
+        assert_eq!(REMOVE_REMOTE_NEXT.slots, ["next"]);
+        assert_eq!(REMOVE_REMOTE_OFFLINE.slots, ["name", "device"]);
         // Without its value, a slot is left as written.
-        assert!(UNPAIR.fill(None, &[]).contains("{{"));
+        assert!(REMOVE_REMOTE_NEXT.fill(None, &[]).contains("{{"));
     }
 
     #[test]

@@ -34,6 +34,10 @@ key's text on that vendor's phones.
 
 - text: BATTERY
 
+# [Copy] section_remotes
+
+- text: REMOTES
+
 # [Copy] section_device
 
 - text: DEVICE
@@ -240,30 +244,17 @@ key's text on that vendor's phones.
 - [abc] size: the cache's size in MB
 - text: Clear cache ({{ [abc] size }} MB)
 
-# [Copy] unpair
-
-- title: Unpair this device
-- [abc] daemon: the paired daemon's name
-- text: |
-    Unpair this phone from {{ [abc] daemon }}? You will need to pair
-    again to use flankr.
-
-# [Copy] unpair_offline
-
-- text: |
-    flankr is offline: it will still list this phone until it is removed
-    from `auth.toml`.
-
-# [Copy] unpair_action
-
-- text: Unpair
-
 # [Copy] delete_data
 
 - title: Delete data
 - text: |
-    Delete flankr's data on this phone? Settings, stored scrollback and
-    pairing are removed. Voice models stay.
+    Delete flankr's data on this phone? Every remote is removed first:
+    each daemon is asked to forget this phone (`link.unpair`; the one in
+    use over its open link, the others over one short connection each,
+    all at once, up to 15 seconds), and this phone's key, record and
+    `remotes/<id>/` state for each are deleted whether it answers or not.
+    Then settings, stored scrollback and the rest of the data directory
+    go. Voice models stay.
 
 # [Copy] delete_action
 
@@ -276,6 +267,192 @@ key's text on that vendor's phones.
 # [Copy] ok
 
 - text: OK
+
+The Remotes section (docs/design/20261028_01_MULTIPLE_REMOTES_PLAN.md,
+3.10 and 3.11, with its 13:03 EDT amendment), drawn in
+`src/settings/screen.rs` and `src/settings/remote_row.rs`. `flankr` has no
+command that removes a paired device: a daemon forgets one by
+`link.unpair`, or by its `[[client]]` entry being deleted from its
+`auth.toml`, which it reads again on change.
+
+# [Copy] remotes
+
+- title: Remotes
+- text: |
+    Each remote is a flankr daemon this phone is paired with, known by
+    its link static key (X25519). The phone pins that key and reconnects
+    with `Noise_IK`. For each remote it holds a separate static key of
+    its own in libmorph's key store (Keystore-sealed on Android, the
+    login Keychain on macOS), so removing one never touches another, and
+    two daemons can't tell from their `auth.toml` that they list the same
+    phone. The fingerprint is the first 8 hex digits of BLAKE2s-256 over
+    the daemon's key, as `flankr pair` prints it.
+
+    flankr connects to one remote at a time, the one marked *in use*.
+    **+** pairs another beside it without dropping that connection;
+    choosing which one is in use comes later. Removing the one in use
+    moves to the most recently paired of the rest. Each remote's state is
+    kept in its own `remotes/<id>/state.redb` in flankr's data directory,
+    and goes with it. The phone keeps at most 8 remotes.
+
+# [Copy] remote_in_use
+
+- text: in use
+
+# [Copy] remote_in_use_offline
+
+- text: in use · offline
+
+# [Copy] remote_detail
+
+- [abc] host: the remote's first address, host:port
+- [abc] fingerprint: the remote's fingerprint, as 3f9a 12c4
+- [abc] date: when it was paired, as 28 Oct 2026
+- text: |
+    {{ [abc] host }} · {{ [abc] fingerprint }} · paired {{ [abc] date }}
+
+# [Copy] remote_detail_undated
+
+- [abc] host: the remote's first address, host:port
+- [abc] fingerprint: the remote's fingerprint, as 3f9a 12c4
+- text: |
+    {{ [abc] host }} · {{ [abc] fingerprint }} · paired before this list
+
+# [Copy] remotes_empty
+
+- text: |
+    No remote paired. Tap **+** to pair with a flankr daemon: `flankr
+    pair` on that machine prints the URL to paste.
+
+# [Copy] remotes_full
+
+- text: |
+    8 remotes is the most this phone keeps: remove one to pair another.
+
+# [Copy] remove_remote
+
+- title: Remove remote
+- [abc] name: the remote's name
+- [abc] host: the remote's first address, host:port
+- [abc] fingerprint: the remote's fingerprint
+- text: |
+    Remove **{{ [abc] name }}** (`{{ [abc] host }}`, {{ [abc] fingerprint }})
+    from this phone? This phone's key for that pairing, its record, and
+    its stored state and cache on this phone (`remotes/<id>/`) are
+    deleted. To use it again, pair it again with `flankr pair`.
+
+# [Copy] remove_remote_tell
+
+- [abc] name: the remote's name
+- [abc] device: the name this phone paired as
+- text: |
+    flankr asks {{ [abc] name }} over the open link to forget this phone
+    (`link.unpair`, waiting up to 5 seconds), which deletes its
+    `[[client]]` entry for this phone (`{{ [abc] device }}`) from its
+    `auth.toml`.
+
+# [Copy] remove_remote_try
+
+- [abc] name: the remote's name
+- [abc] device: the name this phone paired as
+- text: |
+    flankr connects to {{ [abc] name }} once, with this phone's key for
+    it (`IK`, up to 15 seconds), to ask it to forget this phone
+    (`link.unpair`). If it can't be reached, its `auth.toml` keeps the
+    `[[client]]` entry for this phone (`{{ [abc] device }}`) until you
+    delete it on that machine (`~/.config/flankr/auth.toml` by default).
+
+# [Copy] remove_remote_offline
+
+- [abc] name: the remote's name
+- [abc] device: the name this phone paired as
+- text: |
+    **{{ [abc] name }} is offline, so it won't be told.** Its `auth.toml`
+    keeps the `[[client]]` entry for this phone (`{{ [abc] device }}`).
+    The key that entry names is deleted here, so nothing can connect
+    with it; to clear it, delete the entry on that machine
+    (`~/.config/flankr/auth.toml` by default). `flankr` has no command
+    for it; the daemon reads the file again when it changes.
+
+# [Copy] remove_remote_next
+
+- [abc] next: the remote that will be in use after
+- text: |
+    It's the remote in use: flankr connects to {{ [abc] next }} next.
+
+# [Copy] remove_remote_last
+
+- text: |
+    It's the last remote: flankr returns to the pairing screen.
+
+# [Copy] remove_remote_action
+
+- text: Remove
+
+# [Copy] remote_removing
+
+- [abc] name: the remote's name
+- text: |
+    Removing {{ [abc] name }}: asking it to forget this phone…
+
+# [Copy] remote_removed
+
+- [abc] name: the remote's name
+- text: |
+    Removed {{ [abc] name }}: it answered `link.unpair` and no longer
+    lists this phone.
+
+# [Copy] remote_removed_here
+
+- [abc] name: the remote's name
+- [abc] device: the name this phone paired as
+- text: |
+    Removed {{ [abc] name }} on this phone only: it didn't answer
+    `link.unpair`, so its `auth.toml` lists `{{ [abc] device }}` until
+    that entry is deleted on that machine.
+
+# [Copy] remote_paired
+
+- [abc] name: the remote's name
+- text: |
+    Paired with {{ [abc] name }}. flankr stays connected to the remote in
+    use.
+
+# [Copy] remote_already
+
+- [abc] name: the remote's name
+- text: |
+    Already paired with {{ [abc] name }}: its addresses are updated.
+
+The pairing screen (`src/ui.rs`, laid out by `src/remotes.rs`): its lines
+are drawn as plain text, not Markdown. In add mode (**+** in Remotes) its
+title is `remote_add`'s.
+
+# [Copy] remote_add
+
+- title: Pair another remote
+- text: |
+    Run flankr pair on the machine whose daemon you're adding and paste
+    the pairing URL it prints below. flankr stays connected to the
+    remote in use meanwhile.
+
+# [Copy] pairing_paste
+
+- [abc] server: the daemon's name, from the pairing URL
+- text: |
+    Paste this code into flankr pair on {{ [abc] server }}:
+
+# [Copy] pairing_confirmation
+
+- text: Confirmation code
+
+# [Copy] pairing_confirmation_check
+
+- [abc] server: the daemon's name, from the pairing URL
+- text: |
+    Check that it matches the confirmation code flankr pair printed on
+    {{ [abc] server }}. Both come from the daemon's static key; if they
+    differ, the URL names another daemon: tap Cancel.
 
 The foreground service's notification (CHANGES.md, 2026-10-24 12:59 EDT,
 item 3), filled in `src/notify.rs` and shown with libmorph's

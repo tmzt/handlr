@@ -26,14 +26,20 @@
 //!   use is restricted, from libmorph's battery pages (read again on
 //!   resume, [`SettingsScreen::refresh_battery`]); where the state cannot
 //!   be known, one note, "Battery settings need an app update";
+//! - **Remotes** (plan 20261028_01, 3.10; plan 20261024_02, the
+//!   2026-10-28 13:03 EDT amendment): an ⓘ after the title and a **+** at
+//!   the title line's right, dim and inactive at [`MAX_REMOTES`]; one
+//!   [`RemoteRow`] per paired daemon, in pairing order, with an X that
+//!   asks first ([`Confirm`]); and a note under them: none paired, the
+//!   list full, or the last removal or pairing's result;
 //! - **Device**, last: *Clear cache (n MB)* in the normal text colour,
-//!   with no confirmation (the 12:12 EDT amendment), then, in red, *Unpair
-//!   this device* and *Delete data*, each behind a confirming modal
-//!   ([`Confirm`]).
+//!   with no confirmation (the 12:12 EDT amendment), then *Delete data* in
+//!   red, behind a confirming modal ([`Confirm`]). *Unpair this device* is
+//!   gone: each remote's X replaces it.
 //!
 //! Rows with a long explanation have an ⓘ that opens it in a modal
-//! ([`InfoModal`]): *Voice*, *General agent*, *Tab follows focus*, *Appearance*, the two above, *Battery optimization*
-//! and *Samsung battery (app sleeping)*. All the copy is in
+//! ([`InfoModal`]): *Voice*, *General agent*, *Tab follows focus*, *Appearance*, the two above, *Battery optimization*,
+//! *Samsung battery (app sleeping)*, and the Remotes title. All the copy is in
 //! `SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
 //! label; a link in it is tappable, and the app opens it with libmorph's
 //! `ctx.open_link` ([`SettingsScreen::take_links`]).
@@ -53,6 +59,7 @@ use libcontrols::{
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
+use flankr_companion::{MAX_REMOTES, RemoteId, RemoteInfo};
 use flankr_markdown::Style;
 
 use super::background::{self, Background};
@@ -61,12 +68,13 @@ use super::build_info::BuildInfo;
 use super::confirm::Confirm;
 use super::copy::{self, CopyText};
 use super::danger_row::DangerRow;
-use super::info::{INFO_PART, InfoModal};
+use super::info::{self, INFO_PART, InfoModal};
 use super::link_row::{ACTION_PART, LinkRow};
 use super::option_row::OptionRow;
+use super::remote_row::{REMOVE_PART, RemoteRow};
 use super::toggle_row::ToggleRow;
 use super::voice;
-use super::{Settings, scrollbar_label, step_scrollbar};
+use super::{Settings, dim_since, scrollbar_label, step_scrollbar};
 use crate::agent::{PAD, Row, Terminal, draw_row, fill, line_h, term_h};
 use crate::markdown_view::{self, Faces, MarkdownView};
 use crate::theme::{self, theme};
@@ -111,17 +119,19 @@ pub enum Section {
     Background,
     Notifications,
     Battery,
+    Remotes,
     Device,
 }
 
 impl Section {
-    const ALL: [Section; 7] = [
+    const ALL: [Section; 8] = [
         Section::Sound,
         Section::Voice,
         Section::Display,
         Section::Background,
         Section::Notifications,
         Section::Battery,
+        Section::Remotes,
         Section::Device,
     ];
 
@@ -133,6 +143,7 @@ impl Section {
             Section::Background => copy::SECTION_BACKGROUND.text,
             Section::Notifications => copy::SECTION_NOTIFICATIONS.text,
             Section::Battery => copy::SECTION_BATTERY.text,
+            Section::Remotes => copy::SECTION_REMOTES.text,
             Section::Device => copy::SECTION_DEVICE.text,
         }
     }
@@ -149,6 +160,7 @@ enum Info {
     Optimization,
     Vendor,
     Appearance,
+    Remotes,
 }
 
 impl Info {
@@ -162,6 +174,7 @@ impl Info {
             Info::Optimization => copy::BATTERY_OPTIMIZATION,
             Info::Vendor => copy::SAMSUNG_BATTERY,
             Info::Appearance => copy::APPEARANCE,
+            Info::Remotes => copy::REMOTES,
         }
     }
 }
@@ -176,8 +189,10 @@ pub enum SettingsHit {
     /// The *Voice* arrows stepped: the settings as they are now, and the
     /// new voice to preview.
     Voice(Settings),
-    /// *Unpair* in its modal.
-    Unpair,
+    /// The Remotes title's **+**: the pairing screen, in its add mode.
+    AddRemote,
+    /// *Remove* in a remote's modal, after its X.
+    RemoveRemote(RemoteId),
     /// *Delete* in its modal.
     DeleteData,
     /// *Clear cache*, with something cached: the cached sessions go.
@@ -210,7 +225,7 @@ pub fn clear_cache_label(bytes: u64) -> String {
 /// Which modal is open, and its buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Asking {
-    Unpair,
+    RemoveRemote(RemoteId),
     Delete,
     /// An ⓘ's explanation.
     Info(Info),
@@ -220,7 +235,7 @@ impl Asking {
     /// Its entry on the modal stack.
     fn id(self) -> &'static str {
         match self {
-            Asking::Unpair => "unpair",
+            Asking::RemoveRemote(_) => "remove_remote",
             Asking::Delete => "delete",
             Asking::Info(Info::Voice) => "info_voice",
             Asking::Info(Info::GeneralAgent) => "info_general_agent",
@@ -230,6 +245,7 @@ impl Asking {
             Asking::Info(Info::Optimization) => "info_optimization",
             Asking::Info(Info::Vendor) => "info_vendor",
             Asking::Info(Info::Appearance) => "info_appearance",
+            Asking::Info(Info::Remotes) => "info_remotes",
         }
     }
 }
@@ -256,9 +272,137 @@ struct Nodes {
     optimization: NodeId,
     vendor: NodeId,
     restricted: NodeId,
+    remotes_title: NodeId,
+    /// [`MAX_REMOTES`] rows, those past the list hidden.
+    remotes: Vec<NodeId>,
+    remotes_note: NodeId,
     clear_cache: NodeId,
-    unpair: NodeId,
     delete: NodeId,
+}
+
+/// The Remotes title line's ⓘ and **+** (plan 20261028_01, decision 25).
+/// The title itself is the section's `Label`; this draws the ⓘ after it
+/// and the + at the line's right, in the accent colour, a 44 pt target;
+/// dim and inactive when the list is full. It takes taps only on those
+/// two.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemotesTitle {
+    /// The title line: the section title's height, the screen's width.
+    pub rect: Rect,
+    /// The title's width, for the ⓘ after it.
+    pub title_w: f32,
+    pub scale: f32,
+    /// [`MAX_REMOTES`] are paired: the + is dim and takes no taps.
+    pub full: bool,
+}
+
+impl RemotesTitle {
+    /// The + glyph's half size, in points.
+    const PLUS: f32 = 8.0;
+
+    /// The title text's vertical centre.
+    fn cy(&self) -> f32 {
+        let s = self.scale;
+        self.rect.y + self.rect.h - 6.0 * s - line_h(SECTION_PT * s) * 0.5
+    }
+
+    pub fn info_rect(&self) -> Rect {
+        let s = self.scale;
+        info::target(self.rect.x + PAD * s + self.title_w, self.cy(), s)
+    }
+
+    /// The +'s 44 pt target, at the line's right.
+    pub fn add_rect(&self) -> Rect {
+        let s = self.scale;
+        let t = info::TARGET * s;
+        Rect::new(
+            self.rect.x + self.rect.w - PAD * s * 0.5 - t,
+            self.cy() - t * 0.5,
+            t,
+            t,
+        )
+    }
+
+    fn part(&self, pos: [f32; 2]) -> Option<ControlPart> {
+        if self.info_rect().contains(pos) {
+            Some(INFO_PART)
+        } else if self.add_rect().contains(pos) {
+            Some(ControlPart::Body)
+        } else {
+            None
+        }
+    }
+}
+
+impl libcontrols::DrawControl for RemotesTitle {
+    fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
+        let s = self.scale;
+        info::draw(list, ctx, self.info_rect(), s);
+        let start = list.instances.len();
+        let [cx, cy] = self.add_rect().center();
+        let h = Self::PLUS * s;
+        let t = 2.0 * s;
+        list.push_line([cx - h, cy], [cx + h, cy], t, theme().accent);
+        list.push_line([cx, cy - h], [cx, cy + h], t, theme().accent);
+        if self.full {
+            dim_since(list, start);
+        }
+    }
+}
+
+impl libcontrols::HostedControl for RemotesTitle {
+    fn bounds(&self) -> Rect {
+        let a = self.add_rect();
+        let i = self.info_rect();
+        let top = self.rect.y.min(a.y).min(i.y);
+        let bottom = (self.rect.y + self.rect.h).max(a.y + a.h).max(i.y + i.h);
+        Rect::new(self.rect.x, top, self.rect.w, bottom - top)
+    }
+
+    fn hit_test(&self, pos: [f32; 2]) -> Option<(ControlPart, f32)> {
+        self.part(pos)
+            .map(|part| (part, self.rect.normalized_x(pos[0])))
+    }
+
+    /// On the ⓘ, the explanation; on the +, pairing another, unless full.
+    fn handle_mouse(
+        &self,
+        event: &MouseEvent,
+        _ctx: &libcontrols::EventContext,
+    ) -> Option<ControlAction> {
+        let MouseEvent::Click {
+            pos,
+            button: MouseButton::Left,
+        } = event
+        else {
+            return None;
+        };
+        match self.part(*pos)? {
+            INFO_PART => Some(ControlAction::Activated { part: INFO_PART }),
+            _ if self.full => None,
+            part => Some(ControlAction::Activated { part }),
+        }
+    }
+
+    fn handle_keyboard(
+        &self,
+        _event: &libcontrols::KeyboardEvent,
+        _ctx: &libcontrols::EventContext,
+    ) -> Option<ControlAction> {
+        None
+    }
+}
+
+/// The remote in use after `id` is removed: the most recently paired of
+/// the rest, by `paired_at` and then list order (plan 20261028_01,
+/// decision 8; `Remotes::most_recent` in the client).
+pub fn next_remote(remotes: &[RemoteInfo], id: RemoteId) -> Option<&RemoteInfo> {
+    remotes
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.id != id)
+        .max_by_key(|(i, r)| (r.paired_at.unwrap_or(0), *i))
+        .map(|(_, r)| r)
 }
 
 pub struct SettingsScreen {
@@ -285,9 +429,13 @@ pub struct SettingsScreen {
     android: bool,
     /// The vendor's page answered that it does not exist.
     no_vendor: bool,
-    /// The daemon's name, and whether it is online, for the unpair modal.
-    daemon: String,
-    online: bool,
+    /// The paired remotes, in pairing order, as the client last gave them.
+    remotes: Vec<RemoteInfo>,
+    /// The note under them: the last removal's or pairing's result.
+    remotes_note: Option<String>,
+    /// The name this phone paired as: its `[[client]]` entry's, for the
+    /// removal modal.
+    device: String,
     /// The cached sessions' size, in bytes, for *Clear cache (n MB)*.
     cache: u64,
     /// The open modal, and its Cancel and action buttons (an ⓘ's: OK
@@ -331,8 +479,9 @@ impl SettingsScreen {
             vendor: None,
             android,
             no_vendor: false,
-            daemon: "flankr".to_string(),
-            online: false,
+            remotes: Vec::new(),
+            remotes_note: None,
+            device: "this phone".to_string(),
             cache: 0,
             asking: None,
             modal_text: None,
@@ -472,10 +621,46 @@ impl SettingsScreen {
         )
     }
 
-    /// The paired daemon's name, and whether it is online now.
-    pub fn set_daemon(&mut self, name: &str, online: bool) {
-        self.daemon = name.to_string();
-        self.online = online;
+    /// The paired remotes ([`flankr_companion::Event::Remotes`]), shown as
+    /// they are now.
+    pub fn set_remotes(&mut self, remotes: Vec<RemoteInfo>) {
+        if remotes != self.remotes {
+            self.remotes = remotes;
+            if self.nodes.is_some() {
+                self.place();
+            }
+        }
+    }
+
+    /// The note under the remotes: a removal's or a pairing's result.
+    pub fn set_remotes_note(&mut self, note: Option<String>) {
+        if note != self.remotes_note {
+            self.remotes_note = note;
+            if self.nodes.is_some() {
+                self.place();
+            }
+        }
+    }
+
+    /// The name this phone paired as, for the removal modal's copy.
+    pub fn set_device(&mut self, name: &str) {
+        self.device = name.to_string();
+    }
+
+    /// The notes under the remotes: none paired, the list full, and the
+    /// last result.
+    fn remote_notes(&self) -> Option<String> {
+        let mut notes = Vec::new();
+        if self.remotes.is_empty() {
+            notes.push(copy::REMOTES_EMPTY.text.trim().to_string());
+        }
+        if self.remotes.len() >= MAX_REMOTES {
+            notes.push(copy::REMOTES_FULL.text.trim().to_string());
+        }
+        if let Some(note) = &self.remotes_note {
+            notes.push(note.trim().to_string());
+        }
+        (!notes.is_empty()).then(|| notes.join("\n\n"))
     }
 
     /// The cached sessions' size, in bytes: *Clear cache (n MB)*.
@@ -598,11 +783,30 @@ impl SettingsScreen {
         };
         let optimization = link(&mut router, copy::BATTERY_OPTIMIZATION.label());
         let vendor = link(&mut router, copy::SAMSUNG_BATTERY.label());
+        // The title's ⓘ and +, then the rows, which win where the +'s
+        // target reaches into the first.
+        let remotes_title = router.add(
+            under,
+            RemotesTitle {
+                rect: Rect::new(0.0, 0.0, 1.0, 1.0),
+                title_w: markdown_view::measure(
+                    self.faces.as_deref(),
+                    copy::SECTION_REMOTES.text,
+                    Style::Regular,
+                    SECTION_PT * s,
+                ),
+                scale: s,
+                full: false,
+            },
+        );
+        let remotes = (0..MAX_REMOTES)
+            .map(|_| router.add(under, RemoteRow::new(s)))
+            .collect();
+        let remotes_note = router.add(under, self.note(""));
         let clear_cache = router.add(
             under,
             DangerRow::new(&clear_cache_label(self.cache), s).with_color(theme().fg),
         );
-        let unpair = router.add(under, DangerRow::new(copy::UNPAIR.label(), s));
         let delete = router.add(under, DangerRow::new(copy::DELETE_DATA.label(), s));
         let _ = ModalStack::install(
             &mut router,
@@ -633,8 +837,10 @@ impl SettingsScreen {
             optimization,
             vendor,
             restricted,
+            remotes_title,
+            remotes,
+            remotes_note,
             clear_cache,
-            unpair,
             delete,
         });
         self.place();
@@ -667,6 +873,8 @@ impl SettingsScreen {
             (n.background_note, background_note.map(|t| self.note(t))),
             (n.alerts_note, alerts_note.map(|t| self.note(t))),
         ];
+        let mut remotes_note = self.remote_notes().map(|t| self.note(&t));
+        let remotes = &self.remotes;
         let router = &mut self.router;
         let show = |router: &mut Router, id: NodeId, on: bool| {
             router.set_flags(id, NodeFlags::HIDDEN, !on);
@@ -691,6 +899,12 @@ impl SettingsScreen {
                     w - 2.0 * PAD * s,
                     line_h(SECTION_PT * s),
                 );
+            }
+            if section == Section::Remotes
+                && let Some(t) = router.get_mut::<RemotesTitle>(n.remotes_title)
+            {
+                t.rect = Rect::new(0.0, y, w, SECTION_H * s);
+                t.full = remotes.len() >= MAX_REMOTES;
             }
             y += SECTION_H * s;
             let row = |y: &mut f32| {
@@ -832,8 +1046,30 @@ impl SettingsScreen {
                         }
                     }
                 }
+                Section::Remotes => {
+                    for (i, &id) in n.remotes.iter().enumerate() {
+                        let info = remotes.get(i).cloned();
+                        show(router, id, info.is_some());
+                        let rect = if info.is_some() {
+                            row(&mut y)
+                        } else {
+                            Rect::new(0.0, y, w, 0.0)
+                        };
+                        if let Some(r) = router.get_mut::<RemoteRow>(id) {
+                            r.rect = rect;
+                            r.info = info;
+                        }
+                    }
+                    show(router, n.remotes_note, remotes_note.is_some());
+                    if let Some(view) = remotes_note.take() {
+                        if let Some(old) = router.get_mut::<MarkdownView>(n.remotes_note) {
+                            *old = view;
+                        }
+                        note(router, n.remotes_note, &mut y);
+                    }
+                }
                 Section::Device => {
-                    for id in [n.clear_cache, n.unpair, n.delete] {
+                    for id in [n.clear_cache, n.delete] {
                         let rect = row(&mut y);
                         if let Some(d) = router.get_mut::<DangerRow>(id) {
                             d.rect = rect;
@@ -890,7 +1126,7 @@ impl SettingsScreen {
                 .map(|l| (l.label.clone(), l.rect))
         }))
         .chain(
-            [n.clear_cache, n.unpair, n.delete]
+            [n.clear_cache, n.delete]
                 .into_iter()
                 .filter_map(|id| r.get::<DangerRow>(id).map(|d| (d.label.clone(), d.rect))),
         )
@@ -1078,6 +1314,7 @@ impl SettingsScreen {
                 (n.optimization, Info::Optimization),
                 (n.vendor, Info::Vendor),
                 (n.appearance, Info::Appearance),
+                (n.remotes_title, Info::Remotes),
             ]
             .into_iter()
             .find(|(id, _)| *id == target)
@@ -1162,8 +1399,16 @@ impl SettingsScreen {
         } else if target == n.clear_cache {
             // No confirmation; nothing to do when empty.
             return (self.cache > 0).then_some(SettingsHit::ClearCache);
-        } else if target == n.unpair {
-            self.ask(Asking::Unpair);
+        } else if target == n.remotes_title {
+            // Only a tap on the + gets here, and not while the list is full.
+            return (self.remotes.len() < MAX_REMOTES).then_some(SettingsHit::AddRemote);
+        } else if let Some(i) = n.remotes.iter().position(|&id| id == target) {
+            // The X asks first; the row itself does nothing yet.
+            if action == (ControlAction::Activated { part: REMOVE_PART })
+                && let Some(id) = self.remotes.get(i).map(|r| r.id)
+            {
+                self.ask(Asking::RemoveRemote(id));
+            }
             return None;
         } else if target == n.delete {
             self.ask(Asking::Delete);
@@ -1207,12 +1452,11 @@ impl SettingsScreen {
         let viewport = self.modal_viewport();
         let vendor = self.vendor.as_deref();
         let (question, action) = match what {
-            Asking::Unpair => {
-                let mut q = copy::UNPAIR.fill(vendor, &[("daemon", &self.daemon)]);
-                if !self.online {
-                    q = format!("{}\n\n{q}", copy::UNPAIR_OFFLINE.body(vendor));
-                }
-                (q, copy::UNPAIR_ACTION.text)
+            Asking::RemoveRemote(id) => {
+                let Some(q) = self.removal_question(id) else {
+                    return;
+                };
+                (q, copy::REMOVE_REMOTE_ACTION.text)
             }
             Asking::Delete => (copy::DELETE_DATA.body(vendor), copy::DELETE_ACTION.text),
             Asking::Info(info) => return self.explain(info),
@@ -1224,6 +1468,43 @@ impl SettingsScreen {
             (confirm.cancel, confirm.action),
             confirm.text,
         );
+    }
+
+    /// The removal modal's text for `id` (plan 20261028_01, 3.11): what is
+    /// deleted; then whether its daemon is told (over the open link, by
+    /// one short connection, or not at all while the one in use is
+    /// offline); then, for the one in use, what comes next.
+    fn removal_question(&self, id: RemoteId) -> Option<String> {
+        let r = self.remotes.iter().find(|r| r.id == id)?;
+        let name = r.name.as_str();
+        let device = self.device.as_str();
+        let mut parts = vec![copy::REMOVE_REMOTE.fill(
+            None,
+            &[
+                ("name", name),
+                ("host", &r.host),
+                ("fingerprint", &r.fingerprint),
+            ],
+        )];
+        let told = match (r.active, r.online) {
+            (true, true) => copy::REMOVE_REMOTE_TELL,
+            (true, false) => copy::REMOVE_REMOTE_OFFLINE,
+            (false, _) => copy::REMOVE_REMOTE_TRY,
+        };
+        parts.push(told.fill(None, &[("name", name), ("device", device)]));
+        if r.active {
+            parts.push(match next_remote(&self.remotes, id) {
+                Some(next) => copy::REMOVE_REMOTE_NEXT.fill(None, &[("next", &next.name)]),
+                None => copy::REMOVE_REMOTE_LAST.text.to_string(),
+            });
+        }
+        Some(
+            parts
+                .iter()
+                .map(|p| p.trim())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
     }
 
     /// The daemon's `[llm]` changed: *General agent* is shown as it is now.
@@ -1292,7 +1573,7 @@ impl SettingsScreen {
                 self.dirty = true;
                 if by == DismissReason::Control(action) {
                     hit = match what {
-                        Asking::Unpair => Some(SettingsHit::Unpair),
+                        Asking::RemoveRemote(id) => Some(SettingsHit::RemoveRemote(id)),
                         Asking::Delete => Some(SettingsHit::DeleteData),
                         Asking::Info(_) => None,
                     };
@@ -1604,6 +1885,7 @@ mod tests {
                 Section::Display,
                 Section::Background,
                 Section::Notifications,
+                Section::Remotes,
                 Section::Device
             ]
         );
@@ -1618,8 +1900,12 @@ mod tests {
         assert_eq!(sound.h, ROW_H * 2.0);
         assert!(sound.y >= s.viewport().y);
         let delete = s.row_rect("Delete data").unwrap();
-        let unpair = s.row_rect("Unpair this device").unwrap();
-        assert!(unpair.y < delete.y && delete.y > sound.y);
+        let clear = s.row_rect("Clear cache (0 MB)").unwrap();
+        assert!(clear.y < delete.y && delete.y > sound.y);
+        // *Unpair this device* is gone: each remote's X replaces it (the
+        // 2026-10-28 13:03 EDT amendment).
+        assert!(s.row_rect("Unpair this device").is_none());
+        assert!(!copy::DELETE_DATA.text.contains("Unpair"));
     }
 
     #[test]
@@ -1903,12 +2189,12 @@ mod tests {
 
     #[test]
     fn each_modal_opens_and_cancels_and_its_action_confirms() {
-        for (row, hit) in [
-            ("Unpair this device", SettingsHit::Unpair),
-            ("Delete data", SettingsHit::DeleteData),
-        ] {
-            let mut s = plain();
-            s.set_daemon("m4", true);
+        // *Delete data*'s; *Unpair this device*'s is gone, and a remote's X
+        // has its own test below.
+        let (row, hit) = ("Delete data", SettingsHit::DeleteData);
+        {
+            // Tall enough that Device, last, is in view unscrolled.
+            let mut s = with_remotes(Vec::new());
             assert_eq!(tap_row(&mut s, row), None);
             assert!(s.asking(), "{row} asks first");
             s.tick(Duration::from_secs(1));
@@ -1937,15 +2223,305 @@ mod tests {
         }
     }
 
+    // The Remotes section (plan 20261028_01, step 5).
+
+    /// A remote, paired `n` seconds after 28 Oct 2026 12:00 UTC.
+    fn remote(n: u8, active: bool, online: bool) -> RemoteInfo {
+        RemoteInfo {
+            id: RemoteId([n; 8]),
+            name: format!("m{n}"),
+            host: format!("m{n}.tail1a2b3c.ts.net:7347"),
+            fingerprint: format!("{n}{n}{n}{n} 12c4"),
+            paired_at: Some(1_793_188_800 + u64::from(n)),
+            active,
+            online,
+        }
+    }
+
+    /// A screen tall enough that the Remotes and Device sections are in
+    /// view, with `remotes`.
+    fn with_remotes(remotes: Vec<RemoteInfo>) -> SettingsScreen {
+        let mut s = SettingsScreen::new(Settings::default(), Box::new(NoBattery), false);
+        s.set_layout(Layout { h: 4000.0, ..PHONE });
+        s.set_device("s23");
+        s.set_remotes(remotes);
+        s
+    }
+
+    impl SettingsScreen {
+        /// The remote rows shown: name, status, second line and place.
+        fn remote_rows(&self) -> Vec<(String, Option<&'static str>, String, Rect)> {
+            let Some(n) = &self.nodes else {
+                return Vec::new();
+            };
+            n.remotes
+                .iter()
+                .filter(|&&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
+                .filter_map(|&id| self.router.get::<RemoteRow>(id))
+                .map(|r| (r.name().to_string(), r.status(), r.detail(), r.rect))
+                .collect()
+        }
+
+        /// The centre of remote row `i`'s X.
+        fn remove_point(&self, i: usize) -> [f32; 2] {
+            let n = self.nodes.as_ref().unwrap();
+            self.router
+                .get::<RemoteRow>(n.remotes[i])
+                .unwrap()
+                .remove_rect()
+                .center()
+        }
+
+        /// The Remotes title's + and ⓘ, and whether the + is dim.
+        fn remotes_title(&self) -> RemotesTitle {
+            let n = self.nodes.as_ref().unwrap();
+            self.router
+                .get::<RemotesTitle>(n.remotes_title)
+                .unwrap()
+                .clone()
+        }
+
+        /// The note under the remotes, if shown.
+        fn remotes_notes(&self) -> Vec<String> {
+            let Some(n) = &self.nodes else {
+                return Vec::new();
+            };
+            self.shown_notes(&[n.remotes_note])
+        }
+    }
+
     #[test]
-    fn the_unpair_modal_says_when_flankr_is_offline() {
-        let mut s = plain();
-        s.set_daemon("m4", false);
-        tap_row(&mut s, "Unpair this device");
+    fn the_remotes_section_sits_between_battery_and_device_with_a_row_each() {
+        let mut s = screen(true, Box::new(NoBattery));
+        let order: Vec<Section> = s.sections().into_iter().map(|(x, _)| x).collect();
+        let at = |x| order.iter().position(|&o| o == x).unwrap();
+        assert_eq!(at(Section::Remotes), at(Section::Battery) + 1);
+        assert_eq!(at(Section::Device), at(Section::Remotes) + 1);
+        assert_eq!(Section::Remotes.title(), "REMOTES");
+
+        s.set_remotes(vec![remote(1, true, false), remote(2, false, false)]);
+        let rows = s.remote_rows();
+        assert_eq!(rows.len(), 2, "one row per remote, the rest hidden");
+        let (name, status, detail, rect) = &rows[0];
+        assert_eq!(name, "m1");
+        assert_eq!(*status, Some("in use · offline"));
+        assert_eq!(
+            detail,
+            "m1.tail1a2b3c.ts.net:7347 · 1111 12c4 · paired 28 Oct 2026"
+        );
+        assert_eq!(rect.h, ROW_H * 2.0, "52 pt");
+        assert_eq!(rows[1].1, None, "only the one in use says so");
+        assert_eq!(rows[1].3.y, rect.y + rect.h, "in pairing order");
+        // Under the Remotes title, above Device.
+        let title_y = |x| s.sections().into_iter().find(|(t, _)| *t == x).unwrap().1;
+        assert!(rect.y > title_y(Section::Remotes));
+        assert!(rows[1].3.y + rows[1].3.h <= title_y(Section::Device));
+        // Online: "in use".
+        s.set_remotes(vec![remote(1, true, true), remote(2, false, false)]);
+        assert_eq!(s.remote_rows()[0].1, Some("in use"));
+        // A row is drawn: its two lines and its X.
+        let mut list = DrawList::new();
+        assert!(s.draw(&mut list, &crate::theme::testing::draw_context(), None));
+        assert!(
+            s.remotes_notes().is_empty(),
+            "no note with remotes and room"
+        );
+    }
+
+    #[test]
+    fn no_remote_shows_the_empty_note_and_the_title_explains_remotes() {
+        let mut s = with_remotes(Vec::new());
+        assert!(s.remote_rows().is_empty());
+        assert_eq!(
+            s.remotes_notes(),
+            [copy::REMOTES_EMPTY.text.trim().to_string()]
+        );
+        // The ⓘ beside the title opens the explanation.
+        let [x, y] = s.remotes_title().info_rect().center();
+        assert_eq!(tap(&mut s, x, y), None);
+        assert!(s.asking());
         s.tick(Duration::from_secs(1));
         let text = s.modal_text();
-        assert!(text.contains("flankr is offline"), "{text}");
-        assert!(text.contains("from m4?"), "{text}");
+        assert!(text.starts_with("Remotes"), "{text}");
+        for word in [
+            "`Noise_IK`",
+            "BLAKE2s-256",
+            "*in use*",
+            "`remotes/<id>/state.redb`",
+        ] {
+            assert!(
+                text.contains(word.trim_matches(['`', '*'])),
+                "{word}: {text}"
+            );
+        }
+        assert!(s.back());
+    }
+
+    #[test]
+    fn the_plus_opens_the_add_mode_and_is_dim_at_eight() {
+        let mut s = with_remotes(vec![remote(1, true, true)]);
+        let t = s.remotes_title();
+        let add = t.add_rect();
+        assert_eq!(add.w, 44.0 * 2.0, "a 44 pt target");
+        assert!(
+            add.x + add.w <= PHONE.w && add.x > PHONE.w * 0.8,
+            "at the right"
+        );
+        assert!(!t.full);
+        assert_eq!(
+            tap(&mut s, add.center()[0], add.center()[1]),
+            Some(SettingsHit::AddRemote)
+        );
+        assert!(!s.asking());
+        // At 8: dim, no taps, and the note says why.
+        let eight: Vec<_> = (1..=8).map(|n| remote(n, n == 1, true)).collect();
+        assert_eq!(eight.len(), MAX_REMOTES);
+        s.set_remotes(eight);
+        let t = s.remotes_title();
+        assert!(t.full);
+        let [x, y] = t.add_rect().center();
+        assert_eq!(tap(&mut s, x, y), None, "dim, it takes no taps");
+        assert_eq!(
+            s.remotes_notes(),
+            [copy::REMOTES_FULL.text.trim().to_string()]
+        );
+        // Drawn dim.
+        let ctx = crate::theme::testing::draw_context();
+        let alpha = |full| {
+            let mut t = t.clone();
+            t.full = full;
+            let mut list = DrawList::new();
+            libcontrols::DrawControl::draw(&t, &mut list, &ctx);
+            list.instances.last().unwrap().color[3]
+        };
+        assert!(
+            (alpha(true) - alpha(false) * crate::settings::DISABLED_ALPHA).abs() < 1e-6,
+            "the + at 35%"
+        );
+    }
+
+    #[test]
+    fn a_remotes_x_asks_first_and_remove_confirms() {
+        let remotes = vec![
+            remote(1, true, true),
+            remote(2, false, false),
+            remote(3, false, false),
+        ];
+        let mut s = with_remotes(remotes.clone());
+        // A tap on the row itself does nothing.
+        let row = s.remote_rows()[1].3;
+        assert_eq!(tap(&mut s, row.x + 40.0, row.y + row.h * 0.5), None);
+        assert!(!s.asking());
+
+        // Another remote: the revoke probe's paragraph, nothing on what is
+        // next.
+        let [x, y] = s.remove_point(1);
+        assert_eq!(tap(&mut s, x, y), None);
+        assert!(s.asking(), "the X asks first");
+        let text = s.modal_text();
+        assert!(
+            text.contains("Remove m2 (m2.tail1a2b3c.ts.net:7347, 2222 12c4)"),
+            "{text}"
+        );
+        assert!(text.contains("remotes/<id>/"), "{text}");
+        assert!(text.contains("connects to m2 once"), "{text}");
+        assert!(text.contains("(s23)"), "the auth.toml entry: {text}");
+        assert!(
+            !text.contains("next") && !text.contains("last remote"),
+            "{text}"
+        );
+        // Cancel: nothing.
+        let (cancel, action) = s.modal_points();
+        assert_eq!(tap(&mut s, cancel[0], cancel[1]), None);
+        assert!(!s.asking());
+        // Remove: the remote's id.
+        tap(&mut s, x, y);
+        assert_eq!(
+            tap(&mut s, action[0], action[1]),
+            Some(SettingsHit::RemoveRemote(RemoteId([2; 8])))
+        );
+        assert!(!s.asking(), "closed at once");
+        assert!(
+            !s.modals
+                .contains(Asking::RemoveRemote(RemoteId([2; 8])).id())
+        );
+
+        // The one in use, online: told over the open link; the most
+        // recently paired of the rest is next.
+        let [x, y] = s.remove_point(0);
+        tap(&mut s, x, y);
+        let text = s.modal_text();
+        assert!(text.contains("over the open link"), "{text}");
+        assert!(text.contains("connects to m3 next"), "{text}");
+        assert!(s.back(), "Back cancels");
+
+        // The one in use, offline: it won't be told, and the entry left
+        // there is named, with where to delete it.
+        let mut offline = remotes.clone();
+        offline[0].online = false;
+        s.set_remotes(offline);
+        tap(&mut s, x, y);
+        let text = s.modal_text();
+        assert!(
+            text.contains("m1 is offline, so it won't be told."),
+            "{text}"
+        );
+        assert!(text.contains("~/.config/flankr/auth.toml"), "{text}");
+        assert!(text.contains("(s23)"), "{text}");
+        assert!(!text.contains("over the open link"), "{text}");
+        let (_, action) = s.modal_points();
+        assert_eq!(
+            tap(&mut s, action[0], action[1]),
+            Some(SettingsHit::RemoveRemote(RemoteId([1; 8])))
+        );
+
+        // The last one: back to the pairing screen.
+        let mut s = with_remotes(vec![remote(1, true, true)]);
+        let [x, y] = s.remove_point(0);
+        tap(&mut s, x, y);
+        let text = s.modal_text();
+        assert!(text.contains("the last remote"), "{text}");
+        // The modal's button says Remove.
+        let (_, action) = s.modal_points();
+        let label = s
+            .dialog(|c| {
+                c.children(None)
+                    .filter_map(|id| c.get::<libcontrols::Button>(id))
+                    .find(|b| b.rect.center() == action)
+                    .map(|b| b.text.clone())
+            })
+            .flatten();
+        assert_eq!(label.as_deref(), Some("Remove"));
+    }
+
+    #[test]
+    fn a_result_note_shows_under_the_remotes() {
+        let mut s = with_remotes(vec![remote(1, true, true)]);
+        s.set_remotes_note(Some("Removed m2: it answered.".into()));
+        assert_eq!(s.remotes_notes(), ["Removed m2: it answered."]);
+        // Kept across a new layout.
+        s.set_layout(Layout {
+            w: 1200.0,
+            h: 4000.0,
+            ..PHONE
+        });
+        assert_eq!(s.remotes_notes(), ["Removed m2: it answered."]);
+        s.set_remotes_note(None);
+        assert!(s.remotes_notes().is_empty());
+    }
+
+    #[test]
+    fn the_next_remote_is_the_most_recently_paired_of_the_rest() {
+        let mut list = vec![
+            remote(1, true, true),
+            remote(3, false, false),
+            remote(2, false, false),
+        ];
+        assert_eq!(next_remote(&list, RemoteId([1; 8])).unwrap().name, "m3");
+        // Undated ones go by list order, after dated ones.
+        list[1].paired_at = None;
+        assert_eq!(next_remote(&list, RemoteId([1; 8])).unwrap().name, "m2");
+        assert!(next_remote(&list[..1], RemoteId([1; 8])).is_none());
     }
 
     #[test]
@@ -2021,8 +2597,8 @@ mod tests {
         let mut s = plain();
         // Empty: shown, and does nothing.
         let empty = s.row_rect("Clear cache (0 MB)").unwrap();
-        let unpair = s.row_rect("Unpair this device").unwrap();
-        assert!(empty.y < unpair.y, "before Unpair, in Device");
+        let delete = s.row_rect("Delete data").unwrap();
+        assert!(empty.y < delete.y, "before Delete data, in Device");
         assert_eq!(tap_row(&mut s, "Clear cache (0 MB)"), None);
         assert!(!s.asking());
         s.set_cache(2_621_440);
@@ -2511,7 +3087,6 @@ mod tests {
             "General agent (Gemini)",
             "Tab follows focus",
             "Scrollbar",
-            "Unpair this device",
             "Delete data",
         ] {
             assert!(s.row_rect(label).is_some(), "{label}");
