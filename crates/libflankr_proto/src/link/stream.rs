@@ -5,13 +5,89 @@ use std::sync::Arc;
 use snow::StatelessTransportState;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
-use super::{FLAG_LAST, FLAG_MORE, KEY_LEN, LinkError, MAX_CHUNK, MAX_FRAME, MAX_MESSAGE};
+use super::{
+    FLAG_MORE, FLAG_RESERVED, KEY_LEN, KIND_JSON, KIND_TERMINAL, LinkError, MAX_CHUNK, MAX_FRAME,
+    MAX_MESSAGE,
+};
+
+/// A message's kind, as the high nibble of its frames' flag byte carries
+/// it (see the [module](super) header). Open: later kinds are additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Kind {
+    /// A JSON-RPC message ([`KIND_JSON`](super::KIND_JSON)).
+    Json,
+    /// A terminal frame ([`KIND_TERMINAL`](super::KIND_TERMINAL); plan
+    /// 20261027_07, decision 3): its bytes are `libflankr_term`'s encoding.
+    Terminal,
+}
+
+impl Kind {
+    /// The kind's nibble, before it is shifted into the flag byte's high
+    /// half.
+    pub fn nibble(self) -> u8 {
+        match self {
+            Kind::Json => KIND_JSON,
+            Kind::Terminal => KIND_TERMINAL,
+        }
+    }
+
+    /// The kind a nibble names, if it is one this crate reads.
+    pub fn from_nibble(nibble: u8) -> Option<Kind> {
+        match nibble {
+            KIND_JSON => Some(Kind::Json),
+            KIND_TERMINAL => Some(Kind::Terminal),
+            _ => None,
+        }
+    }
+}
+
+/// One whole message as [`LinkStream::recv`] returns it, by its kind.
+/// Open: later kinds are additive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Message {
+    /// A JSON-RPC message: what [`LinkStream::recv_message`] returns.
+    Json(Vec<u8>),
+    /// A terminal frame.
+    Terminal(Vec<u8>),
+}
+
+impl Message {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Message::Json(_) => Kind::Json,
+            Message::Terminal(_) => Kind::Terminal,
+        }
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        match self {
+            Message::Json(b) | Message::Terminal(b) => b,
+        }
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Message::Json(b) | Message::Terminal(b) => b,
+        }
+    }
+
+    fn new(kind: Kind, bytes: Vec<u8>) -> Message {
+        match kind {
+            Kind::Json => Message::Json(bytes),
+            Kind::Terminal => Message::Terminal(bytes),
+        }
+    }
+}
 
 /// An established link connection. Messages are whole: one
 /// [`send_message`](Self::send_message) is one
-/// [`recv_message`](Self::recv_message) on the other side.
+/// [`recv_message`](Self::recv_message) on the other side, and one
+/// `send_message` or [`send_terminal`](Self::send_terminal) is one
+/// [`recv`](Self::recv).
 ///
-/// `recv_message` is not cancel-safe: a message half read when its future
+/// `recv_message` and `recv` are not cancel-safe: a message half read when its future
 /// is dropped is lost and the stream is out of step. To read and write at
 /// once, [`into_split`](Self::into_split) the stream.
 pub struct LinkStream<S> {
@@ -43,30 +119,95 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LinkStream<S> {
     /// Sends one message, in as many frames as it needs. A message over
     /// [`MAX_MESSAGE`] is refused without sending anything.
     pub async fn send_message(&mut self, msg: &[u8]) -> Result<(), LinkError> {
+        self.send_kind(Kind::Json, msg).await
+    }
+
+    /// Sends one terminal frame, as [`send_message`](Self::send_message)
+    /// sends a JSON-RPC message. Send it only to a peer that reads with
+    /// [`recv`](Self::recv): `recv_message` is `BadFrame` on it.
+    pub async fn send_terminal(&mut self, msg: &[u8]) -> Result<(), LinkError> {
+        self.send_kind(Kind::Terminal, msg).await
+    }
+
+    /// Sends one message of `kind`. A message over [`MAX_MESSAGE`] is
+    /// refused without sending anything.
+    pub async fn send_kind(&mut self, kind: Kind, msg: &[u8]) -> Result<(), LinkError> {
         if msg.len() > MAX_MESSAGE {
             return Err(LinkError::MessageTooLarge);
         }
-        self.send_unchecked(msg).await
+        self.send_unchecked_kind(kind, msg).await
     }
 
+    #[cfg(test)]
     pub(super) async fn send_unchecked(&mut self, msg: &[u8]) -> Result<(), LinkError> {
+        self.send_unchecked_kind(Kind::Json, msg).await
+    }
+
+    async fn send_unchecked_kind(&mut self, kind: Kind, msg: &[u8]) -> Result<(), LinkError> {
         if self.closed {
             return Err(LinkError::Closed);
         }
-        let r = write_message(&mut self.io, &self.transport, &mut self.send_nonce, msg).await;
+        let r = write_message(
+            &mut self.io,
+            &self.transport,
+            &mut self.send_nonce,
+            kind,
+            msg,
+        )
+        .await;
         if r.is_err() {
             self.close().await;
         }
         r
     }
 
-    /// Receives one whole message. On any error, including a message
+    /// Sends frames with the given flag bytes and chunks as they are, for
+    /// tests of the receiver's checks.
+    #[cfg(test)]
+    pub(super) async fn send_raw_frames(
+        &mut self,
+        frames: &[(u8, &[u8])],
+    ) -> Result<(), LinkError> {
+        let mut out = vec![0u8; 2 + MAX_FRAME];
+        for &(flag, chunk) in frames {
+            let mut plain = vec![flag];
+            plain.extend_from_slice(chunk);
+            let n = self
+                .transport
+                .write_message(self.send_nonce, &plain, &mut out[2..])?;
+            self.send_nonce += 1;
+            out[..2].copy_from_slice(&(n as u16).to_be_bytes());
+            self.io.write_all(&out[..2 + n]).await?;
+        }
+        self.io.flush().await?;
+        Ok(())
+    }
+
+    /// Receives one whole JSON-RPC message. A frame of any other kind is
+    /// [`LinkError::BadFrame`]. On any error, including a message
     /// reassembled past [`MAX_MESSAGE`], the connection is closed.
     pub async fn recv_message(&mut self) -> Result<Vec<u8>, LinkError> {
+        self.recv_accepting(false).await.map(Message::into_bytes)
+    }
+
+    /// Receives one whole message of either kind. Errors as
+    /// [`recv_message`](Self::recv_message) does, but a terminal frame is
+    /// [`Message::Terminal`].
+    pub async fn recv(&mut self) -> Result<Message, LinkError> {
+        self.recv_accepting(true).await
+    }
+
+    async fn recv_accepting(&mut self, terminal: bool) -> Result<Message, LinkError> {
         if self.closed {
             return Err(LinkError::Closed);
         }
-        let r = read_message(&mut self.io, &self.transport, &mut self.recv_nonce).await;
+        let r = read_message(
+            &mut self.io,
+            &self.transport,
+            &mut self.recv_nonce,
+            terminal,
+        )
+        .await;
         if r.is_err() {
             self.close().await;
         }
@@ -117,10 +258,19 @@ pub struct LinkReader<R> {
 impl<R: AsyncRead + Unpin> LinkReader<R> {
     /// As [`LinkStream::recv_message`]. Not cancel-safe.
     pub async fn recv_message(&mut self) -> Result<Vec<u8>, LinkError> {
+        self.recv_accepting(false).await.map(Message::into_bytes)
+    }
+
+    /// As [`LinkStream::recv`]. Not cancel-safe.
+    pub async fn recv(&mut self) -> Result<Message, LinkError> {
+        self.recv_accepting(true).await
+    }
+
+    async fn recv_accepting(&mut self, terminal: bool) -> Result<Message, LinkError> {
         if self.closed {
             return Err(LinkError::Closed);
         }
-        let r = read_message(&mut self.io, &self.transport, &mut self.nonce).await;
+        let r = read_message(&mut self.io, &self.transport, &mut self.nonce, terminal).await;
         self.closed = r.is_err();
         r
     }
@@ -137,13 +287,23 @@ pub struct LinkWriter<W> {
 impl<W: AsyncWrite + Unpin> LinkWriter<W> {
     /// As [`LinkStream::send_message`].
     pub async fn send_message(&mut self, msg: &[u8]) -> Result<(), LinkError> {
+        self.send_kind(Kind::Json, msg).await
+    }
+
+    /// As [`LinkStream::send_terminal`].
+    pub async fn send_terminal(&mut self, msg: &[u8]) -> Result<(), LinkError> {
+        self.send_kind(Kind::Terminal, msg).await
+    }
+
+    /// As [`LinkStream::send_kind`].
+    pub async fn send_kind(&mut self, kind: Kind, msg: &[u8]) -> Result<(), LinkError> {
         if msg.len() > MAX_MESSAGE {
             return Err(LinkError::MessageTooLarge);
         }
         if self.closed {
             return Err(LinkError::Closed);
         }
-        let r = write_message(&mut self.io, &self.transport, &mut self.nonce, msg).await;
+        let r = write_message(&mut self.io, &self.transport, &mut self.nonce, kind, msg).await;
         if r.is_err() {
             self.closed = true;
             let _ = self.io.shutdown().await;
@@ -163,8 +323,10 @@ async fn write_message<W: AsyncWrite + Unpin>(
     io: &mut W,
     transport: &StatelessTransportState,
     nonce: &mut u64,
+    kind: Kind,
     msg: &[u8],
 ) -> Result<(), LinkError> {
+    let kind = kind.nibble() << 4;
     let mut plain = Vec::with_capacity(1 + MAX_CHUNK.min(msg.len()));
     let mut frame = vec![0u8; 2 + MAX_FRAME];
     let mut rest = msg;
@@ -173,9 +335,9 @@ async fn write_message<W: AsyncWrite + Unpin>(
         rest = tail;
         plain.clear();
         plain.push(if rest.is_empty() {
-            FLAG_LAST
+            kind
         } else {
-            FLAG_MORE
+            kind | FLAG_MORE
         });
         plain.extend_from_slice(chunk);
         let n = transport.write_message(*nonce, &plain, &mut frame[2..])?;
@@ -190,14 +352,19 @@ async fn write_message<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
+/// Reads one message. With `terminal` false only kind 0 is read, so any
+/// flag byte but `0x00`/`0x01` is `BadFrame`, exactly as before the kind
+/// nibble (plan 20261027_07, the 14:23 EDT amendment).
 async fn read_message<R: AsyncRead + Unpin>(
     io: &mut R,
     transport: &StatelessTransportState,
     nonce: &mut u64,
-) -> Result<Vec<u8>, LinkError> {
+    terminal: bool,
+) -> Result<Message, LinkError> {
     let mut frame = vec![0u8; MAX_FRAME];
     let mut plain = vec![0u8; MAX_FRAME];
     let mut out = Vec::new();
+    let mut kind: Option<Kind> = None;
     loop {
         let len = usize::from(io.read_u16().await?);
         io.read_exact(&mut frame[..len]).await?;
@@ -207,11 +374,20 @@ async fn read_message<R: AsyncRead + Unpin>(
         if out.len() + chunk.len() > MAX_MESSAGE {
             return Err(LinkError::MessageTooLarge);
         }
+        if flag & FLAG_RESERVED != 0 {
+            return Err(LinkError::BadFrame);
+        }
+        let this = match Kind::from_nibble(flag >> 4) {
+            Some(Kind::Terminal) if !terminal => return Err(LinkError::BadFrame),
+            Some(k) => k,
+            None => return Err(LinkError::BadFrame),
+        };
+        if *kind.get_or_insert(this) != this {
+            return Err(LinkError::BadFrame);
+        }
         out.extend_from_slice(chunk);
-        match flag {
-            FLAG_LAST => return Ok(out),
-            FLAG_MORE => continue,
-            _ => return Err(LinkError::BadFrame),
+        if flag & FLAG_MORE == 0 {
+            return Ok(Message::new(this, out));
         }
     }
 }

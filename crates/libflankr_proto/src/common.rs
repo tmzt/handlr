@@ -71,6 +71,30 @@ pub mod methods {
     pub const SESSION_CONTENT: &str = "session.content";
     /// Notification: a subscription's new or changed sections.
     pub const SESSION_DELIVERY: &str = "session.delivery";
+
+    /// Start mirroring a session's pane on this connection (plan
+    /// 20261027_07, decision 2): [`TerminalOpenParams`](super::TerminalOpenParams)
+    /// → [`TerminalOpenResult`](super::TerminalOpenResult). Companions only;
+    /// frames then arrive as the link's terminal kind. An older daemon
+    /// answers `METHOD_NOT_FOUND`.
+    pub const TERMINAL_OPEN: &str = "terminal.open";
+    /// Stop a terminal: [`TerminalCloseParams`](super::TerminalCloseParams),
+    /// answered `{}`.
+    pub const TERMINAL_CLOSE: &str = "terminal.close";
+    /// Notification, phone → daemon: the newest frame the phone holds
+    /// ([`TerminalAckParams`](super::TerminalAckParams)).
+    pub const TERMINAL_ACK: &str = "terminal.ack";
+    /// Arm keyboard input for 60 s
+    /// ([`TerminalInputArmParams`](super::TerminalInputArmParams) →
+    /// [`TerminalInputArmResult`](super::TerminalInputArmResult); plan
+    /// 20261027_07, decision 6).
+    pub const TERMINAL_INPUT_ARM: &str = "terminal.input_arm";
+    /// Keys into an armed terminal
+    /// ([`TerminalInputParams`](super::TerminalInputParams)), answered `{}`.
+    pub const TERMINAL_INPUT: &str = "terminal.input";
+    /// Notification, daemon → phone: a terminal ended
+    /// ([`TerminalClosedParams`](super::TerminalClosedParams)).
+    pub const TERMINAL_CLOSED: &str = "terminal.closed";
 }
 
 /// Topics for `events.subscribe`.
@@ -1263,6 +1287,105 @@ pub struct LinkPairDone {
     pub error: Option<String>,
 }
 
+/// `terminal.open` (plan 20261027_07, decision 2): mirror the pane of a
+/// session on this connection. One terminal per session per connection;
+/// a second `open` returns the same id. Refused with the codes
+/// `agents.read` uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOpenParams {
+    /// A pane id or a name, resolved as `session.peek` resolves it; also
+    /// read as `session`.
+    #[serde(alias = "session")]
+    pub pane_id: String,
+    /// The columns the phone could show. A hint only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols_hint: Option<u16>,
+    /// The rows the phone could show. A hint only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows_hint: Option<u16>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalOpenResult {
+    /// Names the terminal in the other `terminal.*` calls and in its
+    /// frames.
+    pub terminal_id: u32,
+    /// The pane's size as the daemon reads it (today the longest row and
+    /// the row count of the visible frame).
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// `terminal.close`, answered with [`Empty`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalCloseParams {
+    pub terminal_id: u32,
+}
+
+/// `terminal.ack`, a notification from the phone: `seq` is the newest
+/// frame it holds, which the daemon diffs from thereafter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalAckParams {
+    pub terminal_id: u32,
+    pub seq: u32,
+}
+
+/// How long one `terminal.input_arm` lets `terminal.input` through, in
+/// seconds (plan 20261027_07, decision 6).
+pub const TERMINAL_INPUT_ARM_SECS: u32 = 60;
+
+/// `terminal.input_arm`: arm keyboard input on a terminal opened on this
+/// connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInputArmParams {
+    pub terminal_id: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInputArmResult {
+    /// Seconds from the daemon's answer until input is refused again
+    /// unless armed anew: [`TERMINAL_INPUT_ARM_SECS`] today. Relative, so
+    /// the phone's clock does not matter.
+    pub expires_in_s: u32,
+}
+
+/// The most bytes of `keys` in one `terminal.input`.
+pub const TERMINAL_INPUT_MAX: usize = 64;
+
+/// `terminal.input`, answered with [`Empty`]: keys into an armed terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInputParams {
+    pub terminal_id: u32,
+    /// herdr's `send_keys` syntax, at most [`TERMINAL_INPUT_MAX`] bytes.
+    pub keys: String,
+}
+
+/// Why a terminal ended. Open: a reason this crate does not know reads as
+/// `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TerminalClosedReason {
+    /// The pane closed.
+    PaneClosed,
+    /// The pane's agent changed.
+    AgentChanged,
+    /// Keyboard input was revoked.
+    InputRevoked,
+    /// The daemon closed it for another reason, such as shutting down.
+    Closed,
+    /// A reason from a newer daemon.
+    #[serde(other)]
+    Unknown,
+}
+
+/// `terminal.closed`, a notification from the daemon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalClosedParams {
+    pub terminal_id: u32,
+    pub reason: TerminalClosedReason,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2293,5 +2416,75 @@ mod tests {
         };
         round_trip(bookend);
         assert_eq!(serde_json::to_value(bookend).unwrap()["bookend"], true);
+    }
+
+    /// Plan 20261027_07, step 2: the `terminal.*` methods.
+    #[test]
+    fn terminal_methods_and_their_shapes() {
+        assert_eq!(methods::TERMINAL_OPEN, "terminal.open");
+        assert_eq!(methods::TERMINAL_CLOSE, "terminal.close");
+        assert_eq!(methods::TERMINAL_ACK, "terminal.ack");
+        assert_eq!(methods::TERMINAL_INPUT_ARM, "terminal.input_arm");
+        assert_eq!(methods::TERMINAL_INPUT, "terminal.input");
+        assert_eq!(methods::TERMINAL_CLOSED, "terminal.closed");
+
+        let open = TerminalOpenParams {
+            pane_id: "w2:p4".into(),
+            cols_hint: Some(60),
+            rows_hint: None,
+        };
+        round_trip(open.clone());
+        assert_eq!(
+            serde_json::to_value(&open).unwrap(),
+            json!({"pane_id": "w2:p4", "cols_hint": 60})
+        );
+        let by_session: TerminalOpenParams =
+            serde_json::from_value(json!({"session": "w2:p4"})).unwrap();
+        assert_eq!(by_session.pane_id, "w2:p4");
+        assert_eq!((by_session.cols_hint, by_session.rows_hint), (None, None));
+        round_trip(TerminalOpenResult {
+            terminal_id: 1,
+            cols: 200,
+            rows: 60,
+        });
+        round_trip(TerminalCloseParams { terminal_id: 1 });
+        assert_eq!(
+            serde_json::to_value(TerminalAckParams {
+                terminal_id: 1,
+                seq: 7
+            })
+            .unwrap(),
+            json!({"terminal_id": 1, "seq": 7})
+        );
+        round_trip(TerminalInputArmParams { terminal_id: 1 });
+        round_trip(TerminalInputArmResult {
+            expires_in_s: TERMINAL_INPUT_ARM_SECS,
+        });
+        round_trip(TerminalInputParams {
+            terminal_id: 1,
+            keys: "ls enter".into(),
+        });
+        assert_eq!(TERMINAL_INPUT_MAX, 64);
+
+        for (reason, wire) in [
+            (TerminalClosedReason::PaneClosed, "pane_closed"),
+            (TerminalClosedReason::AgentChanged, "agent_changed"),
+            (TerminalClosedReason::InputRevoked, "input_revoked"),
+            (TerminalClosedReason::Closed, "closed"),
+        ] {
+            let c = TerminalClosedParams {
+                terminal_id: 3,
+                reason,
+            };
+            round_trip(c);
+            assert_eq!(
+                serde_json::to_value(c).unwrap(),
+                json!({"terminal_id": 3, "reason": wire})
+            );
+        }
+        // A reason from a newer daemon reads as Unknown.
+        let c: TerminalClosedParams =
+            serde_json::from_value(json!({"terminal_id": 3, "reason": "resized_away"})).unwrap();
+        assert_eq!(c.reason, TerminalClosedReason::Unknown);
     }
 }

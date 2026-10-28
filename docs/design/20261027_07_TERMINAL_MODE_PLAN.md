@@ -1,7 +1,7 @@
 ---
 title: A terminal mode for a session, tunnelled over the link
 date: 2026-10-27
-status: Draft
+status: In implementation
 covers:
   - A per-session terminal view in the companion app, beside the transcript
     view, switched by a swapped terminal/list glyph in the bottom bar
@@ -610,3 +610,11 @@ the 14:23 amendment, it wins.
    view and its bottom bar) is also related; the front matter is not edited.
 
 The status becomes `In implementation` with step 1's commit.
+
+## Amendment — 2026-10-27 20:53 EDT: implementation has started; the document is now immutable
+
+Implementation has started with step 2 (`libflankr_proto` 0.4.0), which
+lands before step 1; the 20:44 EDT amendment's "with step 1's commit" is
+corrected to this commit. Steps 1 and 2 are independent. The status is
+`In implementation`, and the document is now immutable: it changes only on
+the owner's explicit instruction.

@@ -15,6 +15,20 @@
 //!   message (at most 65535 bytes). After the handshake each frame's
 //!   plaintext is a flag byte (`0x00` last, `0x01` more) and a chunk of one
 //!   message. A message reassembled past 1 MiB closes the connection.
+//! * The flag byte is two nibbles (plan 20261027_07, the 14:23 EDT
+//!   amendment). The low nibble is the flags: bit 0 is *more* (0 last,
+//!   1 more); bits 1-3 are reserved, must be zero, and a frame with any of
+//!   them set is [`LinkError::BadFrame`]. The high nibble is the message's
+//!   kind: 0 ([`KIND_JSON`]) a JSON-RPC message, 1 ([`KIND_TERMINAL`]) a
+//!   terminal frame, 2-14 reserved, 15 ([`KIND_EXTENDED`]) extended (the
+//!   kind would continue in the next byte). A reserved or extended kind is
+//!   `BadFrame` for now. Every frame of one message carries the same kind;
+//!   a change mid-message is `BadFrame`. So `0x00`/`0x01` are kind 0, as
+//!   before, and `0x10`/`0x11` a terminal frame, last/more.
+//!   [`LinkStream::recv_message`] takes kind 0 only and is `BadFrame` on
+//!   any other, as before this layout; [`LinkStream::recv`] takes both
+//!   known kinds and returns a [`Message`]. A terminal frame is sent only
+//!   to a peer that has shown it reads them (by calling `terminal.open`).
 //! * [`PairingPayload`] is the pairing string, `flankr1…`, and its URL;
 //!   [`DeviceCode`] is the device's code, `flankrkey1…`. Neither holds a
 //!   secret.
@@ -41,7 +55,7 @@ pub use pairing::{
     DEVICE_CODE_PREFIX, DEVICE_CODE_VERSION, DEVICE_NAME_MAX, DeviceCode, PAIRING_PREFIX,
     PAIRING_URL_SCHEME, PAIRING_VERSION, PairingPayload, PairingStringError,
 };
-pub use stream::{LinkReader, LinkStream, LinkWriter};
+pub use stream::{Kind, LinkReader, LinkStream, LinkWriter, Message};
 
 use std::fmt;
 
@@ -68,9 +82,20 @@ pub const MAX_MESSAGE: usize = 1 << 20;
 /// encrypted static key and the payload's tag).
 pub const MAX_FIRST_MESSAGE: usize = MAX_FRAME - (KEY_LEN + KEY_LEN + TAG_LEN + TAG_LEN);
 
+/// The kind nibble of a JSON-RPC message: the high nibble of the flag
+/// byte.
+pub const KIND_JSON: u8 = 0x0;
+/// The kind nibble of a terminal frame (plan 20261027_07, decision 3).
+pub const KIND_TERMINAL: u8 = 0x1;
+/// The kind nibble that says the kind continues in the next byte.
+/// Reserved: a frame with it is [`LinkError::BadFrame`] today.
+pub const KIND_EXTENDED: u8 = 0xF;
+
 const TAG_LEN: usize = 16;
-const FLAG_LAST: u8 = 0x00;
+/// The flag nibble's *more* bit.
 const FLAG_MORE: u8 = 0x01;
+/// The flag nibble's reserved bits, which must be zero.
+const FLAG_RESERVED: u8 = 0x0E;
 
 /// Why a link operation failed. After any error but
 /// [`LinkError::MessageTooLarge`] from a send, the connection is finished
@@ -96,7 +121,11 @@ pub enum LinkError {
     MessageTooLarge,
     /// A first message longer than [`MAX_FIRST_MESSAGE`].
     FirstMessageTooLarge,
-    /// A frame's plaintext was empty or its flag byte was not `0x00`/`0x01`.
+    /// A frame's plaintext was empty, or its flag byte was not one the
+    /// receive accepts: a reserved flag bit set, a reserved or extended
+    /// kind, a kind other than JSON-RPC to [`LinkStream::recv_message`],
+    /// or a kind that changed mid-message. For `recv_message` that is any
+    /// flag byte but `0x00`/`0x01`, as before.
     BadFrame,
 }
 

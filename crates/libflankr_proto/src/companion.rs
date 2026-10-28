@@ -76,6 +76,23 @@ pub struct HelloResult {
     /// available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmInfo>,
+    /// The terminal mode, when the daemon offers it on this connection
+    /// (plan 20261027_07, decision 4). `None`, from an older daemon or one
+    /// that reaches herdr remotely, means no `terminal.*` methods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalInfo>,
+}
+
+/// The terminal mode a daemon offers (plan 20261027_07, decision 4).
+/// Fields appended later default, so an older daemon's object still reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct TerminalInfo {
+    /// Whether keystrokes may be sent on this connection
+    /// (`terminal.input_arm`, `terminal.input`): the daemon's
+    /// `[terminal] input` setting. Each agent's own setting and the arm
+    /// still apply.
+    #[serde(default)]
+    pub input: bool,
 }
 
 /// What the daemon's `[llm]` makes available to a companion (plan
@@ -112,6 +129,9 @@ pub struct ServerCapabilities {
     /// As [`HelloResult::llm`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub llm: Option<LlmInfo>,
+    /// As [`HelloResult::terminal`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<TerminalInfo>,
 }
 
 /// `turn.start`. `turn_id` is chosen by the client, unique within the
@@ -297,11 +317,20 @@ mod tests {
                 summaries: true,
                 reason: Some("[llm.uses.general_agent] enabled = false".into()),
             }),
+            terminal: Some(TerminalInfo { input: true }),
         });
         round_trip(ServerCapabilities {
             llm: Some(LlmInfo::available()),
+            terminal: None,
         });
-        round_trip(ServerCapabilities { llm: None });
+        round_trip(ServerCapabilities {
+            llm: None,
+            terminal: Some(TerminalInfo { input: false }),
+        });
+        round_trip(ServerCapabilities {
+            llm: None,
+            terminal: None,
+        });
         round_trip(TurnStartParams {
             turn_id: 4,
             text: "send continue to claude".into(),
@@ -424,10 +453,15 @@ mod tests {
         .unwrap();
         assert_eq!(h.llm, None);
         assert!(serde_json::to_value(&h).unwrap().get("llm").is_none());
+        // ... and no `terminal` (plan 20261027_07, decision 4): None, not
+        // written.
+        assert_eq!(h.terminal, None);
+        assert!(serde_json::to_value(&h).unwrap().get("terminal").is_none());
         // LlmInfo's shape; a reason only when there is one.
         assert_eq!(
             serde_json::to_value(ServerCapabilities {
-                llm: Some(LlmInfo::available())
+                llm: Some(LlmInfo::available()),
+                terminal: None,
             })
             .unwrap(),
             json!({"llm": {"general_agent": true, "summaries": true}})
@@ -436,5 +470,18 @@ mod tests {
         assert!(!i.general_agent && !i.summaries);
         assert_eq!(i.reason.as_deref(), Some("off"));
         assert_eq!(methods::SERVER_CAPABILITIES, "server.capabilities");
+        // TerminalInfo's shape; an empty object reads as no input.
+        assert_eq!(
+            serde_json::to_value(ServerCapabilities {
+                llm: None,
+                terminal: Some(TerminalInfo { input: false }),
+            })
+            .unwrap(),
+            json!({"terminal": {"input": false}})
+        );
+        let c: ServerCapabilities = serde_json::from_value(json!({"terminal": {}})).unwrap();
+        assert_eq!(c.terminal, Some(TerminalInfo { input: false }));
+        let c: ServerCapabilities = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(c.terminal, None);
     }
 }

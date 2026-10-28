@@ -305,3 +305,37 @@ appended, serde-defaulted field (plan 20261027_06, step 2):
 - **Changed (documentation only):** `PendingQuestion::about_plan` and
   `PendingQuestion::plan` now say what the daemon fills them with (the
   `plan` rule matched, and the plan as its answers name it).
+
+## libflankr_proto 0.4.0 — 2026-10-27 (the commit tagged `libflankr_proto-v0.4.0`)
+
+A minor bump by the owner's ruling for this change only (plan 20261027_07,
+the 20:44 EDT amendment), although every change below is additive: the
+terminal mode's protocol (plan 20261027_07, step 2, with the 14:23 EDT
+amendment's split flag byte). `companion::VERSION` stays 1 and the link's
+prologue `flankr.link/1`.
+
+- **Added:**
+  - `link`: the flag byte is two nibbles, flags low (bit 0 more, bits 1-3
+    reserved) and kind high (0 JSON-RPC, 1 terminal frame, 2-14 reserved,
+    15 extended); `0x00`/`0x01` are unchanged. `KIND_JSON`, `KIND_TERMINAL`,
+    `KIND_EXTENDED`; `Kind { Json, Terminal }` and `Message { Json(Vec<u8>),
+    Terminal(Vec<u8>) }`, both non-exhaustive; `LinkStream::recv`,
+    `send_terminal` and `send_kind`; `LinkReader::recv`;
+    `LinkWriter::send_terminal` and `send_kind`. `recv` is `BadFrame` on a
+    reserved flag bit, a reserved or extended kind, or a kind that changes
+    mid-message.
+  - `common::methods::TERMINAL_OPEN`, `TERMINAL_CLOSE`, `TERMINAL_ACK`,
+    `TERMINAL_INPUT_ARM`, `TERMINAL_INPUT`, `TERMINAL_CLOSED`, and their
+    types `TerminalOpenParams { pane_id, cols_hint, rows_hint }`,
+    `TerminalOpenResult { terminal_id, cols, rows }`,
+    `TerminalCloseParams`, `TerminalAckParams { terminal_id, seq }`,
+    `TerminalInputArmParams`, `TerminalInputArmResult { expires_in_s }`,
+    `TerminalInputParams { terminal_id, keys }`, `TerminalClosedParams
+    { terminal_id, reason }` and the open `TerminalClosedReason { PaneClosed,
+    AgentChanged, InputRevoked, Closed, Unknown }`; `TERMINAL_INPUT_MAX`
+    (64) and `TERMINAL_INPUT_ARM_SECS` (60).
+  - `companion::TerminalInfo { input }`, and `terminal: Option<TerminalInfo>`
+    appended to `companion::HelloResult` and `companion::ServerCapabilities`,
+    `None` when left out and not written when `None`.
+- **Unchanged:** `recv_message` reads kind 0 only and is `BadFrame` on any
+  other flag byte, exactly as before.
