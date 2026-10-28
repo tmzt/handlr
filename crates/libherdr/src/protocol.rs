@@ -101,6 +101,27 @@ pub enum ReadSource {
     Detection,
 }
 
+/// How `pane.read` renders the snapshot it returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadFormat {
+    /// Plain text, escapes stripped (herdr's default).
+    #[default]
+    Text,
+    /// The text with SGR colour and attribute escapes kept, as the
+    /// terminal emulator renders them (herdr's `visible_ansi()` for the
+    /// visible frame).
+    Ansi,
+}
+
+impl ReadFormat {
+    /// True for [`ReadFormat::Text`], herdr's default, which is left off
+    /// the wire so a text read is byte-identical to one without `format`.
+    pub fn is_text(&self) -> bool {
+        matches!(self, ReadFormat::Text)
+    }
+}
+
 /// Information describing a tab within a workspace.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TabInfo {
@@ -238,6 +259,10 @@ pub enum HerdrRequest {
         /// Which snapshot to read; herdr's default, `recent`, when absent.
         #[serde(default)]
         source: ReadSource,
+        /// How the snapshot is rendered; herdr's default, `text`, when
+        /// absent. Not serialised when `text`.
+        #[serde(default, skip_serializing_if = "ReadFormat::is_text")]
+        format: ReadFormat,
     },
     /// Executes a command in the target pane.
     RunCommand {
@@ -301,11 +326,23 @@ impl HerdrRequest {
 
     /// Create an `inspect_pane` request reading `source`.
     pub fn inspect_pane_from(pane_id: impl Into<String>, lines: usize, source: ReadSource) -> Self {
+        Self::inspect_pane_as(pane_id, lines, source, ReadFormat::Text)
+    }
+
+    /// Create an `inspect_pane` request reading `source` rendered as
+    /// `format`; `ReadFormat::Ansi` keeps the SGR escapes.
+    pub fn inspect_pane_as(
+        pane_id: impl Into<String>,
+        lines: usize,
+        source: ReadSource,
+        format: ReadFormat,
+    ) -> Self {
         Self::InspectPane {
             id: generate_request_id(),
             pane_id: pane_id.into(),
             lines,
             source,
+            format,
         }
     }
 
@@ -454,19 +491,25 @@ impl HerdrRequest {
                 pane_id,
                 lines,
                 source,
+                format,
             } => {
                 // herdr's schema names the line count `lines`; `count` is
-                // kept for herdr versions that read it.
+                // kept for herdr versions that read it. `format` is sent
+                // only when it is not herdr's default, `text`.
+                let mut params = serde_json::json!({
+                    "pane_id": pane_id,
+                    "source": source,
+                    "lines": lines,
+                    "count": lines,
+                });
+                if !format.is_text() {
+                    params["format"] = serde_json::json!(format);
+                }
                 HerdrJsonRpcRequest {
                     jsonrpc: "2.0".to_string(),
                     id: id.clone(),
                     method: "pane.read".to_string(),
-                    params: serde_json::json!({
-                        "pane_id": pane_id,
-                        "source": source,
-                        "lines": lines,
-                        "count": lines,
-                    }),
+                    params,
                 }
             }
             HerdrRequest::RunCommand {

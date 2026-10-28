@@ -15,7 +15,7 @@ pub use error::{HerdrError, HerdrResult};
 pub use events::{HerdrEvent, PaneAgentStatusChanged, Subscription};
 pub use protocol::{
     AgentSession, AgentStatus, DEFAULT_INSPECT_LINES, EnvironmentSnapshot, HerdrRequest,
-    HerdrResponse, LayoutAction, PaneInfo, ReadSource, TabInfo, WorkspaceInfo,
+    HerdrResponse, LayoutAction, PaneInfo, ReadFormat, ReadSource, TabInfo, WorkspaceInfo,
 };
 pub use transport::{
     HerdrEventStream, HerdrTransport, MockState, RemoteSshConfig, SshInvocationMethod,
@@ -375,6 +375,26 @@ mod tests {
         assert_eq!(bare.agent_session, None);
         let wire = serde_json::to_value(&bare).unwrap();
         assert!(wire.get("agent_session").is_none());
+    }
+
+    #[test]
+    fn test_read_format_is_sent_only_when_ansi() {
+        let text = HerdrRequest::inspect_pane_from("p1", 40, ReadSource::Visible);
+        assert!(text.to_jsonrpc().params.get("format").is_none());
+        let wire = serde_json::to_value(&text).unwrap();
+        assert!(wire.get("format").is_none());
+        let back: HerdrRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, text);
+
+        let ansi = HerdrRequest::inspect_pane_as("p1", 40, ReadSource::Visible, ReadFormat::Ansi);
+        let rpc = ansi.to_jsonrpc();
+        assert_eq!(rpc.params["format"], "ansi");
+        assert_eq!(rpc.params["source"], "visible");
+        assert_eq!(rpc.params["lines"], 40);
+        let wire = serde_json::to_value(&ansi).unwrap();
+        assert_eq!(wire["format"], "ansi");
+        let back: HerdrRequest = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, ansi);
     }
 
     #[tokio::test]

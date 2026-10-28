@@ -339,3 +339,19 @@ prologue `flankr.link/1`.
     `None` when left out and not written when `None`.
 - **Unchanged:** `recv_message` reads kind 0 only and is `BadFrame` on any
   other flag byte, exactly as before.
+
+## libherdr 0.3.1 — 2026-10-27 (the commit tagged `libherdr-v0.3.1`)
+
+Additive, by the owner's ruling ("appending to a struct is additive") and
+plan 20261027_07's 20:44 EDT amendment ("a patch"): one appended,
+serde-defaulted field on a request variant, and two new functions (plan
+20261027_07, the 14:23 EDT amendment's ANSI read):
+
+- **Added:**
+  - `ReadFormat { Text, Ansi }` (default `Text`, serialised `"text"` and
+    `"ansi"`), re-exported from the crate root;
+  - `HerdrRequest::InspectPane::format: ReadFormat`, `Text` when left out
+    and not sent when `Text`, so existing `pane.read` requests are
+    byte-identical;
+  - `HerdrRequest::inspect_pane_as(pane_id, lines, source, format)` and
+    `HerdrClient::inspect_pane_as(pane_id, lines, source, format)`.
