@@ -2787,3 +2787,53 @@ owner's instruction. `libflankr_proto` 0.4.1 (`bf70776`, tag
 4. **Config:** the owner's config now has `[terminal] input = true` and
    `terminal_input = true` for claude, omp and agy; listing `[[agents]]`
    replaces the built-in list, so all three are written out.
+
+## 2026-10-28 00:39 EDT — plan 20261027_08 steps 1-9's departures (libherdr_term, branch `main-terminal`)
+
+Plan: docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md. Steps 1
+(`756450b`, `5f9ae10`), 2-4 (`3c4293c`), 5 (`4366e5d`, tag
+`libflankr_term-v0.1.1`), 6 (`cb4c0ff`, tag `libflankr_proto-v0.4.2`,
+with `7e0a933` and `1bbc896`), 7-8 (`7ce1315`, `61f93a3`) and 9
+(`ee040e9`, `3d5aeeb`); `7cd7836` reads herdr's socket from
+`HERDR_SOCKET_PATH`. Step 3's check was run against a separate herdr
+0.9.5 server (the release binary, config and state under
+`~/.cache/flankr-herdr-test`): welcome at generation 1, `pane.focus` ok,
+the pane at 80x24 with its cursor. The owner's own herdr is 0.8.0, before
+generation 1, and is refused as incompatible (`no_welcome`), so the poll
+serves it.
+
+1. **Typed characters are key events** (the owner: "ime keyboard input
+   should be translated to keys"): every character, space included, goes
+   as `Key` press and release of `Char(c)`, so herdr encodes it for the
+   pane's keyboard mode; decision 8's `TextCommit` is not produced.
+2. **One attachment for the daemon** (the 23:32 EDT amendment, over
+   decision 4 and step 7's wording). It returns to attached frames when it
+   reconnects, and the poll serves a terminal whose pane the attached
+   surface does not show; those frames carry a hidden, stale cursor. A
+   desktop change counts only once herdr has answered flankr's requests
+   and drawn a matching surface. A successful `terminal.input_arm` is a
+   touch that takes the tab back, since a keyboard-mode tap sends no input.
+   `pane.focus` is still sent within herdr's active tab when
+   `tab_follows_focus` is off. `server.capabilities` is not pushed when
+   the attachment comes or goes. A herdr without `client_shell.surface.set`
+   takes the tab for a moment at daemon start, before the daemon detaches.
+3. **libherdr_term:** `AttachOptions` has `active` and
+   `handshake_timeout`; `set_active`, `requested`, `supports_surface_set`,
+   `Event::{Snapshot, ActiveAnswer, ServerError}` and `DesktopChange`
+   are added; the surface is clamped in the library; mouse converts by
+   `TryFrom` (the open `Unknown` kind has no herdr event); key tokens
+   become several events (named keys are press and release). The
+   extractor lives in `build/extract.rs`, force-added since `.gitignore`
+   has `build/`; its failing-build test runs it as a library. The fake
+   herdr server is `libherdr_term::fake` behind `fake-server`.
+   `HERDR_PROTOCOL_VERSION` comes from the extracted constant.
+4. **The link protocol:** `TerminalMouseKind` has struct variants
+   (`Down { button }`) for flat JSON and an open `Unknown`; the button is
+   `MouseButton`; `TerminalInfo.mouse` and `modifiers` are left out when
+   unset. `terminal.resize` on a polled terminal is answered `{}` and
+   ignored. Scroll offsets come from the first later surface whose offset
+   changed, else the latest within 500 ms.
+5. **The app:** the fit uses the layout's existing keyboard inset. In a
+   TUI that reports the mouse, a horizontal drag is a mouse drag and does
+   not pan; a click on an unarmed terminal waits for the arm. herdr's
+   cursor `shape` is DECSCUSR: 3-4 underline, 5-6 bar, else block.
