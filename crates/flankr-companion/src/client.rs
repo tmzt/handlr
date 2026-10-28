@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use flankr_speech::LocalTime;
 use libflankr_proto::common::{self, methods, protocols};
@@ -155,7 +155,8 @@ pub enum Input {
     TerminalClose(String),
     /// Arm keyboard input on the session's open terminal
     /// (`terminal.input_arm`, step 6): [`Terminals::status`]'s `armed_for`
-    /// says for how long.
+    /// is set once answered, and stays until the terminal is closed (no
+    /// expiry).
     TerminalArm(String),
     /// Keys into the session's armed terminal, in herdr's `send_keys`
     /// syntax: sent as `terminal.input` in batches of at most
@@ -1997,13 +1998,11 @@ impl State {
                 self.terminal_acts(acts, &mut out);
             }
             Input::TerminalKeys { session, keys } => {
-                let now = Instant::now();
-                let acts = self.terminals.update(|b| b.send_keys(&session, &keys, now));
+                let acts = self.terminals.update(|b| b.send_keys(&session, &keys));
                 self.terminal_acts(acts, &mut out);
             }
             Input::TerminalScroll { session, lines } => {
-                let now = Instant::now();
-                let acts = self.terminals.update(|b| b.scroll(&session, lines, now));
+                let acts = self.terminals.update(|b| b.scroll(&session, lines));
                 self.terminal_acts(acts, &mut out);
             }
             Input::TerminalResize {
@@ -2021,14 +2020,13 @@ impl State {
                 row,
                 modifiers,
             } => {
-                let now = Instant::now();
                 let e = crate::terminal::MouseEvent {
                     kind,
                     col,
                     row,
                     modifiers,
                 };
-                let acts = self.terminals.update(|b| b.mouse(&session, e, now));
+                let acts = self.terminals.update(|b| b.mouse(&session, e));
                 self.terminal_acts(acts, &mut out);
             }
         }
@@ -3066,9 +3064,6 @@ impl State {
     fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
         self.now = self.now.max(now);
         self.keep_alive(out);
-        // Arms that ran out (the app's "Typing into" frame drops).
-        let wall = Instant::now();
-        self.terminals.update(|b| ((), b.expire(wall)));
         if self
             .unpairing
             .is_some_and(|at| self.now >= at + UNPAIR_WAIT)
@@ -3829,24 +3824,19 @@ impl State {
                 }
                 Sent::TerminalClose => log::debug!("terminal.close: {message}"),
                 Sent::TerminalArm(session) => {
-                    let now = Instant::now();
-                    let acts = self
-                        .terminals
-                        .update(|b| b.armed(&session, Err(message), now));
+                    let acts = self.terminals.update(|b| b.armed(&session, Err(message)));
                     self.terminal_acts(acts, out);
                 }
                 Sent::TerminalInput(session) => {
-                    let now = Instant::now();
                     let acts = self
                         .terminals
-                        .update(|b| b.keys_sent(&session, Err(message), now));
+                        .update(|b| b.keys_sent(&session, Err(message)));
                     self.terminal_acts(acts, out);
                 }
                 Sent::TerminalScroll(session) => {
-                    let now = Instant::now();
                     let acts = self
                         .terminals
-                        .update(|b| b.scrolled(&session, Err(message), now));
+                        .update(|b| b.scrolled(&session, Err(message)));
                     self.terminal_acts(acts, out);
                 }
                 Sent::TerminalResize(session) => {
@@ -3858,10 +3848,9 @@ impl State {
                     self.terminal_acts(acts, out);
                 }
                 Sent::TerminalMouse(session) => {
-                    let now = Instant::now();
                     let acts = self
                         .terminals
-                        .update(|b| b.mouse_sent(&session, Err(message), now));
+                        .update(|b| b.mouse_sent(&session, Err(message)));
                     self.terminal_acts(acts, out);
                 }
                 Sent::History(id) => {
@@ -3927,22 +3916,17 @@ impl State {
                 let secs = parse::<common::TerminalInputArmResult>(result)
                     .map(|r| r.expires_in_s)
                     .map_err(|e| format!("a bad result: {e}"));
-                let now = Instant::now();
-                let acts = self.terminals.update(|b| b.armed(&session, secs, now));
+                let acts = self.terminals.update(|b| b.armed(&session, secs));
                 self.terminal_acts(acts, out);
             }
             Sent::TerminalInput(session) => {
-                let now = Instant::now();
-                let acts = self
-                    .terminals
-                    .update(|b| b.keys_sent(&session, Ok(()), now));
+                let acts = self.terminals.update(|b| b.keys_sent(&session, Ok(())));
                 self.terminal_acts(acts, out);
             }
             Sent::TerminalScroll(session) => {
                 let r = parse::<common::TerminalScrollResult>(result)
                     .map_err(|e| format!("a bad result: {e}"));
-                let now = Instant::now();
-                let acts = self.terminals.update(|b| b.scrolled(&session, r, now));
+                let acts = self.terminals.update(|b| b.scrolled(&session, r));
                 self.terminal_acts(acts, out);
             }
             Sent::TerminalResize(session) => {
@@ -3952,10 +3936,7 @@ impl State {
                 self.terminal_acts(acts, out);
             }
             Sent::TerminalMouse(session) => {
-                let now = Instant::now();
-                let acts = self
-                    .terminals
-                    .update(|b| b.mouse_sent(&session, Ok(()), now));
+                let acts = self.terminals.update(|b| b.mouse_sent(&session, Ok(())));
                 self.terminal_acts(acts, out);
             }
             Sent::Hello => match parse::<wire::HelloResult>(result) {

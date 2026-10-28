@@ -30,9 +30,11 @@
 //! together when it is answered. The answer's offset is kept for the app
 //! ([`TerminalStatus::scroll_offset`]).
 //!
-//! An accepted `terminal.input`, `terminal.scroll` or `terminal.mouse`
-//! extends the local arm to [`TERMINAL_INPUT_ARM_SECS`] from its answer, as
-//! the daemon extends its own window on each one it accepts.
+//! The arm has no expiry (the L3 amendment of 2026-10-28 10:42 EDT of
+//! docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md): once
+//! `terminal.input_arm` is answered the terminal stays armed, whatever
+//! `expires_in_s` says (the daemon answers 0, no expiry), until it is
+//! closed, the daemon ends it (`terminal.closed`) or the connection drops.
 //!
 //! Plan 20261027_08, step 9:
 //!
@@ -56,11 +58,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use libflankr_proto::common::{
-    TERMINAL_INPUT_ARM_SECS, TERMINAL_INPUT_MAX, TerminalClosedParams, TerminalClosedReason,
-    TerminalMouseKind, TerminalOpenResult, TerminalScrollResult, TerminalSource,
+    TERMINAL_INPUT_MAX, TerminalClosedParams, TerminalClosedReason, TerminalMouseKind,
+    TerminalOpenResult, TerminalScrollResult, TerminalSource,
 };
 use libflankr_proto::companion::TerminalInfo;
 use libflankr_term::{Frame, HISTORY, Screen};
@@ -91,7 +93,9 @@ pub struct TerminalStatus {
     /// The last refusal or failure for this terminal (an error code's
     /// message), until the next open.
     pub error: Option<String>,
-    /// How long keyboard input stays armed (`terminal.input_arm`), if it is.
+    /// Keyboard input is armed (`terminal.input_arm`): `Some(Duration::MAX)`,
+    /// since the arm has no expiry (the L3 amendment of 2026-10-28 10:42
+    /// EDT); `None` when not armed.
     pub armed_for: Option<Duration>,
     /// Key batches not yet answered, the one in flight included.
     pub keys_pending: usize,
@@ -171,7 +175,6 @@ impl Terminals {
     pub fn status(&self, session: &str) -> Option<TerminalStatus> {
         let book = self.lock();
         let t = book.sessions.get(session)?;
-        let now = Instant::now();
         Some(TerminalStatus {
             open: t.terminal_id.is_some(),
             opening: t.wanted && t.terminal_id.is_none(),
@@ -179,10 +182,7 @@ impl Terminals {
             rows: t.size.1,
             closed: t.closed,
             error: t.error.clone(),
-            armed_for: t
-                .armed_until
-                .and_then(|until| until.checked_duration_since(now))
-                .filter(|d| !d.is_zero()),
+            armed_for: t.is_armed.then_some(Duration::MAX),
             keys_pending: t.keys.len() + usize::from(t.keys_in_flight),
             scroll_offset: t.scroll_offset,
             scroll_max: t.scroll_max,
@@ -301,7 +301,8 @@ struct Term {
     fresh: bool,
     closed: Option<TerminalClosedReason>,
     error: Option<String>,
-    armed_until: Option<Instant>,
+    /// Armed by `terminal.input_arm`, until disarmed: no expiry.
+    is_armed: bool,
     arming: bool,
     keys: VecDeque<String>,
     keys_in_flight: bool,
@@ -327,7 +328,7 @@ struct Term {
 
 impl Term {
     fn disarm(&mut self) {
-        self.armed_until = None;
+        self.is_armed = false;
         self.arming = false;
         self.keys.clear();
         self.keys_in_flight = false;
@@ -340,18 +341,6 @@ impl Term {
     /// The fit, when the app gave both of its parts.
     fn fit(&self) -> Option<(u16, u16)> {
         self.cols_hint.zip(self.rows_hint)
-    }
-
-    /// An accepted input or scroll: armed for the daemon's window again,
-    /// as the daemon extends its own.
-    fn extend_arm(&mut self, now: Instant) {
-        if self.armed_until.is_some() {
-            self.armed_until = Some(now + Duration::from_secs(u64::from(TERMINAL_INPUT_ARM_SECS)));
-        }
-    }
-
-    fn armed(&self, now: Instant) -> bool {
-        self.armed_until.is_some_and(|until| now < until)
     }
 }
 
@@ -611,26 +600,21 @@ impl Book {
         )
     }
 
-    /// `terminal.input_arm` was answered: armed for `expires_in_s` from
-    /// `now`, or refused.
-    pub(crate) fn armed(
-        &mut self,
-        session: &str,
-        result: Result<u32, String>,
-        now: Instant,
-    ) -> (Vec<Act>, bool) {
+    /// `terminal.input_arm` was answered: armed until disarmed (its
+    /// `expires_in_s` is not used: the arm has no expiry), or refused.
+    pub(crate) fn armed(&mut self, session: &str, result: Result<u32, String>) -> (Vec<Act>, bool) {
         let Some(t) = self.sessions.get_mut(session).filter(|t| t.arming) else {
             return (Vec::new(), false);
         };
         t.arming = false;
         match result {
-            Ok(secs) => {
-                t.armed_until = Some(now + Duration::from_secs(u64::from(secs)));
+            Ok(_) => {
+                t.is_armed = true;
                 t.error = None;
                 (Vec::new(), true)
             }
             Err(message) => {
-                t.armed_until = None;
+                t.is_armed = false;
                 t.error = Some(message.clone());
                 (
                     vec![Act::Error(format!("terminal.input_arm: {message}"))],
@@ -642,12 +626,7 @@ impl Book {
 
     /// The app sends keys: queued in batches, the first sent if none is
     /// in flight. Refused here unless open and armed.
-    pub(crate) fn send_keys(
-        &mut self,
-        session: &str,
-        keys: &str,
-        now: Instant,
-    ) -> (Vec<Act>, bool) {
+    pub(crate) fn send_keys(&mut self, session: &str, keys: &str) -> (Vec<Act>, bool) {
         let Some(t) = self.sessions.get_mut(session) else {
             return (
                 vec![Act::Error(format!(
@@ -656,7 +635,7 @@ impl Book {
                 false,
             );
         };
-        if t.terminal_id.is_none() || !t.armed(now) {
+        if t.terminal_id.is_none() || !t.is_armed {
             let message = "terminal input is not armed".to_string();
             t.error = Some(message.clone());
             return (vec![Act::Error(format!("terminal.input: {message}"))], true);
@@ -692,17 +671,13 @@ impl Book {
         &mut self,
         session: &str,
         result: Result<(), String>,
-        now: Instant,
     ) -> (Vec<Act>, bool) {
         let Some(t) = self.sessions.get_mut(session).filter(|t| t.keys_in_flight) else {
             return (Vec::new(), false);
         };
         t.keys_in_flight = false;
         match result {
-            Ok(()) => {
-                t.extend_arm(now);
-                (self.next_keys(session), true)
-            }
+            Ok(()) => (self.next_keys(session), true),
             Err(message) => {
                 t.keys.clear();
                 t.error = Some(message.clone());
@@ -714,7 +689,7 @@ impl Book {
     /// The app scrolls the pane by `lines` (positive back into the
     /// scrollback): sent at once if no scroll is in flight, else added to
     /// what goes when it is answered. Refused here unless open and armed.
-    pub(crate) fn scroll(&mut self, session: &str, lines: i32, now: Instant) -> (Vec<Act>, bool) {
+    pub(crate) fn scroll(&mut self, session: &str, lines: i32) -> (Vec<Act>, bool) {
         let Some(t) = self.sessions.get_mut(session) else {
             return (
                 vec![Act::Error(format!(
@@ -723,7 +698,7 @@ impl Book {
                 false,
             );
         };
-        if t.terminal_id.is_none() || !t.armed(now) {
+        if t.terminal_id.is_none() || !t.is_armed {
             let message = "terminal input is not armed".to_string();
             t.error = Some(message.clone());
             return (
@@ -760,7 +735,6 @@ impl Book {
         &mut self,
         session: &str,
         result: Result<TerminalScrollResult, String>,
-        now: Instant,
     ) -> (Vec<Act>, bool) {
         let Some(t) = self
             .sessions
@@ -774,7 +748,6 @@ impl Book {
             Ok(r) => {
                 t.scroll_offset = Some(r.offset_from_bottom);
                 t.scroll_max = r.max_offset_from_bottom;
-                t.extend_arm(now);
                 (self.next_scroll(session), true)
             }
             Err(message) => {
@@ -856,12 +829,7 @@ impl Book {
     /// The app sends a mouse event: queued, and sent if none is in flight.
     /// Refused here unless the daemon serves `terminal.mouse` and the
     /// terminal is open and armed.
-    pub(crate) fn mouse(
-        &mut self,
-        session: &str,
-        event: MouseEvent,
-        now: Instant,
-    ) -> (Vec<Act>, bool) {
+    pub(crate) fn mouse(&mut self, session: &str, event: MouseEvent) -> (Vec<Act>, bool) {
         let allowed = self.online && self.info.is_some_and(|i| i.mouse);
         let Some(t) = self.sessions.get_mut(session) else {
             return (
@@ -876,7 +844,7 @@ impl Book {
             t.error = Some(message.clone());
             return (vec![Act::Error(format!("terminal.mouse: {message}"))], true);
         }
-        if t.terminal_id.is_none() || !t.armed(now) {
+        if t.terminal_id.is_none() || !t.is_armed {
             let message = "terminal input is not armed".to_string();
             t.error = Some(message.clone());
             return (vec![Act::Error(format!("terminal.mouse: {message}"))], true);
@@ -922,38 +890,19 @@ impl Book {
         &mut self,
         session: &str,
         result: Result<(), String>,
-        now: Instant,
     ) -> (Vec<Act>, bool) {
         let Some(t) = self.sessions.get_mut(session).filter(|t| t.mouse_in_flight) else {
             return (Vec::new(), false);
         };
         t.mouse_in_flight = false;
         match result {
-            Ok(()) => {
-                t.extend_arm(now);
-                (self.next_mouse(session), true)
-            }
+            Ok(()) => (self.next_mouse(session), true),
             Err(message) => {
                 t.mouse.clear();
                 t.error = Some(message.clone());
                 (vec![Act::Error(format!("terminal.mouse: {message}"))], true)
             }
         }
-    }
-
-    /// Arms that ran out by `now` are dropped.
-    pub(crate) fn expire(&mut self, now: Instant) -> bool {
-        let mut changed = false;
-        for t in self.sessions.values_mut() {
-            if t.armed_until.is_some_and(|until| now >= until) {
-                t.armed_until = None;
-                t.keys.clear();
-                t.scroll_pending = 0;
-                t.mouse.clear();
-                changed = true;
-            }
-        }
-        changed
     }
 
     /// The session whose terminal is `terminal_id` on this connection.
@@ -1144,9 +1093,8 @@ mod tests {
     fn keys_need_an_arm_and_go_one_batch_at_a_time() {
         let mut b = online(true);
         opened(&mut b, "claude", 7);
-        let now = Instant::now();
         assert!(matches!(
-            &b.send_keys("claude", "ls", now).0[..],
+            &b.send_keys("claude", "ls").0[..],
             [Act::Error(_)]
         ));
         assert_eq!(
@@ -1156,59 +1104,58 @@ mod tests {
                 terminal_id: 7
             }]
         );
-        b.armed("claude", Ok(60), now);
+        // 0: no expiry, as the daemon answers since the L3 amendment of
+        // 2026-10-28 10:42 EDT.
+        b.armed("claude", Ok(0));
         let keys = "a ".repeat(50);
-        let (acts, _) = b.send_keys("claude", &keys, now);
+        let (acts, _) = b.send_keys("claude", &keys);
         assert_eq!(acts.len(), 1);
-        let (acts, _) = b.keys_sent("claude", Ok(()), now);
+        let (acts, _) = b.keys_sent("claude", Ok(()));
         assert!(matches!(&acts[..], [Act::Keys { keys, .. }] if keys.len() == 36));
-        assert_eq!(b.keys_sent("claude", Ok(()), now).0, vec![]);
-        // Expired: refused here.
-        assert!(b.expire(now + Duration::from_secs(60)));
-        assert!(matches!(
-            &b.send_keys("claude", "ls", now + Duration::from_secs(61)).0[..],
-            [Act::Error(_)]
-        ));
+        assert_eq!(b.keys_sent("claude", Ok(())).0, vec![]);
+        // No expiry: still armed, for as long as the terminal is open.
+        assert_eq!(b.send_keys("claude", "ls").0.len(), 1);
+        b.keys_sent("claude", Ok(()));
+        let st = Terminals::default();
+        *st.lock() = std::mem::take(&mut b);
+        assert_eq!(st.status("claude").unwrap().armed_for, Some(Duration::MAX));
+        assert!(st.armed("claude"));
+        // The connection drops: the arm ends with it.
+        st.lock().disconnected();
+        assert_eq!(st.status("claude").unwrap().armed_for, None);
     }
 
     #[test]
-    fn scrolls_coalesce_and_accepted_ones_extend_the_arm() {
+    fn scrolls_coalesce_and_keep_the_arm() {
         let mut b = online(true);
         opened(&mut b, "claude", 7);
-        let now = Instant::now();
-        assert!(matches!(&b.scroll("claude", 3, now).0[..], [Act::Error(_)]));
+        assert!(matches!(&b.scroll("claude", 3).0[..], [Act::Error(_)]));
         b.arm("claude");
-        b.armed("claude", Ok(60), now);
+        b.armed("claude", Ok(0));
         assert_eq!(
-            b.scroll("claude", 3, now).0,
+            b.scroll("claude", 3).0,
             vec![Act::Scroll {
                 session: "claude".into(),
                 terminal_id: 7,
                 lines: 3
             }]
         );
-        assert_eq!(b.scroll("claude", -1, now).0, vec![]);
-        assert_eq!(b.scroll("claude", 5, now).0, vec![]);
-        let later = now + Duration::from_secs(50);
+        assert_eq!(b.scroll("claude", -1).0, vec![]);
+        assert_eq!(b.scroll("claude", 5).0, vec![]);
         let (acts, changed) = b.scrolled(
             "claude",
             Ok(TerminalScrollResult {
                 offset_from_bottom: 3,
                 max_offset_from_bottom: None,
             }),
-            later,
         );
         assert!(changed);
         assert!(matches!(&acts[..], [Act::Scroll { lines: 4, .. }]));
         assert_eq!(b.sessions["claude"].scroll_offset, Some(3));
-        // Extended to 60 s from the answer.
-        assert_eq!(
-            b.sessions["claude"].armed_until,
-            Some(later + Duration::from_secs(60))
-        );
+        assert!(b.sessions["claude"].is_armed);
         // A refusal drops what was asked meanwhile.
-        b.scroll("claude", 2, later);
-        let (acts, _) = b.scrolled("claude", Err("no".into()), later);
+        b.scroll("claude", 2);
+        let (acts, _) = b.scrolled("claude", Err("no".into()));
         assert!(matches!(&acts[..], [Act::Error(_)]));
         assert_eq!(b.sessions["claude"].scroll_pending, 0);
         assert!(!b.sessions["claude"].scroll_in_flight);
@@ -1342,7 +1289,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_events_need_the_arm_go_in_order_and_extend_it() {
+    fn mouse_events_need_the_arm_and_go_in_order() {
         use libflankr_proto::common::MouseButton::Left;
         let mut b = Book::default();
         b.set_info(Some(TerminalInfo {
@@ -1350,39 +1297,31 @@ mod tests {
             mouse: true,
         }));
         attached(&mut b, "claude", 7);
-        let now = Instant::now();
         let down = click(TerminalMouseKind::Down { button: Left }, 1);
-        assert!(matches!(
-            &b.mouse("claude", down, now).0[..],
-            [Act::Error(_)]
-        ));
+        assert!(matches!(&b.mouse("claude", down).0[..], [Act::Error(_)]));
         b.arm("claude");
-        b.armed("claude", Ok(60), now);
+        b.armed("claude", Ok(0));
         let sent = |e| Act::Mouse {
             session: "claude".into(),
             terminal_id: 7,
             event: e,
         };
-        assert_eq!(b.mouse("claude", down, now).0, vec![sent(down)]);
+        assert_eq!(b.mouse("claude", down).0, vec![sent(down)]);
         let drag = |c| click(TerminalMouseKind::Drag { button: Left }, c);
         let up = click(TerminalMouseKind::Up { button: Left }, 5);
-        assert_eq!(b.mouse("claude", drag(2), now).0, vec![]);
-        assert_eq!(b.mouse("claude", drag(3), now).0, vec![]);
-        assert_eq!(b.mouse("claude", drag(4), now).0, vec![]);
-        assert_eq!(b.mouse("claude", up, now).0, vec![]);
-        let later = now + Duration::from_secs(30);
+        assert_eq!(b.mouse("claude", drag(2)).0, vec![]);
+        assert_eq!(b.mouse("claude", drag(3)).0, vec![]);
+        assert_eq!(b.mouse("claude", drag(4)).0, vec![]);
+        assert_eq!(b.mouse("claude", up).0, vec![]);
         // The drags behind the down became the newest one.
-        assert_eq!(b.mouse_sent("claude", Ok(()), later).0, vec![sent(drag(4))]);
-        assert_eq!(
-            b.sessions["claude"].armed_until,
-            Some(later + Duration::from_secs(60))
-        );
-        assert_eq!(b.mouse_sent("claude", Ok(()), later).0, vec![sent(up)]);
-        assert_eq!(b.mouse_sent("claude", Ok(()), later).0, vec![]);
+        assert_eq!(b.mouse_sent("claude", Ok(())).0, vec![sent(drag(4))]);
+        assert!(b.sessions["claude"].is_armed);
+        assert_eq!(b.mouse_sent("claude", Ok(())).0, vec![sent(up)]);
+        assert_eq!(b.mouse_sent("claude", Ok(())).0, vec![]);
         // A refusal drops what is queued.
-        b.mouse("claude", down, later);
-        b.mouse("claude", up, later);
-        let (acts, _) = b.mouse_sent("claude", Err("no".into()), later);
+        b.mouse("claude", down);
+        b.mouse("claude", up);
+        let (acts, _) = b.mouse_sent("claude", Err("no".into()));
         assert!(matches!(&acts[..], [Act::Error(_)]));
         assert!(b.sessions["claude"].mouse.is_empty());
     }
@@ -1391,19 +1330,15 @@ mod tests {
     fn mouse_events_need_a_daemon_that_serves_them() {
         let mut b = online(true);
         attached(&mut b, "claude", 7);
-        let now = Instant::now();
         b.arm("claude");
-        b.armed("claude", Ok(60), now);
+        b.armed("claude", Ok(0));
         let down = click(
             TerminalMouseKind::Down {
                 button: libflankr_proto::common::MouseButton::Left,
             },
             1,
         );
-        assert!(matches!(
-            &b.mouse("claude", down, now).0[..],
-            [Act::Error(_)]
-        ));
+        assert!(matches!(&b.mouse("claude", down).0[..], [Act::Error(_)]));
     }
 
     #[test]

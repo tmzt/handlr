@@ -207,8 +207,8 @@ impl Companion {
     }
 
     /// Arms keyboard input on the session's terminal
-    /// ([`Input::TerminalArm`]); [`TerminalStatus::armed_for`] says how long
-    /// once the daemon answers.
+    /// ([`Input::TerminalArm`]); [`TerminalStatus::armed_for`] is set once
+    /// the daemon answers, and stays until the terminal is closed.
     pub fn terminal_arm_input(&self, session: &str) {
         self.send(Input::TerminalArm(session.to_string()));
     }
@@ -252,8 +252,7 @@ impl Companion {
     /// A mouse event at pane-local cell `col`, `row` of the session's armed
     /// terminal ([`Input::TerminalMouse`]), for a TUI that reports the mouse
     /// ([`Cursor::mouse_reporting`]) on a daemon that serves it
-    /// ([`Terminals::mouse_allowed`]). Refused here unless armed; an
-    /// accepted one extends the arm.
+    /// ([`Terminals::mouse_allowed`]). Refused here unless armed.
     pub fn terminal_mouse(
         &self,
         session: &str,

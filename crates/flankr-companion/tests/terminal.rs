@@ -258,7 +258,9 @@ impl Ctx {
                                 }
                                 Ok(Value::Null)
                             }
-                            "terminal.input_arm" => Ok(json!({"expires_in_s": 60})),
+                            // 0: no expiry (the L3 amendment of
+                            // 2026-10-28 10:42 EDT).
+                            "terminal.input_arm" => Ok(json!({"expires_in_s": 0})),
                             "terminal.scroll" => {
                                 offset = (offset + m["params"]["lines"].as_i64().unwrap()).max(0);
                                 Ok(json!({"offset_from_bottom": offset, "max_offset_from_bottom": 500}))
@@ -522,8 +524,11 @@ fn keys_over_64_bytes_go_in_batches_after_the_arm() {
         json!({"terminal_id": 7})
     );
     until(&c, "armed", |c| c.terminals().armed(SESSION));
-    let armed_for = c.terminals().status(SESSION).unwrap().armed_for.unwrap();
-    assert!(armed_for > Duration::from_secs(55) && armed_for <= Duration::from_secs(60));
+    // No expiry.
+    assert_eq!(
+        c.terminals().status(SESSION).unwrap().armed_for,
+        Some(Duration::MAX)
+    );
 
     let keys = "echo the quick brown fox jumps over the lazy dog and keeps on running enter";
     assert!(keys.len() > 64);
@@ -742,7 +747,7 @@ fn resizes_are_deduplicated_and_the_newest_wins() {
 }
 
 #[test]
-fn a_mouse_event_needs_the_arm_and_extends_it() {
+fn a_mouse_event_needs_the_arm_and_keeps_it() {
     let (daemon, c, _dir) = attached_terminal();
     let down = TerminalMouseKind::Down {
         button: MouseButton::Left,
@@ -757,8 +762,6 @@ fn a_mouse_event_needs_the_arm_and_extends_it() {
     c.terminal_arm_input(SESSION);
     daemon.next("terminal.input_arm");
     until(&c, "armed", |c| c.terminals().armed(SESSION));
-    let before = c.terminals().status(SESSION).unwrap().armed_for.unwrap();
-    std::thread::sleep(Duration::from_millis(1100));
     c.terminal_mouse(SESSION, down, 4, 2, 0);
     c.terminal_mouse(
         SESSION,
@@ -777,11 +780,10 @@ fn a_mouse_event_needs_the_arm_and_extends_it() {
         daemon.next("terminal.mouse")["params"],
         json!({"terminal_id": 7, "kind": "up", "button": "left", "col": 4, "row": 2})
     );
-    // Accepted: the arm runs from the answer again.
-    until(&c, "the arm extended", |c| {
-        c.terminals()
-            .status(SESSION)
-            .and_then(|s| s.armed_for)
-            .is_some_and(|d| d > before)
-    });
+    // Accepted: still armed, with no expiry.
+    assert!(c.terminals().armed(SESSION));
+    assert_eq!(
+        c.terminals().status(SESSION).unwrap().armed_for,
+        Some(Duration::MAX)
+    );
 }
