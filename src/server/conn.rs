@@ -8,7 +8,7 @@ use futures_util::{Stream, StreamExt};
 use libflankr_proto::common::{self, methods, protocols, topics};
 use libflankr_proto::companion;
 use libflankr_proto::envelope::codes;
-use libflankr_proto::link::{KEY_LEN, LinkError, LinkStream};
+use libflankr_proto::link::{KEY_LEN, LinkError, LinkStream, Message};
 use libflankr_proto::{ErrorObject, Id, Incoming, Notification, Request, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -60,11 +60,19 @@ enum Origin {
     },
 }
 
+/// What a connection's writer sends: JSON-RPC lines, and on a link
+/// connection terminal frames (plan 20261027_07, decision 3), in the order
+/// they were queued.
+pub(super) enum Outgoing {
+    Line(String),
+    Terminal(Vec<u8>),
+}
+
 pub(super) struct Conn {
     pub(super) daemon: Arc<Daemon>,
     id: u64,
     origin: Origin,
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::UnboundedSender<Outgoing>,
     principal: OnceLock<Principal>,
     /// Set at `hello` for `flankr.companion`: its session.
     session: OnceLock<Arc<Session>>,
@@ -112,6 +120,8 @@ pub(super) struct Conn {
     /// a subscription's delivery has left once `written` reaches its place.
     queued: std::sync::atomic::AtomicU64,
     written: Arc<std::sync::atomic::AtomicU64>,
+    /// Open terminals (plan 20261027_07, decision 8).
+    pub(super) terminals: super::terminal::Terminals,
 }
 
 impl Conn {
@@ -126,9 +136,28 @@ impl Conn {
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
         if let Ok(line) = serde_json::to_string(value) {
-            let _ = self.out.send(line);
+            let _ = self.out.send(Outgoing::Line(line));
         }
         place
+    }
+
+    /// Queue a terminal frame's bytes; only on a link connection, whose
+    /// writer sends it as the link's terminal kind. Frames are not counted
+    /// in [`Conn::written`].
+    pub(super) fn send_terminal(&self, frame: Vec<u8>) {
+        if self.is_link() {
+            let _ = self.out.send(Outgoing::Terminal(frame));
+        }
+    }
+
+    /// Whether the connection came over the link.
+    pub(super) fn is_link(&self) -> bool {
+        matches!(self.origin, Origin::Link { .. })
+    }
+
+    /// `ready` fires once the answer to `request_id` is written.
+    pub(super) fn on_answered(&self, request_id: Id, ready: tokio::sync::oneshot::Sender<()>) {
+        self.after_answer.lock().unwrap().insert(request_id, ready);
     }
 
     /// How many lines the connection's writer has written.
@@ -234,11 +263,15 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
     }
 
     let (read, mut write) = stream.into_split();
-    let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out, mut out_rx) = mpsc::unbounded_channel::<Outgoing>();
     let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counted = Arc::clone(&written);
     let writer = tokio::spawn(async move {
-        while let Some(mut line) = out_rx.recv().await {
+        while let Some(message) = out_rx.recv().await {
+            // Terminal frames are never queued here (`Conn::send_terminal`).
+            let Outgoing::Line(mut line) = message else {
+                continue;
+            };
             line.push('\n');
             if write.write_all(line.as_bytes()).await.is_err() {
                 break;
@@ -263,8 +296,11 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
 /// A link connection that finished its handshake as `entry`, with the
 /// client's static key `key`. `first` is
 /// the message carried in the handshake, already checked to be `hello`.
-/// Each link message is one JSON-RPC object; `close` ends the connection
-/// (its entry was revoked or replaced).
+/// Each link message is one JSON-RPC object, or from the daemon a terminal
+/// frame (plan 20261027_07, decision 3) on the same writer, in queue
+/// order; `close` ends the connection (its entry was revoked or replaced).
+/// A terminal frame from the client is a protocol error, answered as an
+/// unreadable message is (`INVALID_REQUEST`, no id), and closes it.
 pub(crate) async fn handle_link(
     daemon: Arc<Daemon>,
     stream: LinkStream<TcpStream>,
@@ -274,23 +310,36 @@ pub(crate) async fn handle_link(
     close: CancellationToken,
 ) {
     let (reader, mut writer) = stream.into_split();
-    let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
+    let (out, mut out_rx) = mpsc::unbounded_channel::<Outgoing>();
     let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counted = Arc::clone(&written);
     let write_task = tokio::spawn(async move {
         while let Some(message) = out_rx.recv().await {
-            if writer.send_message(message.as_bytes()).await.is_err() {
-                return;
+            match message {
+                Outgoing::Line(line) => {
+                    if writer.send_message(line.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                Outgoing::Terminal(frame) => {
+                    if writer.send_terminal(&frame).await.is_err() {
+                        return;
+                    }
+                }
             }
-            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let _ = writer.shutdown().await;
     });
     let first = futures_util::stream::iter(first.map(decode_message));
     let rest = futures_util::stream::unfold(Some(reader), |reader| async move {
         let mut reader = reader?;
-        match reader.recv_message().await {
-            Ok(message) => Some((decode_message(message), Some(reader))),
+        match reader.recv().await {
+            Ok(Message::Json(message)) => Some((decode_message(message), Some(reader))),
+            Ok(_) => Some((
+                Err("a terminal frame from the client; only the daemon sends them".to_string()),
+                None,
+            )),
             Err(LinkError::Closed) => None,
             Err(e) => Some((Err(e.to_string()), None)),
         }
@@ -316,7 +365,7 @@ async fn serve<S>(
     daemon: Arc<Daemon>,
     origin: Origin,
     mut lines: S,
-    out: mpsc::UnboundedSender<String>,
+    out: mpsc::UnboundedSender<Outgoing>,
     written: Arc<std::sync::atomic::AtomicU64>,
     close: CancellationToken,
 ) where
@@ -347,6 +396,7 @@ async fn serve<S>(
         after_answer: Mutex::new(HashMap::new()),
         queued: std::sync::atomic::AtomicU64::new(0),
         written,
+        terminals: Default::default(),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -371,6 +421,15 @@ async fn serve<S>(
         }
         let request = match serde_json::from_str::<Incoming>(&line) {
             Ok(Incoming::Request(request)) => request,
+            // The one notification a client sends (plan 20261027_07).
+            Ok(Incoming::Notification(note))
+                if note.method == methods::TERMINAL_ACK
+                    && conn.principal.get().is_some()
+                    && conn.is_companion() =>
+            {
+                super::terminal::ack(&conn, note.params);
+                continue;
+            }
             Ok(_) => continue,
             Err(e) => {
                 conn.send(&Response::err(
@@ -439,6 +498,7 @@ async fn serve<S>(
     for (_, sub) in conn.subscriptions.lock().unwrap().drain() {
         sub.cancel();
     }
+    conn.terminals.close_all(&conn.daemon);
     if let Some(principal) = conn.principal.get() {
         let opened: Vec<u64> = conn.opened.lock().unwrap().drain().collect();
         for confirm_id in opened {
@@ -523,7 +583,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
             vocabulary,
             paired: paired_now.then_some(true),
             llm: Some(conn.daemon.llm.info()),
-            terminal: None,
+            terminal: super::terminal::info(&conn.daemon, conn.is_link()),
         })?;
         return Ok((principal, result));
     }
@@ -565,7 +625,7 @@ fn cancel(conn: &Conn, request: &Request) -> Response {
     Response::ok(request.id.clone(), common::CancelResult { cancelled })
 }
 
-fn params<T: DeserializeOwned>(value: Value) -> Result<T, ErrorObject> {
+pub(super) fn params<T: DeserializeOwned>(value: Value) -> Result<T, ErrorObject> {
     let value = if value.is_null() {
         Value::Object(Default::default())
     } else {
@@ -728,6 +788,14 @@ async fn call(
             }
             ok(common::Empty {})
         }
+        // Plan 20261027_07: companions only (a harness client is answered
+        // METHOD_NOT_FOUND below); `terminal::served` narrows to the link.
+        methods::TERMINAL_OPEN if conn.is_companion() => {
+            super::terminal::open(conn, request_id, raw).await
+        }
+        methods::TERMINAL_CLOSE if conn.is_companion() => super::terminal::close(conn, raw),
+        methods::TERMINAL_INPUT_ARM if conn.is_companion() => super::terminal::input_arm(conn, raw),
+        methods::TERMINAL_INPUT if conn.is_companion() => super::terminal::input(conn, raw).await,
         methods::AGENTS_INTERRUPT => {
             let p: common::AgentsInterruptParams = params(raw)?;
             let snap = snapshot(conn).await?;
@@ -1097,7 +1165,7 @@ async fn call(
                         serde_json::to_string(&Notification::new(methods::LINK_PAIR_DONE, done)),
                     )
                 {
-                    let _ = out.send(line);
+                    let _ = out.send(Outgoing::Line(line));
                 }
             });
             ok(added.result)
@@ -1293,7 +1361,7 @@ async fn forward_events(conn: Arc<Conn>) {
                         companion::methods::SERVER_CAPABILITIES,
                         companion::ServerCapabilities {
                             llm: Some(info),
-                            terminal: None,
+                            terminal: super::terminal::info(&conn.daemon, conn.is_link()),
                         },
                     ));
                 }
@@ -1365,7 +1433,9 @@ async fn forward_events(conn: Arc<Conn>) {
                 Ok(CoreEvent::Focus { .. }) if companion => {
                     tokio::spawn(turns::check_vocabulary(Arc::clone(&conn)));
                 }
-                Ok(CoreEvent::Focus { .. }) | Ok(CoreEvent::Pane { .. }) => {}
+                Ok(CoreEvent::Focus { .. })
+                | Ok(CoreEvent::Pane { .. })
+                | Ok(CoreEvent::Output { .. }) => {}
                 Ok(CoreEvent::AgentStatus { pane_id, agent, status }) if companion => {
                     if conn.daemon.watches.is_watched(&pane_id) {
                         turns::agent_status(&conn, &pane_id, &agent, &status).await;

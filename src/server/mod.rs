@@ -9,6 +9,7 @@ pub mod conn;
 pub mod link;
 pub mod speech;
 mod subscriptions;
+pub mod terminal;
 mod watcher;
 
 use std::io::IsTerminal;
@@ -54,6 +55,10 @@ pub enum CoreEvent {
     Focus { pane_id: Option<String> },
     /// A pane changed, or closed: its session subscriptions read it again.
     Pane { pane_id: String, closed: bool },
+    /// herdr says a pane with an open terminal scrolled
+    /// (`pane.scroll_changed`): its terminals read it again (plan
+    /// 20261027_07, decision 5).
+    Output { pane_id: String },
 }
 
 /// Everything a connection needs, shared by all of them.
@@ -86,6 +91,11 @@ pub struct Daemon {
     /// The file watcher as given, if it was (see [`Daemon::file_watcher`]).
     file_watcher_option: Option<Result<FileWatcher, String>>,
     file_watcher: OnceLock<Option<FileWatcher>>,
+    /// `[terminal] input`: typing into terminals may be allowed at all
+    /// (plan 20261027_07, decision 6).
+    pub terminal_input: bool,
+    /// The panes of open terminals, for `pane.scroll_changed`.
+    pub terminal_panes: Arc<terminal::TerminalPanes>,
 }
 
 impl Daemon {
@@ -158,6 +168,8 @@ impl Daemon {
             llm,
             file_watcher_option: turns.file_watcher.clone(),
             file_watcher: OnceLock::new(),
+            terminal_input: config.terminal.input,
+            terminal_panes: Arc::new(terminal::TerminalPanes::new()),
         });
         // `[llm.uses.card_summaries]`: each new Finished card summarised
         // once, while card summaries are available.
@@ -365,6 +377,7 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
             transport,
             daemon.client.clone(),
             Arc::clone(&daemon.watches),
+            Arc::clone(&daemon.terminal_panes),
             daemon.events.clone(),
         ));
     }

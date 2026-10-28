@@ -96,6 +96,19 @@ fn entry<'a>(
     Ok(agent_cfg)
 }
 
+/// The `[[agents]]` entry of the agent named `agent` (lowercased) in
+/// `pane_id`, when it is configured and `principal` may reach it: the
+/// check every send starts with, and all a terminal needs to open (plan
+/// 20261027_07, decision 6).
+pub fn reach<'a>(
+    principal: &Principal,
+    agents: &'a [AgentConfig],
+    agent: &str,
+    pane_id: &str,
+) -> Result<&'a AgentConfig, Denied> {
+    entry(principal, agents, agent, pane_id)
+}
+
 /// Check `command` for the agent named `agent` (lowercased) in `pane_id`,
 /// as `principal`, against the `[[agents]]` entries.
 pub fn check(

@@ -45,6 +45,19 @@ pub struct AppConfig {
     /// section is not there.
     #[serde(default)]
     pub llm: Option<LlmConfig>,
+    /// `[terminal]`: the terminal mode (plan 20261027_07, decision 6).
+    #[serde(default)]
+    pub terminal: TerminalConfig,
+}
+
+/// `[terminal]`: the companion's terminal mode (plan 20261027_07).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TerminalConfig {
+    /// Whether a paired device may type into a terminal at all
+    /// (`terminal.input_arm`, `terminal.input`; decision 6). Off unless
+    /// set; each agent's `terminal_input` must be on too.
+    pub input: bool,
 }
 
 /// `[llm]`: the daemon's own LLM use (plan 20261027_02). Nothing here is
@@ -142,6 +155,8 @@ fn default_agents() -> Vec<AgentConfig> {
             allow_arbitrary_commands: false,
             allow_messages: true,
             interrupt_key: default_interrupt_key(),
+            terminal_input: false,
+            terminal_signals: false,
         },
         AgentConfig {
             name: "omp".to_string(),
@@ -150,6 +165,8 @@ fn default_agents() -> Vec<AgentConfig> {
             allow_arbitrary_commands: false,
             allow_messages: true,
             interrupt_key: default_interrupt_key(),
+            terminal_input: false,
+            terminal_signals: false,
         },
         AgentConfig {
             name: "agy".to_string(),
@@ -158,6 +175,8 @@ fn default_agents() -> Vec<AgentConfig> {
             allow_arbitrary_commands: false,
             allow_messages: true,
             interrupt_key: default_interrupt_key(),
+            terminal_input: false,
+            terminal_signals: false,
         },
     ]
 }
@@ -175,6 +194,7 @@ impl Default for AppConfig {
             urls: UrlsConfig::default(),
             summary: None,
             llm: None,
+            terminal: TerminalConfig::default(),
         }
     }
 }
@@ -240,6 +260,15 @@ pub struct AgentConfig {
         deserialize_with = "deserialize_interrupt_key"
     )]
     pub interrupt_key: String,
+    /// Whether a paired device that may approve can type into this agent's
+    /// terminal, once armed, while `[terminal] input` is on (plan
+    /// 20261027_07, decision 6). Default `false`.
+    #[serde(default)]
+    pub terminal_input: bool,
+    /// Whether that typing may include `ctrl+c`, `ctrl+d`, `ctrl+z` and
+    /// `ctrl+\` (decision 6). Default `false`.
+    #[serde(default)]
+    pub terminal_signals: bool,
 }
 
 fn default_require_confirmation() -> bool {
@@ -328,6 +357,8 @@ impl AgentConfig {
             allow_arbitrary_commands: false,
             allow_messages: true,
             interrupt_key: default_interrupt_key(),
+            terminal_input: false,
+            terminal_signals: false,
         }
     }
 
@@ -338,6 +369,13 @@ impl AgentConfig {
 
     pub fn with_messages(mut self, allow: bool) -> Self {
         self.allow_messages = allow;
+        self
+    }
+
+    /// Turn terminal input (and its signal keys) on or off for this agent.
+    pub fn with_terminal_input(mut self, input: bool, signals: bool) -> Self {
+        self.terminal_input = input;
+        self.terminal_signals = signals;
         self
     }
 
@@ -649,6 +687,40 @@ allowed_commands = ["continue"]
         // Defaults to off when the key is omitted.
         assert!(!cfg.find_agent("omp").unwrap().allow_arbitrary_commands);
         assert_eq!(cfg.allow_arbitrary_commands, None);
+    }
+
+    #[test]
+    fn terminal_input_is_off_unless_set() {
+        // Plan 20261027_07, decision 6: a fresh install cannot type.
+        let cfg: AppConfig = toml::from_str("[[agents]]\nname = \"claude\"\n").unwrap();
+        assert!(!cfg.terminal.input);
+        let claude = cfg.find_agent("claude").unwrap();
+        assert!(!claude.terminal_input && !claude.terminal_signals);
+        assert!(
+            AppConfig::default()
+                .agents
+                .iter()
+                .all(|a| !a.terminal_input)
+        );
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[terminal]
+input = true
+
+[[agents]]
+name = "claude"
+terminal_input = true
+terminal_signals = true
+"#,
+        )
+        .unwrap();
+        assert!(cfg.terminal.input);
+        let claude = cfg.find_agent("claude").unwrap();
+        assert!(claude.terminal_input && claude.terminal_signals);
+        // The shipped template parses, and leaves input off.
+        let shipped: AppConfig = toml::from_str(&AppConfig::default_toml_template()).unwrap();
+        assert!(!shipped.terminal.input);
+        assert!(shipped.agents.iter().all(|a| !a.terminal_input));
     }
 
     #[test]

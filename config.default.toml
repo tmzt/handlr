@@ -33,6 +33,12 @@ allow_arbitrary_commands = false
 # or `agents.interrupt` is called, in herdr's key names. Sent as a keystroke,
 # never typed. Default "esc"; "" turns interrupting off.
 # interrupt_key = "esc"
+# Typing into this agent's pane from the companion's terminal view, once the
+# owner arms it there. Needs [terminal] input = true below and a paired
+# device that may approve. terminal_signals also lets ctrl+c, ctrl+d, ctrl+z
+# and ctrl+\ through. Both default to false.
+# terminal_input = false
+# terminal_signals = false
 
 [[agents]]
 name = "omp"
@@ -131,6 +137,14 @@ allow_arbitrary_commands = false
 # auth = "~/.config/flankr/auth.toml"    # the paired clients
 # revoke_check_secs = 60                 # open connections are checked when
 #                                        # auth.toml changes, and this often
+
+# The companion's terminal view of a session, read-only unless `input`.
+# `input = true` lets a paired device that may approve type into the panes of
+# agents with `terminal_input = true`, after arming it in the app; an arm
+# lasts 60 s from the last key. Off unless set. Only for a herdr reached over
+# its local socket, not a remote (SSH) one.
+# [terminal]
+# input = false
 
 # Links from `docs/…` paths in the companion's agent view to their pages on
 # repowiki (`~/src/repowiki`). Each agent's site is its directory's parent
