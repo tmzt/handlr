@@ -5,9 +5,10 @@
 //! `Screen` must match the buffer after a full frame and a diff, its acks
 //! must reach the mirror, a `terminal.closed` drops the terminal, a
 //! reconnect opens it again, bytes that are not a frame are not fatal, and
-//! keys over 64 bytes go in batches.
+//! keys over 64 bytes go in batches. Scrolls need the arm, coalesce while
+//! one is in flight, and their offset lands in the status.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,8 @@ enum Cmd {
     Raw(Vec<u8>),
     /// `terminal.closed` for the open terminal.
     Closed(&'static str),
+    /// Answer the `terminal.scroll`s held while `hold_scroll` was set.
+    ReleaseScrolls,
     /// End the connection.
     Hangup,
 }
@@ -52,6 +55,9 @@ struct Daemon {
     /// Every message the client sent after `hello`.
     seen: mpsc::Receiver<Value>,
     cmds: UnboundedSender<Cmd>,
+    /// While set, `terminal.scroll` is not answered until
+    /// [`Cmd::ReleaseScrolls`].
+    hold_scroll: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -64,6 +70,7 @@ struct Ctx {
     buffer: Arc<Mutex<String>>,
     next_id: Arc<AtomicU32>,
     old: Old,
+    hold_scroll: Arc<AtomicBool>,
 }
 
 impl Daemon {
@@ -74,6 +81,7 @@ impl Daemon {
         let addr = listener.local_addr().unwrap().to_string();
         let (seen_tx, seen) = mpsc::channel();
         let (cmds, cmds_rx) = unbounded_channel();
+        let hold_scroll = Arc::new(AtomicBool::new(false));
         let ctx = Ctx {
             key: key.clone(),
             client,
@@ -82,6 +90,7 @@ impl Daemon {
             buffer: Arc::new(Mutex::new(buffer.to_string())),
             next_id: Arc::new(AtomicU32::new(7)),
             old,
+            hold_scroll: hold_scroll.clone(),
         };
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -104,11 +113,26 @@ impl Daemon {
             key,
             seen,
             cmds,
+            hold_scroll,
         }
     }
 
     fn send(&self, cmd: Cmd) {
         self.cmds.send(cmd).unwrap();
+    }
+
+    /// Whether a message with this method comes within `wait`; the
+    /// others are dropped.
+    fn comes(&self, method: &str, wait: Duration) -> bool {
+        let deadline = Instant::now() + wait;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.seen.recv_timeout(left) {
+                Ok(m) if m["method"] == method => return true,
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+        }
     }
 
     /// The next message from the client with this method.
@@ -162,6 +186,9 @@ impl Ctx {
         // One connection takes the commands at a time.
         let mut cmds = self.cmds.lock().await;
         let mut mirror: Option<Mirror> = None;
+        // The pane's scroll offset, and the scrolls not answered yet.
+        let mut offset: i64 = 0;
+        let mut held: Vec<Value> = Vec::new();
         loop {
             tokio::select! {
                 m = from.recv() => {
@@ -169,6 +196,11 @@ impl Ctx {
                     let m: Value = serde_json::from_slice(&m).unwrap();
                     let method = m["method"].as_str().unwrap_or("").to_string();
                     let mut frame = None;
+                    if method == "terminal.scroll" && self.hold_scroll.load(Ordering::SeqCst) {
+                        held.push(m.clone());
+                        let _ = self.seen.send(m);
+                        continue;
+                    }
                     let result = if self.old != Old::No && method.starts_with("terminal.") {
                         Err((-32601, "method not found"))
                     } else {
@@ -189,6 +221,10 @@ impl Ctx {
                                 Ok(Value::Null)
                             }
                             "terminal.input_arm" => Ok(json!({"expires_in_s": 60})),
+                            "terminal.scroll" => {
+                                offset = (offset + m["params"]["lines"].as_i64().unwrap()).max(0);
+                                Ok(json!({"offset_from_bottom": offset, "max_offset_from_bottom": 500}))
+                            }
                             _ => Ok(json!({})),
                         }
                     };
@@ -221,6 +257,23 @@ impl Ctx {
                             frame.encode()
                         }
                         Cmd::Raw(bytes) => bytes,
+                        Cmd::ReleaseScrolls => {
+                            self.hold_scroll.store(false, Ordering::SeqCst);
+                            let mut failed = false;
+                            for m in held.drain(..) {
+                                offset = (offset + m["params"]["lines"].as_i64().unwrap()).max(0);
+                                let response = json!({"jsonrpc": "2.0", "id": m["id"],
+                                    "result": {"offset_from_bottom": offset}});
+                                if write.send_message(&serde_json::to_vec(&response).unwrap()).await.is_err() {
+                                    failed = true;
+                                    break;
+                                }
+                            }
+                            if failed {
+                                break;
+                            }
+                            continue;
+                        }
                         Cmd::Closed(reason) => {
                             let id = mirror.take().map(|mi| mi.terminal_id()).unwrap();
                             let note = json!({"jsonrpc": "2.0", "method": "terminal.closed",
@@ -439,4 +492,74 @@ fn method_not_found_is_no_terminal_mode() {
         status.error.as_deref(),
         Some("the daemon offers no terminal mode")
     );
+}
+
+/// A companion with the terminal open (terminal 7) and, if `arm`, armed.
+fn open_terminal(arm: bool) -> (Daemon, Companion, tempfile::TempDir) {
+    let (daemon, c, dir) = paired(ONE, Old::No);
+    until(&c, "the terminal mode", |c| c.terminals().supported());
+    c.terminal_open(SESSION, None, None);
+    daemon.next("terminal.ack");
+    until(&c, "open", |c| {
+        c.terminals().status(SESSION).is_some_and(|s| s.open)
+    });
+    if arm {
+        c.terminal_arm_input(SESSION);
+        daemon.next("terminal.input_arm");
+        until(&c, "armed", |c| c.terminals().armed(SESSION));
+    }
+    (daemon, c, dir)
+}
+
+#[test]
+fn a_scroll_needs_the_arm() {
+    let (daemon, c, _dir) = open_terminal(false);
+    c.terminal_scroll(SESSION, 5);
+    until(&c, "the refusal", |c| {
+        c.terminals()
+            .status(SESSION)
+            .is_some_and(|s| s.error.as_deref() == Some("terminal input is not armed"))
+    });
+    assert!(!daemon.comes("terminal.scroll", Duration::from_millis(200)));
+
+    c.terminal_arm_input(SESSION);
+    daemon.next("terminal.input_arm");
+    until(&c, "armed", |c| c.terminals().armed(SESSION));
+    c.terminal_scroll(SESSION, -2);
+    // The refused 5 is not carried over.
+    assert_eq!(
+        daemon.next("terminal.scroll")["params"],
+        json!({"terminal_id": 7, "lines": -2})
+    );
+}
+
+#[test]
+fn scrolls_coalesce_while_one_is_in_flight_and_the_offset_lands_in_the_status() {
+    let (daemon, c, _dir) = open_terminal(true);
+    assert_eq!(c.terminals().status(SESSION).unwrap().scroll_offset, None);
+    daemon.hold_scroll.store(true, Ordering::SeqCst);
+    c.terminal_scroll(SESSION, 3);
+    assert_eq!(daemon.next("terminal.scroll")["params"]["lines"], 3);
+    c.terminal_scroll(SESSION, 2);
+    c.terminal_scroll(SESSION, 4);
+    c.terminal_scroll(SESSION, 0);
+    // Nothing more while the first is unanswered.
+    assert!(!daemon.comes("terminal.scroll", Duration::from_millis(300)));
+
+    let changes = c.terminals().changes();
+    daemon.send(Cmd::ReleaseScrolls);
+    // The sum goes once the first is answered.
+    assert_eq!(
+        daemon.next("terminal.scroll")["params"],
+        json!({"terminal_id": 7, "lines": 6})
+    );
+    until(&c, "the offset", |c| {
+        c.terminals()
+            .status(SESSION)
+            .is_some_and(|s| s.scroll_offset == Some(9))
+    });
+    let status = c.terminals().status(SESSION).unwrap();
+    assert_eq!(status.scroll_max, Some(500));
+    assert!(c.terminals().changes() > changes);
+    assert!(!daemon.comes("terminal.scroll", Duration::from_millis(200)));
 }

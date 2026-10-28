@@ -23,6 +23,16 @@
 //! batches of at most [`TERMINAL_INPUT_MAX`] bytes ([`key_batches`]) and
 //! sent one at a time, each after the last was answered; a refusal drops
 //! the rest.
+//!
+//! Scrolls ([`Input::TerminalScroll`](crate::Input::TerminalScroll), a drag
+//! on the terminal) are coalesced: one `terminal.scroll` is in flight per
+//! terminal at most, and the lines asked for meanwhile are summed and sent
+//! together when it is answered. The answer's offset is kept for the app
+//! ([`TerminalStatus::scroll_offset`]).
+//!
+//! An accepted `terminal.input` or `terminal.scroll` extends the local arm
+//! to [`TERMINAL_INPUT_ARM_SECS`] from its answer, as the daemon extends its
+//! own window on each one it accepts.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +40,8 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use libflankr_proto::common::{
-    TERMINAL_INPUT_MAX, TerminalClosedParams, TerminalClosedReason, TerminalOpenResult,
+    TERMINAL_INPUT_ARM_SECS, TERMINAL_INPUT_MAX, TerminalClosedParams, TerminalClosedReason,
+    TerminalOpenResult, TerminalScrollResult,
 };
 use libflankr_proto::companion::TerminalInfo;
 use libflankr_term::{Frame, HISTORY, Screen};
@@ -65,6 +76,12 @@ pub struct TerminalStatus {
     pub armed_for: Option<Duration>,
     /// Key batches not yet answered, the one in flight included.
     pub keys_pending: usize,
+    /// The pane's scroll offset in rows above the bottom, as the last
+    /// `terminal.scroll` answer gave it; `None` before one (this
+    /// connection's terminal).
+    pub scroll_offset: Option<u64>,
+    /// The furthest the pane can scroll back, when the daemon said.
+    pub scroll_max: Option<u64>,
 }
 
 impl Terminals {
@@ -133,6 +150,8 @@ impl Terminals {
                 .and_then(|until| until.checked_duration_since(now))
                 .filter(|d| !d.is_zero()),
             keys_pending: t.keys.len() + usize::from(t.keys_in_flight),
+            scroll_offset: t.scroll_offset,
+            scroll_max: t.scroll_max,
         })
     }
 
@@ -186,6 +205,11 @@ pub(crate) enum Act {
         terminal_id: u32,
         keys: String,
     },
+    Scroll {
+        session: String,
+        terminal_id: u32,
+        lines: i32,
+    },
     Error(String),
 }
 
@@ -221,6 +245,12 @@ struct Term {
     arming: bool,
     keys: VecDeque<String>,
     keys_in_flight: bool,
+    /// Lines asked for while a `terminal.scroll` was in flight, sent as
+    /// one when it is answered.
+    scroll_pending: i32,
+    scroll_in_flight: bool,
+    scroll_offset: Option<u64>,
+    scroll_max: Option<u64>,
 }
 
 impl Term {
@@ -229,6 +259,16 @@ impl Term {
         self.arming = false;
         self.keys.clear();
         self.keys_in_flight = false;
+        self.scroll_pending = 0;
+        self.scroll_in_flight = false;
+    }
+
+    /// An accepted input or scroll: armed for the daemon's window again,
+    /// as the daemon extends its own.
+    fn extend_arm(&mut self, now: Instant) {
+        if self.armed_until.is_some() {
+            self.armed_until = Some(now + Duration::from_secs(u64::from(TERMINAL_INPUT_ARM_SECS)));
+        }
     }
 
     fn armed(&self, now: Instant) -> bool {
@@ -351,6 +391,8 @@ impl Book {
         t.terminal_id = Some(terminal_id);
         t.size = (result.cols, result.rows);
         t.fresh = true;
+        t.scroll_offset = None;
+        t.scroll_max = None;
         let mut acts = Vec::new();
         let early: Vec<Frame> = self.early.iter().cloned().collect();
         self.early.retain(|f| f.terminal_id != terminal_id);
@@ -564,17 +606,98 @@ impl Book {
         &mut self,
         session: &str,
         result: Result<(), String>,
+        now: Instant,
     ) -> (Vec<Act>, bool) {
         let Some(t) = self.sessions.get_mut(session).filter(|t| t.keys_in_flight) else {
             return (Vec::new(), false);
         };
         t.keys_in_flight = false;
         match result {
-            Ok(()) => (self.next_keys(session), true),
+            Ok(()) => {
+                t.extend_arm(now);
+                (self.next_keys(session), true)
+            }
             Err(message) => {
                 t.keys.clear();
                 t.error = Some(message.clone());
                 (vec![Act::Error(format!("terminal.input: {message}"))], true)
+            }
+        }
+    }
+
+    /// The app scrolls the pane by `lines` (positive back into the
+    /// scrollback): sent at once if no scroll is in flight, else added to
+    /// what goes when it is answered. Refused here unless open and armed.
+    pub(crate) fn scroll(&mut self, session: &str, lines: i32, now: Instant) -> (Vec<Act>, bool) {
+        let Some(t) = self.sessions.get_mut(session) else {
+            return (
+                vec![Act::Error(format!(
+                    "terminal.scroll: no terminal open for {session}"
+                ))],
+                false,
+            );
+        };
+        if t.terminal_id.is_none() || !t.armed(now) {
+            let message = "terminal input is not armed".to_string();
+            t.error = Some(message.clone());
+            return (
+                vec![Act::Error(format!("terminal.scroll: {message}"))],
+                true,
+            );
+        }
+        t.scroll_pending = t.scroll_pending.saturating_add(lines);
+        (self.next_scroll(session), false)
+    }
+
+    fn next_scroll(&mut self, session: &str) -> Vec<Act> {
+        let Some(t) = self.sessions.get_mut(session) else {
+            return Vec::new();
+        };
+        let Some(terminal_id) = t.terminal_id else {
+            return Vec::new();
+        };
+        if t.scroll_in_flight || t.scroll_pending == 0 {
+            return Vec::new();
+        }
+        let lines = std::mem::take(&mut t.scroll_pending);
+        t.scroll_in_flight = true;
+        vec![Act::Scroll {
+            session: session.to_string(),
+            terminal_id,
+            lines,
+        }]
+    }
+
+    /// A `terminal.scroll` was answered: its offset is kept and what was
+    /// asked meanwhile goes, or, refused, that is dropped.
+    pub(crate) fn scrolled(
+        &mut self,
+        session: &str,
+        result: Result<TerminalScrollResult, String>,
+        now: Instant,
+    ) -> (Vec<Act>, bool) {
+        let Some(t) = self
+            .sessions
+            .get_mut(session)
+            .filter(|t| t.scroll_in_flight)
+        else {
+            return (Vec::new(), false);
+        };
+        t.scroll_in_flight = false;
+        match result {
+            Ok(r) => {
+                t.scroll_offset = Some(r.offset_from_bottom);
+                t.scroll_max = r.max_offset_from_bottom;
+                t.extend_arm(now);
+                (self.next_scroll(session), true)
+            }
+            Err(message) => {
+                t.scroll_pending = 0;
+                t.error = Some(message.clone());
+                (
+                    vec![Act::Error(format!("terminal.scroll: {message}"))],
+                    true,
+                )
             }
         }
     }
@@ -586,6 +709,7 @@ impl Book {
             if t.armed_until.is_some_and(|until| now >= until) {
                 t.armed_until = None;
                 t.keys.clear();
+                t.scroll_pending = 0;
                 changed = true;
             }
         }
@@ -784,15 +908,58 @@ mod tests {
         let keys = "a ".repeat(50);
         let (acts, _) = b.send_keys("claude", &keys, now);
         assert_eq!(acts.len(), 1);
-        let (acts, _) = b.keys_sent("claude", Ok(()));
+        let (acts, _) = b.keys_sent("claude", Ok(()), now);
         assert!(matches!(&acts[..], [Act::Keys { keys, .. }] if keys.len() == 36));
-        assert_eq!(b.keys_sent("claude", Ok(())).0, vec![]);
+        assert_eq!(b.keys_sent("claude", Ok(()), now).0, vec![]);
         // Expired: refused here.
         assert!(b.expire(now + Duration::from_secs(60)));
         assert!(matches!(
             &b.send_keys("claude", "ls", now + Duration::from_secs(61)).0[..],
             [Act::Error(_)]
         ));
+    }
+
+    #[test]
+    fn scrolls_coalesce_and_accepted_ones_extend_the_arm() {
+        let mut b = online(true);
+        opened(&mut b, "claude", 7);
+        let now = Instant::now();
+        assert!(matches!(&b.scroll("claude", 3, now).0[..], [Act::Error(_)]));
+        b.arm("claude");
+        b.armed("claude", Ok(60), now);
+        assert_eq!(
+            b.scroll("claude", 3, now).0,
+            vec![Act::Scroll {
+                session: "claude".into(),
+                terminal_id: 7,
+                lines: 3
+            }]
+        );
+        assert_eq!(b.scroll("claude", -1, now).0, vec![]);
+        assert_eq!(b.scroll("claude", 5, now).0, vec![]);
+        let later = now + Duration::from_secs(50);
+        let (acts, changed) = b.scrolled(
+            "claude",
+            Ok(TerminalScrollResult {
+                offset_from_bottom: 3,
+                max_offset_from_bottom: None,
+            }),
+            later,
+        );
+        assert!(changed);
+        assert!(matches!(&acts[..], [Act::Scroll { lines: 4, .. }]));
+        assert_eq!(b.sessions["claude"].scroll_offset, Some(3));
+        // Extended to 60 s from the answer.
+        assert_eq!(
+            b.sessions["claude"].armed_until,
+            Some(later + Duration::from_secs(60))
+        );
+        // A refusal drops what was asked meanwhile.
+        b.scroll("claude", 2, later);
+        let (acts, _) = b.scrolled("claude", Err("no".into()), later);
+        assert!(matches!(&acts[..], [Act::Error(_)]));
+        assert_eq!(b.sessions["claude"].scroll_pending, 0);
+        assert!(!b.sessions["claude"].scroll_in_flight);
     }
 
     #[test]

@@ -220,6 +220,20 @@ impl Companion {
         });
     }
 
+    /// Scrolls the session's armed terminal by `lines`, as a mouse wheel
+    /// does: positive back into the scrollback ([`Input::TerminalScroll`]).
+    /// Scrolls asked for while one is in flight are summed;
+    /// [`TerminalStatus::scroll_offset`] says where the pane is once the
+    /// daemon answers.
+    pub fn terminal_scroll(&self, session: &str, lines: i32) {
+        if lines != 0 {
+            self.send(Input::TerminalScroll {
+                session: session.to_string(),
+                lines,
+            });
+        }
+    }
+
     /// The bytes sent to and received from the daemon since the client
     /// started, over every connection: each socket line with its newline,
     /// each link message's plaintext (CHANGES.md, 2026-10-24 12:59 EDT,

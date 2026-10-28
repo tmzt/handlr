@@ -161,6 +161,11 @@ pub enum Input {
     /// syntax: sent as `terminal.input` in batches of at most
     /// `TERMINAL_INPUT_MAX` bytes ([`crate::terminal::key_batches`]).
     TerminalKeys { session: String, keys: String },
+    /// Scroll the session's armed terminal by `lines`, as a mouse wheel
+    /// does (positive back into the scrollback): `terminal.scroll`, one in
+    /// flight at a time, the lines asked for meanwhile summed into the next
+    /// (plan 20261022_03, the L3 amendment of 2026-10-27 21:58 EDT).
+    TerminalScroll { session: String, lines: i32 },
 }
 
 /// A grade of memory pressure (plan 20261022_03, the L3 amendment of
@@ -860,6 +865,8 @@ enum Sent {
     TerminalArm(String),
     /// `terminal.input` of this session.
     TerminalInput(String),
+    /// `terminal.scroll` of this session.
+    TerminalScroll(String),
 }
 
 /// The most `session.content` requests in flight at once.
@@ -1662,6 +1669,15 @@ impl State {
                     common::TerminalInputParams { terminal_id, keys },
                     Sent::TerminalInput(session),
                 )),
+                Act::Scroll {
+                    session,
+                    terminal_id,
+                    lines,
+                } => out.push(self.request(
+                    methods::TERMINAL_SCROLL,
+                    common::TerminalScrollParams { terminal_id, lines },
+                    Sent::TerminalScroll(session),
+                )),
                 Act::Error(message) => out.push(event(Event::Error(message))),
             }
         }
@@ -1926,6 +1942,11 @@ impl State {
             Input::TerminalKeys { session, keys } => {
                 let now = Instant::now();
                 let acts = self.terminals.update(|b| b.send_keys(&session, &keys, now));
+                self.terminal_acts(acts, &mut out);
+            }
+            Input::TerminalScroll { session, lines } => {
+                let now = Instant::now();
+                let acts = self.terminals.update(|b| b.scroll(&session, lines, now));
                 self.terminal_acts(acts, &mut out);
             }
         }
@@ -3704,9 +3725,17 @@ impl State {
                     self.terminal_acts(acts, out);
                 }
                 Sent::TerminalInput(session) => {
+                    let now = Instant::now();
                     let acts = self
                         .terminals
-                        .update(|b| b.keys_sent(&session, Err(message)));
+                        .update(|b| b.keys_sent(&session, Err(message), now));
+                    self.terminal_acts(acts, out);
+                }
+                Sent::TerminalScroll(session) => {
+                    let now = Instant::now();
+                    let acts = self
+                        .terminals
+                        .update(|b| b.scrolled(&session, Err(message), now));
                     self.terminal_acts(acts, out);
                 }
                 Sent::History(id) => {
@@ -3777,7 +3806,17 @@ impl State {
                 self.terminal_acts(acts, out);
             }
             Sent::TerminalInput(session) => {
-                let acts = self.terminals.update(|b| b.keys_sent(&session, Ok(())));
+                let now = Instant::now();
+                let acts = self
+                    .terminals
+                    .update(|b| b.keys_sent(&session, Ok(()), now));
+                self.terminal_acts(acts, out);
+            }
+            Sent::TerminalScroll(session) => {
+                let r = parse::<common::TerminalScrollResult>(result)
+                    .map_err(|e| format!("a bad result: {e}"));
+                let now = Instant::now();
+                let acts = self.terminals.update(|b| b.scrolled(&session, r, now));
                 self.terminal_acts(acts, out);
             }
             Sent::Hello => match parse::<wire::HelloResult>(result) {
