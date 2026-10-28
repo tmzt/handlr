@@ -852,3 +852,20 @@ fingerprint, where both sides show the code) stands.
    screen; **Done when:** two `flankr pair` runs print different codes,
    each matching what the phone shows for its link, and an old-version
    link still pairs with no code shown.
+
+## Amendment — 2026-10-28 14:03 EDT: the fingerprint stays in `flankr pair`; on the phone, behind Details
+
+The owner (2026-10-28), asked whether `flankr pair` should stop printing
+the daemon's fingerprint now that the confirmation code is per offer: "no
+it should be there, but were redesigning the pairing screen around the
+camera, it should probably be a details or similar button".
+
+1. **`flankr pair`** keeps printing the fingerprint beside the per-offer
+   confirmation code.
+2. **The phone's pairing screen** shows the confirmation code, and puts the
+   daemon's fingerprint (and its `host:port`) behind a **Details** button,
+   not on the screen by default. The pairing screen is to be redesigned
+   around the camera (scanning the QR code; libmobile's and libmorph's
+   camera capture and QR plans of 2026-10-28); that redesign carries the
+   Details button over. The Remotes row keeps the fingerprint as decision
+   12 has it.
