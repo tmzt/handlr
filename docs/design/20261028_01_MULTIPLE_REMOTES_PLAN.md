@@ -797,3 +797,13 @@ remote's `state.redb` separately, as the previous amendment's item 3
 reads it. The plan is approved with its amendments and built in Claude
 Code worktrees; the status becomes `In implementation` with its first
 code commit.
+
+## Amendment — 2026-10-28 13:06 EDT: no session-count cap; a 50 MB LRU cap per remote
+
+The owner (2026-10-28): "one thing, the 20 sesdion l8mit can't be enforcrd
+given herdr having other clients, si drop it, kerp the 50mb cap on lru
+storage". This replaces the 20-session part of the cap in the amendments of
+13:03 EDT (item 3) and 13:04 EDT (the approval): each remote's `state.redb` has no
+limit on the number of sessions, and is capped at 50 MB, evicting the least
+recently used sessions first when a write would pass it. The data plan's
+amendment, when either plan is built, says the same.
