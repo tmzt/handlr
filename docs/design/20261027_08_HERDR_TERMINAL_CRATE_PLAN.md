@@ -794,3 +794,44 @@ and for a missing submodule build.
 5. The pin: track the owner's installed herdr version (moved by hand, with
    step 1's audit, when herdr is upgraded), or the newest herdr release?
 
+
+## Amendment — 2026-10-27 23:24 EDT: the terminal sized to the phone, keyboard included; herdr's private protocol only for the terminal
+
+The owner (2026-10-27): "resize term to fit phone (including ime offset).
+the json protocol should still be used for summary/overview, only use the
+private protocol for terminal/mouse/wheel". Where this disagrees with the
+body, it wins.
+
+1. **The terminal fits the phone** (replaces decision 6's "the phone's
+   `cols_hint` and `rows_hint` … without hints, 80 by 24"). The app works
+   out the columns and rows that fit the terminal area at its current font
+   size: the width of the view, and the height from below the header to
+   the top of the bottom bar **less the soft keyboard's height while it is
+   shown** (the IME inset libmorph reports). It sends them in
+   `terminal.open` and again in `terminal.resize` whenever they change:
+   the keyboard shown or hidden, a pinch that settles on a new size (sent
+   once the pinch ends, not during it), rotation, and the cards over the
+   terminal changing height. The daemon passes them on as
+   `ClientShellResize` (`surface_size`), clamped as decision 6 says, at
+   most twice a second. The phone's first frame after a resize is drawn at
+   the new size without panning, since it fits; pan stays for a pane
+   narrower than the surface would make it. With the poll (no attachment)
+   the size cannot be set, and the view pans as today.
+2. **herdr's private protocol only for the terminal.** The attachment of
+   decisions 3-5 is opened only while a phone has a terminal open, and
+   carries only that terminal: its surface, cursor and size, its keys,
+   text and paste, mouse and wheel, and the `pane.focus` endpoint request
+   that points the attachment's own view at the session's pane (2.1.7).
+   Everything else stays on herdr's JSON API as it is: the snapshot, agent
+   status and the event subscription, `pane.read` for transcripts and
+   detection, the summaries and the overview, `tab_follows_focus` for the
+   general agent's `focus_project`, and `send_keys`/`run_command` for
+   sends. No JSON API use moves to the attachment.
+3. **Open question 1 narrows.** The surface is herdr's whole tab, so the
+   session's pane fills the phone only when it is alone in its tab. In a
+   tab split into several panes, the pane gets its share of the phone-sized
+   tab unless it is zoomed (`pane.zoom`, which the desktop would also
+   see). The question stays for the owner: zoom the pane while the phone's
+   terminal is open, or leave splits as they are.
+
+The plan stays `Draft`.
