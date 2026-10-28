@@ -64,6 +64,7 @@ members = [
     "crates/flankr-markdown",
     "crates/flankr-speech",
     "crates/libflankr_proto",
+    "crates/libflankr_term",
     "crates/libherdr",
     "crates/qrcodeurl"
 ]
@@ -75,6 +76,7 @@ default-members = [
     "crates/flankr-markdown",
     "crates/flankr-speech",
     "crates/libflankr_proto",
+    "crates/libflankr_term",
     "crates/libherdr",
     "crates/qrcodeurl"
 ]

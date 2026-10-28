@@ -2290,6 +2290,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libflankr_term"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "libherdr"
 version = "0.3.1"
 dependencies = [
