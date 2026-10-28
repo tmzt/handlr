@@ -1078,3 +1078,9 @@ amendments of 13:59, 14:03, 14:06, 14:37, 14:40, 14:42 (both), 14:45 EDT
 and their corrections, which together define the six-word pairing flow,
 the fingerprint words, the review's changes and the step they add, are
 approved, and that step is built now.
+
+## Amendment — 2026-10-28 14:47 EDT: correction of a cited time
+
+The previous amendment's list "14:42 EDT (both), 14:45 EDT" means the
+amendments of **14:42 EDT** (the quiet phone; `flankr pair` exits on
+expiry) and **14:44 EDT** (one attempt per run); there is none at 14:45.
