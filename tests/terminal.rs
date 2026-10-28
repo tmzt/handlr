@@ -693,3 +693,140 @@ async fn scrolling_needs_every_switch() {
         .await;
     assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
 }
+
+/// Makes the mock's pane `p1` a shell: no agent named, a title naming none.
+async fn make_shell(env: &Env) {
+    env.mock(|m| {
+        let pane = &mut m.snapshot.workspaces[0].tabs[0].panes[0];
+        pane.extra.remove("agent");
+        pane.terminal_title = Some("htop".to_string());
+        pane.agent_status = None;
+    })
+    .await;
+}
+
+/// The shipped agents, `[terminal] input` on.
+fn shipped(shell_input: bool) -> AppConfig {
+    let mut config = AppConfig {
+        summary: Some(flankr::config::SummaryConfig { cards: false }),
+        terminal: TerminalConfig {
+            input: true,
+            ..TerminalConfig::default()
+        },
+        ..AppConfig::default()
+    };
+    config
+        .agents
+        .iter_mut()
+        .filter(|a| a.name == "shell")
+        .for_each(|a| a.terminal_input = shell_input);
+    config
+}
+
+/// Plan 20261022_03, the 2026-10-28 00:47 EDT amendment: a shell pane is
+/// listed, its terminal opens with the shipped `shell` entry, read-only,
+/// and nothing is sent to it as a command, a message or an interrupt.
+#[tokio::test]
+async fn a_shell_pane_is_listed_and_only_its_terminal_opens() {
+    let env = start(shipped(false)).await;
+    make_shell(&env).await;
+    let mut phone = env.device("s23", None, true).await;
+
+    let list = phone.call("agents.list", json!({})).await;
+    let agents = list["result"]["agents"].as_array().unwrap();
+    assert_eq!(agents.len(), 1, "{list}");
+    assert_eq!(agents[0]["pane_id"], "p1");
+    assert_eq!(agents[0]["agent"], "shell");
+    assert!(agents[0]["name"].is_string(), "{list}");
+    assert!(agents[0].get("session").is_none(), "{list}");
+    assert!(agents[0].get("turn").is_none(), "{list}");
+
+    // Its session: none, for want of a reader, without an error.
+    let r = phone
+        .call("session.subscribe", json!({"pane_id": "p1", "sections": 4}))
+        .await;
+    assert_eq!(r["result"]["delivery"]["reason"], "no_reader", "{r}");
+
+    // The terminal opens and mirrors the pane.
+    phone.open("p1").await;
+    let first = phone.frame().await;
+    let mut screen = Screen::default();
+    assert!(screen.apply(&first));
+    assert_eq!(screen.grid().text_lines(), ["hello", "bold world"]);
+    // Read-only: the shell entry's terminal_input is off.
+    let r = phone
+        .call("terminal.input_arm", json!({"terminal_id": 1}))
+        .await;
+    assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": 3}))
+        .await;
+    assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+
+    // No command, tapped or not: an agent's allow-listed word, a command
+    // line, a slash command.
+    for command in ["continue", "ls", "/compact"] {
+        for confirmed in [false, true] {
+            let r = phone
+                .call(
+                    "agents.send",
+                    json!({"pane_id": "p1", "command": command, "confirmed": confirmed}),
+                )
+                .await;
+            assert_eq!(code(&r), codes::NOT_PERMITTED, "{command}: {r}");
+        }
+    }
+    // No message.
+    let r = phone
+        .call(
+            "agents.send",
+            json!({"pane_id": "p1", "text": "list the files", "kind": "message", "confirmed": true}),
+        )
+        .await;
+    assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+    // No interrupt key.
+    let r = phone
+        .call("agents.interrupt", json!({"target": "p1"}))
+        .await;
+    assert_eq!(r["result"]["interrupted"], false, "{r}");
+    let (commands, keys) = env
+        .mock(|m| (m.command_log.clone(), m.keystroke_log.clone()))
+        .await;
+    assert!(commands.is_empty(), "{commands:?}");
+    assert!(keys.is_empty(), "{keys:?}");
+}
+
+/// With `terminal_input` set on the shell entry, an armed shell terminal
+/// takes keys.
+#[tokio::test]
+async fn a_shell_types_only_with_its_entrys_terminal_input() {
+    let env = start(shipped(true)).await;
+    make_shell(&env).await;
+    let mut phone = env.device("s23", None, true).await;
+    phone.open("p1").await;
+    let r = phone
+        .call("terminal.input_arm", json!({"terminal_id": 1}))
+        .await;
+    assert_eq!(r["result"], json!({"expires_in_s": 60}), "{r}");
+    let r = phone
+        .call("terminal.input", json!({"terminal_id": 1, "keys": "q"}))
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    let keys = env.mock(|m| m.keystroke_log.clone()).await;
+    assert_eq!(keys, [("p1".to_string(), "q".to_string())]);
+}
+
+/// Without a `shell` entry the pane is still listed, and its terminal is
+/// refused with the daemon's message.
+#[tokio::test]
+async fn without_a_shell_entry_a_shell_is_listed_but_its_terminal_refused() {
+    let env = start(config(false, false, false)).await;
+    make_shell(&env).await;
+    let mut phone = env.device("s23", None, true).await;
+    let list = phone.call("agents.list", json!({})).await;
+    assert_eq!(list["result"]["agents"][0]["agent"], "shell", "{list}");
+    let r = phone.call("terminal.open", json!({"pane_id": "p1"})).await;
+    assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+    let message = r["error"]["message"].as_str().unwrap();
+    assert!(message.contains("shell"), "{r}");
+}

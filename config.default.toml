@@ -52,6 +52,22 @@ allowed_commands = ["continue"]
 require_confirmation = true
 allow_arbitrary_commands = false
 
+# A pane that runs no known agent (a shell, htop, a build): the companion
+# lists it and opens it only in its terminal view. Read-only by default:
+# nothing is typed into it unless terminal_input = true here (and [terminal]
+# input = true below, and the owner arms it on the phone). It takes no
+# commands, messages or interrupt key; the global allow_arbitrary_commands
+# never turns arbitrary commands on for it. Remove this entry to refuse its
+# terminal too.
+[[agents]]
+name = "shell"
+allowed_commands = []
+require_confirmation = true
+allow_arbitrary_commands = false
+allow_messages = false
+interrupt_key = ""
+terminal_input = false
+
 # Every LLM flankr uses itself: the general agent's turns, card summaries
 # and spoken summaries; never the coding agents in the panes. Off unless
 # `enabled = true`: without it, nothing calls any model. Turned on, the rest

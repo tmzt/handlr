@@ -161,6 +161,10 @@ pub struct UrlsConfig {
     pub repowiki_url: Option<String>,
 }
 
+/// The agent name of a pane that runs no known agent
+/// (`extract_agent_name_for_pane`).
+pub const SHELL_AGENT: &str = "shell";
+
 fn default_agents() -> Vec<AgentConfig> {
     vec![
         AgentConfig {
@@ -190,6 +194,20 @@ fn default_agents() -> Vec<AgentConfig> {
             allow_arbitrary_commands: false,
             allow_messages: true,
             interrupt_key: default_interrupt_key(),
+            terminal_input: false,
+            terminal_signals: false,
+        },
+        // A pane that runs no known agent (plan 20261022_03, the
+        // 2026-10-28 00:47 EDT amendment): its terminal only, read-only
+        // until the owner sets `terminal_input`; no commands, messages or
+        // interrupt key.
+        AgentConfig {
+            name: SHELL_AGENT.to_string(),
+            allowed_commands: Vec::new(),
+            require_confirmation: true,
+            allow_arbitrary_commands: false,
+            allow_messages: false,
+            interrupt_key: String::new(),
             terminal_input: false,
             terminal_signals: false,
         },
@@ -597,11 +615,16 @@ impl AppConfig {
     /// Apply a global arbitrary-command override to every configured agent.
     ///
     /// `Some(true)`/`Some(false)` force the setting on/off for all agents;
-    /// `None` is a no-op so per-agent settings survive.
+    /// `None` is a no-op so per-agent settings survive. The `shell` entry
+    /// is never turned on by it: arbitrary text typed into a shell runs as
+    /// a command line, so only its own entry may allow that.
     pub fn apply_arbitrary_commands_override(&mut self, allow: Option<bool>) {
         let Some(allow) = allow else { return };
         self.allow_arbitrary_commands = Some(allow);
         for agent in &mut self.agents {
+            if allow && agent.name.eq_ignore_ascii_case(SHELL_AGENT) {
+                continue;
+            }
             agent.allow_arbitrary_commands = allow;
         }
         log::info!(
@@ -752,6 +775,28 @@ terminal_signals = true
     }
 
     #[test]
+    fn the_shell_entry_is_a_read_only_terminal() {
+        // Plan 20261022_03, the 2026-10-28 00:47 EDT amendment.
+        let mut cfg = AppConfig::default();
+        let shell = cfg.find_agent("shell").unwrap();
+        assert!(shell.allowed_commands.is_empty());
+        assert!(shell.require_confirmation);
+        assert!(!shell.allow_arbitrary_commands && !shell.allow_messages);
+        assert!(!shell.terminal_input && !shell.terminal_signals);
+        assert!(shell.interrupt_key.is_empty());
+        // The global switch turns arbitrary commands on for agents, never
+        // for the shell; it still turns them off for it.
+        cfg.apply_arbitrary_commands_override(Some(true));
+        assert!(cfg.find_agent("claude").unwrap().allow_arbitrary_commands);
+        assert!(!cfg.find_agent("shell").unwrap().allow_arbitrary_commands);
+        cfg.agents
+            .iter_mut()
+            .for_each(|a| a.allow_arbitrary_commands = true);
+        cfg.apply_arbitrary_commands_override(Some(false));
+        assert!(cfg.agents.iter().all(|a| !a.allow_arbitrary_commands));
+    }
+
+    #[test]
     fn test_global_arbitrary_commands_override() {
         let sample = r#"
 allow_arbitrary_commands = true
@@ -804,10 +849,12 @@ interrupt_key = "ctrl+c"
         assert_eq!(cfg.find_agent("claude").unwrap().interrupt_key, "esc");
         assert_eq!(cfg.find_agent("omp").unwrap().interrupt_key, "");
         assert_eq!(cfg.find_agent("codex").unwrap().interrupt_key, "ctrl+c");
+        // Every shipped agent's is esc; the shell has none.
         assert!(
             AppConfig::default()
                 .agents
                 .iter()
+                .filter(|a| a.name != SHELL_AGENT)
                 .all(|a| a.interrupt_key == DEFAULT_INTERRUPT_KEY)
         );
 
@@ -994,7 +1041,12 @@ allow_messages = false
         );
         let parsed = cfg.unwrap();
         assert_eq!(parsed.transports.len(), 2);
-        assert_eq!(parsed.agents.len(), 3);
+        assert_eq!(parsed.agents.len(), 4);
+        // The shipped shell entry is the built-in one: terminal only.
+        assert_eq!(
+            parsed.find_agent(SHELL_AGENT),
+            AppConfig::default().find_agent(SHELL_AGENT)
+        );
         let claude = parsed.find_agent("claude").unwrap();
         assert_eq!(claude.allowed_commands, vec!["continue", "/compact"]);
         assert!(claude.require_confirmation);
