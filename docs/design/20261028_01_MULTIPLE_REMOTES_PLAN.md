@@ -813,3 +813,42 @@ amendment, when either plan is built, says the same.
 Implementation has started with step 1 (`libflankr_proto` 0.4.3). The
 status is `In implementation`, and the document is now immutable: it
 changes only on the owner's explicit instruction.
+
+## Amendment — 2026-10-28 13:59 EDT: the confirmation code comes from a per-offer key
+
+The owner (2026-10-28), after the first pairing showed the same code the
+daemon prints for every pairing: "the confirmation code shouldnt be the
+same, it should be totp derived or similar (that breaks if tod is way off)
+or derived from the offer key"; offered a per-offer value or a TOTP-style
+window, "I would say 1, amend the plan". This replaces the 13:03 EDT
+amendment's item 7 on how the code is derived; the rest of item 7 (the
+fingerprint, where both sides show the code) stands.
+
+1. **A fresh offer per `flankr pair`.** Each `link.pair_begin` makes a
+   random 16-byte `offer` (from the OS's random source) and puts it in the
+   pairing payload beside `server_key` and `addresses`. Nothing is held
+   pending on the daemon for it: like the rest of the payload it is only
+   shown, in the URL and the QR code.
+2. **The code is per offer:** `confirmation_code(server_key, offer)` is the
+   first 20 bits of BLAKE2s-256 over `flankr.pair.confirm/2`, the key and
+   the offer, modulo 1,000,000, as six zero-padded digits. `flankr pair`
+   prints it; the phone computes it from the link it was given. Two
+   pairings never show the same code (but by chance), and a link from any
+   other run or daemon shows different digits. No clock is involved.
+3. **The payload's format.** `PairingPayload::from_bytes` refuses trailing
+   bytes (`crates/libflankr_proto/src/link/pairing.rs:150`), so the offer
+   cannot be appended silently: the payload's version byte moves to the
+   next value and carries the offer after the addresses. The decoder reads
+   both versions; a payload without an offer (the older version) shows no
+   confirmation code. An app older than this change refuses a new link
+   with "unknown version", so the phone and the daemon move together.
+   `PairingPayload` gains `offer: Option<[u8; 16]>`; `confirmation_code`
+   takes the offer (the key-only form is removed, as nothing has shipped
+   with it beyond this branch). In `libflankr_proto` this is a changed
+   signature and a new wire version: not strictly additive, so 0.4.3 →
+   0.5.0, **Breaking**, with its `VERSIONS.md` entry.
+4. **Steps:** a step is added after step 5: the offer in the payload, the
+   new `confirmation_code`, `flankr pair`'s output and the phone's pairing
+   screen; **Done when:** two `flankr pair` runs print different codes,
+   each matching what the phone shows for its link, and an old-version
+   link still pairs with no code shown.
