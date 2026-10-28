@@ -1,0 +1,38 @@
+[package]
+name = "libherdr_term"
+version = "0.1.0"
+edition = "2024"
+description = "Attaching to the local herdr as one of herdr's own shell clients, with herdr's protocol types extracted from the vendor/herdr submodule"
+# The crate's own code is flankr's; build.rs generates `libherdr_term::herdr`
+# from herdr's Apache-2.0 source (see README.md).
+
+[lib]
+# No herdr test code is ever compiled: the tests live in tests/
+# (docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md, decision 2).
+test = false
+doctest = false
+
+[dependencies]
+libflankr_term = { path = "../libflankr_term" }
+libflankr_proto = { path = "../libflankr_proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# herdr's framing: bincode 2 through serde, config::standard() (herdr uses 2.0.1).
+bincode = { version = "=2.0.1", default-features = false, features = ["std", "serde"] }
+
+[build-dependencies]
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
+proc-macro2 = "1"
+prettyplease = "0.2"
+
+[dev-dependencies]
+# herdr's golden hashes of the surface messages.
+sha2 = "0.10"
+# tests/extract.rs runs build/extract.rs as a library on a broken copy of
+# herdr's source, so the failing build is checked without spawning cargo.
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
+proc-macro2 = "1"
+prettyplease = "0.2"
+tempfile = "3"

@@ -68,6 +68,7 @@ members = [
     "crates/libflankr_proto",
     "crates/libflankr_term",
     "crates/libherdr",
+    "crates/libherdr_term",
     "crates/qrcodeurl"
 ]
 # herdr's own source, read by libherdr_term's build.rs; never built here
@@ -83,5 +84,6 @@ default-members = [
     "crates/libflankr_proto",
     "crates/libflankr_term",
     "crates/libherdr",
+    "crates/libherdr_term",
     "crates/qrcodeurl"
 ]
