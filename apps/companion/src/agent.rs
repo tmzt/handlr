@@ -276,6 +276,8 @@ pub struct Fill {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentHit {
     Back,
+    /// The ≡ button at the header's left: open the session drawer.
+    Menu,
     /// Take a message to this agent.
     Message,
     /// The centre button: trigger the general agent chat (Gemini).
@@ -1982,7 +1984,10 @@ pub struct Frame {
     /// The pinned card, in full or as the bar, and its parts.
     pub pin: Option<Pinned>,
     pub buttons: Vec<FlowButton>,
-    /// The back glyph's tap area, at the header's left.
+    /// The ≡ button's tap area, at the header's left (plan 20261028_03,
+    /// the 18:48 EDT amendment, item 1).
+    pub menu: Rect,
+    /// The back glyph's tap area, one slot right of the ≡.
     pub back: Rect,
     /// The suggested responses, as plain coloured text above the buttons.
     pub suggestions: Vec<Suggested>,
@@ -3409,7 +3414,8 @@ impl AgentScreen {
                 bg: [0.0; 4],
             });
         }
-        let back = Rect::new(0.0, l.top, BACK_W * s, HEADER_H * s);
+        let menu = Rect::new(0.0, l.top, BACK_W * s, HEADER_H * s);
+        let back = Rect::new(BACK_W * s, l.top, BACK_W * s, HEADER_H * s);
         let mut above = if replying.is_some() {
             row_bottom
         } else {
@@ -3581,6 +3587,7 @@ impl AgentScreen {
             full_viewport_h: (full_bottom - view_top).max(0.0),
             pin,
             buttons,
+            menu,
             back,
             suggestions,
             typed,
@@ -4151,6 +4158,7 @@ impl AgentScreen {
         for b in &self.frame.buttons {
             self.hits.push((b.hit, b.rect));
         }
+        self.hits.push((AgentHit::Menu, self.frame.menu));
         self.hits.push((AgentHit::Back, self.frame.back));
         for g in &self.frame.suggestions {
             self.hits.push((g.hit, g.rect));
@@ -5021,8 +5029,12 @@ impl AgentScreen {
             mono: true,
         };
         let back_y = l.top + (HEADER_H * s - term_h(back.px)) * 0.5;
-        draw_row(list, ctx, term, &back, [PAD * s, back_y]);
-        let name_x = BACK_W * s;
+        let menu = crate::drawer::Menu {
+            rect: self.frame.menu,
+        };
+        menu.draw(list, s, theme().fg);
+        draw_row(list, ctx, term, &back, [BACK_W * s + PAD * s, back_y]);
+        let name_x = 2.0 * BACK_W * s;
         ctx.draw_text(list, &self.name, [name_x, top], name_px, theme().fg);
         ctx.draw_text(
             list,

@@ -18,6 +18,9 @@
 //! nothing until a view has been opened; record takes a message for
 //! herdr's focused agent. A tap on nothing is the main screen's tap.
 //!
+//! The ≡ button ([`Menu`]) at the left of the title opens the session
+//! drawer (plan 20261028_03, 3.10; the 18:48 EDT amendment, item 1).
+//!
 //! The gear ([`Gear`]) at the right of the title opens the settings
 //! (plan 20261024_02). What they turn off is off here too (decision 4):
 //! play without sound, record without the microphone or the general agent,
@@ -43,6 +46,7 @@ use crate::agent::{
 };
 use crate::controls::scroll::Touched;
 use crate::controls::{ControlRow, SquareButton};
+use crate::drawer::Menu;
 use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts};
 use crate::settings;
 use crate::theme::theme;
@@ -63,6 +67,8 @@ pub enum OverviewHit {
     Tap,
     /// The gear: open the settings.
     Settings,
+    /// The ≡ button: open the drawer.
+    Menu,
 }
 
 /// A card above the bottom row: its lines and, for a confirmation being
@@ -81,6 +87,8 @@ enum Target {
     Prompt,
     /// The gear.
     Gear,
+    /// The ≡ button.
+    Menu,
     /// A control, or nothing.
     Other,
 }
@@ -119,6 +127,7 @@ pub struct Overview {
     headings: Vec<Heading>,
     divider_y: Option<f32>,
     gear: Gear,
+    menu: Menu,
     /// The confirmation card as placed.
     panels: Vec<Flow>,
     buttons: Vec<FlowButton>,
@@ -161,6 +170,7 @@ impl Overview {
             headings: Vec::new(),
             divider_y: None,
             gear: Gear::default(),
+            menu: Menu::default(),
             panels: Vec::new(),
             buttons: Vec::new(),
             hits: Vec::new(),
@@ -301,6 +311,11 @@ impl Overview {
         self.gear
     }
 
+    /// The ≡ button.
+    pub fn menu(&self) -> Menu {
+        self.menu
+    }
+
     pub fn grid(&self) -> &CardGrid {
         &self.grid
     }
@@ -343,9 +358,12 @@ impl Overview {
         let mut headings = Vec::new();
         let mut y = l.top + 24.0 * s;
         self.gear = Gear::place(l.w, pad, y, TITLE_PT * s * 1.35, s);
+        // The ≡ at the left, its bars where the title began; the title
+        // after it.
+        self.menu = Menu::place(pad * 0.5, y, TITLE_PT * s * 1.35, s);
         headings.push(Heading {
             text: "flankr".to_string(),
-            x: Some(pad),
+            x: Some(self.menu.rect.x + self.menu.rect.w + 4.0 * s),
             y,
             px: TITLE_PT * s,
             color: theme().text,
@@ -466,6 +484,8 @@ impl Overview {
                 Target::Other
             } else if self.gear.contains(x, y) && !self.prompts.overlay().is_open() {
                 Target::Gear
+            } else if self.menu.contains(x, y) && !self.prompts.overlay().is_open() {
+                Target::Menu
             } else if self.prompts.claims(x, y) {
                 Target::Prompt
             } else if self.grid.viewport().contains([x, y]) {
@@ -500,7 +520,7 @@ impl Overview {
         }
         let touched = match target {
             Target::Grid => self.grid.touch(id, phase, x, y, now),
-            Target::Prompt | Target::Gear | Target::Other => match phase {
+            Target::Prompt | Target::Gear | Target::Menu | Target::Other => match phase {
                 TouchPhase::Ended => Touched::Tap,
                 _ => Touched::Nothing,
             },
@@ -517,6 +537,7 @@ impl Overview {
                     .pane_at(x, y)
                     .map(|p| OverviewHit::Agent(p.to_string())),
                 Target::Gear => self.gear.contains(x, y).then_some(OverviewHit::Settings),
+                Target::Menu => self.menu.contains(x, y).then_some(OverviewHit::Menu),
                 Target::Prompt => None,
                 Target::Other => match self.control_at(x, y) {
                     // Nothing to read until a view has been opened.
@@ -577,6 +598,7 @@ impl Overview {
             ctx.draw_text(list, &h.text, [x, h.y], px, h.color);
         }
         self.gear.draw(list);
+        self.menu.draw(list, s, theme().muted);
         self.grid.draw(list, ctx, self.shader_panels);
         self.prompts.draw_pinned(list, ctx);
         let recording = self.prompts.message_open();
@@ -1390,6 +1412,21 @@ mod tests {
         assert_eq!(
             tap(&mut o, g.x + g.w * 0.5, g.y + g.h * 0.5),
             Some(OverviewHit::Settings)
+        );
+    }
+
+    #[test]
+    fn the_menu_is_at_the_left_of_the_title_and_opens_the_drawer() {
+        let mut o = overview(2);
+        let m = o.menu().rect;
+        let title = &o.headings[0];
+        assert_eq!(m.w, Menu::SIZE * 2.0);
+        assert!(m.x < PAD * 2.0, "at the left edge");
+        assert!(title.x.unwrap() >= m.x + m.w, "the title after it");
+        assert!(m.y <= title.y + title.px && m.y + m.h >= title.y);
+        assert_eq!(
+            tap(&mut o, m.x + m.w * 0.5, m.y + m.h * 0.5),
+            Some(OverviewHit::Menu)
         );
     }
 

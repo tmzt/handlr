@@ -64,6 +64,9 @@
 
 pub mod agent;
 pub mod controls;
+pub mod drawer;
+#[cfg(all(test, not(target_os = "android")))]
+mod drawer_tests;
 pub mod keys;
 pub mod markdown_view;
 pub mod memory;
@@ -91,7 +94,7 @@ use flankr_companion::{
     Companion, CompanionConfig, Dictation, DictationPhase, Event, FileKeyStore, Input, KeyStore,
     Pressure, PromptMode, RemoteId, RemoteInfo, Speaker, Suggestion,
 };
-use libcontrols::DrawContext;
+use libcontrols::{DrawContext, DrawerLayers};
 use libflankr_proto::common::AgentInfo;
 use libmorph::camera::{CameraEvent, Fit, ScanId, Viewfinder, ViewfinderOptions};
 use libmorph::{
@@ -107,6 +110,7 @@ use libmsdf::font::{
 };
 
 use crate::agent::{AgentHit, AgentScreen, TermAsk, TermState, Terminal, TerminalSessions};
+use crate::drawer::{AppDrawer, DrawerHit, DrawerTouch};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
 use crate::notify::Notifier;
@@ -372,6 +376,64 @@ pub struct App {
     /// [`TERM_KEYBOARD_WAIT`] (plan 20261022_03, the L3 amendment of
     /// 2026-10-27 21:58 EDT, item 2).
     term_keyboard_at: Option<Instant>,
+    /// The session drawer (plan 20261028_03): its layout, its sheet's
+    /// controls and the finger in it.
+    drawer: AppDrawer,
+    /// Its two textures and composite pass, made on the first frame the
+    /// drawer shows, and dropped on suspend.
+    layers: Option<DrawerLayers>,
+    /// A card's 2 s press opened Settings for its remote's details: Settings
+    /// closes again with them.
+    details_from_drawer: bool,
+    /// The remote whose details open once Settings is laid out.
+    pending_details: Option<RemoteId>,
+    /// What the remotes in the background last gave (plan 20261028_03, the
+    /// 18:51 EDT amendment), by remote.
+    background: HashMap<RemoteId, BackgroundRemote>,
+    /// The confirmation card is a background remote's: its Approve and Deny
+    /// go to that remote's link (`Input::ToRemote`).
+    card_remote: Option<RemoteId>,
+    /// The remote in use's other-session cards, as last given; the cards
+    /// shown are these and the background remotes' together.
+    active_cards: Vec<flankr_companion::SessionCard>,
+    /// A background remote's card as shown, by its shown pane key: its
+    /// remote and real pane.
+    background_panes: HashMap<String, (RemoteId, String)>,
+    /// The remote in use's next try while it cannot be reached.
+    retry_in: Option<u32>,
+    /// The screens shown, frame by frame, and the drawer's layer plans
+    /// (scripted tests).
+    #[cfg(test)]
+    updates: u32,
+}
+
+/// What a remote in the background last gave: its agents and pending
+/// panes, its other-session cards, and its confirmation waiting.
+#[derive(Clone, Debug, Default)]
+struct BackgroundRemote {
+    agents: Vec<AgentInfo>,
+    pending: Vec<String>,
+    cards: Vec<flankr_companion::SessionCard>,
+    confirm: Option<u64>,
+}
+
+impl BackgroundRemote {
+    /// A question or an approval waits for the user.
+    fn waiting(&self) -> bool {
+        self.confirm.is_some()
+            || !self.pending.is_empty()
+            || self
+                .agents
+                .iter()
+                .any(|a| matches!(a.turn, Some(libflankr_proto::common::Turn::Asking { .. })))
+            || self.cards.iter().any(|c| {
+                matches!(
+                    c.kind,
+                    flankr_companion::SessionCardKind::Question
+                        | flankr_companion::SessionCardKind::Approval
+                )
+            })
+    }
 }
 
 /// How long a tap on the terminal waits for its arm before the soft
@@ -407,6 +469,12 @@ impl CenterHold {
         self.opened = true;
         true
     }
+}
+
+/// Where the shown screen is drawn: the surface, or the drawer's main
+/// layer.
+struct RenderTarget<'a> {
+    view: &'a wgpu::TextureView,
 }
 
 /// The foreground service, as the app knows it.
@@ -582,6 +650,9 @@ impl App {
         if let Some(s) = self.settings_screen.as_mut() {
             s.restyle();
         }
+        // The drawer's sheet is built again in the new colours.
+        self.drawer.content_mut().invalidate();
+        self.drawer.mark_main();
     }
 
     /// The app's handling of a pairing URL, however it arrives: the field,
@@ -622,6 +693,8 @@ impl App {
     }
 
     fn send(&self, input: Input) {
+        #[cfg(test)]
+        probe::input(&input);
         if let Some(companion) = &self.companion {
             companion.send(input);
         }
@@ -664,9 +737,15 @@ impl App {
                 log::info!("link: connected to {server}");
                 self.link = format!("connected to {server}");
                 self.online = true;
+                self.retry_in = None;
+                self.drawer.content_mut().set_retry(None);
             }
             Event::Disconnected { retry_in_ms } => {
                 self.online = false;
+                // The drawer's list says when the next try is, once one
+                // has failed.
+                self.retry_in = (retry_in_ms > 0).then(|| retry_in_ms.div_ceil(1000));
+                self.drawer.content_mut().set_retry(self.retry_in);
                 self.link = if self.paired {
                     format!(
                         "disconnected \u{b7} retrying in {} s",
@@ -752,6 +831,7 @@ impl App {
                 project,
                 ..
             } => {
+                self.card_remote = None;
                 self.card = Some(Card {
                     confirm_id,
                     command,
@@ -761,21 +841,24 @@ impl App {
                     state: CardState::Waiting,
                 })
             }
+            // The remote in use's: its card, not a background remote's.
             Event::Answered {
                 confirm_id,
                 approve,
-            } => self.set_card(confirm_id, CardState::Answering { approve }),
+            } if self.card_remote.is_none() => {
+                self.set_card(confirm_id, CardState::Answering { approve })
+            }
             Event::ReplyFailed {
                 confirm_id,
                 message,
-            } => {
+            } if self.card_remote.is_none() => {
                 log::warn!("confirmation {confirm_id}: {message}");
                 self.set_card(confirm_id, CardState::Refused(message));
             }
             Event::Resolved {
                 confirm_id,
                 outcome,
-            } => {
+            } if self.card_remote.is_none() => {
                 log::info!("confirmation {confirm_id}: {outcome}");
                 self.set_card(confirm_id, CardState::Done(outcome));
             }
@@ -791,10 +874,15 @@ impl App {
                 self.agents = agents;
                 self.follow_sessions();
                 self.overview.set_agents(self.agents.clone(), &self.pending);
+                let now = self.started.elapsed();
+                self.drawer
+                    .content_mut()
+                    .set_agents(self.agents.clone(), now);
             }
             Event::PendingPanes(panes) => {
                 self.pending = panes;
                 self.overview.set_agents(self.agents.clone(), &self.pending);
+                self.drawer.content_mut().set_pending(self.pending.clone());
             }
             Event::Conversation { speaker, text } => {
                 if let Some(agent) = &mut self.agent {
@@ -877,6 +965,13 @@ impl App {
                 if let Some(screen) = &mut self.settings_screen {
                     screen.set_remotes(self.remotes.clone());
                 }
+                // The remote in use and those removed have no background
+                // state.
+                let rows = &self.remotes;
+                self.background
+                    .retain(|id, _| rows.iter().any(|r| r.id == *id && !r.active));
+                self.drawer.content_mut().set_remotes(self.remotes.clone());
+                self.show_background();
             }
             Event::RemoteRemoved { id, name, daemon } => {
                 log::info!(
@@ -898,7 +993,10 @@ impl App {
                 self.note = None;
                 self.screen.invalidate();
             }
-            Event::Unpaired { daemon } => self.unpaired(daemon),
+            Event::Unpaired { daemon } => {
+                self.drawer.close_now();
+                self.unpaired(daemon);
+            }
             Event::SessionCards(cards) => {
                 if let Some(c) = cards.first() {
                     log::info!(
@@ -907,7 +1005,8 @@ impl App {
                         cards.len()
                     );
                 }
-                self.session_cards.set(cards);
+                self.active_cards = cards;
+                self.show_background();
             }
             // Plan 20261027_02, decision 9: the centre button, the Gemini
             // strip and the settings toggle follow the daemon's `[llm]`.
@@ -928,10 +1027,128 @@ impl App {
             | Event::StopSpeaking
             | Event::Arm
             | Event::Vocabulary(_) => {}
-            // A remote in the background, and later variants: the drawer's
-            // steps (plan 20261028_03, steps 6-8) show them.
+            Event::Background { remote, event } => self.background_event(remote, *event),
+            // Later variants, and a background remote's answer to its card
+            // arriving untagged (it is not: tagged ones are above).
             _ => {}
         }
+    }
+
+    /// An event of a remote in the background (plan 20261028_03, the
+    /// 18:51 EDT amendment): its questions, approvals and finished turns
+    /// are shown with its name, in the other-session cards and the
+    /// confirmation card, answered through `Input::ToRemote`; its card in
+    /// the drawer has a dot while one waits. The rest (its views closing,
+    /// its connection) is its own.
+    fn background_event(&mut self, remote: RemoteId, event: Event) {
+        if self.remotes.iter().any(|r| r.id == remote && r.active) {
+            // Given before the switch was seen: no longer background.
+            return;
+        }
+        let name = self.remote_name(remote);
+        let bg = self.background.entry(remote).or_default();
+        match event {
+            Event::Agents(agents) => bg.agents = agents,
+            Event::PendingPanes(panes) => bg.pending = panes,
+            Event::SessionCards(cards) => {
+                if let Some(c) = cards.first() {
+                    log::info!("cards: {:?} from {name} in the background", c.kind);
+                }
+                bg.cards = cards;
+            }
+            Event::Confirm {
+                confirm_id,
+                label,
+                command,
+                agent,
+                project,
+                ..
+            } => {
+                log::info!("confirmation {confirm_id} from {name} in the background");
+                bg.confirm = Some(confirm_id);
+                self.card_remote = Some(remote);
+                self.card = Some(Card {
+                    confirm_id,
+                    command,
+                    agent: format!("{name} \u{b7} {agent}"),
+                    project,
+                    handle: label,
+                    state: CardState::Waiting,
+                });
+            }
+            Event::Answered {
+                confirm_id,
+                approve,
+            } => {
+                if self.card_remote == Some(remote) {
+                    self.set_card(confirm_id, CardState::Answering { approve });
+                }
+            }
+            Event::ReplyFailed {
+                confirm_id,
+                message,
+            } => {
+                bg.confirm = bg.confirm.filter(|c| *c != confirm_id);
+                if self.card_remote == Some(remote) {
+                    self.set_card(confirm_id, CardState::Refused(message));
+                }
+            }
+            Event::Resolved {
+                confirm_id,
+                outcome,
+            } => {
+                bg.confirm = bg.confirm.filter(|c| *c != confirm_id);
+                if self.card_remote == Some(remote) {
+                    log::info!("confirmation {confirm_id} from {name}: {outcome}");
+                    self.set_card(confirm_id, CardState::Done(outcome));
+                }
+            }
+            _ => return,
+        }
+        self.show_background();
+    }
+
+    /// A remote's shown name, as its card shows it.
+    fn remote_name(&self, id: RemoteId) -> String {
+        self.remotes
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.display_name.clone())
+            .unwrap_or_else(|| "another remote".to_string())
+    }
+
+    /// The background remotes' state, shown: the other-session cards (the
+    /// remote in use's and theirs, newest first, theirs named with the
+    /// remote), and the drawer's dots.
+    fn show_background(&mut self) {
+        let mut cards = self.active_cards.clone();
+        self.background_panes.clear();
+        for (id, bg) in &self.background {
+            let name = self
+                .remotes
+                .iter()
+                .find(|r| r.id == *id)
+                .map(|r| r.display_name.clone())
+                .unwrap_or_default();
+            for c in &bg.cards {
+                let key = format!("{id}/{}", c.pane_id);
+                self.background_panes
+                    .insert(key.clone(), (*id, c.pane_id.clone()));
+                let mut c = c.clone();
+                c.agent = format!("{name} \u{b7} {}", c.agent);
+                c.pane_id = key;
+                cards.push(c);
+            }
+        }
+        cards.sort_by(|a, b| b.at.cmp(&a.at));
+        self.session_cards.set(cards);
+        let waiting = self
+            .background
+            .iter()
+            .filter(|(_, bg)| bg.waiting())
+            .map(|(id, _)| *id)
+            .collect();
+        self.drawer.content_mut().set_waiting(waiting);
     }
 
     /// Opens the view of the agent in `pane_id`, from its card.
@@ -1201,6 +1418,8 @@ impl App {
     pub fn memory_pressure(&mut self, pressure: Pressure) {
         log::info!("memory: {pressure:?}");
         self.send(Input::Memory(pressure));
+        // The drawer's textures go at once (plan 20261028_03, risk 2).
+        self.drawer.close_now();
         if let Some(agent) = &mut self.agent {
             agent.set_pressure(Some(pressure));
         }
@@ -1227,9 +1446,160 @@ impl App {
         }
     }
 
+    /// Approve or Deny on the confirmation card: to the remote whose card
+    /// it is, in use or in the background (`Input::ToRemote`).
+    fn answer(&mut self, confirm_id: u64, approve: bool) {
+        let input = Input::Answer {
+            confirm_id,
+            approve,
+        };
+        match self.card_remote {
+            Some(remote)
+                if self
+                    .card
+                    .as_ref()
+                    .is_some_and(|c| c.confirm_id == confirm_id) =>
+            {
+                log::info!("confirmation {confirm_id}: answering a background remote");
+                self.send(Input::ToRemote {
+                    remote,
+                    input: Box::new(input),
+                });
+            }
+            _ => self.send(input),
+        }
+    }
+
+    /// The ≡ button: the drawer slides in over the overview or the agent
+    /// view, never over the pairing window or Settings (plan 20261028_03,
+    /// 3.10 item 44), and the client lists the sessions at once and every
+    /// 3 s while it shows (`Input::DrawerShown`, in `update`).
+    fn open_drawer(&mut self) {
+        if self.pairing() || self.settings_screen.is_some() {
+            return;
+        }
+        log::info!("drawer: open");
+        self.drawer
+            .content_mut()
+            .set_open_pane(self.agent_pane.clone());
+        self.drawer.open();
+    }
+
+    /// What a touch in the drawer chose.
+    fn drawer_hit(&mut self, hit: DrawerHit) {
+        match hit {
+            // A tap on the card of the remote in use does nothing (the
+            // owner, 2026-10-28: only a 2 s press opens its details).
+            DrawerHit::Remote(id) => {
+                if self.remotes.iter().any(|r| r.id == id && !r.active) {
+                    self.switch_remote(id);
+                }
+            }
+            DrawerHit::AddRemote => {
+                self.drawer.close_now();
+                self.open_add();
+            }
+            DrawerHit::Details(id) => {
+                log::info!("drawer: a remote's details, from its card");
+                self.drawer.close_now();
+                self.open_settings();
+                // Opened once Settings is laid out (`lay_out`).
+                self.pending_details = Some(id);
+                self.details_from_drawer = true;
+            }
+            // The agent view opens at once, in place of any other, so the
+            // overview is never drawn between them (3.8 item 34).
+            DrawerHit::Session(pane) => {
+                self.drawer.close();
+                if self.agent_pane.as_deref() == Some(pane.as_str()) {
+                    return;
+                }
+                if self.agent.is_some() {
+                    self.close_agent();
+                }
+                self.open_agent(pane.clone());
+                self.drawer.content_mut().set_open_pane(Some(pane));
+            }
+        }
+    }
+
+    /// Settings opened for a card's details close with them: back to the
+    /// screen under the drawer.
+    fn settings_closed_for_drawer(&mut self) {
+        if self.details_from_drawer
+            && self.pending_details.is_none()
+            && self.settings_screen.as_ref().is_none_or(|s| !s.asking())
+        {
+            self.details_from_drawer = false;
+            self.close_settings();
+        }
+    }
+
+    /// A tap on a remote's card that is not in use (plan 20261028_03, 3.7
+    /// item 28 and the 18:51 EDT amendment): what is bound to the old
+    /// remote is closed here first, in the same event, so no frame shows
+    /// its view with the new remote's list: its agent view (and its
+    /// terminal), a typed or dictated message to one of its panes; its
+    /// confirmation card stays, answered through its link in the
+    /// background. Then the client switches, and the drawer stays open on
+    /// the new remote's list.
+    fn switch_remote(&mut self, id: RemoteId) {
+        let old = self.remotes.iter().find(|r| r.active).map(|r| r.id);
+        log::info!("remotes: switching to {}", self.remote_name(id));
+        if self.agent.is_some() {
+            self.close_agent();
+        }
+        if self.dictation.as_ref().is_some_and(|d| !d.general_agent) {
+            log::info!("prompt: a message to the old remote's pane, dropped");
+            self.keyboard.close();
+            self.dictation = None;
+            self.overview.invalidate();
+        }
+        if let Some(old) = old
+            && self.card_remote.is_none()
+            && self
+                .card
+                .as_ref()
+                .is_some_and(|c| matches!(c.state, CardState::Waiting))
+        {
+            let name = self.remote_name(old);
+            if let Some(card) = &mut self.card {
+                card.agent = format!("{name} \u{b7} {}", card.agent);
+                self.background.entry(old).or_default().confirm = Some(card.confirm_id);
+            }
+            self.card_remote = Some(old);
+        } else if self.card_remote == Some(id) {
+            // The new remote's own card: its answers are untagged now.
+            self.card_remote = None;
+        }
+        // The new remote's state comes in the switch's replay; until then
+        // nothing of the old one's shows.
+        self.agents.clear();
+        self.pending.clear();
+        self.active_cards.clear();
+        self.overview.set_agents(Vec::new(), &[]);
+        self.drawer
+            .content_mut()
+            .set_agents(Vec::new(), self.started.elapsed());
+        self.drawer.content_mut().set_pending(Vec::new());
+        self.drawer.content_mut().set_open_pane(None);
+        self.background.remove(&id);
+        // The cards show the new one in use, connecting until its replay.
+        for r in &mut self.remotes {
+            r.active = r.id == id;
+        }
+        self.online = self.remotes.iter().any(|r| r.id == id && r.online);
+        self.retry_in = None;
+        self.drawer.content_mut().set_retry(None);
+        self.drawer.content_mut().set_remotes(self.remotes.clone());
+        self.show_background();
+        self.send(Input::SwitchRemote(id));
+    }
+
     /// Opens the settings screen, from the overview's gear.
     fn open_settings(&mut self) {
         log::info!("settings: open");
+        self.drawer.close_now();
         self.follow_permission();
         // The user's themes.toml is read again: a theme added or changed
         // there shows in the rows, and in force if it is the one chosen.
@@ -1354,6 +1724,7 @@ impl App {
     /// Settings, with a pushed `pair.txt` read at once (decision 9).
     fn open_add(&mut self) {
         log::info!("remotes: pairing another");
+        self.drawer.close_now();
         self.pairing.open_add();
         self.field.clear();
         self.field_focused = false;
@@ -1591,14 +1962,9 @@ impl App {
                 }
                 self.send(Input::StartDictation);
             }
-            AgentHit::Approve(confirm_id) => self.send(Input::Answer {
-                confirm_id,
-                approve: true,
-            }),
-            AgentHit::Deny(confirm_id) => self.send(Input::Answer {
-                confirm_id,
-                approve: false,
-            }),
+            AgentHit::Menu => self.open_drawer(),
+            AgentHit::Approve(confirm_id) => self.answer(confirm_id, true),
+            AgentHit::Deny(confirm_id) => self.answer(confirm_id, false),
             AgentHit::Expand => {
                 if let Some(agent) = &mut self.agent {
                     agent.toggle_expand();
@@ -1977,6 +2343,24 @@ impl App {
     /// pairing screen, only a touch's end counts.
     fn touch(&mut self, touch: Touch) {
         let now = self.started.elapsed();
+        // While the drawer shows, its touches are its own (3.9 item 38): a
+        // tap on the scrim closes it; the screens under it get none.
+        if self.drawer.is_shown() {
+            let touched = self
+                .drawer
+                .touch(touch.id, touch.phase, touch.x, touch.y, now);
+            #[cfg(test)]
+            probe::record(format!("drawer {:?} {:?}", touch.phase, touched));
+            match touched {
+                DrawerTouch::Nothing => {}
+                DrawerTouch::Close => {
+                    log::info!("drawer: closed by the scrim");
+                    self.drawer.close();
+                }
+                DrawerTouch::Hit(hit) => self.drawer_hit(hit),
+            }
+            return;
+        }
         if let Some(hold) = self.center_hold.as_mut()
             && hold.id == touch.id
         {
@@ -2067,9 +2451,15 @@ impl App {
             }
         }
         if let Some(screen) = &mut self.settings_screen {
-            if let Some(hit) = screen.touch(touch.id, touch.phase, touch.x, touch.y, now) {
+            let hit = screen.touch(touch.id, touch.phase, touch.x, touch.y, now);
+            // The nickname's X emptied it: the keyboard starts on it again.
+            if screen.take_ime_restart() {
+                self.keyboard.restart();
+            }
+            if let Some(hit) = hit {
                 self.settings_hit(hit);
             }
+            self.settings_closed_for_drawer();
             return;
         }
         if let Some(agent) = &mut self.agent {
@@ -2087,6 +2477,7 @@ impl App {
                 Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
                 Some(OverviewHit::Tap) => self.send(Input::Tap),
                 Some(OverviewHit::Settings) => self.open_settings(),
+                Some(OverviewHit::Menu) => self.open_drawer(),
                 None => {}
             }
             return;
@@ -2198,6 +2589,12 @@ impl App {
     /// into the focused field (desktop): Enter pairs, Escape clears.
     fn key(&mut self, key: Key) -> KeyStatus {
         let back = matches!(key, Key::Back | Key::Escape);
+        // Back (Escape on the desktop) closes the drawer, and is taken.
+        if back && self.drawer.is_shown() {
+            log::info!("drawer: closed by Back");
+            self.drawer.close();
+            return KeyStatus::Handled;
+        }
         // Back on a finished pairing is Done.
         if back && self.pairing.finished.is_some() {
             self.finish_pairing();
@@ -2326,6 +2723,32 @@ impl App {
 
     /// A tap on another session's card opens it; a swipe dismisses it.
     fn session_hit(&mut self, hit: Option<SessionHit>) {
+        // A background remote's card: its remote comes into use, then its
+        // session opens; a swipe dismisses it on that remote.
+        let background = match &hit {
+            Some(SessionHit::Open(key) | SessionHit::Dismiss(key)) => {
+                self.background_panes.get(key).cloned()
+            }
+            None => None,
+        };
+        if let Some((remote, pane)) = background {
+            match hit {
+                Some(SessionHit::Open(_)) => {
+                    log::info!("cards: opening a background remote's session");
+                    self.close_settings();
+                    self.switch_remote(remote);
+                    self.open_agent(pane);
+                }
+                _ => {
+                    log::info!("cards: dismissed, on a background remote");
+                    self.send(Input::ToRemote {
+                        remote,
+                        input: Box::new(Input::DismissCard(pane)),
+                    });
+                }
+            }
+            return;
+        }
         match hit {
             Some(SessionHit::Open(pane_id)) => {
                 log::info!("cards: opening another session");
@@ -2395,6 +2818,8 @@ impl App {
             top: safe.top,
             bottom: safe.bottom + ctx.keyboard_inset(),
         };
+        self.drawer
+            .set_frame(layout.w, layout.h, safe.top, safe.bottom, layout.scale);
         let ga_listening = self.dictation.as_ref().is_some_and(|d| {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
         });
@@ -2413,6 +2838,9 @@ impl App {
 
         if let Some(screen) = &mut self.settings_screen {
             screen.set_layout(layout);
+            if let Some(id) = self.pending_details.take() {
+                screen.show_details(id);
+            }
         }
         // Without the microphone, nothing listens: the sound line says so.
         let sound = if self.settings.microphone {
@@ -2598,6 +3026,9 @@ impl MorphApp for App {
     /// The app left the screen: the link sleeps (one socket, no polling).
     fn on_suspend(&mut self, _ctx: &mut MorphContext) {
         self.send(Input::Background(true));
+        // The drawer's textures go with the surface; made again on the
+        // next frame it shows (3.10 item 45).
+        self.layers = None;
         self.visible = false;
         self.notifier.visible(false);
     }
@@ -2883,6 +3314,17 @@ impl MorphApp for App {
             terminal_panes: TerminalSessions::default(),
             term_ime: None,
             term_keyboard_at: None,
+            drawer: AppDrawer::new(),
+            layers: None,
+            details_from_drawer: false,
+            pending_details: None,
+            background: HashMap::new(),
+            card_remote: None,
+            active_cards: Vec::new(),
+            background_panes: HashMap::new(),
+            retry_in: None,
+            #[cfg(test)]
+            updates: 0,
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
@@ -3000,10 +3442,13 @@ impl MorphApp for App {
         }
         self.next_frame = self.next_frame.max(now) + Duration::from_secs(1) / FPS;
 
-        let events: Vec<Event> = match &self.companion {
+        #[allow(unused_mut)]
+        let mut events: Vec<Event> = match &self.companion {
             Some(companion) => companion.poll().collect(),
             None => Vec::new(),
         };
+        #[cfg(test)]
+        events.extend(probe::injected(self.updates));
         for event in events {
             self.on_event(event);
         }
@@ -3047,6 +3492,28 @@ impl MorphApp for App {
             viewfinder.update(ctx, scan);
         }
         self.lay_out(ctx);
+        // The drawer: never over the pairing window or Settings; moved on,
+        // a card held 2 s opening its details; the client told when it
+        // shows or hides (3.12 item 48).
+        if self.drawer.is_shown() && (self.pairing() || self.settings_screen.is_some()) {
+            self.drawer.close_now();
+        }
+        if let Some(hit) = self.drawer.tick(dt, elapsed) {
+            self.drawer_hit(hit);
+        }
+        if let Some(layers) = &mut self.layers {
+            layers.advance(dt.as_secs_f32(), self.drawer.layout().drawer());
+        }
+        if let Some(on) = self.drawer.take_shown_change() {
+            log::info!("drawer: {}", if on { "shown" } else { "hidden" });
+            self.send(Input::DrawerShown(on));
+        }
+        self.settings_closed_for_drawer();
+        #[cfg(test)]
+        {
+            self.updates += 1;
+            probe::drawer(self);
+        }
         self.sync_terminal();
         // The view's flow came near its top: page in earlier sections
         // (plan 20261023_03, A7).
@@ -3171,6 +3638,9 @@ impl MorphApp for App {
         // indicator and the insertion cursor, in the theme.
         draw.theme.accent_color = theme().accent;
         draw.theme.scroll.indicator_color = theme().scrollbar;
+        // The drawer's defaults, in the app's pixels, its sheet opaque in
+        // the theme's background (plan 20261028_03, 3.9 item 37).
+        draw.theme.drawer = drawer::drawer_theme(ctx.scale_factor());
         let term = Terminal {
             shaper: &self.terminal,
             text: font(self.mono),
@@ -3225,6 +3695,82 @@ impl MorphApp for App {
         }
         let (w, h) = frame.size;
         let s = ctx.scale_factor();
+        // The drawer's layers (3.9 item 39): while it is closed, nothing
+        // but today's drawing straight to the surface, and its layers are
+        // not even made until it first shows. Otherwise the screen is
+        // drawn into the main layer when it changed, the sheet into its
+        // own when it did, and one composite pass makes the frame.
+        if drew {
+            self.drawer.mark_main();
+        }
+        let plan = if self.drawer.is_visible() || self.layers.is_some() {
+            let layers = self
+                .layers
+                .get_or_insert_with(|| DrawerLayers::new(ctx.device(), ctx.surface_format()));
+            Some(layers.prepare(ctx.device(), self.drawer.layout().drawer(), (w, h), 1.0))
+        } else {
+            None
+        };
+        let layered = plan.filter(|p| !p.direct);
+        #[cfg(test)]
+        probe::layers(
+            shown,
+            layered.is_none(),
+            self.layers.as_ref().is_some_and(DrawerLayers::has_textures),
+        );
+        let layers = if layered.is_some() {
+            self.layers.take()
+        } else {
+            None
+        };
+        if let (Some(p), Some(layers)) = (layered, &layers)
+            && p.draw_sheet
+        {
+            let mut sheet = DrawList::new();
+            self.drawer
+                .draw_sheet(&mut sheet, &draw, Some(&term), self.started.elapsed());
+            layers.render_sheet(
+                ctx.device(),
+                ctx.queue(),
+                &self.sdf,
+                &sheet,
+                Some(&self.fonts),
+            );
+        }
+        let target = match (&layers, layered) {
+            (Some(l), Some(p)) => l.main_view().filter(|_| p.draw_main),
+            _ => Some(frame.view),
+        };
+        if let Some(target) = target {
+            self.render_screen(ctx, target, w, h, s, shown);
+        }
+        if let Some(l) = layers {
+            l.composite(
+                ctx.device(),
+                ctx.queue(),
+                frame.view,
+                self.drawer.layout().drawer(),
+                1.0,
+            );
+            self.layers = Some(l);
+        }
+    }
+}
+
+impl App {
+    /// The shown screen's list (and the overview's panels, the pairing
+    /// window's camera) into `target`: the surface, or the drawer's main
+    /// layer.
+    fn render_screen(
+        &mut self,
+        ctx: &mut MorphContext,
+        target: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+        s: f32,
+        shown: Shown,
+    ) {
+        let frame = RenderTarget { view: target };
         if shown == Shown::Overview && self.panel_shader.is_some() {
             let panels = self.overview.panel_instances();
             if let Some(shader) = &mut self.panel_shader {
@@ -3376,6 +3922,129 @@ pub(crate) mod probe {
         pub state: String,
         /// The app's data directory and the client's, as the app started.
         pub data_dirs: Option<(Option<std::path::PathBuf>, Option<std::path::PathBuf>)>,
+        /// Each frame rendered: the screen shown, whether it was drawn
+        /// straight to the surface (the drawer's `LayerPlan::direct`), and
+        /// whether the drawer's textures existed.
+        pub frames: Vec<(super::Shown, bool, bool)>,
+        /// The inputs the app sent the client, in order, as `{:?}`.
+        pub inputs: Vec<String>,
+        /// The drawer as last updated: shown, its cards' and rows' places
+        /// when open, the rows' panes, the ≡ of the screen shown, and the
+        /// pane of the agent view open.
+        pub drawer: DrawerProbe,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct DrawerProbe {
+        pub shown: bool,
+        pub cards: Vec<Rect>,
+        pub rows: Vec<Rect>,
+        pub panes: Vec<String>,
+        pub menu: Option<Rect>,
+        pub agent_pane: Option<String>,
+        pub settings: bool,
+        pub adding: bool,
+        /// Settings shows a modal (a remote's details).
+        pub details: bool,
+        /// A message to a session is being typed or dictated.
+        pub message: bool,
+        /// The overview's agents, by pane.
+        pub agents: Vec<String>,
+        /// The background remotes with a dot on their card.
+        pub waiting: Vec<flankr_companion::RemoteId>,
+        /// The confirmation card's agent line, whose it is, and its
+        /// Approve on the overview.
+        pub card: Option<(String, Option<flankr_companion::RemoteId>)>,
+        pub approve: Option<Rect>,
+        /// The other-session cards' agents, newest first.
+        pub session_cards: Vec<String>,
+    }
+
+    /// When an injected event is given.
+    #[derive(Clone, Debug)]
+    pub enum When {
+        /// On the app's update of this number.
+        Update(u32),
+        /// On the update after the app sent an input whose `{:?}` starts
+        /// so.
+        After(&'static str),
+    }
+
+    thread_local! {
+        static INJECT: RefCell<Vec<(When, flankr_companion::Event)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// `event` is given to the app as the client's on its update `at`
+    /// (scripted tests, without a daemon).
+    pub fn inject(at: u32, event: flankr_companion::Event) {
+        INJECT.with(|i| i.borrow_mut().push((When::Update(at), event)));
+    }
+
+    /// `event` is given to the app as the client's once it has sent an
+    /// input starting with `input`.
+    pub fn inject_after(input: &'static str, event: flankr_companion::Event) {
+        INJECT.with(|i| i.borrow_mut().push((When::After(input), event)));
+    }
+
+    /// The events due by update `now`.
+    pub fn injected(now: u32) -> Vec<flankr_companion::Event> {
+        let sent = PROBE.with(|p| p.borrow().inputs.clone());
+        INJECT.with(|i| {
+            let mut i = i.borrow_mut();
+            let (due, later): (Vec<_>, Vec<_>) = i.drain(..).partition(|(when, _)| match when {
+                When::Update(at) => *at <= now,
+                When::After(input) => sent.iter().any(|s| s.starts_with(input)),
+            });
+            *i = later;
+            due.into_iter().map(|(_, e)| e).collect()
+        })
+    }
+
+    pub fn layers(shown: super::Shown, direct: bool, textures: bool) {
+        PROBE.with(|p| p.borrow_mut().frames.push((shown, direct, textures)));
+    }
+
+    pub fn input(input: &flankr_companion::Input) {
+        PROBE.with(|p| p.borrow_mut().inputs.push(format!("{input:?}")));
+    }
+
+    pub fn drawer(app: &super::App) {
+        let d = &app.drawer;
+        let n = d.content().slots().len();
+        let rows = d.content().row_panes().len();
+        let menu = match &app.agent {
+            Some(agent) => agent.rect_of(crate::agent::AgentHit::Menu),
+            None => Some(app.overview.menu().rect),
+        };
+        let probe = DrawerProbe {
+            shown: d.is_shown(),
+            cards: (0..n).filter_map(|i| d.card_on_screen(i)).collect(),
+            rows: (0..rows).filter_map(|i| d.row_on_screen(i)).collect(),
+            panes: d.content().row_panes(),
+            menu,
+            agent_pane: app.agent_pane.clone(),
+            settings: app.settings_screen.is_some(),
+            adding: app.pairing.adding,
+            details: app.settings_screen.as_ref().is_some_and(|s| s.asking()),
+            message: app.dictation.as_ref().is_some_and(|d| !d.general_agent),
+            agents: app.agents.iter().map(|a| a.pane_id.clone()).collect(),
+            waiting: d.content().waiting().iter().copied().collect(),
+            card: app
+                .card
+                .as_ref()
+                .map(|c| (c.agent.clone(), app.card_remote)),
+            approve: app.card.as_ref().and_then(|c| {
+                app.overview
+                    .rect_of(crate::agent::AgentHit::Approve(c.confirm_id))
+            }),
+            session_cards: app
+                .session_cards
+                .cards()
+                .iter()
+                .map(|c| c.agent.clone())
+                .collect(),
+        };
+        PROBE.with(|p| p.borrow_mut().drawer = probe);
     }
 
     impl Probe {

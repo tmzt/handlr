@@ -58,9 +58,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use libcontrols::{
-    ControlAction, ControlPart, DismissReason, DrawContext, EventResponse, Label, ModalDialog,
-    ModalEvent, ModalStack, ModalState, ModalTransition, MouseButton, MouseEvent, NodeFlags,
-    NodeId, Rect, Router, ScrollAxis, ScrollPane, ScrollState, TextAlign,
+    ControlAction, ControlPart, DismissReason, DrawContext, EditableLabelEvent, EventResponse,
+    Label, ModalDialog, ModalEvent, ModalStack, ModalState, ModalTransition, MouseButton,
+    MouseEvent, NodeFlags, NodeId, Rect, Router, ScrollAxis, ScrollPane, ScrollState, TextAlign,
 };
 use libmorph::{Key, TouchPhase};
 use libmsdf::drawlist::DrawList;
@@ -502,6 +502,9 @@ pub struct SettingsScreen {
     touch: Option<(u64, [f32; 2])>,
     /// It came down on the header's "‹".
     on_back: bool,
+    /// The nickname's X emptied its draft: the soft keyboard is started
+    /// again with it ([`SettingsScreen::take_ime_restart`]).
+    ime_restart: bool,
     dirty: bool,
 }
 
@@ -545,6 +548,7 @@ impl SettingsScreen {
             layout: Layout::default(),
             touch: None,
             on_back: false,
+            ime_restart: false,
             dirty: true,
         }
     }
@@ -745,10 +749,17 @@ impl SettingsScreen {
             .take(flankr_companion::NICKNAME_MAX)
             .collect();
         if text != d.draft {
+            d.label.set_draft(text.as_str());
             d.draft = text;
             let id = *id;
             self.open(Asking::Details(id));
         }
+    }
+
+    /// The nickname's X emptied the draft since the last call: the soft
+    /// keyboard is to start again on the empty text.
+    pub fn take_ime_restart(&mut self) -> bool {
+        std::mem::take(&mut self.ime_restart)
     }
 
     /// A physical key while the nickname is typed: it edits it, Enter
@@ -774,15 +785,57 @@ impl SettingsScreen {
     }
 
     /// Typing the nickname ended (Enter, the keyboard's Done): the field
-    /// stops, and a changed nickname is to be saved.
+    /// stops, as its check does, and a changed nickname is to be saved.
     pub fn nickname_done(&mut self) -> Option<SettingsHit> {
         let (id, d) = self.details.as_mut()?;
         let was = std::mem::replace(&mut d.editing, false);
+        let confirmed = d.label.confirm().is_some();
+        let _ = d.label.take_events();
         let id = *id;
-        if was {
+        if was || confirmed {
             self.open(Asking::Details(id));
         }
         self.commit_nickname()
+    }
+
+    /// What the nickname's `EditableLabel` did with a tap (its pencil,
+    /// text, check or X), from its state's events: editing starts the soft
+    /// keyboard, the X empties the draft (the default), the check keeps
+    /// it. A tap on the field while the keyboard was put away shows it
+    /// again.
+    fn nickname_tapped(&mut self) -> Option<SettingsHit> {
+        let (id, d) = self.details.as_mut()?;
+        let id = *id;
+        let mut confirmed = false;
+        for event in d.label.take_events() {
+            match event {
+                EditableLabelEvent::Started => {
+                    d.editing = true;
+                    d.draft = d.label.draft().unwrap_or_default();
+                }
+                EditableLabelEvent::Cleared => {
+                    d.draft.clear();
+                    d.editing = true;
+                    self.ime_restart = true;
+                }
+                EditableLabelEvent::Confirmed(text) => {
+                    d.draft = text;
+                    d.editing = false;
+                    confirmed = true;
+                }
+                EditableLabelEvent::Cancelled => d.editing = false,
+                _ => {}
+            }
+        }
+        if d.label.is_editing() && !d.editing && !confirmed {
+            d.editing = true;
+        }
+        self.open(Asking::Details(id));
+        if confirmed {
+            self.commit_nickname()
+        } else {
+            None
+        }
     }
 
     /// The soft keyboard was put away: the field stops; the text stays,
@@ -1634,15 +1687,18 @@ impl SettingsScreen {
         self.open(what);
     }
 
+    /// Opens `id`'s details over the screen, as a tap on its row does: from
+    /// a 2 s press on its card in the drawer (plan 20261028_03, step 8).
+    pub fn show_details(&mut self, id: RemoteId) {
+        self.open_details(id);
+    }
+
     /// Opens `id`'s details, the nickname field showing its nickname.
     fn open_details(&mut self, id: RemoteId) {
         let Some(info) = self.remotes.iter().find(|r| r.id == id) else {
             return;
         };
-        let state = DetailsState {
-            draft: info.nickname.clone().unwrap_or_default(),
-            ..DetailsState::default()
-        };
+        let state = DetailsState::new(info.nickname.as_deref().unwrap_or_default());
         self.details = Some((id, state));
         self.nickname_sent = None;
         self.open(Asking::Details(id));
@@ -1818,13 +1874,11 @@ impl SettingsScreen {
         let (what, ..) = self.asking?;
         match (what, target) {
             (Asking::Details(id), Target::Field) => {
-                if let Some((_, d)) = self.details.as_mut().filter(|(d, _)| *d == id)
-                    && !d.editing
-                {
-                    d.editing = true;
-                    self.open(what);
+                if self.details.as_ref().is_some_and(|(d, _)| *d == id) {
+                    self.nickname_tapped()
+                } else {
+                    None
                 }
-                None
             }
             (Asking::Details(id), Target::Fingerprint) => {
                 if let Some((_, d)) = self.details.as_mut().filter(|(d, _)| *d == id) {
@@ -2659,15 +2713,32 @@ mod tests {
             .unwrap_or_default()
         }
 
-        /// The open details' nickname field.
-        fn field(&self) -> Option<super::super::remote_details::NicknameField> {
+        /// The open details' nickname: its `EditableLabel`'s text (the
+        /// draft while edited), placeholder, and whether it is edited.
+        fn field(&self) -> Option<Field> {
             self.dialog(|c| {
                 c.children(None)
-                    .find_map(|id| c.get::<super::super::remote_details::NicknameField>(id))
-                    .cloned()
+                    .find_map(|id| c.get::<libcontrols::EditableLabel>(id))
+                    .map(|l| Field {
+                        text: l.state.draft().unwrap_or_else(|| l.text()),
+                        placeholder: l.options.placeholder.clone().unwrap_or_default(),
+                        editing: l.is_editing(),
+                        clear: l.clear_shown(),
+                        rect: l.rect,
+                    })
             })
             .flatten()
         }
+    }
+
+    /// What the details' nickname shows.
+    #[derive(Debug)]
+    struct Field {
+        text: String,
+        placeholder: String,
+        editing: bool,
+        clear: bool,
+        rect: Rect,
     }
 
     #[test]
@@ -3092,6 +3163,62 @@ mod tests {
         s.set_nickname_text("   ");
         assert_eq!(
             s.nickname_done(),
+            Some(SettingsHit::SetNickname {
+                id: RemoteId([2; 8]),
+                nickname: None
+            })
+        );
+    }
+
+    #[test]
+    fn the_nicknames_x_clears_it_to_the_default_and_its_check_keeps_it() {
+        let mut named = remote(2, false, false);
+        named.nickname = Some("Office".into());
+        named.display_name = "Office".into();
+        let mut s = with_remotes(vec![remote(1, true, true), named]);
+        let [x, y] = s.row_point(1);
+        tap(&mut s, x, y);
+        let f = s.field().unwrap();
+        assert_eq!(
+            (f.text.as_str(), f.editing, f.clear),
+            ("Office", false, false)
+        );
+        // The pencil: edited, the X shown.
+        let sc = s.scale();
+        let r = f.rect;
+        let cy = r.y + r.h * 0.5;
+        let pencil = r.x + r.w - 22.0 * sc;
+        assert_eq!(tap(&mut s, pencil, cy), None);
+        assert_eq!(s.nickname_editing(), Some("Office"));
+        let f = s.field().unwrap();
+        assert!(f.editing && f.clear);
+        assert!(!s.take_ime_restart());
+        // The X: the draft is empty, the default shows, and the keyboard
+        // starts again on it.
+        let clear = r.x + r.w - 66.0 * sc;
+        assert_eq!(tap(&mut s, clear, cy), None);
+        assert_eq!(s.nickname_editing(), Some(""));
+        let f = s.field().unwrap();
+        assert_eq!(f.text, "");
+        assert_eq!(f.placeholder, "m2 (default)");
+        assert!(s.take_ime_restart());
+        // Typed again, then the check: kept and saved.
+        s.set_nickname_text("Lab");
+        assert!(s.field().unwrap().clear);
+        assert_eq!(
+            tap(&mut s, pencil, cy),
+            Some(SettingsHit::SetNickname {
+                id: RemoteId([2; 8]),
+                nickname: Some("Lab".into())
+            })
+        );
+        assert_eq!(s.nickname_editing(), None, "the keyboard put away");
+        assert!(!s.field().unwrap().editing);
+        // Edited, cleared and checked: the default.
+        tap(&mut s, pencil, cy);
+        tap(&mut s, clear, cy);
+        assert_eq!(
+            tap(&mut s, pencil, cy),
             Some(SettingsHit::SetNickname {
                 id: RemoteId([2; 8]),
                 nickname: None

@@ -1070,7 +1070,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1632,10 +1632,12 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libcontrols"
-version = "0.9.1"
-source = "git+https://github.com/tmzt/libcontrols?rev=52e6c074637c9bb38b28d807535463c6d0ef4cc4#52e6c074637c9bb38b28d807535463c6d0ef4cc4"
+version = "0.10.2"
+source = "git+https://github.com/tmzt/libcontrols?rev=e3140dbd7a36bba36157b1a78b5bf346510ab376#e3140dbd7a36bba36157b1a78b5bf346510ab376"
 dependencies = [
+ "bytemuck",
  "libmsdf",
+ "wgpu",
 ]
 
 [[package]]
@@ -3004,7 +3006,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -3416,7 +3418,7 @@ dependencies = [
  "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4222,7 +4224,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

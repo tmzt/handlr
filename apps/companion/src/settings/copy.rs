@@ -97,7 +97,11 @@ include!(concat!(env!("OUT_DIR"), "/copy.rs"));
 
 /// The copy files, as `build.rs` reads them, for the tests.
 #[cfg(test)]
-pub const FILES: [(&str, &str); 2] = [
+pub const FILES: [(&str, &str); 3] = [
+    (
+        "copy/DRAWER_COPY.md",
+        include_str!("../../copy/DRAWER_COPY.md"),
+    ),
     (
         "copy/PAIRING_COPY.md",
         include_str!("../../copy/PAIRING_COPY.md"),
@@ -187,6 +191,11 @@ mod tests {
         let code = copy_gen::generate_files(&files, &[]).expect("one module");
         assert!(code.contains("pub const PAIRING_DONE: CopyText"));
         assert!(code.contains("pub const REMOTES_EMPTY: CopyText"));
+        assert!(code.contains("pub const DRAWER_CONNECTING: CopyText"));
+        assert_eq!(
+            DRAWER_UNREACHABLE.fill(None, &[("nickname", "m4"), ("seconds", "8")]),
+            "Can't reach m4 · retrying in 8 s"
+        );
         // The generated consts are the files' text.
         assert_eq!(REMOTES_EMPTY.text, "No remotes paired");
         assert_eq!(PAIRING_FINGERPRINT.text, "Daemon fingerprint");
@@ -202,6 +211,9 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         found.sort();
-        assert_eq!(found, ["PAIRING_COPY.md", "SETTINGS_COPY.md"]);
+        assert_eq!(
+            found,
+            ["DRAWER_COPY.md", "PAIRING_COPY.md", "SETTINGS_COPY.md"]
+        );
     }
 }

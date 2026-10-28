@@ -128,7 +128,7 @@ impl CardLayout {
 }
 
 /// `agent` with its first letter in capitals: "claude" is "Claude".
-fn shown_agent(agent: &str) -> String {
+pub(crate) fn shown_agent(agent: &str) -> String {
     let mut chars = agent.chars();
     chars
         .next()

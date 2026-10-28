@@ -109,6 +109,15 @@ impl KeyboardRoute {
         self.reshow = true;
     }
 
+    /// The text typed was changed from outside the keyboard (a field's
+    /// clear): the soft keyboard is started again on it, unless it was put
+    /// away.
+    pub fn restart(&mut self) {
+        if !self.dismissed {
+            self.reshow = true;
+        }
+    }
+
     /// The soft keyboard was dismissed: the card and its text stay.
     pub fn dismiss(&mut self) {
         self.dismissed = true;

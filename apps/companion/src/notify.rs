@@ -33,10 +33,11 @@
 //!
 //! The templates are `notification_*` in `copy/SETTINGS_COPY.md`.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use flankr_companion::Event;
+use flankr_companion::{Event, RemoteId};
 use libflankr_proto::common::{AgentInfo, Turn};
 
 use crate::overview::agent_card::AgentCard;
@@ -174,6 +175,14 @@ pub struct Model {
     bytes: u64,
     /// A list of agents has come: the next is compared with it.
     listed: bool,
+    /// The remotes' shown names, and the one in use, from
+    /// `Event::Remotes` (plan 20261028_03, the 18:51 EDT amendment).
+    names: Vec<(RemoteId, String)>,
+    active: Option<RemoteId>,
+    /// What each remote in the background gave, as its own model: its
+    /// alerts are named with the remote. Switching trades the one in use
+    /// for its own, so a remote's questions are not alerted again.
+    background: HashMap<RemoteId, Model>,
 }
 
 impl Model {
@@ -239,9 +248,63 @@ impl Model {
                 }
             }
             Event::Unpaired { .. } => *self = Model::default(),
+            Event::Remotes(rows) => {
+                self.names = rows
+                    .iter()
+                    .map(|r| (r.id, r.display_name.clone()))
+                    .collect();
+                let active = rows.iter().find(|r| r.active).map(|r| r.id);
+                if self.active.is_none() {
+                    self.active = active;
+                } else if active != self.active {
+                    self.trade(active);
+                }
+                self.background
+                    .retain(|id, _| rows.iter().any(|r| r.id == *id));
+            }
+            Event::Background { remote, event } => {
+                let name = self
+                    .names
+                    .iter()
+                    .find(|(id, _)| id == remote)
+                    .map(|(_, n)| n.clone())
+                    .unwrap_or_else(|| "another remote".to_string());
+                let model = self.background.entry(*remote).or_default();
+                for mut alert in model.apply(event, bytes) {
+                    alert.title = format!("{name} \u{b7} {}", alert.title);
+                    alerts.push(alert);
+                }
+            }
             _ => {}
         }
         alerts
+    }
+
+    /// `active` comes into use: what the model held goes to the remote
+    /// that was in use, and `active`'s own comes out of the background.
+    fn trade(&mut self, active: Option<RemoteId>) {
+        let names = std::mem::take(&mut self.names);
+        let mut background = std::mem::take(&mut self.background);
+        let bytes = self.bytes;
+        let incoming = active
+            .and_then(|id| background.remove(&id))
+            .unwrap_or_default();
+        let outgoing = std::mem::replace(self, incoming);
+        if let Some(old) = self.active.take().or(outgoing.active) {
+            background.insert(
+                old,
+                Model {
+                    names: Vec::new(),
+                    active: None,
+                    background: HashMap::new(),
+                    ..outgoing
+                },
+            );
+        }
+        self.names = names;
+        self.background = background;
+        self.active = active;
+        self.bytes = bytes;
     }
 
     fn alert(&self, kind: AlertKind, agent: &AgentInfo, line: &str) -> Alert {
@@ -690,6 +753,66 @@ mod tests {
             .map(str::trim_start)
             .collect();
         assert_eq!(joined, SERVICE_REASON);
+    }
+
+    fn rows(active: u8) -> Vec<flankr_companion::RemoteInfo> {
+        [(1u8, "m4"), (2, "mini")]
+            .into_iter()
+            .map(|(n, name)| flankr_companion::RemoteInfo {
+                id: RemoteId([n; 8]),
+                name: name.into(),
+                host: format!("{name}:7347"),
+                fingerprint: String::new(),
+                paired_at: None,
+                active: n == active,
+                online: true,
+                fingerprint_hex: String::new(),
+                fingerprint_words: String::new(),
+                nickname: None,
+                display_name: name.into(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_background_remotes_alerts_are_named_with_it_and_not_given_again_on_a_switch() {
+        let mut m = Model::default();
+        m.apply(&Event::Remotes(rows(1)), 0);
+        let bg = |e: Event| Event::Background {
+            remote: RemoteId([2; 8]),
+            event: Box::new(e),
+        };
+        m.apply(
+            &bg(Event::Agents(vec![named("p1", "Claude", working("…"))])),
+            0,
+        );
+        let alerts = m.apply(
+            &bg(Event::Agents(vec![named("p1", "Claude", asking("Push?"))])),
+            0,
+        );
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].kind, AlertKind::Question);
+        assert_eq!(alerts[0].title, "mini \u{b7} Claude");
+        // The remote in use's own come untagged, unnamed.
+        m.apply(&Event::Agents(vec![named("p9", "Codex", working("…"))]), 0);
+        let alerts = m.apply(&Event::Agents(vec![named("p9", "Codex", asking("Ok?"))]), 0);
+        assert_eq!(alerts[0].title, "Codex");
+        // mini comes into use: its replayed list, the same question, is
+        // no new alert; m4's goes on in the background, named.
+        m.apply(&Event::Remotes(rows(2)), 0);
+        let alerts = m.apply(
+            &Event::Agents(vec![named("p1", "Claude", asking("Push?"))]),
+            0,
+        );
+        assert!(alerts.is_empty(), "{alerts:?}");
+        let alerts = m.apply(
+            &Event::Background {
+                remote: RemoteId([1; 8]),
+                event: Box::new(Event::Agents(vec![named("p9", "Codex", asking("Now?"))])),
+            },
+            0,
+        );
+        assert_eq!(alerts[0].title, "m4 \u{b7} Codex");
     }
 
     #[test]

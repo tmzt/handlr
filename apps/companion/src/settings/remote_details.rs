@@ -1,15 +1,21 @@
 //! A remote's details modal (plan 20261024_02, the 2026-10-28 17:46, 17:56
 //! and 17:57 EDT amendments): a tap on a Remotes row, anywhere but its X,
-//! opens it. In the settings style, as the confirm modals: libcontrols'
-//! `ModalDialog`, centred on an opaque card, opened and closed at once.
+//! opens it, and so does a 2 s press on the remote's card in the drawer
+//! (plan 20261028_03, step 8). In the settings style, as the confirm
+//! modals: libcontrols' `ModalDialog`, centred on an opaque card, opened
+//! and closed at once.
 //!
 //! From the top:
 //!
 //! - the remote's shown name ([`RemoteInfo::display_name`]), bold, and its
 //!   status: *in use*, *in use · offline*, or *not in use*;
-//! - **Nickname**: a field ([`NicknameField`]) holding the nickname, or the
-//!   default name, dim, when it has none; a tap on it edits it (the app
-//!   shows the soft keyboard), and an empty nickname is the default;
+//! - **Nickname**: libcontrols' `EditableLabel` (plan 20261028_03, the
+//!   18:48 EDT amendment, item 10): the nickname, or the default name dim
+//!   when it has none, with a pencil; a tap on it or its pencil turns it
+//!   into a field with a check and an X. The X empties the draft, which is
+//!   the default; the check keeps it. libcontrols has no IME hook, so the
+//!   app shows the soft keyboard while it is edited and gives it the
+//!   keyboard's text ([`EditableLabelState::set_draft`]);
 //! - **Hostname**: the daemon's name and its first `host:port`, the address
 //!   in the mono face;
 //! - when it was paired (date and time, in the phone's time zone), or
@@ -19,22 +25,24 @@
 //!   of four, in the mono face;
 //! - **Close**, and **Remove** in red, which opens the X's confirm modal.
 //!
-//! The field and the Fingerprint row are not close controls: the screen
+//! The nickname and the Fingerprint row are not close controls: the screen
 //! finds a tap on them by their rects ([`DetailsModal::field`],
-//! [`DetailsModal::fingerprint`]) and builds the modal again.
+//! [`DetailsModal::fingerprint`]), reads what the label did from its
+//! state's events, and builds the modal again.
 
 use std::sync::Arc;
 
 use flankr_companion::RemoteInfo;
 use libcontrols::{
-    Button, ControlAction, ControlPart, DrawContext, DrawControl, EventContext, HostedControl,
-    KeyboardEvent, ModalDialog, MouseButton, MouseEvent, NodeId, PanelFrame, Rect,
+    Button, ControlAction, ControlPart, DrawContext, DrawControl, EditableLabel,
+    EditableLabelOptions, EditableLabelState, EventContext, HostedControl, KeyboardEvent,
+    ModalDialog, MouseButton, MouseEvent, NodeId, PanelFrame, Rect,
 };
 use libmsdf::drawlist::DrawList;
 
 use super::copy;
 use super::remote_row::paired_date_time;
-use crate::agent::{PAD, fill, line_h};
+use crate::agent::{PAD, line_h};
 use crate::markdown_view::{Faces, MarkdownView};
 use crate::remotes::md_escape;
 use crate::theme::theme;
@@ -50,18 +58,44 @@ const FIELD_PT: f32 = 17.0;
 const FIELD_H: f32 = 44.0;
 const BUTTON_H: f32 = 48.0;
 const GAP: f32 = 12.0;
+/// The nickname's pencil, check and X: each a 44 pt target, the glyph 16
+/// pt.
+const ICON_W: f32 = 44.0;
+const ICON_PT: f32 = 16.0;
 /// The hex fingerprint's groups of four on one line.
 const HEX_GROUPS_PER_LINE: usize = 4;
 
 /// What the modal shows of a remote, besides its row.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct DetailsState {
     /// The nickname as typed so far (the stored one when opened).
     pub draft: String,
-    /// The field is being typed into.
+    /// The soft keyboard types into the nickname.
     pub editing: bool,
     /// The Fingerprint section is expanded.
     pub fingerprint_open: bool,
+    /// The nickname's `EditableLabel` state, kept across the modal's
+    /// rebuilds: its committed text is the stored nickname, its draft
+    /// [`DetailsState::draft`] while it is edited.
+    pub label: Arc<EditableLabelState>,
+}
+
+impl DetailsState {
+    /// The details of a remote whose nickname is `nickname` (`""`: none).
+    pub fn new(nickname: &str) -> Self {
+        DetailsState {
+            draft: nickname.to_string(),
+            editing: false,
+            fingerprint_open: false,
+            label: Arc::new(EditableLabelState::new(nickname)),
+        }
+    }
+}
+
+impl Default for DetailsState {
+    fn default() -> Self {
+        DetailsState::new("")
+    }
 }
 
 /// The status words: *in use*, *in use · offline*, or *not in use*.
@@ -115,49 +149,35 @@ pub fn fingerprint_markdown(info: &RemoteInfo) -> String {
     out.join("\n\n")
 }
 
-/// The nickname field: a filled box with the draft, or the default name
-/// dim, and a caret while it is being typed into.
-#[derive(Clone, Debug, PartialEq)]
-pub struct NicknameField {
-    pub rect: Rect,
-    pub text: String,
-    pub placeholder: String,
-    pub editing: bool,
-    pub scale: f32,
-}
-
-impl DrawControl for NicknameField {
-    fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
-        let s = self.scale;
-        fill(list, self.rect, theme().input, 8.0 * s);
-        if self.editing {
-            // An accent line under it while it is typed into.
-            let y = self.rect.y + self.rect.h - 1.0 * s;
-            list.push_line(
-                [self.rect.x + 4.0 * s, y],
-                [self.rect.x + self.rect.w - 4.0 * s, y],
-                2.0 * s,
-                theme().accent,
-            );
-        }
-        let px = FIELD_PT * s;
-        let x = self.rect.x + 12.0 * s;
-        let y = self.rect.y + (self.rect.h - line_h(px)) * 0.5;
-        let (text, color) = if self.text.is_empty() {
-            (self.placeholder.as_str(), theme().placeholder)
-        } else {
-            (self.text.as_str(), theme().text)
-        };
-        ctx.draw_text(list, text, [x, y], px, color);
-        if self.editing {
-            let cx = if self.text.is_empty() {
-                x
-            } else {
-                x + ctx.text_advance(&self.text, px) + 1.0 * s
-            };
-            list.push_line([cx, y], [cx, y + line_h(px)], 1.5 * s, theme().accent);
-        }
-    }
+/// The nickname's `EditableLabel` in `rect`, over `state`, at scale `s`:
+/// the pencil, check and X as 44 pt targets, the X shown while the draft
+/// is not empty, a tap on the text editing it too, in the theme's
+/// colours.
+pub fn nickname_label(
+    rect: Rect,
+    state: &DetailsState,
+    placeholder: &str,
+    s: f32,
+) -> EditableLabel {
+    let options = EditableLabelOptions::new()
+        .button_width(ICON_W * s)
+        .icon_size(ICON_PT * s)
+        .icon_thickness(1.8 * s)
+        .gap(4.0 * s)
+        .pencil_color(theme().dim)
+        .confirm_color(theme().accent)
+        .clear_color(theme().dim)
+        .placeholder_color(theme().placeholder)
+        .field_bg(theme().input)
+        .field_border(theme().band)
+        .font_size(FIELD_PT * s)
+        .text_color(theme().text)
+        .placeholder(placeholder)
+        .clear(true)
+        .label_edits(true);
+    EditableLabel::new("", rect)
+        .with_state(Arc::clone(&state.label))
+        .with_options(options)
 }
 
 /// The Fingerprint row: its label and a chevron, right when collapsed and
@@ -191,56 +211,45 @@ impl DrawControl for Disclosure {
     }
 }
 
-/// Both take a tap anywhere on them as their body; the screen acts on it.
-macro_rules! tappable {
-    ($t:ty) => {
-        impl HostedControl for $t {
-            fn bounds(&self) -> Rect {
-                self.rect
-            }
+/// It takes a tap anywhere on it as its body; the screen acts on it.
+impl HostedControl for Disclosure {
+    fn bounds(&self) -> Rect {
+        self.rect
+    }
 
-            fn hit_test(&self, pos: [f32; 2]) -> Option<(ControlPart, f32)> {
-                self.rect
-                    .contains(pos)
-                    .then(|| (ControlPart::Body, self.rect.normalized_x(pos[0])))
-            }
+    fn hit_test(&self, pos: [f32; 2]) -> Option<(ControlPart, f32)> {
+        self.rect
+            .contains(pos)
+            .then(|| (ControlPart::Body, self.rect.normalized_x(pos[0])))
+    }
 
-            fn handle_mouse(
-                &self,
-                event: &MouseEvent,
-                _ctx: &EventContext,
-            ) -> Option<ControlAction> {
-                match event {
-                    MouseEvent::Click {
-                        pos,
-                        button: MouseButton::Left,
-                    } if self.rect.contains(*pos) => Some(ControlAction::Activated {
-                        part: ControlPart::Body,
-                    }),
-                    _ => None,
-                }
-            }
-
-            fn handle_keyboard(
-                &self,
-                _event: &KeyboardEvent,
-                _ctx: &EventContext,
-            ) -> Option<ControlAction> {
-                None
-            }
+    fn handle_mouse(&self, event: &MouseEvent, _ctx: &EventContext) -> Option<ControlAction> {
+        match event {
+            MouseEvent::Click {
+                pos,
+                button: MouseButton::Left,
+            } if self.rect.contains(*pos) => Some(ControlAction::Activated {
+                part: ControlPart::Body,
+            }),
+            _ => None,
         }
-    };
-}
+    }
 
-tappable!(NicknameField);
-tappable!(Disclosure);
+    fn handle_keyboard(
+        &self,
+        _event: &KeyboardEvent,
+        _ctx: &EventContext,
+    ) -> Option<ControlAction> {
+        None
+    }
+}
 
 /// The modal, and where its controls are.
 pub struct DetailsModal {
     pub dialog: ModalDialog,
     pub close: NodeId,
     pub remove: NodeId,
-    /// The nickname field and the Fingerprint row, on the screen.
+    /// The nickname and the Fingerprint row, on the screen.
     pub field: Rect,
     pub fingerprint: Rect,
     /// The first Markdown view (the title), for links.
@@ -268,7 +277,7 @@ impl DetailsModal {
             theme().fg,
         );
         let state_line = view(status(info), TEXT_PT, theme().dim);
-        let nickname_label = view(copy::REMOTE_DETAILS_NICKNAME.text, LABEL_PT, theme().dim);
+        let nickname_label_md = view(copy::REMOTE_DETAILS_NICKNAME.text, LABEL_PT, theme().dim);
         let host_label = view(copy::REMOTE_DETAILS_HOSTNAME.text, LABEL_PT, theme().dim);
         let host = view(
             &copy::REMOTE_DETAILS_HOST.fill(
@@ -294,7 +303,7 @@ impl DetailsModal {
         let gap = GAP * s;
         let field_h = FIELD_H * s;
         let mut h = pad + title.height() + small + state_line.height();
-        h += gap + nickname_label.height() + small + field_h;
+        h += gap + nickname_label_md.height() + small + field_h;
         h += gap + host_label.height() + small + host.height();
         h += gap + paired.height();
         h += gap + field_h;
@@ -321,7 +330,7 @@ impl DetailsModal {
         };
         let text = place(title, &mut y, small);
         place(state_line, &mut y, gap);
-        place(nickname_label, &mut y, small);
+        place(nickname_label_md, &mut y, small);
         let field = Rect::new(x, y, inner_w, field_h);
         y += field_h + gap;
         place(host_label, &mut y, small);
@@ -332,19 +341,11 @@ impl DetailsModal {
         if let Some(p) = print {
             place(p, &mut y, 0.0);
         }
-        content.add(
-            None,
-            NicknameField {
-                rect: field,
-                text: state.draft.clone(),
-                placeholder: copy::REMOTE_DETAILS_DEFAULT
-                    .fill(None, &[("name", &default_name(info))])
-                    .trim()
-                    .to_string(),
-                editing: state.editing,
-                scale: s,
-            },
-        );
+        let placeholder = copy::REMOTE_DETAILS_DEFAULT
+            .fill(None, &[("name", &default_name(info))])
+            .trim()
+            .to_string();
+        content.add(None, nickname_label(field, state, &placeholder, s));
         content.add(
             None,
             Disclosure {
@@ -396,5 +397,27 @@ mod tests {
         assert_eq!(lines.len(), 4);
         assert_eq!(lines[0], "0123 4567 89ab cdef");
         assert!(lines.iter().all(|l| l.split(' ').count() == 4));
+    }
+
+    #[test]
+    fn the_nickname_is_an_editable_label_with_a_clear() {
+        let state = DetailsState::new("Office");
+        let label = nickname_label(
+            Rect::new(0.0, 0.0, 300.0, 88.0),
+            &state,
+            "m2 (default)",
+            2.0,
+        );
+        assert_eq!(label.text(), "Office");
+        assert!(!label.is_editing());
+        assert!(label.options.clear && label.options.label_edits);
+        // Edited, then cleared by the X: the placeholder, the default.
+        assert!(state.label.begin_edit());
+        assert!(label.clear_shown());
+        assert!(state.label.clear());
+        assert!(label.shows_placeholder());
+        assert_eq!(label.shown_text(), "m2 (default)");
+        assert!(!label.clear_shown(), "no X on an empty draft");
+        assert_eq!(state.label.confirm().as_deref(), Some(""));
     }
 }
