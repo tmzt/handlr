@@ -3086,3 +3086,24 @@ tag `flankr-companion-v0.5.0`, and the app's mechanical commit after it).
    18:48 EDT amendment's item 5); the app does not yet handle
    `Event::Background` or the switch's replay (a wildcard arm drops them
    until steps 6-8).
+
+## 2026-10-28 19:47 EDT — plan 20261028_03, steps 5-8: departures
+
+Plan: docs/design/20261028_03_SESSION_DRAWER_PLAN.md. The app commit after
+the keys commit (`52ae8ca`). Not yet tried on the S23.
+
+1. Copy keys `drawer_session_approval` and `drawer_session_idle_now`
+   (the plain names were taken in SETTINGS_COPY.md); `drawer_not_paired_here`,
+   `drawer_menu` and `drawer_add_remote` are defined but unused.
+2. A 2 s press on a card opens Settings with the remote's details over it,
+   and Settings closes when the details close.
+3. On a switch, a waiting confirmation card of the old remote is kept,
+   labelled with its name and answerable through `ToRemote` (the 18:51
+   EDT amendment), not dropped as section 3.7 item 28 has it.
+4. The drawer theme is scaled to the app's pixels; the sheet is opaque;
+   the layers are created on the first visible frame and dropped on
+   suspend.
+5. The spinner is drawn over the rows after the router renders (router
+   controls cannot hold the terminal face).
+6. Not done: the S23 checks; the 3 s refresh against a live daemon; a
+   background remote's spoken notices are not played aloud.
