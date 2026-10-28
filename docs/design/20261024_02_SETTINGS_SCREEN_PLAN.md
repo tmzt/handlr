@@ -337,3 +337,22 @@ text after them"; asked to queue the change, "yes".
    are in the row's details modal (the previous amendment).
 3. **Empty and full:** with no remotes the section shows one standard row,
    "No remotes paired"; with 8 remotes the + is dimmed and its ⓘ says why.
+
+## Amendment — 2026-10-28 17:56 EDT: a remote's nickname, set in its details; the fingerprint collapsible (living section)
+
+The owner (2026-10-28), about the drawer's small remote cards: "they will
+probably have a new 'nickname' which defaults to the base hostname and
+optional port, and should be settable in the remote details modal (the
+fingerprint should be an expandable)". This adds to the 17:46 EDT entry
+for the remote details modal:
+
+1. **Nickname.** Each remote has a nickname, stored on the phone per remote
+   (an additive `nickname: Option<String>` on the client's record and
+   `RemoteInfo`; `None` means the default). The default is the base
+   hostname (the host's first DNS label, e.g. `m4` for
+   `m4.tail1a2b3c.ts.net`; an IP address whole) plus `:port` when the port
+   is not 7347. The details modal has a field to set or clear it; the
+   Remotes row's first line and the drawer's remote cards show it.
+2. **The fingerprint in the details modal is collapsible:** a "Fingerprint"
+   section, collapsed by default, that expands to the six words and the
+   64-hex fingerprint.
