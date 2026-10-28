@@ -949,3 +949,13 @@ Implementation has started with steps 1 and 2 (libflankr_proto 0.5.1 and
 the daemon's activity fields). The status is `In implementation`, and the
 document is now immutable: it changes only on the owner's explicit
 instruction.
+
+## Amendment — 2026-10-28 19:12 EDT: a 2 s press on a remote card opens its details
+
+The owner (2026-10-28): "only pressing for 2s should open the details and
+allow removing remote from card view". This replaces the 18:48 EDT
+amendment's item 4 (a tap on the active remote's card opens its details):
+a **tap** on a remote card switches to it, and a tap on the active card
+does nothing; only a **2 s press** on any card opens that remote's details
+modal, from which it can be removed (the same confirm flow). The press
+shows feedback while held, and a press that becomes a hold never switches.
