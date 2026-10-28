@@ -256,14 +256,19 @@ impl Remotes {
     /// The name each listed remote shows, in list order (plan 20261024_02,
     /// the 17:56 and 17:57 EDT amendments): its nickname if it has one;
     /// otherwise its base hostname, with `:port` added only when two or
-    /// more listed remotes would otherwise show the same.
+    /// more listed remotes would otherwise show the same; and when two
+    /// defaults are still the same with it (the same host and port: two
+    /// daemons reached through different tailnets), each adds a space and
+    /// the first group of its fingerprint, `m4:7347 3f9a` (plan 20261028_03,
+    /// the 18:48 EDT amendment, item 5).
     pub fn display_names(&self) -> Vec<String> {
         let plain: Vec<String> = self
             .list
             .iter()
             .map(|r| r.nickname.clone().unwrap_or_else(|| r.default_name()))
             .collect();
-        self.list
+        let ported: Vec<String> = self
+            .list
             .iter()
             .zip(&plain)
             .map(|(r, name)| {
@@ -271,6 +276,25 @@ impl Remotes {
                 match (&r.nickname, clash, split_port(r.host()).1) {
                     (None, true, Some(port)) => format!("{name}:{port}"),
                     _ => name.clone(),
+                }
+            })
+            .collect();
+        self.list
+            .iter()
+            .zip(&ported)
+            .map(|(r, name)| {
+                let same = self
+                    .list
+                    .iter()
+                    .zip(&ported)
+                    .filter(|(o, n)| o.nickname.is_none() && *n == name)
+                    .count();
+                if r.nickname.is_none() && same > 1 {
+                    let print = r.id.fingerprint();
+                    let group = print.split(' ').next().unwrap_or_default();
+                    format!("{name} {group}")
+                } else {
+                    name.clone()
                 }
             })
             .collect()
@@ -902,7 +926,17 @@ mod tests {
         // Two that would both show m4: each shows host:port, whatever the
         // port; the other is left alone.
         remotes.list.push(at(3, "m4.lan:7347"));
-        assert_eq!(remotes.display_names(), ["m4:7347", "mini", "m4:7347"]);
+        let group = |r: &ServerRecord| r.id.fingerprint()[..4].to_string();
+        let (g1, g3) = (group(&remotes.list[0]), group(&remotes.list[2]));
+        assert_eq!(
+            remotes.display_names(),
+            [
+                format!("m4:7347 {g1}"),
+                "mini".into(),
+                format!("m4:7347 {g3}")
+            ],
+            "the same host and port: each adds its fingerprint's first group"
+        );
         remotes.list[2].addresses = vec!["m4.lan:7400".into()];
         assert_eq!(remotes.display_names(), ["m4:7347", "mini", "m4:7400"]);
         // A nickname is shown as set, and ends the conflict it was in.
@@ -923,6 +957,37 @@ mod tests {
             list: vec![ServerRecord::new("m9", [9; 32], Vec::new())],
         };
         assert_eq!(bare.display_names(), ["m9"]);
+    }
+
+    #[test]
+    fn the_same_host_and_port_add_the_fingerprints_first_group() {
+        let mut remotes = Remotes {
+            active: None,
+            list: vec![
+                at(1, "m4.tail1.ts.net:7347"),
+                at(2, "m4.tail2.ts.net:7347"),
+                at(3, "mini.tail1.ts.net:7347"),
+            ],
+        };
+        let group = |r: &ServerRecord| r.id.fingerprint()[..4].to_string();
+        let (g1, g2) = (group(&remotes.list[0]), group(&remotes.list[1]));
+        assert_ne!(g1, g2, "two daemons, two keys");
+        assert_eq!(
+            remotes.display_names(),
+            [
+                format!("m4:7347 {g1}"),
+                format!("m4:7347 {g2}"),
+                "mini".to_string()
+            ]
+        );
+        // A set nickname is shown as set, and the other is left alone.
+        assert!(remotes.set_nickname(remotes.list[1].id, Some("Work")));
+        assert_eq!(remotes.display_names(), ["m4", "Work", "mini"]);
+        // Through the rows the drawer's cards and Settings show.
+        assert!(remotes.set_nickname(remotes.list[1].id, None));
+        let rows = remotes.info_with(|_| false);
+        assert_eq!(rows[0].display_name, format!("m4:7347 {g1}"));
+        assert_eq!(rows[1].display_name, format!("m4:7347 {g2}"));
     }
 
     #[test]
