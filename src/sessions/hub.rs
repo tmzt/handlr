@@ -1493,6 +1493,16 @@ impl Tailer {
         let mut cards = sections::cards(self.file, &window, &approvals, Some(&live), &self.linker);
         cards.iter_mut().for_each(|c| self.summaries.apply(c));
         self.ask_summaries(st, &window, &cards);
+        // The newest Finished card, for `agents.list`'s summary (plan
+        // 20261028_03, 3.12).
+        if let Some((card, key)) = cards
+            .iter()
+            .rev()
+            .find_map(|c| Some((c, CardSummaries::key(c)?)))
+        {
+            self.summaries
+                .note_latest(&self.path, card.serial.line, key);
+        }
         let mut out: BTreeMap<u64, Section> = changed
             .into_iter()
             .map(|s| (s.serial.to_u64(), s))

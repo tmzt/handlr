@@ -3,6 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use futures_util::{Stream, StreamExt};
 use libflankr_proto::common::{self, methods, protocols, topics};
@@ -692,23 +693,52 @@ pub(super) fn sessions_here(daemon: &Daemon) -> bool {
     )
 }
 
-/// The session of the agent in `pane` and its turn (plan 20261023_04,
-/// A4), for `agents.list`.
-fn agent_session(
-    daemon: &Daemon,
-    pane: &agents::AgentRef,
-) -> Option<(common::AgentSessionInfo, common::Turn)> {
-    if !sessions_here(daemon) || daemon.sessions.reader_for(&pane.agent).is_none() {
-        return None;
-    }
-    let mut peeked = daemon.sessions.peek(pane, 1)?;
-    peeked.link(daemon.repowiki.as_deref(), pane.cwd.as_deref());
-    let session = common::AgentSessionInfo {
-        session_id: peeked.located.session_id,
-        matched: peeked.located.matched.into(),
-        pending_question: peeked.pending_question,
+/// What `agents.list` gives of an agent's own session.
+#[derive(Debug, Default)]
+struct Listed {
+    session: Option<common::AgentSessionInfo>,
+    turn: Option<common::Turn>,
+    idle_ms: Option<u64>,
+    subagents_running: Option<u32>,
+    summary: Option<String>,
+}
+
+/// The session of the agent in `pane`, its turn (plan 20261023_04, A4),
+/// and its activity and latest summary as of `now` (plan 20261028_03,
+/// 3.12 item 47), for `agents.list`. The summary is only one already
+/// known; none is asked for because of a list.
+fn agent_session(daemon: &Daemon, pane: &agents::AgentRef, now: SystemTime) -> Listed {
+    let Some(reader) = sessions_here(daemon)
+        .then(|| daemon.sessions.reader_for(&pane.agent))
+        .flatten()
+    else {
+        return Listed::default();
     };
-    Some((session, peeked.turn))
+    let Some(mut peeked) = daemon.sessions.peek(pane, 1) else {
+        return Listed::default();
+    };
+    peeked.link(daemon.repowiki.as_deref(), pane.cwd.as_deref());
+    let activity = crate::sessions::activity(reader, &peeked.located, now);
+    let summary = peeked
+        .last_reply
+        .and_then(|line| {
+            daemon
+                .hub
+                .summaries()
+                .latest_spoken(&peeked.located.path, line)
+        })
+        .and_then(|spoken| crate::sessions::turn::summary_line(&spoken));
+    Listed {
+        session: Some(common::AgentSessionInfo {
+            session_id: peeked.located.session_id,
+            matched: peeked.located.matched.into(),
+            pending_question: peeked.pending_question,
+        }),
+        turn: Some(peeked.turn),
+        idle_ms: activity.idle_ms,
+        subagents_running: activity.subagents_running,
+        summary,
+    }
 }
 
 pub(super) async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
@@ -826,15 +856,19 @@ async fn call(
             if conn.is_companion() {
                 *conn.focus.lock().unwrap() = focus.clone();
             }
+            let now = SystemTime::now();
             let agents = names
                 .agents
                 .into_iter()
                 .map(|named| {
                     let a = named.agent;
-                    let (session, turn) = agent_session(daemon, &a).unzip();
+                    let listed = agent_session(daemon, &a, now);
                     common::AgentInfo {
-                        session,
-                        turn,
+                        session: listed.session,
+                        turn: listed.turn,
+                        idle_ms: listed.idle_ms,
+                        subagents_running: listed.subagents_running,
+                        summary: listed.summary,
                         status: wire_status(&a.status),
                         pane_id: a.pane_id,
                         name: Some(named.shown),

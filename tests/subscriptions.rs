@@ -1597,3 +1597,99 @@ async fn without_gemini_a_finished_card_keeps_its_fields_empty() {
     // Asked once, not again.
     assert_eq!(mock.recorded_transcripts().len(), 1);
 }
+
+/// p1's entry in an `agents.list` response.
+fn listed_p1(r: &Value) -> Value {
+    r["result"]["agents"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .iter()
+        .find(|a| a["pane_id"] == "p1")
+        .unwrap_or_else(|| panic!("p1 in {r}"))
+        .clone()
+}
+
+/// Set the modification time of the file at `path` to `age` ago.
+fn age_file(path: &Path, age: Duration) {
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() - age)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn agents_list_gives_the_idle_age_and_the_running_subagents() {
+    // Plan 20261028_03, 3.12 items 46-47.
+    let env = start(false).await;
+    let session = env.session(SESSION_A);
+    age_file(&session, Duration::from_secs(120));
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
+    let p1 = listed_p1(&c.call("agents.list", json!({})).await);
+    // No subagents: none running, the age from the session file.
+    assert_eq!(p1["subagents_running"], 0, "{p1}");
+    let idle = p1["idle_ms"].as_u64().unwrap();
+    assert!((120_000..120_000 + 5_000).contains(&idle), "{p1}");
+    // No summary is known, and none is asked for.
+    assert!(p1.get("summary").is_none(), "{p1}");
+
+    // A running subagent written 3 s ago, a finished one 1 s ago, and one
+    // quiet for 90 s.
+    let subs = session.with_extension("").join("subagents");
+    std::fs::create_dir_all(&subs).unwrap();
+    for (id, age, finished) in [("a1", 3, false), ("b2", 1, true), ("c3", 90, false)] {
+        let transcript = subs.join(format!("agent-{id}.jsonl"));
+        std::fs::write(&transcript, format!("{}\n", reply(1, "sub"))).unwrap();
+        age_file(&transcript, Duration::from_secs(age));
+        std::fs::write(
+            subs.join(format!("agent-{id}.meta.json")),
+            json!({"agentType": "general-purpose", "finished": finished}).to_string(),
+        )
+        .unwrap();
+    }
+    let p1 = listed_p1(&c.call("agents.list", json!({})).await);
+    assert_eq!(p1["subagents_running"], 1, "{p1}");
+    // The age from the newest file, the finished subagent's.
+    let idle = p1["idle_ms"].as_u64().unwrap();
+    assert!((1_000..1_000 + 5_000).contains(&idle), "{p1}");
+}
+
+#[tokio::test]
+async fn agents_list_gives_the_latest_finished_cards_summary_once_known() {
+    // Plan 20261028_03, 3.12 items 46-47.
+    let mock = Arc::new(MockReasoningEngine::with_response(CARD_ANSWER));
+    let env = start_summarising(Arc::clone(&mock), true).await;
+    // The user speaks after Reply 2, which makes it the newest Finished
+    // card, at the newest reply.
+    append_lines(&env.session(SESSION_A), &[user(30, "thanks")]);
+    let mut c = Client::unix(&env.socket, "flankr.companion").await;
+    let _ = c.subscribe(json!({"pane_id": "p1"})).await;
+    let started = Instant::now();
+    let p1 = loop {
+        let p1 = listed_p1(&c.call("agents.list", json!({})).await);
+        if p1.get("summary").is_some() {
+            break p1;
+        }
+        assert!(started.elapsed() < WAIT, "no summary listed: {p1}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    // The spoken summary's first line, not its points.
+    assert_eq!(p1["summary"], "Written and pushed.", "{p1}");
+    let sent = mock.recorded_transcripts();
+    assert!(sent.iter().any(|t| t.contains("Reply 2.")), "{sent:?}");
+
+    // A newer reply, the agent going on with a tool call, so it has no
+    // Finished card: the old card's summary is no longer the latest, and
+    // none is listed.
+    append_lines(
+        &env.session(SESSION_A),
+        &[
+            reply(31, "Working on more."),
+            calls(32, "toolu_fake_31", "cargo test"),
+        ],
+    );
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let p1 = listed_p1(&c.call("agents.list", json!({})).await);
+    assert!(p1.get("summary").is_none(), "{p1}");
+}

@@ -22,9 +22,11 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use std::time::SystemTime;
+
 use super::{
-    EntryKind, Item, LineReader, Located, Matched, Role, SessionReader, TEXT_MAX, TOOL_TEXT_MAX,
-    cut, jsonl_newest_first, safe_id,
+    EntryKind, Item, LineReader, Located, Matched, Role, SUBAGENT_LIVE, SessionReader, Subagents,
+    TEXT_MAX, TOOL_TEXT_MAX, cut, jsonl_newest_first, safe_id,
 };
 
 /// How much of a file's start is searched for its `cwd`.
@@ -264,6 +266,63 @@ impl SessionReader for ClaudeCode {
     ) -> Result<super::Read, String> {
         super::read_tail(self, &at.path, enough)
     }
+
+    /// From `<session dir>/subagents/agent-<id>.jsonl` and its
+    /// `agent-<id>.meta.json` (the subagents plan, sources): running when
+    /// the meta does not say `finished` and the transcript was written
+    /// within [`SUBAGENT_LIVE`]. A meta is read only for a transcript that
+    /// recent; a missing or unreadable one is taken as not finished. No
+    /// directory is no subagents.
+    fn subagents(&self, at: &Located, now: SystemTime) -> Option<Subagents> {
+        let dir = subagents_dir(&at.path);
+        let mut found = Subagents::default();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Some(found);
+        };
+        for path in entries.flatten().map(|e| e.path()) {
+            let Some(stem) = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.strip_suffix(".jsonl"))
+                .filter(|s| s.starts_with("agent-"))
+            else {
+                continue;
+            };
+            let Some(modified) = path.metadata().ok().and_then(|m| m.modified().ok()) else {
+                continue;
+            };
+            found.newest = found.newest.max(Some(modified));
+            let recent = now.duration_since(modified).unwrap_or_default() <= SUBAGENT_LIVE;
+            if recent && !meta_finished(&dir.join(format!("{stem}.meta.json"))) {
+                found.running += 1;
+            }
+        }
+        Some(found)
+    }
+}
+
+/// The subagents' directory of the session file at `path`:
+/// `<project>/<session id>/subagents`.
+fn subagents_dir(path: &Path) -> PathBuf {
+    path.with_extension("").join("subagents")
+}
+
+/// The most of a subagent's meta file that is read.
+const META_MAX: u64 = 64 * 1024;
+
+/// Whether the subagent meta file at `path` says `"finished": true`.
+fn meta_finished(path: &Path) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = Vec::new();
+    if file.take(META_MAX).read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    serde_json::from_slice::<Value>(&buf)
+        .ok()
+        .and_then(|v| v.get("finished").and_then(Value::as_bool))
+        == Some(true)
 }
 
 /// The longest text of an entry that is context (a notification, a
@@ -901,5 +960,97 @@ mod tests {
         assert!(!is_harness_text("[Request interrupted by user]"));
         assert!(!is_harness_text("<3 thanks"));
         assert!(!is_harness_text("use <T> here"));
+    }
+
+    /// Set the modification time of the file at `path` to `at`.
+    fn touch(path: &Path, at: SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(at)
+            .unwrap();
+    }
+
+    #[test]
+    fn subagents_running_are_unfinished_and_recently_written() {
+        // Plan 20261028_03, 3.12 item 47: the fixture session with a
+        // running, a finished, a quiet and a meta-less subagent.
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir
+            .path()
+            .join("00000000-0000-4000-8000-0000000000a1.jsonl");
+        std::fs::copy(fixture("claude_basic.jsonl"), &session).unwrap();
+        let now = SystemTime::now();
+        let secs = std::time::Duration::from_secs;
+        touch(&session, now - secs(600));
+        let at = Located {
+            path: session.clone(),
+            session_id: None,
+            matched: Matched::Id,
+        };
+        let r = reader();
+        // No subagents directory: none running, no time of theirs.
+        assert_eq!(r.subagents(&at, now), Some(Subagents::default()));
+        let activity = crate::sessions::activity(&r, &at, now);
+        assert_eq!(activity.subagents_running, Some(0));
+        assert_eq!(activity.idle_ms, Some(600_000), "{activity:?}");
+
+        let subs = dir
+            .path()
+            .join("00000000-0000-4000-8000-0000000000a1")
+            .join("subagents");
+        std::fs::create_dir_all(&subs).unwrap();
+        for (id, age, finished) in [
+            ("a1", secs(5), Some(false)),
+            ("b2", secs(2), Some(true)),
+            ("c3", secs(61), Some(false)),
+            ("d4", secs(30), None),
+        ] {
+            let transcript = subs.join(format!("agent-{id}.jsonl"));
+            std::fs::write(&transcript, "{}\n").unwrap();
+            touch(&transcript, now - age);
+            if let Some(finished) = finished {
+                std::fs::write(
+                    subs.join(format!("agent-{id}.meta.json")),
+                    serde_json::json!({"agentType": "Explore", "finished": finished}).to_string(),
+                )
+                .unwrap();
+            }
+        }
+        // Not a transcript: ignored.
+        std::fs::write(subs.join("notes.txt"), "x").unwrap();
+        let found = r.subagents(&at, now).unwrap();
+        // a1 (5 s) and d4 (30 s, no meta); b2 is finished, c3 too quiet.
+        assert_eq!(found.running, 2, "{found:?}");
+        assert_eq!(found.newest, Some(now - secs(2)));
+        let activity = crate::sessions::activity(&r, &at, now);
+        assert_eq!(activity.subagents_running, Some(2));
+        // The idle age is from the newest file, a subagent's.
+        assert_eq!(activity.idle_ms, Some(2_000), "{activity:?}");
+        // At the edge: a1, written exactly SUBAGENT_LIVE ago, still counts.
+        assert_eq!(r.subagents(&at, now + secs(55)).unwrap().running, 1);
+        assert_eq!(r.subagents(&at, now + secs(56)).unwrap().running, 0);
+        // A write after `now` is no time ago.
+        let earlier = now - secs(10);
+        assert_eq!(crate::sessions::activity(&r, &at, earlier).idle_ms, Some(0));
+    }
+
+    #[test]
+    fn other_readers_read_no_subagents() {
+        let s = Sessions::with_home(&fixture("home"));
+        let codex = s.reader_for("codex").unwrap();
+        let at = Located {
+            path: fixture(
+                "home/.codex/sessions/2026/01/02/rollout-2026-01-02T08-00-00-00000000-0000-7000-8000-0000000000d4.jsonl",
+            ),
+            session_id: None,
+            matched: Matched::Id,
+        };
+        let now = SystemTime::now();
+        assert_eq!(codex.subagents(&at, now), None);
+        let activity = crate::sessions::activity(codex, &at, now);
+        assert_eq!(activity.subagents_running, None);
+        assert!(activity.idle_ms.is_some());
     }
 }

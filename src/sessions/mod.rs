@@ -29,7 +29,7 @@ use std::fs::File;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 pub use libflankr_proto::common::{
     ENTRY_SUMMARY_MAX, Entry, EntryKind, PENDING_QUESTION_MAX, PendingQuestion, Role,
@@ -192,6 +192,47 @@ impl Located {
     }
 }
 
+/// How long after its last write a subagent not marked finished counts as
+/// running (plan 20261028_03, 3.6: `SUBAGENT_LIVE`).
+pub const SUBAGENT_LIVE: Duration = Duration::from_secs(60);
+
+/// A session's subagents, as [`SessionReader::subagents`] reads them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Subagents {
+    /// Those not marked finished whose transcripts were written within
+    /// [`SUBAGENT_LIVE`].
+    pub running: u32,
+    /// When any subagent's transcript was last written.
+    pub newest: Option<SystemTime>,
+}
+
+/// A session's activity as `agents.list` reports it (plan 20261028_03,
+/// 3.12): `AgentInfo::idle_ms` and `AgentInfo::subagents_running`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// Milliseconds from the newest write of the session or of any of its
+    /// subagents to `now`; 0 for a write after `now`.
+    pub idle_ms: Option<u64>,
+    pub subagents_running: Option<u32>,
+}
+
+/// The activity of the session `at`, read by `reader`, as of `now`.
+pub fn activity(reader: &dyn SessionReader, at: &Located, now: SystemTime) -> Activity {
+    let subagents = reader.subagents(at, now);
+    let newest = reader
+        .modified(at)
+        .into_iter()
+        .chain(subagents.and_then(|s| s.newest))
+        .max();
+    Activity {
+        idle_ms: newest.map(|t| {
+            let age = now.duration_since(t).unwrap_or_default();
+            u64::try_from(age.as_millis()).unwrap_or(u64::MAX)
+        }),
+        subagents_running: subagents.map(|s| s.running),
+    }
+}
+
 /// One agent's session format (decision 3; plan 20261023_06, decision 1).
 pub trait SessionReader: Send + Sync {
     /// `claude_code`, `codex`, `agy`.
@@ -208,6 +249,13 @@ pub trait SessionReader: Send + Sync {
     /// When the session last changed, for [`Located::quiet`].
     fn modified(&self, at: &Located) -> Option<SystemTime> {
         at.modified()
+    }
+
+    /// The session's subagents as of `now`, for the drawer's activity
+    /// (plan 20261028_03, 3.12 item 47). `None` when the reader does not
+    /// read subagents; only Claude Code's does.
+    fn subagents(&self, _at: &Located, _now: SystemTime) -> Option<Subagents> {
+        None
     }
 
     /// The last `n` entries of the file at `path`.
@@ -509,6 +557,9 @@ pub struct Peeked {
     pub entries: Vec<Entry>,
     pub pending_question: Option<PendingQuestion>,
     pub turn: turn::Turn,
+    /// The position ([`Item::pos`]) of the newest entry of the agent's own
+    /// reply text read, where the latest Finished card would be.
+    pub last_reply: Option<u64>,
 }
 
 impl Peeked {
@@ -550,12 +601,18 @@ impl Sessions {
         let pending_question =
             pending::pending_question(&read.items, &pane.status, quiet, Some(&asker));
         let turn = turn::turn(&read.items, &pane.status, quiet);
+        let last_reply = read
+            .items
+            .iter()
+            .rfind(|i| i.is_text() && i.role == Role::Assistant && i.origin.is_none())
+            .map(|i| i.pos);
         let skip = read.items.len().saturating_sub(n);
         Some(Peeked {
             located: read.located,
             entries: read.items[skip..].iter().map(Item::entry).collect(),
             pending_question,
             turn,
+            last_reply,
         })
     }
 }

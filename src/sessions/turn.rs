@@ -51,6 +51,14 @@ pub fn turn(items: &[Item], status: &AgentStatus, quiet: bool) -> Turn {
     Turn::Working { line: shown(line) }
 }
 
+/// The first line of a Finished card's spoken summary as `agents.list`
+/// gives it (plan 20261028_03, 3.12): redacted and cut to
+/// `TURN_TEXT_MAX`; `None` when it has no text.
+pub fn summary_line(spoken: &str) -> Option<String> {
+    let line = first_line(spoken);
+    (!line.is_empty()).then(|| shown(line))
+}
+
 /// `line` as a client sees it: redacted and cut.
 fn shown(line: &str) -> String {
     cut(&redact(line), TURN_TEXT_MAX)

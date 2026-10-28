@@ -14,6 +14,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -67,6 +68,9 @@ struct Store {
     order: VecDeque<CardKey>,
     /// Bumped with each answer kept.
     generation: u64,
+    /// Each session file's newest Finished card, as its tailer last found
+    /// it: the line of its reply and its key (plan 20261028_03, 3.12).
+    latest: HashMap<PathBuf, (u32, CardKey)>,
 }
 
 impl CardSummaries {
@@ -122,6 +126,35 @@ impl CardSummaries {
     /// recomputes its cards.
     pub fn generation(&self) -> u64 {
         self.inner.lock().unwrap().generation
+    }
+
+    /// Note the newest Finished card of the session file at `path`: the
+    /// card at the reply on `line`, with `key`. Kept for at most
+    /// [`CARD_SUMMARIES_MAX`] files; past that, those whose cards are no
+    /// longer kept are dropped.
+    pub fn note_latest(&self, path: &Path, line: u32, key: CardKey) {
+        let mut store = self.inner.lock().unwrap();
+        if store.latest.get(path) == Some(&(line, key)) {
+            return;
+        }
+        store.latest.insert(path.to_path_buf(), (line, key));
+        if store.latest.len() > CARD_SUMMARIES_MAX {
+            let Store { by_key, latest, .. } = &mut *store;
+            latest.retain(|p, (_, k)| p == path || by_key.contains_key(k));
+        }
+    }
+
+    /// The spoken summary of the newest Finished card of the session file
+    /// at `path`, when that card is at the reply on `reply_line` (so it is
+    /// still the session's newest) and its summary is already known. Never
+    /// asks for one.
+    pub fn latest_spoken(&self, path: &Path, reply_line: u64) -> Option<String> {
+        let store = self.inner.lock().unwrap();
+        let (line, key) = store.latest.get(path)?;
+        if u64::from(*line) != reply_line {
+            return None;
+        }
+        store.by_key.get(key)?.as_ref()?.spoken.clone()
     }
 }
 
@@ -212,5 +245,41 @@ mod tests {
         }
         assert!(store.ask(CardSummaries::key(&finished(1, "x")).unwrap()));
         assert!(!store.ask(CardSummaries::key(&finished(3, "x")).unwrap()));
+    }
+
+    #[test]
+    fn a_sessions_latest_summary_only_when_known_and_still_newest() {
+        // Plan 20261028_03, 3.12 item 47.
+        let store = CardSummaries::default();
+        let path = Path::new("/home/.claude/projects/-w/s1.jsonl");
+        let card = finished(7, "Done.");
+        let key = CardSummaries::key(&card).unwrap();
+        // Nothing noted.
+        assert_eq!(store.latest_spoken(path, 7), None);
+        store.note_latest(path, 7, key);
+        // Noted, not asked or not answered: none, and none is asked for.
+        assert_eq!(store.latest_spoken(path, 7), None);
+        assert!(store.ask(key));
+        assert_eq!(store.latest_spoken(path, 7), None);
+        store.put(
+            key,
+            CardSummary {
+                points: vec![],
+                spoken: Some("It is done.\nAnd pushed.".into()),
+            },
+        );
+        assert_eq!(
+            store.latest_spoken(path, 7).as_deref(),
+            Some("It is done.\nAnd pushed.")
+        );
+        // A newer reply than the card: not the newest card's any more.
+        assert_eq!(store.latest_spoken(path, 9), None);
+        // Another file.
+        assert_eq!(store.latest_spoken(Path::new("/other.jsonl"), 7), None);
+        // A newer card noted, not yet answered: none.
+        let newer = CardSummaries::key(&finished(9, "More.")).unwrap();
+        store.note_latest(path, 9, newer);
+        assert_eq!(store.latest_spoken(path, 9), None);
+        assert_eq!(store.latest_spoken(path, 7), None);
     }
 }
