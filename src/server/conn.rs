@@ -523,6 +523,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
             vocabulary,
             paired: paired_now.then_some(true),
             llm: Some(conn.daemon.llm.info()),
+            terminal: None,
         })?;
         return Ok((principal, result));
     }
@@ -1290,7 +1291,10 @@ async fn forward_events(conn: Arc<Conn>) {
                     let info = llm.borrow_and_update().clone();
                     conn.send(&Notification::new(
                         companion::methods::SERVER_CAPABILITIES,
-                        companion::ServerCapabilities { llm: Some(info) },
+                        companion::ServerCapabilities {
+                            llm: Some(info),
+                            terminal: None,
+                        },
                     ));
                 }
                 Err(_) => llm_open = false,
