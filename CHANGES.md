@@ -2966,3 +2966,27 @@ Plan: docs/design/20261028_01_MULTIPLE_REMOTES_PLAN.md, the amendments from
    any address in the link answers (within 30 s, `CHECK_TIMEOUT`);
    `keys.rs` still chmods its key files after creating them (only
    `state.redb` was in scope).
+
+## 2026-10-28 17:20 EDT — plan 20261028_02 (QR scanning in the pairing window): departures
+
+Plan: docs/design/20261028_02_PAIRING_QR_SCAN_PLAN.md. `2768957` (tag
+`flankr-audio-v0.2.0`) and `f2467f0`. The APK builds and its merged
+manifest has CAMERA with the camera `uses-feature`s not required; not yet
+tried on the S23.
+
+1. The scripted runs are lib unit tests (`apps/companion/src/pairing_scan_tests.rs`),
+   not `tests/pairing_scan.rs`: `--camera` and the probe are `cfg(test)`.
+2. The scanner is generic over the scan id and reads libmorph's events
+   through a `Cam` enum, since libmorph's `ScanId` and `QrCode` cannot be
+   built outside libmorph.
+3. The "unknown version" unit case uses a link with a bad checksum.
+4. "→" is drawn as ">" in the pairing window (its Roboto face has no "→");
+   the copy file is unchanged.
+5. The camera lines' source line breaks are joined into one paragraph.
+6. In the add mode the placeholder shows `remote_add`'s text under Tap to
+   scan, with `pairing_camera_why` under the area;
+   `pairing_scan_unreadable` stays until the next code or the scan's end;
+   after `PairFailed` in the camera window, `pairing_retry` replaces the
+   app's own "pairing failed" note; the tests skip audio devices.
+7. The "pairing…" state between a scan and the six words is covered only
+   by a unit test (the local test daemon answers in the same frame).
