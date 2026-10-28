@@ -299,3 +299,21 @@ an amendment, settings becomes living".
    (`20261028_01_MULTIPLE_REMOTES_PLAN.md`).
 3. **`Unpair this device` is removed** from the Device section when that
    plan is built; each remote's X replaces it.
+
+## Amendment — 2026-10-28 17:46 EDT: a remote's row opens its details (living section)
+
+The owner (2026-10-28): "click the remote in settings should show the
+details, when the pairing occurred and offer the Remove option if the user
+missed the X"; asked to queue it, "yes". A new entry for the living list of
+sections and rows (the 2026-10-28 amendment that made it living):
+
+1. **A tap on a Remotes row** (anywhere but its X) opens a details modal in
+   the settings style (opens and closes at once, no fade, no
+   transparency): the remote's name and status ("in use", "in use ·
+   offline", or not in use); its hostname (name and `host:port`); its full
+   fingerprint (the six fingerprint words and the 64-hex BLAKE2s
+   fingerprint in groups of four, in the mono font); when it was paired
+   (date and time, or "paired before this list"); and **Remove** (the same
+   confirm modal as the X) and **Close**.
+2. The companion crate's `RemoteInfo` gains the full fingerprint (hex and
+   words), additively, for this.
