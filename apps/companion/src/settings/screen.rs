@@ -28,10 +28,16 @@
 //!   be known, one note, "Battery settings need an app update";
 //! - **Remotes** (plan 20261028_01, 3.10; plan 20261024_02, the
 //!   2026-10-28 13:03 EDT amendment): an ⓘ after the title and a **+** at
-//!   the title line's right, dim and inactive at [`MAX_REMOTES`]; one
-//!   [`RemoteRow`] per paired daemon, in pairing order, with an X that
-//!   asks first ([`Confirm`]); and a note under them: none paired, the
-//!   list full, or the last removal or pairing's result;
+//!   the title line's right, dim at [`MAX_REMOTES`], when a tap on it, as
+//!   on the ⓘ, says why; one [`RemoteRow`] per paired daemon, in pairing
+//!   order, its first line the remote's shown name, with an X that asks
+//!   first ([`Confirm`]); with none, the one standard row *No remotes
+//!   paired*. Standard rows only, no note under them (the 2026-10-28
+//!   17:48 EDT amendment): a tap on a row opens its details
+//!   ([`DetailsModal`]: nickname, status, hostname, when paired, the
+//!   collapsible fingerprint, Remove and Close), and a removal shows
+//!   *Removing…* in its confirm modal until the daemon answers, then
+//!   closes, or says it was removed on this phone only until closed;
 //! - **Device**, last: *Clear cache (n MB)* in the normal text colour,
 //!   with no confirmation (the 12:12 EDT amendment), then *Delete data* in
 //!   red, behind a confirming modal ([`Confirm`]). *Unpair this device* is
@@ -40,7 +46,7 @@
 //! Rows with a long explanation have an ⓘ that opens it in a modal
 //! ([`InfoModal`]): *Voice*, *General agent*, *Tab follows focus*, *Appearance*, the two above, *Battery optimization*,
 //! *Samsung battery (app sleeping)*, and the Remotes title. All the copy is in
-//! `SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
+//! `copy/SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
 //! label; a link in it is tappable, and the app opens it with libmorph's
 //! `ctx.open_link` ([`SettingsScreen::take_links`]).
 //!
@@ -56,7 +62,7 @@ use libcontrols::{
     ModalEvent, ModalStack, ModalState, ModalTransition, MouseButton, MouseEvent, NodeFlags,
     NodeId, Rect, Router, ScrollAxis, ScrollPane, ScrollState, TextAlign,
 };
-use libmorph::TouchPhase;
+use libmorph::{Key, TouchPhase};
 use libmsdf::drawlist::DrawList;
 
 use flankr_companion::{MAX_REMOTES, RemoteId, RemoteInfo};
@@ -71,6 +77,7 @@ use super::danger_row::DangerRow;
 use super::info::{self, INFO_PART, InfoModal};
 use super::link_row::{ACTION_PART, LinkRow};
 use super::option_row::OptionRow;
+use super::remote_details::{DetailsModal, DetailsState};
 use super::remote_row::{REMOVE_PART, RemoteRow};
 use super::toggle_row::ToggleRow;
 use super::voice;
@@ -191,8 +198,15 @@ pub enum SettingsHit {
     Voice(Settings),
     /// The Remotes title's **+**: the pairing screen, in its add mode.
     AddRemote,
-    /// *Remove* in a remote's modal, after its X.
+    /// *Remove* in a remote's modal, after its X: the modal stays, saying
+    /// *Removing…*, until [`SettingsScreen::remote_removed`].
     RemoveRemote(RemoteId),
+    /// A remote's nickname, set or cleared (`None`: the default) in its
+    /// details.
+    SetNickname {
+        id: RemoteId,
+        nickname: Option<String>,
+    },
     /// *Delete* in its modal.
     DeleteData,
     /// *Clear cache*, with something cached: the cached sessions go.
@@ -226,9 +240,37 @@ pub fn clear_cache_label(bytes: u64) -> String {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Asking {
     RemoveRemote(RemoteId),
+    /// After *Remove*: waiting for the daemon's answer.
+    Removing(RemoteId),
+    /// The daemon did not answer: removed on this phone only.
+    RemovedHere(RemoteId),
+    /// A remote's details.
+    Details(RemoteId),
     Delete,
     /// An ⓘ's explanation.
     Info(Info),
+}
+
+/// What a tap in the open modal can be, besides its close controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// The details' nickname field.
+    Field,
+    /// The details' Fingerprint row.
+    Fingerprint,
+    /// *Remove* in a remote's confirm modal, which stays open.
+    Remove,
+}
+
+/// What a key did to the nickname being typed ([`SettingsScreen::nickname_key`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Typed {
+    /// Nothing is being typed, or the key does not edit.
+    No,
+    /// The text changed.
+    Edited,
+    /// Enter or Escape: typing ended, with the change to save, if any.
+    Done(Option<SettingsHit>),
 }
 
 impl Asking {
@@ -236,6 +278,9 @@ impl Asking {
     fn id(self) -> &'static str {
         match self {
             Asking::RemoveRemote(_) => "remove_remote",
+            Asking::Removing(_) => "removing_remote",
+            Asking::RemovedHere(_) => "removed_here",
+            Asking::Details(_) => "remote_details",
             Asking::Delete => "delete",
             Asking::Info(Info::Voice) => "info_voice",
             Asking::Info(Info::GeneralAgent) => "info_general_agent",
@@ -275,7 +320,8 @@ struct Nodes {
     remotes_title: NodeId,
     /// [`MAX_REMOTES`] rows, those past the list hidden.
     remotes: Vec<NodeId>,
-    remotes_note: NodeId,
+    /// *No remotes paired*, shown with none.
+    remotes_empty: NodeId,
     clear_cache: NodeId,
     delete: NodeId,
 }
@@ -364,7 +410,8 @@ impl libcontrols::HostedControl for RemotesTitle {
             .map(|part| (part, self.rect.normalized_x(pos[0])))
     }
 
-    /// On the ⓘ, the explanation; on the +, pairing another, unless full.
+    /// On the ⓘ, the explanation; on the +, pairing another, or while
+    /// full (dim), the explanation saying why it is full.
     fn handle_mouse(
         &self,
         event: &MouseEvent,
@@ -377,11 +424,8 @@ impl libcontrols::HostedControl for RemotesTitle {
         else {
             return None;
         };
-        match self.part(*pos)? {
-            INFO_PART => Some(ControlAction::Activated { part: INFO_PART }),
-            _ if self.full => None,
-            part => Some(ControlAction::Activated { part }),
-        }
+        let part = self.part(*pos)?;
+        Some(ControlAction::Activated { part })
     }
 
     fn handle_keyboard(
@@ -431,8 +475,14 @@ pub struct SettingsScreen {
     no_vendor: bool,
     /// The paired remotes, in pairing order, as the client last gave them.
     remotes: Vec<RemoteInfo>,
-    /// The note under them: the last removal's or pairing's result.
-    remotes_note: Option<String>,
+    /// The remote whose details are open, and what they show.
+    details: Option<(RemoteId, DetailsState)>,
+    /// The nickname last asked for in them, so closing does not ask again.
+    nickname_sent: Option<Option<String>>,
+    /// The name of the remote being removed, for its modal.
+    removing: String,
+    /// The open modal's taps that are not its close controls.
+    targets: Vec<(Target, Rect)>,
     /// The name this phone paired as: its `[[client]]` entry's, for the
     /// removal modal.
     device: String,
@@ -443,6 +493,8 @@ pub struct SettingsScreen {
     asking: Option<(Asking, NodeId, NodeId)>,
     /// The open modal's Markdown, for its links.
     modal_text: Option<NodeId>,
+    /// A hit left by Back closing a modal ([`SettingsScreen::take_hit`]).
+    pending: Option<SettingsHit>,
     /// Links tapped, for the app to open with `ctx.open_link`.
     links: Vec<String>,
     layout: Layout,
@@ -480,11 +532,15 @@ impl SettingsScreen {
             android,
             no_vendor: false,
             remotes: Vec::new(),
-            remotes_note: None,
+            details: None,
+            nickname_sent: None,
+            removing: String::new(),
+            targets: Vec::new(),
             device: "this phone".to_string(),
             cache: 0,
             asking: None,
             modal_text: None,
+            pending: None,
             links: Vec::new(),
             layout: Layout::default(),
             touch: None,
@@ -624,20 +680,19 @@ impl SettingsScreen {
     /// The paired remotes ([`flankr_companion::Event::Remotes`]), shown as
     /// they are now.
     pub fn set_remotes(&mut self, remotes: Vec<RemoteInfo>) {
-        if remotes != self.remotes {
-            self.remotes = remotes;
-            if self.nodes.is_some() {
-                self.place();
-            }
+        if remotes == self.remotes {
+            return;
         }
-    }
-
-    /// The note under the remotes: a removal's or a pairing's result.
-    pub fn set_remotes_note(&mut self, note: Option<String>) {
-        if note != self.remotes_note {
-            self.remotes_note = note;
-            if self.nodes.is_some() {
-                self.place();
+        self.remotes = remotes;
+        if self.nodes.is_some() {
+            self.place();
+        }
+        // Open details show the remote as it is now, or close with it.
+        if let Some((Asking::Details(id), ..)) = self.asking {
+            if self.remotes.iter().any(|r| r.id == id) {
+                self.open(Asking::Details(id));
+            } else {
+                self.close_modal();
             }
         }
     }
@@ -647,20 +702,115 @@ impl SettingsScreen {
         self.device = name.to_string();
     }
 
-    /// The notes under the remotes: none paired, the list full, and the
-    /// last result.
-    fn remote_notes(&self) -> Option<String> {
-        let mut notes = Vec::new();
-        if self.remotes.is_empty() {
-            notes.push(copy::REMOTES_EMPTY.text.trim().to_string());
+    /// The client removed `id` (`Event::RemoteRemoved`): its modal, while
+    /// it says *Removing…*, closes when `daemon` answered, and otherwise
+    /// says it was removed on this phone only until it is closed.
+    pub fn remote_removed(&mut self, id: RemoteId, name: &str, daemon: bool) {
+        if !matches!(self.asking, Some((Asking::Removing(r), ..)) if r == id) {
+            return;
         }
-        if self.remotes.len() >= MAX_REMOTES {
-            notes.push(copy::REMOTES_FULL.text.trim().to_string());
+        if daemon {
+            self.close_modal();
+        } else {
+            self.removing = name.to_string();
+            self.open(Asking::RemovedHere(id));
         }
-        if let Some(note) = &self.remotes_note {
-            notes.push(note.trim().to_string());
+    }
+
+    /// The nickname being typed in the open details, if it is.
+    pub fn nickname_editing(&self) -> Option<&str> {
+        match &self.details {
+            Some((id, d))
+                if d.editing
+                    && matches!(self.asking, Some((Asking::Details(a), ..)) if a == *id) =>
+            {
+                Some(d.draft.as_str())
+            }
+            _ => None,
         }
-        (!notes.is_empty()).then(|| notes.join("\n\n"))
+    }
+
+    /// The soft keyboard's text for the nickname: shown as typed, at most
+    /// [`flankr_companion::NICKNAME_MAX`] characters on one line.
+    pub fn set_nickname_text(&mut self, text: &str) {
+        let Some((id, d)) = &mut self.details else {
+            return;
+        };
+        if !d.editing {
+            return;
+        }
+        let text: String = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(flankr_companion::NICKNAME_MAX)
+            .collect();
+        if text != d.draft {
+            d.draft = text;
+            let id = *id;
+            self.open(Asking::Details(id));
+        }
+    }
+
+    /// A physical key while the nickname is typed: it edits it, Enter
+    /// saves it and Escape ends typing.
+    pub fn nickname_key(&mut self, key: Key) -> Typed {
+        let Some((_, d)) = &self.details else {
+            return Typed::No;
+        };
+        if self.nickname_editing().is_none() {
+            return Typed::No;
+        }
+        let mut text = d.draft.clone();
+        match key {
+            Key::Character('\r' | '\n') | Key::Escape => return Typed::Done(self.nickname_done()),
+            Key::Character('\u{8}' | '\u{7f}') => {
+                text.pop();
+            }
+            Key::Character(c) if !c.is_control() => text.push(c),
+            _ => return Typed::No,
+        }
+        self.set_nickname_text(&text);
+        Typed::Edited
+    }
+
+    /// Typing the nickname ended (Enter, the keyboard's Done): the field
+    /// stops, and a changed nickname is to be saved.
+    pub fn nickname_done(&mut self) -> Option<SettingsHit> {
+        let (id, d) = self.details.as_mut()?;
+        let was = std::mem::replace(&mut d.editing, false);
+        let id = *id;
+        if was {
+            self.open(Asking::Details(id));
+        }
+        self.commit_nickname()
+    }
+
+    /// The soft keyboard was put away: the field stops; the text stays,
+    /// and is saved when the details close.
+    pub fn nickname_dismissed(&mut self) {
+        if let Some((id, d)) = &mut self.details
+            && std::mem::replace(&mut d.editing, false)
+        {
+            let id = *id;
+            self.open(Asking::Details(id));
+        }
+    }
+
+    /// The nickname typed, if it differs from the remote's and from the
+    /// one last asked for.
+    fn commit_nickname(&mut self) -> Option<SettingsHit> {
+        let (id, d) = self.details.as_ref()?;
+        let info = self.remotes.iter().find(|r| r.id == *id)?;
+        let wanted = flankr_companion::keys::nickname(Some(&d.draft));
+        let asked = self.nickname_sent.as_ref().unwrap_or(&info.nickname);
+        if &wanted == asked {
+            return None;
+        }
+        self.nickname_sent = Some(wanted.clone());
+        Some(SettingsHit::SetNickname {
+            id: *id,
+            nickname: wanted,
+        })
     }
 
     /// The cached sessions' size, in bytes: *Clear cache (n MB)*.
@@ -802,7 +952,13 @@ impl SettingsScreen {
         let remotes = (0..MAX_REMOTES)
             .map(|_| router.add(under, RemoteRow::new(s)))
             .collect();
-        let remotes_note = router.add(under, self.note(""));
+        let remotes_empty = router.add(
+            under,
+            RemoteRow {
+                placeholder: Some(copy::REMOTES_EMPTY.text),
+                ..RemoteRow::new(s)
+            },
+        );
         let clear_cache = router.add(
             under,
             DangerRow::new(&clear_cache_label(self.cache), s).with_color(theme().fg),
@@ -814,7 +970,9 @@ impl SettingsScreen {
             Rect::new(0.0, 0.0, l.w, l.h),
         );
         self.router = router;
-        self.asking = None;
+        // The open modal, made again in the new router (a new layout, as
+        // the soft keyboard coming up for the nickname makes).
+        let open = self.asking.take().map(|(what, ..)| what);
         self.modal_text = None;
         self.nodes = Some(Nodes {
             pane,
@@ -839,11 +997,14 @@ impl SettingsScreen {
             restricted,
             remotes_title,
             remotes,
-            remotes_note,
+            remotes_empty,
             clear_cache,
             delete,
         });
         self.place();
+        if let Some(what) = open {
+            self.open(what);
+        }
     }
 
     /// Sets each node's values and place, and the content's height.
@@ -873,7 +1034,6 @@ impl SettingsScreen {
             (n.background_note, background_note.map(|t| self.note(t))),
             (n.alerts_note, alerts_note.map(|t| self.note(t))),
         ];
-        let mut remotes_note = self.remote_notes().map(|t| self.note(&t));
         let remotes = &self.remotes;
         let router = &mut self.router;
         let show = |router: &mut Router, id: NodeId, on: bool| {
@@ -1060,12 +1220,15 @@ impl SettingsScreen {
                             r.info = info;
                         }
                     }
-                    show(router, n.remotes_note, remotes_note.is_some());
-                    if let Some(view) = remotes_note.take() {
-                        if let Some(old) = router.get_mut::<MarkdownView>(n.remotes_note) {
-                            *old = view;
-                        }
-                        note(router, n.remotes_note, &mut y);
+                    // None paired: one standard row says so.
+                    show(router, n.remotes_empty, remotes.is_empty());
+                    let rect = if remotes.is_empty() {
+                        row(&mut y)
+                    } else {
+                        Rect::new(0.0, y, w, 0.0)
+                    };
+                    if let Some(r) = router.get_mut::<RemoteRow>(n.remotes_empty) {
+                        r.rect = rect;
                     }
                 }
                 Section::Device => {
@@ -1219,10 +1382,14 @@ impl SettingsScreen {
 
     /// The system Back: an open modal is cancelled, and the screen stays.
     /// Returns whether Back was the screen's; if not, it closes.
+    /// What it left for the app, a nickname to save, is
+    /// [`SettingsScreen::take_hit`]'s.
     pub fn back(&mut self) -> bool {
         if self.asking.is_some() {
             self.modals.dismiss(DismissReason::Back);
-            self.settle_modal();
+            if let Some(hit) = self.settle_modal() {
+                self.pending = Some(hit);
+            }
             return true;
         }
         false
@@ -1298,6 +1465,16 @@ impl SettingsScreen {
         if self.asking.is_some() {
             if let Some(url) = self.modal_link(pos) {
                 self.open_link(url);
+            }
+            let target = self
+                .targets
+                .iter()
+                .find(|(_, r)| r.contains(pos))
+                .map(|(t, _)| *t);
+            if let Some(target) = target
+                && self.modals.top_takes_input()
+            {
+                return self.modal_target(target);
             }
             return self.settle_modal();
         }
@@ -1400,14 +1577,19 @@ impl SettingsScreen {
             // No confirmation; nothing to do when empty.
             return (self.cache > 0).then_some(SettingsHit::ClearCache);
         } else if target == n.remotes_title {
-            // Only a tap on the + gets here, and not while the list is full.
-            return (self.remotes.len() < MAX_REMOTES).then_some(SettingsHit::AddRemote);
+            // A tap on the +: pairing another; at 8, dim, it says why.
+            if self.remotes.len() < MAX_REMOTES {
+                return Some(SettingsHit::AddRemote);
+            }
+            self.explain(Info::Remotes);
+            return None;
         } else if let Some(i) = n.remotes.iter().position(|&id| id == target) {
-            // The X asks first; the row itself does nothing yet.
-            if action == (ControlAction::Activated { part: REMOVE_PART })
-                && let Some(id) = self.remotes.get(i).map(|r| r.id)
-            {
+            // The X asks first; the row itself opens the details.
+            let id = self.remotes.get(i).map(|r| r.id)?;
+            if action == (ControlAction::Activated { part: REMOVE_PART }) {
                 self.ask(Asking::RemoveRemote(id));
+            } else {
+                self.open_details(id);
             }
             return None;
         } else if target == n.delete {
@@ -1446,28 +1628,114 @@ impl SettingsScreen {
         Rect::new(0.0, l.top, l.w, l.h - l.top - l.bottom)
     }
 
-    /// Opens the confirming modal for `what`.
+    /// Opens the modal for `what`: a confirming one, a removal's progress
+    /// or result, a remote's details, or an explanation.
     fn ask(&mut self, what: Asking) {
+        self.open(what);
+    }
+
+    /// Opens `id`'s details, the nickname field showing its nickname.
+    fn open_details(&mut self, id: RemoteId) {
+        let Some(info) = self.remotes.iter().find(|r| r.id == id) else {
+            return;
+        };
+        let state = DetailsState {
+            draft: info.nickname.clone().unwrap_or_default(),
+            ..DetailsState::default()
+        };
+        self.details = Some((id, state));
+        self.nickname_sent = None;
+        self.open(Asking::Details(id));
+    }
+
+    /// Closes the open modal at once, with nothing for the app.
+    fn close_modal(&mut self) {
+        if self.asking.take().is_some() || self.modals.depth() > 0 {
+            self.modals.dismiss_all(DismissReason::App);
+        }
+        let _ = self.modals.take_events();
+        self.modal_text = None;
+        self.targets.clear();
+        self.dirty = true;
+    }
+
+    /// (Re)builds `what`'s modal from the screen's state and shows it in
+    /// place of any open one. Settings modals open and close at once, so
+    /// building one again (a nickname typed, the fingerprint expanded, a
+    /// new layout) shows no change but its own.
+    fn open(&mut self, what: Asking) {
         let s = self.scale();
         let viewport = self.modal_viewport();
+        let faces = self.faces.clone();
         let vendor = self.vendor.as_deref();
-        let (question, action) = match what {
-            Asking::RemoveRemote(id) => {
-                let Some(q) = self.removal_question(id) else {
-                    return;
-                };
-                (q, copy::REMOVE_REMOTE_ACTION.text)
+        let confirm = |c: Confirm| (c.dialog, c.cancel, c.action, c.text);
+        let mut targets = Vec::new();
+        let built = match what {
+            Asking::RemoveRemote(id) => self.removal_question(id).map(|q| {
+                let c = Confirm::new(
+                    viewport,
+                    &q,
+                    copy::REMOVE_REMOTE_ACTION.text,
+                    false,
+                    s,
+                    faces,
+                );
+                targets.push((Target::Remove, c.action_rect));
+                confirm(c)
+            }),
+            Asking::Removing(_) => {
+                let text = copy::REMOTE_REMOVING.fill(None, &[("name", &self.removing)]);
+                Some(confirm(Confirm::notice(viewport, &text, None, s, faces)))
             }
-            Asking::Delete => (copy::DELETE_DATA.body(vendor), copy::DELETE_ACTION.text),
-            Asking::Info(info) => return self.explain(info),
+            Asking::RemovedHere(_) => {
+                let text = copy::REMOTE_REMOVED_HERE
+                    .fill(None, &[("name", &self.removing), ("device", &self.device)]);
+                Some(confirm(Confirm::notice(
+                    viewport,
+                    &text,
+                    Some(copy::OK.text),
+                    s,
+                    faces,
+                )))
+            }
+            Asking::Details(id) => {
+                let info = self.remotes.iter().find(|r| r.id == id);
+                let state = self.details.as_ref().filter(|(d, _)| *d == id);
+                info.zip(state).map(|(info, (_, state))| {
+                    let m = DetailsModal::new(viewport, info, state, s, faces);
+                    targets.push((Target::Field, m.field));
+                    targets.push((Target::Fingerprint, m.fingerprint));
+                    (m.dialog, m.close, m.remove, m.text)
+                })
+            }
+            Asking::Delete => Some(confirm(Confirm::new(
+                viewport,
+                &copy::DELETE_DATA.body(vendor),
+                copy::DELETE_ACTION.text,
+                true,
+                s,
+                faces,
+            ))),
+            Asking::Info(info) => {
+                let m = self.info_modal(info);
+                Some((m.dialog, m.ok, m.ok, m.text))
+            }
         };
-        let confirm = Confirm::new(viewport, &question, action, s, self.faces.clone());
-        self.push(
-            what,
-            confirm.dialog,
-            (confirm.cancel, confirm.action),
-            confirm.text,
-        );
+        self.close_modal();
+        let Some((dialog, cancel, action, text)) = built else {
+            return;
+        };
+        let id = what.id();
+        match self.router.push_modal(id, dialog) {
+            Ok(()) => {
+                let _ = self.modals.take_events();
+                self.asking = Some((what, cancel, action));
+                self.modal_text = Some(text);
+                self.targets = targets;
+                self.dirty = true;
+            }
+            Err(e) => log::warn!("settings: the {id} modal: {e:?}"),
+        }
     }
 
     /// The removal modal's text for `id` (plan 20261028_01, 3.11): what is
@@ -1476,7 +1744,7 @@ impl SettingsScreen {
     /// offline); then, for the one in use, what comes next.
     fn removal_question(&self, id: RemoteId) -> Option<String> {
         let r = self.remotes.iter().find(|r| r.id == id)?;
-        let name = r.name.as_str();
+        let name = r.display_name.as_str();
         let device = self.device.as_str();
         let mut parts = vec![copy::REMOVE_REMOTE.fill(
             None,
@@ -1494,7 +1762,7 @@ impl SettingsScreen {
         parts.push(told.fill(None, &[("name", name), ("device", device)]));
         if r.active {
             parts.push(match next_remote(&self.remotes, id) {
-                Some(next) => copy::REMOVE_REMOTE_NEXT.fill(None, &[("next", &next.name)]),
+                Some(next) => copy::REMOVE_REMOTE_NEXT.fill(None, &[("next", &next.display_name)]),
                 None => copy::REMOVE_REMOTE_LAST.text.to_string(),
             });
         }
@@ -1517,6 +1785,11 @@ impl SettingsScreen {
 
     /// Opens `info`'s explanation.
     fn explain(&mut self, info: Info) {
+        self.open(Asking::Info(info));
+    }
+
+    /// `info`'s explanation modal.
+    fn info_modal(&self, info: Info) -> InfoModal {
         let copy = info.copy();
         let vendor = self.vendor.as_deref();
         let mut body = copy.body(vendor);
@@ -1527,60 +1800,94 @@ impl SettingsScreen {
             let why = copy::GENERAL_AGENT_UNAVAILABLE.fill(vendor, &[("reason", reason)]);
             body = format!("{why}\n\n{body}");
         }
-        let modal = InfoModal::new(
+        // At 8 remotes: why the + is dim, first.
+        if info == Info::Remotes && self.remotes.len() >= MAX_REMOTES {
+            body = format!("{}\n\n{body}", copy::REMOTES_FULL.text.trim());
+        }
+        InfoModal::new(
             self.modal_viewport(),
             copy.label(),
             &body,
             self.scale(),
             self.faces.clone(),
-        );
-        self.push(
-            Asking::Info(info),
-            modal.dialog,
-            (modal.ok, modal.ok),
-            modal.text,
-        );
+        )
     }
 
-    /// Pushes `dialog` as `what`'s modal.
-    fn push(
-        &mut self,
-        what: Asking,
-        dialog: ModalDialog,
-        (cancel, action): (NodeId, NodeId),
-        text: NodeId,
-    ) {
-        let id = what.id();
-        match self.router.push_modal(id, dialog) {
-            Ok(()) => {
-                self.asking = Some((what, cancel, action));
-                self.modal_text = Some(text);
-                self.dirty = true;
+    /// A tap in the open modal on one of its [`Target`]s.
+    fn modal_target(&mut self, target: Target) -> Option<SettingsHit> {
+        let (what, ..) = self.asking?;
+        match (what, target) {
+            (Asking::Details(id), Target::Field) => {
+                if let Some((_, d)) = self.details.as_mut().filter(|(d, _)| *d == id)
+                    && !d.editing
+                {
+                    d.editing = true;
+                    self.open(what);
+                }
+                None
             }
-            Err(e) => log::warn!("settings: the {id} modal: {e:?}"),
+            (Asking::Details(id), Target::Fingerprint) => {
+                if let Some((_, d)) = self.details.as_mut().filter(|(d, _)| *d == id) {
+                    d.fingerprint_open = !d.fingerprint_open;
+                    self.open(what);
+                }
+                None
+            }
+            // *Remove*: the modal stays, saying so, until the client
+            // answers ([`SettingsScreen::remote_removed`]).
+            (Asking::RemoveRemote(id), Target::Remove) => {
+                self.removing = self
+                    .remotes
+                    .iter()
+                    .find(|r| r.id == id)
+                    .map(|r| r.display_name.clone())
+                    .unwrap_or_default();
+                self.open(Asking::Removing(id));
+                Some(SettingsHit::RemoveRemote(id))
+            }
+            _ => None,
         }
     }
 
     /// What the modal stack says happened to the open modal: its action
-    /// button closed it, or anything else (*Cancel*, a tap outside, Back).
+    /// button closed it, or anything else (*Cancel*, *Close*, a tap
+    /// outside, Back). Details closing save a changed nickname; their
+    /// *Remove* opens the X's confirm modal.
     fn settle_modal(&mut self) -> Option<SettingsHit> {
         let (what, _, action) = self.asking?;
-        let mut hit = None;
-        for event in self.modals.take_events() {
-            if let ModalEvent::Dismissed { by, .. } = event {
-                self.asking = None;
-                self.modal_text = None;
-                self.dirty = true;
-                if by == DismissReason::Control(action) {
-                    hit = match what {
-                        Asking::RemoveRemote(id) => Some(SettingsHit::RemoveRemote(id)),
-                        Asking::Delete => Some(SettingsHit::DeleteData),
-                        Asking::Info(_) => None,
-                    };
+        let by = self
+            .modals
+            .take_events()
+            .into_iter()
+            .find_map(|e| match e {
+                ModalEvent::Dismissed { by, .. } if by != DismissReason::App => Some(by),
+                _ => None,
+            })?;
+        self.asking = None;
+        self.modal_text = None;
+        self.targets.clear();
+        self.dirty = true;
+        let chosen = by == DismissReason::Control(action);
+        match what {
+            Asking::Details(id) => {
+                if let Some((_, d)) = &mut self.details {
+                    d.editing = false;
                 }
+                let hit = (!chosen).then(|| self.commit_nickname()).flatten();
+                self.details = None;
+                if chosen {
+                    self.open(Asking::RemoveRemote(id));
+                }
+                hit
             }
+            Asking::Delete if chosen => Some(SettingsHit::DeleteData),
+            _ => None,
         }
-        hit
+    }
+
+    /// What closing a modal by Back left for the app (a nickname to save).
+    pub fn take_hit(&mut self) -> Option<SettingsHit> {
+        self.pending.take()
     }
 
     /// Carries the pane's fling and the modal's transition on. Returns
@@ -2223,7 +2530,8 @@ mod tests {
         }
     }
 
-    // The Remotes section (plan 20261028_01, step 5).
+    // The Remotes section (plan 20261028_01, step 5; plan 20261024_02, the
+    // 2026-10-28 17:46, 17:48, 17:56 and 17:57 EDT amendments).
 
     /// A remote, paired `n` seconds after 28 Oct 2026 12:00 UTC.
     fn remote(n: u8, active: bool, online: bool) -> RemoteInfo {
@@ -2235,6 +2543,10 @@ mod tests {
             paired_at: Some(1_793_188_800 + u64::from(n)),
             active,
             online,
+            fingerprint_hex: format!("{n}{n}{n}{n}12c4").repeat(8),
+            fingerprint_words: "zoo zone youth wrist wrong yellow".into(),
+            nickname: None,
+            display_name: format!("m{n}"),
         }
     }
 
@@ -2262,6 +2574,16 @@ mod tests {
                 .collect()
         }
 
+        /// The standard row shown with none paired, if it is.
+        fn empty_row(&self) -> Option<(String, Rect)> {
+            let n = self.nodes.as_ref()?;
+            let id = n.remotes_empty;
+            (!self.router.flags(id).contains(NodeFlags::HIDDEN))
+                .then(|| self.router.get::<RemoteRow>(id))
+                .flatten()
+                .map(|r| (r.name().to_string(), r.rect))
+        }
+
         /// The centre of remote row `i`'s X.
         fn remove_point(&self, i: usize) -> [f32; 2] {
             let n = self.nodes.as_ref().unwrap();
@@ -2270,6 +2592,12 @@ mod tests {
                 .unwrap()
                 .remove_rect()
                 .center()
+        }
+
+        /// The centre of remote row `i`, away from its X.
+        fn row_point(&self, i: usize) -> [f32; 2] {
+            let r = self.remote_rows()[i].3;
+            [r.x + 40.0, r.y + r.h * 0.5]
         }
 
         /// The Remotes title's + and ⓘ, and whether the + is dim.
@@ -2281,12 +2609,64 @@ mod tests {
                 .clone()
         }
 
-        /// The note under the remotes, if shown.
-        fn remotes_notes(&self) -> Vec<String> {
+        /// Every Markdown note shown in the Remotes section's place: there
+        /// are none now.
+        fn remotes_has_note(&self) -> bool {
             let Some(n) = &self.nodes else {
-                return Vec::new();
+                return false;
             };
-            self.shown_notes(&[n.remotes_note])
+            let (top, bottom) = {
+                let at = |x| {
+                    self.sections()
+                        .into_iter()
+                        .find(|(t, _)| *t == x)
+                        .map(|(_, y)| y)
+                };
+                (at(Section::Remotes).unwrap(), at(Section::Device).unwrap())
+            };
+            let pane = n.pane;
+            self.router.children(Some(pane)).any(|id| {
+                !self.router.flags(id).contains(NodeFlags::HIDDEN)
+                    && self
+                        .router
+                        .get::<MarkdownView>(id)
+                        .is_some_and(|v| v.rect().y > top && v.rect().y < bottom)
+            })
+        }
+
+        /// The open modal's kind.
+        fn open_modal(&self) -> Option<Asking> {
+            self.asking.map(|(what, ..)| what)
+        }
+
+        /// Where the open modal's `target` is.
+        fn target_point(&self, target: Target) -> [f32; 2] {
+            self.targets
+                .iter()
+                .find(|(t, _)| *t == target)
+                .map(|(_, r)| r.center())
+                .unwrap_or_else(|| panic!("no {target:?}"))
+        }
+
+        /// The labels of the open modal's buttons.
+        fn modal_buttons(&self) -> Vec<String> {
+            self.dialog(|c| {
+                c.children(None)
+                    .filter_map(|id| c.get::<libcontrols::Button>(id))
+                    .map(|b| b.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+        }
+
+        /// The open details' nickname field.
+        fn field(&self) -> Option<super::super::remote_details::NicknameField> {
+            self.dialog(|c| {
+                c.children(None)
+                    .find_map(|id| c.get::<super::super::remote_details::NicknameField>(id))
+                    .cloned()
+            })
+            .flatten()
         }
     }
 
@@ -2312,6 +2692,7 @@ mod tests {
         assert_eq!(rect.h, ROW_H * 2.0, "52 pt");
         assert_eq!(rows[1].1, None, "only the one in use says so");
         assert_eq!(rows[1].3.y, rect.y + rect.h, "in pairing order");
+        assert!(s.empty_row().is_none());
         // Under the Remotes title, above Device.
         let title_y = |x| s.sections().into_iter().find(|(t, _)| *t == x).unwrap().1;
         assert!(rect.y > title_y(Section::Remotes));
@@ -2322,20 +2703,32 @@ mod tests {
         // A row is drawn: its two lines and its X.
         let mut list = DrawList::new();
         assert!(s.draw(&mut list, &crate::theme::testing::draw_context(), None));
-        assert!(
-            s.remotes_notes().is_empty(),
-            "no note with remotes and room"
-        );
+        assert!(!s.remotes_has_note(), "standard rows only");
     }
 
     #[test]
-    fn no_remote_shows_the_empty_note_and_the_title_explains_remotes() {
+    fn a_rows_first_line_is_the_display_name() {
+        let mut named = remote(2, false, false);
+        named.nickname = Some("Office".into());
+        named.display_name = "Office".into();
+        let mut clash = remote(3, false, false);
+        clash.display_name = "m3:7400".into();
+        let s = with_remotes(vec![remote(1, true, true), named, clash]);
+        let names: Vec<String> = s.remote_rows().into_iter().map(|r| r.0).collect();
+        assert_eq!(names, ["m1", "Office", "m3:7400"]);
+    }
+
+    #[test]
+    fn no_remote_is_one_standard_row_and_the_title_explains_remotes() {
         let mut s = with_remotes(Vec::new());
         assert!(s.remote_rows().is_empty());
-        assert_eq!(
-            s.remotes_notes(),
-            [copy::REMOTES_EMPTY.text.trim().to_string()]
-        );
+        let (label, rect) = s.empty_row().expect("the empty row");
+        assert_eq!(label, "No remotes paired");
+        assert_eq!(rect.h, ROW_H * 2.0, "a standard 52 pt row");
+        assert!(!s.remotes_has_note(), "no note under it");
+        // It takes no taps.
+        assert_eq!(tap(&mut s, rect.x + 40.0, rect.y + rect.h * 0.5), None);
+        assert!(!s.asking());
         // The ⓘ beside the title opens the explanation.
         let [x, y] = s.remotes_title().info_rect().center();
         assert_eq!(tap(&mut s, x, y), None);
@@ -2354,11 +2747,16 @@ mod tests {
                 "{word}: {text}"
             );
         }
+        assert!(!text.contains("most this phone keeps"), "not full: {text}");
         assert!(s.back());
+        // A remote paired: the empty row goes.
+        s.set_remotes(vec![remote(1, true, true)]);
+        assert!(s.empty_row().is_none());
+        assert_eq!(s.remote_rows().len(), 1);
     }
 
     #[test]
-    fn the_plus_opens_the_add_mode_and_is_dim_at_eight() {
+    fn the_plus_opens_the_add_mode_and_at_eight_is_dim_and_says_why() {
         let mut s = with_remotes(vec![remote(1, true, true)]);
         let t = s.remotes_title();
         let add = t.add_rect();
@@ -2373,18 +2771,26 @@ mod tests {
             Some(SettingsHit::AddRemote)
         );
         assert!(!s.asking());
-        // At 8: dim, no taps, and the note says why.
+        // At 8: dim, and a tap on it, as on the ⓘ, says why.
         let eight: Vec<_> = (1..=8).map(|n| remote(n, n == 1, true)).collect();
         assert_eq!(eight.len(), MAX_REMOTES);
         s.set_remotes(eight);
         let t = s.remotes_title();
         assert!(t.full);
+        assert!(!s.remotes_has_note(), "no note: the ⓘ says it");
         let [x, y] = t.add_rect().center();
-        assert_eq!(tap(&mut s, x, y), None, "dim, it takes no taps");
-        assert_eq!(
-            s.remotes_notes(),
-            [copy::REMOTES_FULL.text.trim().to_string()]
+        assert_eq!(tap(&mut s, x, y), None, "no add mode");
+        assert_eq!(s.open_modal(), Some(Asking::Info(Info::Remotes)));
+        let text = s.modal_text();
+        assert!(
+            text.starts_with("Remotes 8 remotes is the most this phone keeps."),
+            "why, first: {text}"
         );
+        assert!(s.back());
+        let [x, y] = t.info_rect().center();
+        tap(&mut s, x, y);
+        assert!(s.modal_text().contains("8 remotes is the most"));
+        assert!(s.back());
         // Drawn dim.
         let ctx = crate::theme::testing::draw_context();
         let alpha = |full| {
@@ -2401,23 +2807,19 @@ mod tests {
     }
 
     #[test]
-    fn a_remotes_x_asks_first_and_remove_confirms() {
+    fn a_remotes_x_asks_first_and_remove_shows_removing_in_the_modal() {
         let remotes = vec![
             remote(1, true, true),
             remote(2, false, false),
             remote(3, false, false),
         ];
         let mut s = with_remotes(remotes.clone());
-        // A tap on the row itself does nothing.
-        let row = s.remote_rows()[1].3;
-        assert_eq!(tap(&mut s, row.x + 40.0, row.y + row.h * 0.5), None);
-        assert!(!s.asking());
 
         // Another remote: the revoke probe's paragraph, nothing on what is
         // next.
         let [x, y] = s.remove_point(1);
         assert_eq!(tap(&mut s, x, y), None);
-        assert!(s.asking(), "the X asks first");
+        assert_eq!(s.open_modal(), Some(Asking::RemoveRemote(RemoteId([2; 8]))));
         let text = s.modal_text();
         assert!(
             text.contains("Remove m2 (m2.tail1a2b3c.ts.net:7347, 2222 12c4)"),
@@ -2430,24 +2832,57 @@ mod tests {
             !text.contains("next") && !text.contains("last remote"),
             "{text}"
         );
+        assert_eq!(s.modal_buttons(), ["Cancel", "Remove"]);
         // Cancel: nothing.
         let (cancel, action) = s.modal_points();
         assert_eq!(tap(&mut s, cancel[0], cancel[1]), None);
         assert!(!s.asking());
-        // Remove: the remote's id.
+        // Remove: the remote's id, and the modal stays, saying so.
         tap(&mut s, x, y);
         assert_eq!(
             tap(&mut s, action[0], action[1]),
             Some(SettingsHit::RemoveRemote(RemoteId([2; 8])))
         );
-        assert!(!s.asking(), "closed at once");
+        assert_eq!(s.open_modal(), Some(Asking::Removing(RemoteId([2; 8]))));
+        let text = s.modal_text();
         assert!(
-            !s.modals
-                .contains(Asking::RemoveRemote(RemoteId([2; 8])).id())
+            text.starts_with("Removing m2: asking it to forget this phone"),
+            "{text}"
         );
+        assert!(s.modal_buttons().is_empty(), "nothing to press meanwhile");
+        // Another remote's answer leaves it.
+        s.remote_removed(RemoteId([3; 8]), "m3", true);
+        assert!(s.asking());
+        // The daemon answered: it closes.
+        s.remote_removed(RemoteId([2; 8]), "m2", true);
+        assert!(!s.asking());
+        assert!(!s.modals.contains(Asking::Removing(RemoteId([2; 8])).id()));
+
+        // Not answered: "removed on this phone only" stays until closed.
+        tap(&mut s, x, y);
+        let (_, action) = s.modal_points();
+        tap(&mut s, action[0], action[1]);
+        s.set_remotes(vec![remotes[0].clone(), remotes[2].clone()]);
+        assert_eq!(s.open_modal(), Some(Asking::Removing(RemoteId([2; 8]))));
+        s.remote_removed(RemoteId([2; 8]), "m2", false);
+        assert_eq!(s.open_modal(), Some(Asking::RemovedHere(RemoteId([2; 8]))));
+        let text = s.modal_text();
+        assert!(text.contains("Removed m2 on this phone only"), "{text}");
+        assert!(text.contains("`s23`".trim_matches('`')), "{text}");
+        s.tick(Duration::from_secs(5));
+        assert!(s.asking(), "it stays");
+        assert_eq!(s.modal_buttons(), ["OK"]);
+        let (ok, _) = s.modal_points();
+        assert_eq!(tap(&mut s, ok[0], ok[1]), None);
+        assert!(!s.asking(), "closed by OK");
+        // A result with no modal open (as for Delete data) does nothing.
+        s.remote_removed(RemoteId([3; 8]), "m3", false);
+        assert!(!s.asking());
+        assert!(!s.remotes_has_note());
 
         // The one in use, online: told over the open link; the most
         // recently paired of the rest is next.
+        let mut s = with_remotes(remotes.clone());
         let [x, y] = s.remove_point(0);
         tap(&mut s, x, y);
         let text = s.modal_text();
@@ -2481,33 +2916,210 @@ mod tests {
         tap(&mut s, x, y);
         let text = s.modal_text();
         assert!(text.contains("the last remote"), "{text}");
-        // The modal's button says Remove.
-        let (_, action) = s.modal_points();
-        let label = s
-            .dialog(|c| {
-                c.children(None)
-                    .filter_map(|id| c.get::<libcontrols::Button>(id))
-                    .find(|b| b.rect.center() == action)
-                    .map(|b| b.text.clone())
-            })
-            .flatten();
-        assert_eq!(label.as_deref(), Some("Remove"));
     }
 
     #[test]
-    fn a_result_note_shows_under_the_remotes() {
+    fn a_rows_tap_opens_its_details_and_close_closes_them() {
+        let mut s = with_remotes(vec![remote(1, true, true), remote(2, false, false)]);
+        let [x, y] = s.row_point(1);
+        assert_eq!(tap(&mut s, x, y), None);
+        assert_eq!(s.open_modal(), Some(Asking::Details(RemoteId([2; 8]))));
+        let text = s.modal_text();
+        for part in [
+            "m2",
+            "not in use",
+            "Nickname",
+            "Hostname",
+            "m2 at m2.tail1a2b3c.ts.net:7347",
+            "Paired 28 Oct 2026 at ",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        // The fingerprint is a collapsed "Fingerprint" section.
+        let row = s
+            .dialog(|c| {
+                c.children(None)
+                    .find_map(|id| c.get::<super::super::remote_details::Disclosure>(id))
+                    .cloned()
+            })
+            .flatten()
+            .expect("the Fingerprint row");
+        assert_eq!(row.label, "Fingerprint");
+        assert!(!row.open);
+        assert!(!text.contains("zoo zone youth"), "{text}");
+        assert!(!text.contains("2222 12c4 2222 12c4"), "{text}");
+        assert_eq!(s.modal_buttons(), ["Close", "Remove"]);
+        // The field shows the default, as there is no nickname.
+        let f = s.field().expect("the nickname field");
+        assert_eq!(f.text, "");
+        assert_eq!(f.placeholder, "m2 (default)");
+        assert!(!f.editing);
+        // Close: nothing to save.
+        let (close, _) = s.modal_points();
+        assert_eq!(tap(&mut s, close[0], close[1]), None);
+        assert!(!s.asking());
+        // The one in use says so; one paired before the list says that.
+        let mut old = remote(1, true, false);
+        old.paired_at = None;
+        s.set_remotes(vec![old, remote(2, false, false)]);
+        let [x, y] = s.row_point(0);
+        tap(&mut s, x, y);
+        let text = s.modal_text();
+        assert!(text.contains("in use · offline"), "{text}");
+        assert!(text.contains("Paired before this list"), "{text}");
+        // Back closes them too.
+        assert!(s.back());
+        assert!(!s.asking());
+        assert_eq!(s.take_hit(), None);
+    }
+
+    #[test]
+    fn the_fingerprint_expands_to_the_words_and_the_hex_in_the_mono_face() {
         let mut s = with_remotes(vec![remote(1, true, true)]);
-        s.set_remotes_note(Some("Removed m2: it answered.".into()));
-        assert_eq!(s.remotes_notes(), ["Removed m2: it answered."]);
-        // Kept across a new layout.
+        let [x, y] = s.row_point(0);
+        tap(&mut s, x, y);
+        let [fx, fy] = s.target_point(Target::Fingerprint);
+        assert_eq!(tap(&mut s, fx, fy), None);
+        assert!(s.asking(), "still open");
+        let text = s.modal_text();
+        assert!(text.contains("zoo zone youth wrist wrong yellow"), "{text}");
+        assert!(text.contains("1111 12c4 1111 12c4"), "{text}");
+        assert!(text.contains("BLAKE2s-256 of its key"), "{text}");
+        // In code spans: the terminal face.
+        let sources: Vec<String> = s
+            .dialog(|c| {
+                c.children(None)
+                    .filter_map(|id| c.get::<MarkdownView>(id).map(|v| v.source().to_string()))
+                    .collect()
+            })
+            .unwrap();
+        let hex = sources
+            .iter()
+            .find(|m| m.contains("12c4"))
+            .expect("the hex");
+        assert_eq!(hex.matches("`1111 12c4 1111 12c4`").count(), 4, "{hex}");
+        // Collapsed again.
+        let [fx, fy] = s.target_point(Target::Fingerprint);
+        tap(&mut s, fx, fy);
+        assert!(!s.modal_text().contains("zoo zone"));
+    }
+
+    #[test]
+    fn the_nickname_is_typed_in_the_details_and_saved() {
+        let mut s = with_remotes(vec![remote(1, true, true), remote(2, false, false)]);
+        let [x, y] = s.row_point(1);
+        tap(&mut s, x, y);
+        assert_eq!(s.nickname_editing(), None);
+        // A tap on the field: typing, and the keyboard is for it.
+        let [fx, fy] = s.target_point(Target::Field);
+        assert_eq!(tap(&mut s, fx, fy), None);
+        assert_eq!(s.nickname_editing(), Some(""));
+        assert!(s.field().unwrap().editing);
+        // The soft keyboard's text, one line.
+        s.set_nickname_text("Off\nice");
+        assert_eq!(s.nickname_editing(), Some("Office"));
+        assert_eq!(s.field().unwrap().text, "Office");
+        // A new layout (the keyboard coming up) keeps the modal and draft.
         s.set_layout(Layout {
-            w: 1200.0,
             h: 4000.0,
+            bottom: 900.0,
             ..PHONE
         });
-        assert_eq!(s.remotes_notes(), ["Removed m2: it answered."]);
-        s.set_remotes_note(None);
-        assert!(s.remotes_notes().is_empty());
+        assert_eq!(s.open_modal(), Some(Asking::Details(RemoteId([2; 8]))));
+        assert_eq!(s.nickname_editing(), Some("Office"));
+        // The keyboard's Done: saved.
+        assert_eq!(
+            s.nickname_done(),
+            Some(SettingsHit::SetNickname {
+                id: RemoteId([2; 8]),
+                nickname: Some("Office".into())
+            })
+        );
+        assert_eq!(s.nickname_editing(), None);
+        assert!(s.asking(), "the details stay");
+        // Closing them does not ask again.
+        let (close, _) = s.modal_points();
+        assert_eq!(tap(&mut s, close[0], close[1]), None);
+
+        // The client's rows come back with it: shown, and in the field.
+        let mut named = remote(2, false, false);
+        named.nickname = Some("Office".into());
+        named.display_name = "Office".into();
+        s.set_remotes(vec![remote(1, true, true), named]);
+        assert_eq!(s.remote_rows()[1].0, "Office");
+        let [x, y] = s.row_point(1);
+        tap(&mut s, x, y);
+        assert!(s.modal_text().contains("Office"));
+        let f = s.field().unwrap();
+        assert_eq!(f.text, "Office");
+        assert_eq!(f.placeholder, "m2 (default)");
+
+        // Cleared with a physical keyboard, then closed by a tap outside:
+        // back to the default.
+        let [fx, fy] = s.target_point(Target::Field);
+        tap(&mut s, fx, fy);
+        for _ in 0..6 {
+            assert_eq!(s.nickname_key(Key::Character('\u{8}')), Typed::Edited);
+        }
+        assert_eq!(s.nickname_editing(), Some(""));
+        assert_eq!(
+            s.nickname_key(Key::Escape),
+            Typed::Done(Some(SettingsHit::SetNickname {
+                id: RemoteId([2; 8]),
+                nickname: None
+            }))
+        );
+        // Typed again, then the details closed by Back: saved then.
+        let [fx, fy] = s.target_point(Target::Field);
+        tap(&mut s, fx, fy);
+        assert_eq!(s.nickname_key(Key::Character('M')), Typed::Edited);
+        s.nickname_dismissed();
+        assert_eq!(s.nickname_editing(), None, "the keyboard put away");
+        assert_eq!(s.nickname_key(Key::Character('x')), Typed::No);
+        assert!(s.back());
+        assert_eq!(
+            s.take_hit(),
+            Some(SettingsHit::SetNickname {
+                id: RemoteId([2; 8]),
+                nickname: Some("M".into())
+            })
+        );
+        // Spaces only: the default.
+        let [x, y] = s.row_point(1);
+        tap(&mut s, x, y);
+        let [fx, fy] = s.target_point(Target::Field);
+        tap(&mut s, fx, fy);
+        s.set_nickname_text("   ");
+        assert_eq!(
+            s.nickname_done(),
+            Some(SettingsHit::SetNickname {
+                id: RemoteId([2; 8]),
+                nickname: None
+            })
+        );
+    }
+
+    #[test]
+    fn remove_in_the_details_opens_the_xs_confirm_modal() {
+        let mut s = with_remotes(vec![remote(1, true, true), remote(2, false, false)]);
+        let [x, y] = s.row_point(1);
+        tap(&mut s, x, y);
+        let (_, remove) = s.modal_points();
+        assert_eq!(tap(&mut s, remove[0], remove[1]), None);
+        assert_eq!(s.open_modal(), Some(Asking::RemoveRemote(RemoteId([2; 8]))));
+        assert!(s.modal_text().contains("Remove m2"));
+        let (_, action) = s.modal_points();
+        assert_eq!(
+            tap(&mut s, action[0], action[1]),
+            Some(SettingsHit::RemoveRemote(RemoteId([2; 8])))
+        );
+        assert_eq!(s.open_modal(), Some(Asking::Removing(RemoteId([2; 8]))));
+        // The details of a remote that goes close with it.
+        s.remote_removed(RemoteId([2; 8]), "m2", true);
+        let [x, y] = s.row_point(1);
+        tap(&mut s, x, y);
+        s.set_remotes(vec![remote(1, true, true)]);
+        assert!(!s.asking());
     }
 
     #[test]

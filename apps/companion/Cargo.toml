@@ -76,7 +76,7 @@ android_logger = "0.14"
 # whose manifest metadata carries the camera's.
 [build-dependencies]
 libmorph-build = { git = "https://github.com/tmzt/libmorph", rev = "b8eb1010d5886dba636603e189a00262de60447f" }
-# SETTINGS_COPY.md, read into settings_copy.rs (plan 20261024_04, decision
+# copy/*.md, read into copy.rs (plan 20261024_04, decision
 # 6), at the revision the root crate pins for ADDITIONAL_PROMPTS.md.
 libtypedmd = { git = "https://github.com/tmzt/libtypedmd", rev = "a61c091e6420a1dfc40e89b8600cd26e628e5f7a" }
 # themes.toml, checked with build/themes_check.rs (plan 20261024_05), as

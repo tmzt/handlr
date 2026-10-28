@@ -1,16 +1,22 @@
 //! A remote's row in the Remotes section (plan 20261028_01, decision 26):
 //! two lines, and an **X** at the right.
 //!
-//! - Line 1, at the label's size: the remote's name, and after it, for
-//!   the one in use, a dim *in use*, or *in use · offline* while its
-//!   connection is down.
+//! - Line 1, at the label's size: the remote's shown name (its nickname,
+//!   or the default: [`RemoteInfo::display_name`]; plan 20261024_02, the
+//!   2026-10-28 17:56 and 17:57 EDT amendments), and after it, for the one
+//!   in use, a dim *in use*, or *in use · offline* while its connection is
+//!   down.
 //! - Line 2, at the subtitle's size and dim: `<host:port> · <fingerprint>
 //!   · paired <date>`, the date as `28 Oct 2026` in local time, or *paired
 //!   before this list*; cut with an ellipsis in the host when too long.
 //! - The X: a 44 pt target, drawn as two strokes in the dim colour (not
 //!   red: the destructive word is the modal's red button). A tap on it is
-//!   [`REMOVE_PART`]; a tap elsewhere on the row is the body, which does
-//!   nothing yet (switching remotes will go there).
+//!   [`REMOVE_PART`]; a tap elsewhere on the row is the body, which opens
+//!   the remote's details ([`super::remote_details`]).
+//!
+//! With no remote, one row of the section is the standard row
+//! *No remotes paired* ([`RemoteRow::placeholder`]): its label, dim, and
+//! no X; it takes no taps.
 
 use flankr_companion::RemoteInfo;
 use libcontrols::{
@@ -33,6 +39,13 @@ const GLYPH: f32 = 12.0;
 /// `secs` (Unix seconds) as `28 Oct 2026`, in the phone's time zone
 /// (`localtime_r`; std has no time zones).
 pub fn paired_date(secs: u64) -> String {
+    paired_date_time(secs).0
+}
+
+/// `secs` (Unix seconds) as its date, `28 Oct 2026`, and its time of day,
+/// `14:05`, in the phone's time zone; UTC when the C library has no
+/// answer.
+pub fn paired_date_time(secs: u64) -> (String, String) {
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
@@ -40,16 +53,29 @@ pub fn paired_date(secs: u64) -> String {
     // SAFETY: `localtime_r` writes only into `tm`, which outlives the call.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     let ok = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
-    let (day, month, year) = if ok {
+    let (day, month, year, hour, minute) = if ok {
         (
             tm.tm_mday as u32,
             tm.tm_mon as usize,
             tm.tm_year as i64 + 1900,
+            tm.tm_hour as u32,
+            tm.tm_min as u32,
         )
     } else {
-        civil(secs)
+        let (day, month, year) = civil(secs);
+        let of_day = secs % 86_400;
+        (
+            day,
+            month,
+            year,
+            (of_day / 3600) as u32,
+            (of_day % 3600 / 60) as u32,
+        )
     };
-    format!("{day} {} {year}", MONTHS[month.min(11)])
+    (
+        format!("{day} {} {year}", MONTHS[month.min(11)]),
+        format!("{hour:02}:{minute:02}"),
+    )
 }
 
 /// The UTC day, month (0-based) and year of `secs`, for when the C library
@@ -96,6 +122,9 @@ pub fn detail(info: &RemoteInfo, cols: usize) -> String {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteRow {
     pub info: Option<RemoteInfo>,
+    /// With no `info`, the label of a standard row that takes no taps
+    /// (*No remotes paired*).
+    pub placeholder: Option<&'static str>,
     pub rect: Rect,
     pub scale: f32,
 }
@@ -104,14 +133,18 @@ impl RemoteRow {
     pub fn new(scale: f32) -> Self {
         RemoteRow {
             info: None,
+            placeholder: None,
             rect: Rect::new(0.0, 0.0, 1.0, 1.0),
             scale,
         }
     }
 
-    /// The first line's name.
+    /// The first line's name: the shown name, or the placeholder's label.
     pub fn name(&self) -> &str {
-        self.info.as_ref().map_or("", |i| i.name.as_str())
+        match &self.info {
+            Some(i) => i.display_name.as_str(),
+            None => self.placeholder.unwrap_or(""),
+        }
     }
 
     /// The dim words after the name: *in use*, *in use · offline*, or
@@ -156,11 +189,16 @@ impl RemoteRow {
 
 impl DrawControl for RemoteRow {
     fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
-        if self.info.is_none() {
-            return;
-        }
         let s = self.scale;
         let px = LABEL_PT * s;
+        if self.info.is_none() {
+            if let Some(label) = self.placeholder {
+                let x = self.rect.x + PAD * s;
+                let y = self.rect.y + (self.rect.h - line_h(px)) * 0.5;
+                ctx.draw_text(list, label, [x, y], px, theme().dim);
+            }
+            return;
+        }
         let sub = SUBTITLE_PT * s;
         let x = self.rect.x + PAD * s;
         let y = self.rect.y + (self.rect.h - line_h(px) - line_h(sub)) * 0.5;
@@ -238,6 +276,10 @@ mod tests {
             paired_at: None,
             active,
             online,
+            fingerprint_hex: "3f9a12c4".repeat(8),
+            fingerprint_words: "able baker charlie delta echo fox".into(),
+            nickname: None,
+            display_name: name.into(),
         }
     }
 
@@ -245,6 +287,16 @@ mod tests {
     fn the_date_is_day_month_year() {
         // 2026-10-28 12:00 UTC: the same day in every zone within ±11 h.
         assert_eq!(paired_date(1_793_188_800), "28 Oct 2026");
+        // And a time of day, as hh:mm, in the phone's zone.
+        let (date, time) = paired_date_time(1_793_188_800 + 5 * 60);
+        assert_eq!(date, "28 Oct 2026");
+        let b = time.as_bytes();
+        assert!(
+            b.len() == 5
+                && b[2] == b':'
+                && time.replace(':', "").bytes().all(|c| c.is_ascii_digit()),
+            "{time}"
+        );
         assert_eq!(civil(1_793_188_800), (28, 9, 2026));
         assert_eq!(civil(0), (1, 0, 1970));
         assert_eq!(civil(951_782_400), (29, 1, 2000));
@@ -282,7 +334,11 @@ mod tests {
                 &EventContext::default(),
             )
         };
-        // An empty row is not there.
+        // An empty row is not there, nor is the placeholder row.
+        assert_eq!(click(&row, [40.0, 150.0]), None);
+        assert!(row.hit_test([40.0, 150.0]).is_none());
+        row.placeholder = Some("No remotes paired");
+        assert_eq!(row.name(), "No remotes paired");
         assert_eq!(click(&row, [40.0, 150.0]), None);
         assert!(row.hit_test([40.0, 150.0]).is_none());
         row.info = Some(info("m4", true, false));
@@ -300,6 +356,11 @@ mod tests {
             })
         );
         assert_eq!(row.status(), Some("in use · offline"));
+        // The first line is the shown name, not the daemon's.
+        let mut named = info("m4", false, false);
+        named.display_name = "Office".into();
+        row.info = Some(named);
+        assert_eq!(row.name(), "Office");
         row.info = Some(info("m4", true, true));
         assert_eq!(row.status(), Some("in use"));
         row.info = Some(info("m4", false, false));

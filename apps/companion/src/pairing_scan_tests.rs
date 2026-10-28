@@ -23,11 +23,19 @@ use super::probe::{self, Probe};
 use crate::ui::Hit;
 
 /// Runs `script` on a fresh app with `args`; `None` without a GPU. Its
-/// keys are files in a directory of its own (`--keys`), so the host's key
-/// store, and any remote paired there, is neither read nor changed.
+/// keys are files in a directory of its own (`--keys`), and its data
+/// directory too (`--data`: settings, each remote's state), so the host's
+/// key store and data, and any remote paired there, are neither read nor
+/// changed.
 fn run(script: &str, args: &[&str]) -> Option<Probe> {
-    let dir = tempfile::tempdir().unwrap();
+    run_in(&tempfile::tempdir().unwrap(), script, args)
+}
+
+/// As [`run`], in `dir`, which the test can look in afterwards.
+fn run_in(dir: &tempfile::TempDir, script: &str, args: &[&str]) -> Option<Probe> {
     let keys = dir.path().join("keys");
+    let data = dir.path().join("data");
+    std::fs::create_dir_all(&data).unwrap();
     let run = ScriptRun {
         spec: libmorph::libdevice::GALAXY_S24,
         out: OutDir::Exact(dir.path().join("out")),
@@ -36,6 +44,7 @@ fn run(script: &str, args: &[&str]) -> Option<Probe> {
         args: std::iter::once("companion")
             .chain(args.iter().copied())
             .chain(["--keys", keys.to_str().unwrap()])
+            .chain(["--data", data.to_str().unwrap()])
             .map(String::from)
             .collect(),
     };
@@ -51,6 +60,18 @@ fn run(script: &str, args: &[&str]) -> Option<Probe> {
             Some(probe::take())
         }
     }
+}
+
+/// A scripted run's data, the app's and the client's (each remote's
+/// `state.redb`), are in the test's own directory, never the host's.
+#[test]
+fn a_scripted_run_keeps_its_data_in_the_tests_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let Some(p) = run_in(&dir, "frames 2\n", &[]) else {
+        return;
+    };
+    let data = dir.path().join("data");
+    assert_eq!(p.data_dirs, Some((Some(data.clone()), Some(data))));
 }
 
 /// The window as it opens with the camera, for its controls' places.

@@ -160,6 +160,11 @@ struct Args {
     /// libmorph's scripted camera (plan 20261028_02, decision 18).
     #[cfg(test)]
     camera: bool,
+    /// `--data <dir>` (tests only): the data directory, for the app and the
+    /// client's `remotes/<id>/state.redb`, in place of libmorph's. A test
+    /// build never falls back to the host's own directory.
+    #[cfg(test)]
+    data: Option<PathBuf>,
 }
 
 /// Seconds as a silence: a positive number, else `None`.
@@ -194,6 +199,8 @@ impl Args {
                 "--name" => out.name = value(),
                 #[cfg(test)]
                 "--camera" => out.camera = true,
+                #[cfg(test)]
+                "--data" => out.data = value().map(PathBuf::from),
                 "--dictation-silence" => {
                     out.dictation_silence = value().and_then(|v| {
                         let silence = parse_silence(&v);
@@ -300,9 +307,6 @@ pub struct App {
     settings_screen: Option<SettingsScreen>,
     /// The paired remotes, as the client last gave them (plan 20261028_01).
     remotes: Vec<RemoteInfo>,
-    /// The note under them in Settings: the last removal's or pairing's
-    /// result.
-    remotes_note: Option<String>,
     /// The name this phone pairs as: its `[[client]]` entry's in a
     /// daemon's `auth.toml`.
     device: String,
@@ -677,6 +681,7 @@ impl App {
                 address,
                 words,
                 fingerprint,
+                fingerprint_hex,
                 expires_in_secs,
                 fallback,
             } => {
@@ -703,6 +708,7 @@ impl App {
                     address,
                     words,
                     fingerprint,
+                    &fingerprint_hex,
                     expires_in_secs,
                     fallback,
                     Instant::now(),
@@ -717,13 +723,10 @@ impl App {
                 log::info!("pairing: paired as {name}");
                 let stop = self.scanner.reset();
                 self.call_camera(stop);
-                let server = self.pairing.paired(&self.remotes);
+                // The window's success state says so; Settings' row shows
+                // after Done, with no note (the 17:48 EDT amendment).
+                self.pairing.paired(&self.remotes);
                 self.note = None;
-                if self.pairing.adding {
-                    // For Settings, where its row shows after Done.
-                    let note = remotes::paired_note(server.as_deref().unwrap_or_default());
-                    self.set_remotes_note(Some(note));
-                }
                 self.screen.invalidate();
             }
             Event::PairFailed(why) => {
@@ -875,13 +878,15 @@ impl App {
                     screen.set_remotes(self.remotes.clone());
                 }
             }
-            Event::RemoteRemoved { name, daemon, .. } => {
+            Event::RemoteRemoved { id, name, daemon } => {
                 log::info!(
                     "remotes: removed {name}{}",
                     if daemon { "" } else { " here only" }
                 );
-                let note = remotes::removed_note(&name, daemon, &self.device);
-                self.set_remotes_note(Some(note));
+                // Its confirm modal closes, or says it was removed here only.
+                if let Some(screen) = &mut self.settings_screen {
+                    screen.remote_removed(id, &name, daemon);
+                }
             }
             // A pairing named a remote already listed and its addresses
             // were checked: the window says so until Done.
@@ -892,7 +897,6 @@ impl App {
                 self.pairing.remote_updated(id, &name, &self.remotes);
                 self.note = None;
                 self.screen.invalidate();
-                self.set_remotes_note(Some(remotes::already_note(&name)));
             }
             Event::Unpaired { daemon } => self.unpaired(daemon),
             Event::SessionCards(cards) => {
@@ -1139,12 +1143,27 @@ impl App {
             Some(text) => Some((Typing::Terminal, text.as_str())),
             None => prompt,
         };
+        // A remote's nickname in Settings, over everything else.
+        let nickname = self
+            .settings_screen
+            .as_ref()
+            .and_then(SettingsScreen::nickname_editing);
+        let field = nickname.is_some();
+        let typing = match nickname {
+            Some(text) => Some((Typing::Field, text)),
+            None => typing,
+        };
         let screen = self.prompt_screen();
         match self.keyboard.sync(typing, ctx.text_input_active(), screen) {
             Ime::Start(text) => {
                 let mut options = libmorph::TextInputOptions::default();
-                options.multiline = true;
-                options.action = libmorph::TextAction::None;
+                // A nickname is one line, and the keyboard's Done saves it.
+                options.multiline = !field;
+                options.action = if field {
+                    libmorph::TextAction::Done
+                } else {
+                    libmorph::TextAction::None
+                };
                 ctx.start_text_input(&text, &options);
             }
             Ime::Stop => ctx.stop_text_input(),
@@ -1225,7 +1244,6 @@ impl App {
             &self.notify_ask,
         ))));
         screen.set_remotes(self.remotes.clone());
-        screen.set_remotes_note(self.remotes_note.clone());
         screen.set_device(&self.device);
         screen.set_cache(self.cache);
         self.settings_screen = Some(screen);
@@ -1250,6 +1268,17 @@ impl App {
             }
             SettingsHit::AddRemote => self.open_add(),
             SettingsHit::RemoveRemote(id) => self.remove_remote(id),
+            SettingsHit::SetNickname { id, nickname } => {
+                log::info!(
+                    "remotes: {} a nickname",
+                    if nickname.is_some() {
+                        "setting"
+                    } else {
+                        "clearing"
+                    }
+                );
+                self.send(Input::SetNickname { id, nickname });
+            }
             SettingsHit::DeleteData => self.delete_everything(),
             SettingsHit::ClearCache => {
                 log::info!("settings: clearing the cache");
@@ -1318,14 +1347,6 @@ impl App {
         self.previewing = true;
     }
 
-    /// The note under Settings' remotes, there now and when it next opens.
-    fn set_remotes_note(&mut self, note: Option<String>) {
-        self.remotes_note = note;
-        if let Some(screen) = &mut self.settings_screen {
-            screen.set_remotes_note(self.remotes_note.clone());
-        }
-    }
-
     /// The **+** in Remotes: the pairing screen in its add mode, over
     /// Settings, with a pushed `pair.txt` read at once (decision 9).
     fn open_add(&mut self) {
@@ -1348,15 +1369,11 @@ impl App {
         self.send(input);
         let stop = self.scanner.reset();
         self.call_camera(stop);
-        // A pairing in progress was cancelled: the window (first run) or
-        // Settings (the add mode) says nothing was added.
-        if pending {
-            if adding {
-                let note = settings::copy::PAIRING_CANCELLED.text.trim().to_string();
-                self.set_remotes_note(Some(note));
-            } else {
-                self.scanner.cancelled = true;
-            }
+        // A pairing in progress was cancelled: the first-run window says
+        // nothing was added; the add mode returns to Settings, which has
+        // no note (the 17:48 EDT amendment).
+        if pending && !adding {
+            self.scanner.cancelled = true;
         }
         self.field_focused = false;
         self.note = None;
@@ -1403,7 +1420,6 @@ impl App {
             .map(|r| r.name.clone())
             .unwrap_or_default();
         log::info!("remotes: removing {name}");
-        self.set_remotes_note(Some(remotes::removing_note(&name)));
         self.send(Input::RemoveRemote(id));
     }
 
@@ -1456,7 +1472,6 @@ impl App {
         self.call_camera(stop);
         self.pairing = remotes::Pairing::default();
         self.remotes.clear();
-        self.remotes_note = None;
         self.card = None;
         self.dictation = None;
         self.agents.clear();
@@ -2212,10 +2227,27 @@ impl App {
             self.field_focused = false;
             return KeyStatus::Handled;
         }
-        // The system Back cancels the settings' modal, or closes them.
+        // Typing a remote's nickname (a physical keyboard): Enter saves
+        // it, Escape ends typing.
+        if let Some(screen) = &mut self.settings_screen {
+            match screen.nickname_key(key) {
+                settings::screen::Typed::No => {}
+                settings::screen::Typed::Edited => return KeyStatus::Handled,
+                settings::screen::Typed::Done(hit) => {
+                    if let Some(hit) = hit {
+                        self.settings_hit(hit);
+                    }
+                    return KeyStatus::Handled;
+                }
+            }
+        }
+        // The system Back cancels the settings' modal, or closes them; a
+        // remote's details closed by it save a changed nickname.
         if back && let Some(screen) = &mut self.settings_screen {
             if !screen.back() {
                 self.close_settings();
+            } else if let Some(hit) = screen.take_hit() {
+                self.settings_hit(hit);
             }
             return KeyStatus::Handled;
         }
@@ -2725,14 +2757,23 @@ impl MorphApp for App {
         let audio_config = audio_config(ctx, &args);
         // libmorph's data directory, on every host with a filesystem; the
         // companion's old one where there is none (the web).
+        #[cfg(not(test))]
         let data_dir = ctx
             .data_dir()
             .map(std::path::Path::to_path_buf)
             .or_else(|| Some(FileKeyStore::default_dir()));
+        // Tests: `--data`, else the scripted run's own `storage/`; never
+        // the host's real directory.
+        #[cfg(test)]
+        let data_dir = args
+            .data
+            .clone()
+            .or_else(|| ctx.data_dir().map(std::path::Path::to_path_buf));
         // The desktop's settings.toml was in ~/.config/flankr-companion
         // until libmorph 0.4.0: moved once into the data directory. Only
-        // into the app's own directory, never a scripted run's `storage/`.
-        #[cfg(not(target_os = "android"))]
+        // into the app's own directory, never a scripted run's `storage/`,
+        // and never in a test build.
+        #[cfg(not(any(target_os = "android", test)))]
         if let Some(dir) = data_dir.as_deref()
             && dir.file_name() == Some(std::ffi::OsStr::new(APP_ID))
         {
@@ -2814,7 +2855,6 @@ impl MorphApp for App {
             data_dir,
             settings_screen: None,
             remotes: Vec::new(),
-            remotes_note: None,
             device: device_name(&args),
             deleting: false,
             models,
@@ -2858,6 +2898,12 @@ impl MorphApp for App {
                 config.voice = args.voice.clone();
                 // Each remote's state.redb (plan 20261028_01, decision 14).
                 config.data_dir = ctx.data_dir().map(std::path::Path::to_path_buf);
+                // Tests: the app's own (temporary) data directory.
+                #[cfg(test)]
+                {
+                    config.data_dir = app.data_dir.clone();
+                    probe::data_dirs(app.data_dir.clone(), config.data_dir.clone());
+                }
                 // Tests: unpaired, the client would connect to a daemon
                 // running on the host by its socket, and the pairing window
                 // would give way to the overview; no socket is there.
@@ -3059,6 +3105,27 @@ impl MorphApp for App {
 
     fn on_text_input(&mut self, _ctx: &mut MorphContext, event: &libmorph::TextInputEvent) {
         log::info!("companion: on_text_input: {event:?}");
+        // Into a remote's nickname, in its details.
+        if let Some(screen) = &mut self.settings_screen
+            && screen.nickname_editing().is_some()
+        {
+            match event {
+                libmorph::TextInputEvent::Changed(text) => screen.set_nickname_text(text),
+                libmorph::TextInputEvent::Action(_) => {
+                    let hit = screen.nickname_done();
+                    self.keyboard.close();
+                    if let Some(hit) = hit {
+                        self.settings_hit(hit);
+                    }
+                }
+                libmorph::TextInputEvent::Dismissed => {
+                    self.keyboard.dismiss();
+                    screen.nickname_dismissed();
+                }
+                _ => {}
+            }
+            return;
+        }
         // Into the armed terminal: each edit as the keys that make it.
         if let Some(old) = &self.term_ime {
             match event {
@@ -3304,6 +3371,8 @@ pub(crate) mod probe {
         pub hits: Vec<(Hit, Rect)>,
         /// The scanner's state, as last laid out.
         pub state: String,
+        /// The app's data directory and the client's, as the app started.
+        pub data_dirs: Option<(Option<std::path::PathBuf>, Option<std::path::PathBuf>)>,
     }
 
     impl Probe {
@@ -3329,6 +3398,12 @@ pub(crate) mod probe {
 
     pub fn record(line: String) {
         PROBE.with(|p| p.borrow_mut().log.push(line));
+    }
+
+    /// The data directories the app started with: its own and the
+    /// client's.
+    pub fn data_dirs(app: Option<std::path::PathBuf>, client: Option<std::path::PathBuf>) {
+        PROBE.with(|p| p.borrow_mut().data_dirs = Some((app, client)));
     }
 
     pub fn screen(texts: Vec<String>, hits: Vec<(Hit, Rect)>, state: String) {

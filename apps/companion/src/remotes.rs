@@ -1,6 +1,8 @@
 //! The app's side of the paired remotes (docs/design/20261028_01_MULTIPLE_REMOTES_PLAN.md,
-//! step 5): the pairing screen's state and lines, the notes a removal or a
-//! pairing leaves in Settings' Remotes, and *Delete data*'s removals.
+//! step 5): the pairing screen's state and lines, and *Delete data*'s
+//! removals. A pairing's result stays on the pairing window and a
+//! removal's in its confirm modal: Settings' Remotes has no note (plan
+//! 20261024_02, the 2026-10-28 17:48 EDT amendment).
 //!
 //! - [`Pairing`]: whether the pairing screen is in its **add** mode (the
 //!   **+** in Remotes, decision 9), the link last read ([`LinkRead`]),
@@ -31,7 +33,6 @@
 use std::time::{Duration, Instant};
 
 use flankr_companion::{DeviceCodeFallback, Input, RemoteId, RemoteInfo};
-use libflankr_proto::link;
 
 use crate::settings::copy;
 use crate::theme::{Role, theme};
@@ -67,14 +68,10 @@ pub fn md_escape(text: &str) -> String {
     out
 }
 
-/// BLAKE2s-256 of `key` as 64 hex digits in groups of four.
-pub fn fingerprint_hex(key: &[u8; 32]) -> String {
-    let digits: String = link::fingerprint(key)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    digits
-        .as_bytes()
+/// The whole fingerprint's 64 hex digits (as the client gives them) in
+/// groups of four.
+pub fn hex_groups(hex: &str) -> String {
+    hex.as_bytes()
         .chunks(4)
         .map(|c| String::from_utf8_lossy(c).into_owned())
         .collect::<Vec<_>>()
@@ -90,31 +87,25 @@ pub fn host_of(address: &str) -> &str {
     }
 }
 
-/// What the app read of the pairing link it handed to the client: for
-/// "Connecting to <host>…", and for the full fingerprint in Details, which
-/// `PairingWords` does not carry.
+/// What the app read of the pairing link it handed to the client, for
+/// "Connecting to <host>…" and a finished pairing's name and address. The
+/// fingerprint comes from the client: `PairingWords` and the remote's row
+/// carry it whole.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkRead {
     /// The daemon's name, as the client names it.
     pub server: String,
     /// The link's first `host:port`.
     pub address: String,
-    /// The daemon's fingerprint as six words.
-    pub words: String,
-    /// BLAKE2s-256 of the daemon's key in hex ([`fingerprint_hex`]).
-    pub hex: String,
 }
 
 impl LinkRead {
     /// The link `text`, if `flankr_companion::scan::read` reads it.
     pub fn of(text: &str) -> Option<Self> {
         let p = flankr_companion::scan::read(text).ok()?;
-        let key = p.payload.server_key;
         Some(LinkRead {
             server: p.server,
             address: p.payload.addresses.first()?.clone(),
-            words: link::fingerprint_words_text(&key),
-            hex: fingerprint_hex(&key),
         })
     }
 }
@@ -130,9 +121,9 @@ pub struct Waiting {
     pub words: Option<String>,
     /// The daemon's fingerprint as six words.
     pub fingerprint: String,
-    /// The whole fingerprint in hex, from the link the app read, when its
-    /// six words are `fingerprint` (the event does not carry the key).
-    pub fingerprint_hex: Option<String>,
+    /// The whole fingerprint, 64 hex digits in groups of four, from the
+    /// event.
+    pub fingerprint_hex: String,
     /// When the link's offer expires; `None` in the fallback.
     pub expires_at: Option<Instant>,
     /// The device-code fallback, if this is it.
@@ -141,11 +132,13 @@ pub struct Waiting {
 
 impl Waiting {
     /// From the event's fields, received at `now`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         server: String,
         address: String,
         words: Option<String>,
         fingerprint: String,
+        fingerprint_hex: &str,
         expires_in_secs: Option<u16>,
         fallback: Option<DeviceCodeFallback>,
         now: Instant,
@@ -155,7 +148,7 @@ impl Waiting {
             address,
             words,
             fingerprint,
-            fingerprint_hex: None,
+            fingerprint_hex: hex_groups(fingerprint_hex),
             expires_at: expires_in_secs.map(|s| now + Duration::from_secs(u64::from(s))),
             fallback,
         }
@@ -272,18 +265,11 @@ impl Pairing {
     /// A pairing waits: its words are shown in the modal, with Details and
     /// Cancel. With no words to show (a link without an offer) Details open
     /// at once, as the code there is all there is to do.
-    pub fn show(&mut self, mut waiting: Waiting) {
+    pub fn show(&mut self, waiting: Waiting) {
         if waiting.words.is_none() {
             self.details = true;
         } else if self.waiting.as_ref().map(|w| &w.words) != Some(&waiting.words) {
             self.details = false;
-        }
-        if waiting.fingerprint_hex.is_none() {
-            waiting.fingerprint_hex = self
-                .link
-                .as_ref()
-                .filter(|l| l.words == waiting.fingerprint)
-                .map(|l| l.hex.clone());
         }
         self.finished = None;
         self.waiting = Some(waiting);
@@ -324,14 +310,8 @@ impl Pairing {
                 .map(|w| w.address.clone())
                 .or_else(|| link.as_ref().map(|l| l.address.clone())),
             label: None,
-            words: waiting
-                .as_ref()
-                .map(|w| w.fingerprint.clone())
-                .or_else(|| link.as_ref().map(|l| l.words.clone())),
-            hex: waiting
-                .as_ref()
-                .and_then(|w| w.fingerprint_hex.clone())
-                .or_else(|| link.as_ref().map(|l| l.hex.clone())),
+            words: waiting.as_ref().map(|w| w.fingerprint.clone()),
+            hex: waiting.as_ref().map(|w| w.fingerprint_hex.clone()),
             already: false,
             updated: false,
             id: None,
@@ -347,7 +327,7 @@ impl Pairing {
     /// checked: the window shows it until **Done**. `rows` are the rows
     /// before the update.
     pub fn remote_updated(&mut self, id: RemoteId, name: &str, rows: &[RemoteInfo]) {
-        let link = self.link.take();
+        self.link = None;
         self.waiting = None;
         self.details = false;
         let row = rows.iter().find(|r| r.id == id);
@@ -355,8 +335,8 @@ impl Pairing {
             server: name.to_string(),
             address: row.map(|r| r.host.clone()),
             label: row.map(|r| r.fingerprint.clone()),
-            words: link.as_ref().map(|l| l.words.clone()),
-            hex: link.map(|l| l.hex),
+            words: row.map(|r| r.fingerprint_words.clone()),
+            hex: row.map(|r| hex_groups(&r.fingerprint_hex)),
             already: true,
             updated: false,
             id: Some(id),
@@ -432,8 +412,9 @@ impl Pairing {
     }
 }
 
-/// `f`'s row, by id or else by name: its short fingerprint, its id, and
-/// for an update whether its first address changed.
+/// `f`'s row, by id or else by name: its short fingerprint, its id, its
+/// whole fingerprint where the pairing gave none, and for an update
+/// whether its first address changed.
 fn fill_from_rows(f: &mut Finished, rows: &[RemoteInfo]) {
     let row = match f.id {
         Some(id) => rows.iter().find(|r| r.id == id),
@@ -444,6 +425,12 @@ fn fill_from_rows(f: &mut Finished, rows: &[RemoteInfo]) {
     };
     f.id = Some(row.id);
     f.label = Some(row.fingerprint.clone());
+    if f.words.is_none() {
+        f.words = Some(row.fingerprint_words.clone());
+    }
+    if f.hex.is_none() {
+        f.hex = Some(hex_groups(&row.fingerprint_hex));
+    }
     if f.already {
         if f.old_host.as_deref().is_some_and(|old| old != row.host) {
             f.updated = true;
@@ -531,8 +518,6 @@ fn identity(
         );
         word_rows(out, layout, words, FINGERPRINT_PT, theme().text);
     }
-    // TODO(flankr-companion): `PairingWords` carries no daemon key, so the
-    // hex comes from the link this app read and handed over.
     if let Some(hex) = hex {
         para(
             out,
@@ -565,7 +550,7 @@ fn details(out: &mut Vec<Line>, layout: &Layout, w: &Waiting, now: Instant) {
         &w.server,
         Some(&w.address),
         Some(&w.fingerprint),
-        w.fingerprint_hex.as_deref(),
+        Some(&w.fingerprint_hex),
     );
     if let Some(at) = w.expires_at {
         let left = at.saturating_duration_since(now);
@@ -631,32 +616,6 @@ pub fn delete_all(remotes: &[RemoteInfo]) -> Vec<Input> {
         .collect()
 }
 
-/// The note while `name` is being removed.
-pub fn removing_note(name: &str) -> String {
-    copy::REMOTE_REMOVING.fill(None, &[("name", name)])
-}
-
-/// The note once `name` is removed: whether its daemon answered
-/// `link.unpair`, and, if not, the `auth.toml` entry left there for
-/// `device`.
-pub fn removed_note(name: &str, daemon: bool, device: &str) -> String {
-    if daemon {
-        copy::REMOTE_REMOVED.fill(None, &[("name", name)])
-    } else {
-        copy::REMOTE_REMOVED_HERE.fill(None, &[("name", name), ("device", device)])
-    }
-}
-
-/// The note once `name` is paired beside the remote in use.
-pub fn paired_note(name: &str) -> String {
-    copy::REMOTE_PAIRED.fill(None, &[("name", name)])
-}
-
-/// The note when a pairing named a remote already in the list.
-pub fn already_note(name: &str) -> String {
-    copy::REMOTE_ALREADY.fill(None, &[("name", name)])
-}
-
 /// Whether `text` is a pairing link, `flankr://<host>:<port>/pair#…`:
 /// the test an opened link and a scanned QR code both pass before they
 /// are acted on (plan 20261028_02, decision 8). Only the part before the
@@ -696,6 +655,9 @@ mod tests {
     const WORDS: &str = "abandon ability able about above absent";
     const FINGERPRINT: &str = "zoo zone youth wrist wrong yellow";
 
+    /// The whole fingerprint the tests' events and rows carry.
+    const HEX: &str = "3f9a12c4";
+
     fn remote(n: u8, active: bool) -> RemoteInfo {
         RemoteInfo {
             id: RemoteId([n; 8]),
@@ -705,6 +667,10 @@ mod tests {
             paired_at: Some(1_793_188_800 + u64::from(n)),
             active,
             online: active,
+            fingerprint_hex: HEX.repeat(8),
+            fingerprint_words: FINGERPRINT.into(),
+            nickname: None,
+            display_name: format!("m{n}"),
         }
     }
 
@@ -715,6 +681,7 @@ mod tests {
             "m4.ts.net:7347".into(),
             Some(WORDS.into()),
             FINGERPRINT.into(),
+            &HEX.repeat(8),
             Some(60),
             None,
             now,
@@ -732,6 +699,7 @@ mod tests {
             "m4.ts.net:7347".into(),
             words.then(|| WORDS.to_string()),
             FINGERPRINT.into(),
+            &HEX.repeat(8),
             None,
             Some(DeviceCodeFallback {
                 code: code(),
@@ -828,11 +796,14 @@ mod tests {
         let lines = p.lines(&PHONE, None, now + Duration::from_millis(15_500));
         let all: Vec<String> = lines.iter().map(|l| plain(&l.text)).collect();
         let all: Vec<&str> = all.iter().map(String::as_str).collect();
-        // The hostname first, then the fingerprint (no hex: no link read).
+        // The hostname first, then the fingerprint: its words and, from the
+        // event, its whole hex in the mono face.
         assert_eq!(all[0], "m4 at m4.ts.net:7347");
         assert_eq!(all[1], "Daemon fingerprint");
         assert_eq!(all[2..4], ["zoo zone youth", "wrist wrong yellow"]);
-        assert!(!all.contains(&"BLAKE2s-256 fingerprint"), "{all:?}");
+        assert_eq!(all[4], "BLAKE2s-256 fingerprint");
+        assert_eq!(all[5], "`3f9a 12c4 3f9a 12c4`");
+        assert_eq!(all[5..9].len(), 4, "four lines of four groups");
         assert!(all.contains(&"The link expires in 45 s."), "{all:?}");
         // The pairing words are not the fingerprint: not repeated here, and
         // no device code without the fallback.
@@ -981,7 +952,7 @@ mod tests {
     }
 
     #[test]
-    fn details_show_the_full_fingerprint_from_the_link_read() {
+    fn details_show_the_full_fingerprint_the_event_carries() {
         let now = Instant::now();
         let key = [7u8; 32];
         let url = libflankr_proto::link::PairingPayload {
@@ -994,16 +965,18 @@ mod tests {
         let read = LinkRead::of(&url).expect("a pairing link");
         assert_eq!(read.address, "127.0.0.1:7347");
         assert_eq!(host_of(&read.address), "127.0.0.1");
-        let hex = fingerprint_hex(&key);
-        assert_eq!(hex.len(), 64 + 15, "64 digits in 16 groups");
+        // The client's hex, whatever link was read: it is not recomputed.
+        let hex = flankr_companion::fingerprint_hex(&key);
+        let grouped = hex_groups(&hex);
+        assert_eq!(grouped.len(), 64 + 15, "64 digits in 16 groups");
         let mut p = Pairing::default();
         p.read(Some(read.clone()));
-        // The event's fingerprint words match the link's: the hex is shown.
         p.show(Waiting::new(
             read.server.clone(),
             "127.0.0.1:7347".into(),
             Some(WORDS.into()),
-            read.words.clone(),
+            libflankr_proto::link::fingerprint_words_text(&key),
+            &hex,
             Some(60),
             None,
             now,
@@ -1011,13 +984,22 @@ mod tests {
         p.toggle_details();
         let all = texts(&p, now);
         assert_eq!(all[0], "127.0.0.1 at 127.0.0.1:7347", "{all:?}");
-        let groups: Vec<&str> = hex.split(' ').collect();
+        let groups: Vec<&str> = grouped.split(' ').collect();
         let first = format!("`{}`", groups[..4].join(" "));
         assert!(all.contains(&first), "{all:?}");
         assert!(all.contains(&"BLAKE2s-256 fingerprint".to_string()));
-        // Words that are not the link's: no hex.
-        p.show(held(now));
-        assert_eq!(p.waiting.as_ref().unwrap().fingerprint_hex, None);
+        // Paired: the finished pairing keeps the event's hex.
+        p.paired(&[]);
+        assert_eq!(
+            p.finished.as_ref().unwrap().hex.as_deref(),
+            Some(grouped.as_str())
+        );
+        // Already paired: the row's.
+        let row = remote(4, true);
+        p.remote_updated(row.id, "m4", std::slice::from_ref(&row));
+        let f = p.finished.as_ref().unwrap();
+        assert_eq!(f.hex, Some(hex_groups(&HEX.repeat(8))));
+        assert_eq!(f.words.as_deref(), Some(FINGERPRINT));
     }
 
     #[test]
@@ -1033,23 +1015,5 @@ mod tests {
         );
         // None paired: Unpair, which answers Unpaired at once.
         assert_eq!(delete_all(&[]), [Input::Unpair]);
-    }
-
-    #[test]
-    fn the_notes_say_whether_the_daemon_was_told() {
-        let told = removed_note("m4", true, "s23");
-        assert!(
-            told.contains("Removed m4") && told.contains("`link.unpair`"),
-            "{told}"
-        );
-        let here = removed_note("m4", false, "s23");
-        assert!(
-            here.contains("on this phone only") && here.contains("`s23`"),
-            "{here}"
-        );
-        assert!(here.contains("`auth.toml`"));
-        assert!(removing_note("m4").starts_with("Removing m4"));
-        assert!(already_note("m4").contains("addresses are updated"));
-        assert!(paired_note("mini").starts_with("Paired with mini."));
     }
 }

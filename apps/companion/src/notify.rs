@@ -31,7 +31,7 @@
 //! service's, so [`MorphHost`] only logs it, and the ongoing notification
 //! shows it with the next update.
 //!
-//! The templates are `notification_*` in `SETTINGS_COPY.md`.
+//! The templates are `notification_*` in `copy/SETTINGS_COPY.md`.
 
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};

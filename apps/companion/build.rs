@@ -14,7 +14,7 @@ const SERVICE_REASON: &str = "Keeps the encrypted link to the user's own flankr 
      finished turns reach the phone.";
 
 fn main() {
-    settings_copy();
+    copy();
     themes();
     // Writes target/aarch64-linux-android/<profile>/gradle/companion/, the
     // whole Gradle project that scripts/android.sh packages.
@@ -48,14 +48,15 @@ fn main() {
         .expect("libmorph-build: generating the Gradle project");
 }
 
-/// `SETTINGS_COPY.md` into `$OUT_DIR/settings_copy.rs`, checked against the
-/// keys `src/` uses (plan 20261024_04, decision 6). libmorph-build prints
+/// Every `.md` file in `copy/` (`SETTINGS_COPY.md`, `PAIRING_COPY.md`), in
+/// name order, into one `$OUT_DIR/copy.rs`, checked against the keys `src/`
+/// uses (plan 20261024_04, decision 6). libmorph-build prints
 /// `rerun-if-changed` lines of its own, which turns off cargo's "any change
 /// in the package" rule, so the copy, the sources it is checked against, and
 /// the rest of what this script reads are named here.
-fn settings_copy() {
+fn copy() {
     for path in [
-        "SETTINGS_COPY.md",
+        "copy",
         "themes.toml",
         "src",
         "build.rs",
@@ -66,22 +67,36 @@ fn settings_copy() {
         println!("cargo:rerun-if-changed={path}");
     }
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
-    let md = std::fs::read_to_string(dir.join("SETTINGS_COPY.md"))
-        .expect("SETTINGS_COPY.md: reading it");
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir.join("copy"))
+        .expect("copy/: reading it")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .collect();
+    paths.sort();
+    let files: Vec<(String, String)> = paths
+        .iter()
+        .map(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy();
+            let text = std::fs::read_to_string(p)
+                .unwrap_or_else(|e| panic!("copy/{name}: reading it: {e}"));
+            (format!("copy/{name}"), text)
+        })
+        .collect();
     let mut sources = Vec::new();
     rust_files(&dir.join("src"), &mut sources);
     let used = copy_gen::used_keys(&sources);
-    let code = match copy_gen::generate(&md, &used) {
+    let code = match copy_gen::generate_files(&files, &used) {
         Ok(code) => code,
-        Err(e) => panic!("SETTINGS_COPY.md: {e}"),
+        Err(e) => panic!("copy: {e}"),
     };
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("set by cargo"));
-    std::fs::write(out.join("settings_copy.rs"), code).expect("writing settings_copy.rs");
+    std::fs::write(out.join("copy.rs"), code).expect("writing copy.rs");
 }
 
 /// `themes.toml`, checked as the app parses it (plan 20261024_05, the
 /// 15:33 EDT amendment): a bad file fails the build. Its
-/// `rerun-if-changed` line is with the others, in [`settings_copy`].
+/// `rerun-if-changed` line is with the others, in [`copy`].
 fn themes() {
     let dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("set by cargo"));
     let text = std::fs::read_to_string(dir.join("themes.toml")).expect("themes.toml: reading it");

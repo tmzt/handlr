@@ -30,6 +30,9 @@ pub enum FocusedPrompt {
         kind: PromptKind,
     },
     Terminal,
+    /// A one-line field outside the prompt cards: a remote's nickname in
+    /// its details (plan 20261024_02, the 2026-10-28 17:56 EDT amendment).
+    Field,
 }
 
 /// What is typed into, as the app sees it each frame: a typed prompt of a
@@ -38,6 +41,8 @@ pub enum FocusedPrompt {
 pub enum Typing {
     Prompt(PromptKind),
     Terminal,
+    /// A one-line field ([`FocusedPrompt::Field`]).
+    Field,
 }
 
 impl Typing {
@@ -45,6 +50,7 @@ impl Typing {
         match self {
             Typing::Prompt(kind) => FocusedPrompt::Card { screen, kind },
             Typing::Terminal => FocusedPrompt::Terminal,
+            Typing::Field => FocusedPrompt::Field,
         }
     }
 }

@@ -1,7 +1,8 @@
-//! The settings screen's copy, from `SETTINGS_COPY.md` at build time
+//! The app's copy, from the files in `copy/` (`SETTINGS_COPY.md`,
+//! `PAIRING_COPY.md`) at build time
 //! (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, decision 6).
 //!
-//! `build.rs` generates one `pub const` per `# [Copy] <key>`, a
+//! `build.rs` generates one `pub const` per `# [Copy] <key>` of every file, a
 //! [`CopyText`], named as the key in capitals; a key the code names here
 //! and the file lacks fails the build. A vendor subkey's text is appended
 //! after its key's on that vendor's phones ([`CopyText::body`]), with the
@@ -92,7 +93,20 @@ impl CopyText {
     }
 }
 
-include!(concat!(env!("OUT_DIR"), "/settings_copy.rs"));
+include!(concat!(env!("OUT_DIR"), "/copy.rs"));
+
+/// The copy files, as `build.rs` reads them, for the tests.
+#[cfg(test)]
+pub const FILES: [(&str, &str); 2] = [
+    (
+        "copy/PAIRING_COPY.md",
+        include_str!("../../copy/PAIRING_COPY.md"),
+    ),
+    (
+        "copy/SETTINGS_COPY.md",
+        include_str!("../../copy/SETTINGS_COPY.md"),
+    ),
+];
 
 /// The generator's unit tests, run with the library's.
 #[cfg(test)]
@@ -135,11 +149,59 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_file_generates() {
-        let md = include_str!("../../SETTINGS_COPY.md");
-        let entries = copy_gen::parse(md).expect("it parses");
-        assert!(entries.iter().any(|e| e.key == "background"));
+    fn the_shipped_files_generate() {
+        let keys = |name: &str| -> Vec<String> {
+            let (_, md) = FILES.iter().find(|(n, _)| n.ends_with(name)).expect(name);
+            copy_gen::parse(md)
+                .expect("it parses")
+                .into_iter()
+                .map(|e| e.key)
+                .collect()
+        };
+        let settings = keys("SETTINGS_COPY.md");
+        assert!(settings.iter().any(|k| k == "background"));
         // The notification's templates, which notify.rs fills.
-        assert!(entries.iter().any(|e| e.key.starts_with("notification_")));
+        assert!(settings.iter().any(|k| k.starts_with("notification_")));
+        assert!(settings.iter().any(|k| k == "remote_details_fingerprint"));
+        // The pairing window's keys are in their own file, and only there.
+        let pairing = keys("PAIRING_COPY.md");
+        assert!(!pairing.is_empty());
+        assert!(
+            pairing
+                .iter()
+                .all(|k| k.starts_with("pairing_") || k.starts_with("remote_add")),
+            "{pairing:?}"
+        );
+        assert!(pairing.iter().any(|k| k == "remote_add"));
+        assert!(
+            !settings
+                .iter()
+                .any(|k| k.starts_with("pairing_") || k.starts_with("remote_add")),
+            "{settings:?}"
+        );
+        // Both, as build.rs reads them (in name order), into one module.
+        let files: Vec<(String, String)> = FILES
+            .iter()
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+            .collect();
+        let code = copy_gen::generate_files(&files, &[]).expect("one module");
+        assert!(code.contains("pub const PAIRING_DONE: CopyText"));
+        assert!(code.contains("pub const REMOTES_EMPTY: CopyText"));
+        // The generated consts are the files' text.
+        assert_eq!(REMOTES_EMPTY.text, "No remotes paired");
+        assert_eq!(PAIRING_FINGERPRINT.text, "Daemon fingerprint");
+    }
+
+    #[test]
+    fn there_is_no_copy_left_at_the_old_path() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(!dir.join("SETTINGS_COPY.md").exists());
+        let mut found: Vec<String> = std::fs::read_dir(dir.join("copy"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        assert_eq!(found, ["PAIRING_COPY.md", "SETTINGS_COPY.md"]);
     }
 }
