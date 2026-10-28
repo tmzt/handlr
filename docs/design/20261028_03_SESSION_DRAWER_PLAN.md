@@ -904,3 +904,41 @@ that plan (when it's ready)". Where this disagrees with the body, it wins.
 
 The plan is approved; the status becomes `In implementation` with its
 first code commit.
+
+## Amendment — 2026-10-28 18:51 EDT: a connection manager: every remote stays connected, the inactive ones in the background
+
+The owner (2026-10-28): "connection shouldn't be dropped, we should have a
+connection manager and background events can continue, but they should
+drop to non-active (background only)". This replaces section 3.7's
+switching (closing the old link, forgetting the old daemon's state, and
+reconnecting) and the body's one-connection model. Where this disagrees
+with the body or the earlier amendments, it wins.
+
+1. **A connection manager in flankr-companion** holds one link per listed
+   remote (at most 8), each with its own key, reconnecting on its own
+   backoff. Exactly one is **active**; the rest are **background**.
+2. **Background means the daemon's existing background mode:** the
+   client sets `ClientOptionsParams.background = true` on a background
+   remote's link (the same option the app's own backgrounding uses,
+   `libflankr_proto::common`'s `ClientOptionsParams.background`), so that
+   daemon sends only what a backgrounded app gets (the notices,
+   questions, approvals and finished summaries it already sends while the
+   link sleeps), and no session streams, terminals or live agent lists
+   beyond what that mode sends. The app keeps showing and notifying those
+   background events, labelled with the remote's nickname.
+3. **Switching** (`Input::SwitchRemote(id)`) writes `active` first, then
+   sets the old active remote's link to background and the new one's to
+   foreground (`background = false`), and swaps which remote's sessions,
+   cards and agent views the app shows. No link is closed; nothing is
+   reconnected; each remote's in-memory state and its `state.redb` stay
+   open while it is listed. An agent view, a terminal or a prompt bound to
+   the old remote is closed on the phone (its terminal is closed on that
+   daemon), as the body says.
+4. **The drawer** refreshes the active remote's agent list every 3 s while
+   shown; background remotes' cards show their last state and a dot when a
+   background event (a question, an approval) is waiting.
+5. **Removal** closes that remote's link and its `state.redb` as before;
+   pairing a new remote adds a background link (or the active one when it
+   is the first).
+6. **Limits and costs:** up to 8 links held open; a background link sends
+   little, and the app's own backgrounding sets every link to background.
