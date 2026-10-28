@@ -58,7 +58,7 @@ pub mod link_spans;
 mod notice_line;
 pub mod terminal_view;
 use input_box::InputBox;
-pub use terminal_view::{TermAsk, TermState, TermView};
+pub use terminal_view::{MouseAt, TermAsk, TermState, TermView};
 
 /// The fifth button's labels: which glyph it draws (plan 20261027_07,
 /// decision 7). The terminal glyph while the transcript shows, the list
@@ -70,6 +70,9 @@ pub const LIST_LABEL: &str = "list";
 /// counter, whether the mode is offered and input allowed, and the armed
 /// input's seconds left. The app reads the terminal again when it moves.
 pub type TermStamp = (u64, bool, bool, Option<u64>);
+
+/// The most mouse events held for an arm on its way.
+const TERM_MOUSE_HELD: usize = 64;
 
 /// The sessions, by pane, last left showing the terminal rather than the
 /// transcript: kept while the app runs, not saved (plan 20261027_07,
@@ -2402,6 +2405,12 @@ pub struct AgentScreen {
     /// In terminal mode, a finger that started off the terminal: its id,
     /// where it started and whether it moved, for a tap on the controls.
     term_tap: Option<(u64, [f32; 2], bool)>,
+    /// The fit last asked for (the open's hints, then each resize; plan
+    /// 20261027_08, the 23:24 EDT amendment).
+    term_fit_sent: Option<(u16, u16)>,
+    /// Mouse events not yet asked for: held until the terminal is armed
+    /// (the gesture's own arm on its way), as `term_lines` are.
+    term_mouse: Vec<MouseAt>,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -4469,6 +4478,8 @@ impl AgentScreen {
         self.term_shown = on;
         self.term_tap = None;
         self.term_lines = 0;
+        self.term_fit_sent = None;
+        self.term_mouse.clear();
         if on {
             self.term = TermView::default();
             self.term_asks.push(TermAsk::Open {
@@ -4519,21 +4530,45 @@ impl AgentScreen {
         self.dirty = true;
     }
 
-    /// What to ask of the client: an open with what fits at the starting
-    /// size, a close, an arm.
+    /// What fits the terminal's area now at the view's type size: the
+    /// width of the view, and the height from below the header to the top
+    /// of the bottom bar, less the soft keyboard while it shows (the
+    /// layout's `bottom` carries libmorph's keyboard inset).
+    pub fn terminal_fit(&self) -> Option<(u16, u16)> {
+        self.term.fit_size(self.terminal_rect(), self.scale())
+    }
+
+    /// What to ask of the client: an open with what fits, a resize when
+    /// the fit changed (the keyboard shown or hidden, rotation, the cards
+    /// over the terminal, a pinch once it ends), a close, an arm, and the
+    /// drags' lines and mouse events once armed.
     pub fn take_terminal_asks(&mut self) -> Vec<TermAsk> {
-        let (cols, rows) = TermView::hints(self.terminal_rect(), self.scale());
+        let fit = self.terminal_fit();
         let mut asks = std::mem::take(&mut self.term_asks);
+        let mut opened = false;
         for ask in &mut asks {
             if let TermAsk::Open { cols: c, rows: r } = ask {
-                *c = cols;
-                *r = rows;
+                (*c, *r) = fit.unzip();
+                opened = true;
             }
+        }
+        if opened {
+            self.term_fit_sent = fit;
+        } else if self.term_shown
+            && !self.term.pinching()
+            && let Some((cols, rows)) = fit.filter(|&f| Some(f) != self.term_fit_sent)
+        {
+            log::info!("terminal: the fit is now {cols}x{rows}");
+            self.term_fit_sent = fit;
+            asks.push(TermAsk::Resize { cols, rows });
         }
         // The drags' lines, once armed (the client sums them while one is
         // in flight).
         if self.term_lines != 0 && self.terminal_armed() {
             asks.push(TermAsk::Scroll(std::mem::take(&mut self.term_lines)));
+        }
+        if !self.term_mouse.is_empty() && self.terminal_armed() {
+            asks.extend(self.term_mouse.drain(..).map(TermAsk::Mouse));
         }
         asks
     }
@@ -4585,9 +4620,14 @@ impl AgentScreen {
         let input = self.term_state.input_allowed;
         let armed = self.term_state.armed();
         if phase == TouchPhase::Started && !self.term.touching() && !armed {
-            // An earlier drag's lines whose arm never came are dropped.
+            // An earlier gesture's lines and clicks whose arm never came are
+            // dropped.
             self.term_lines = 0;
+            self.term_mouse.clear();
         }
+        // A program that reports the mouse gets taps and drags across as
+        // clicks and drags (plan 20261027_08, step 9).
+        self.term.set_mouse_mode(self.term_state.mouse_mode());
         let out = self
             .term
             .touch(id, phase, x, y, now, screen, rect, s, input);
@@ -4595,11 +4635,16 @@ impl AgentScreen {
             self.dirty = true;
         }
         // A tap arms and raises the keyboard; a vertical drag arms and
-        // scrolls the pane (the L3 amendment of 2026-10-27 21:58 EDT).
-        if (out.tap || out.drag) && !armed {
+        // scrolls the pane (the L3 amendment of 2026-10-27 21:58 EDT); in
+        // mouse mode a tap or a drag across arms and clicks or drags.
+        if (out.tap || out.drag || out.click) && !armed {
             log::info!(
                 "terminal: {}, arming input",
-                if out.tap { "tapped" } else { "dragged" }
+                if out.tap || out.click {
+                    "tapped"
+                } else {
+                    "dragged"
+                }
             );
             self.term_asks.push(TermAsk::Arm);
         }
@@ -4607,6 +4652,12 @@ impl AgentScreen {
             self.term_asks.push(TermAsk::Keyboard);
         }
         self.term_lines = self.term_lines.saturating_add(out.lines);
+        self.term_mouse.extend(out.mouse);
+        // A long drag held while unarmed keeps its newest part.
+        let excess = self.term_mouse.len().saturating_sub(TERM_MOUSE_HELD);
+        if excess > 0 {
+            self.term_mouse.drain(..excess);
+        }
         None
     }
 
@@ -4702,7 +4753,9 @@ impl AgentScreen {
         if self.term_shown {
             // The terminal in place of the flow (plan 20261027_07, step 5).
             let rect = self.terminal_rect();
-            self.term.follow(self.term_state.screen.as_ref(), rect, s);
+            let attached = self.term_state.attached();
+            self.term
+                .follow(self.term_state.screen.as_ref(), rect, s, attached);
             self.term
                 .draw(list, ctx, term, &self.term_state, rect, s, &self.name);
         } else {
@@ -6367,6 +6420,8 @@ mod tests {
             keys_pending: 0,
             scroll_offset: None,
             scroll_max: None,
+            cursor: false,
+            source: flankr_companion::TerminalSource::Poll,
         });
         st
     }
@@ -6468,6 +6523,12 @@ mod tests {
         a.take_terminal_asks();
         let mut list = DrawList::new();
         a.draw(&mut list, &DrawContext::default(), None);
+        // A polled frame is placed at the fit-width size: the fit at that
+        // size is asked for (the client sends it only to an attached pane).
+        assert!(matches!(
+            a.take_terminal_asks().as_slice(),
+            [TermAsk::Resize { .. }]
+        ));
         let r = a.terminal_rect();
         let before = a.terminal_view().pan();
         assert!(before[1] > 0.0, "at the bottom rows");
@@ -6477,6 +6538,193 @@ mod tests {
         a.touch(1, TouchPhase::Ended, x, y + 300.0, MS * 2);
         assert_eq!(a.terminal_view().pan()[1], before[1] - 300.0);
         assert!(a.take_terminal_asks().is_empty(), "no arm, no scroll");
+    }
+
+    // Plan 20261027_08, step 9: the fit and the mouse.
+
+    /// The resizes among `asks`.
+    fn resizes(asks: &[TermAsk]) -> Vec<(u16, u16)> {
+        asks.iter()
+            .filter_map(|a| match a {
+                TermAsk::Resize { cols, rows } => Some((*cols, *rows)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `rows` lines of ANSI as an open, attached terminal, its cursor
+    /// reporting the mouse or not.
+    fn attached_state(armed: bool, mouse_reporting: bool) -> TermState {
+        let mut st = open_state(true, armed);
+        st.mouse_allowed = true;
+        let mut grid = libflankr_term::parse_ansi("htop\n row 1\n row 2\n row 3");
+        grid.cursor = Some(flankr_companion::Cursor {
+            col: 0,
+            row: 0,
+            visible: true,
+            shape: 2,
+            mouse_reporting,
+            alternate_screen: mouse_reporting,
+            stale: false,
+        });
+        let mut sc = flankr_companion::Screen::default();
+        assert!(sc.apply(&libflankr_term::Frame::full(1, 1, &grid)));
+        st.screen = Some(sc);
+        if let Some(s) = st.status.as_mut() {
+            s.source = flankr_companion::TerminalSource::Attached;
+            s.cursor = true;
+        }
+        st
+    }
+
+    #[test]
+    fn the_open_carries_the_fit_and_the_keyboard_rotation_and_cards_resize() {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_state((1, true, true, None), attached_state(false, false));
+        a.toggle_terminal();
+        let asks = a.take_terminal_asks();
+        let [TermAsk::Open { cols, rows }] = asks.as_slice() else {
+            panic!("{asks:?}");
+        };
+        let fit = a.terminal_fit().unwrap();
+        assert_eq!((*cols, *rows), (Some(fit.0), Some(fit.1)));
+        // Nothing changed: nothing more.
+        assert!(a.take_terminal_asks().is_empty());
+        let mut list = DrawList::new();
+        a.draw(&mut list, &DrawContext::default(), None);
+        assert!(
+            a.take_terminal_asks().is_empty(),
+            "an attached frame keeps the size it was fitted at"
+        );
+
+        // The soft keyboard: the layout's bottom carries its inset, so the
+        // terminal is above it and fewer rows fit.
+        let inset = 700.0;
+        a.set_layout(Layout {
+            bottom: PHONE.bottom + inset,
+            ..PHONE
+        });
+        let r = a.terminal_rect();
+        assert!(r.y + r.h <= PHONE.h - PHONE.bottom - inset);
+        let with_keyboard = resizes(&a.take_terminal_asks());
+        let [(c, k)] = with_keyboard.as_slice() else {
+            panic!("{with_keyboard:?}");
+        };
+        assert_eq!(*c, fit.0, "as wide");
+        let px = terminal_view::START_PT * PHONE.scale;
+        let lost = (inset / term_h(px)).floor() as u16;
+        assert!(
+            fit.1 - k >= lost,
+            "{} rows less for the keyboard",
+            fit.1 - k
+        );
+        assert!(a.take_terminal_asks().is_empty(), "once");
+        // Hidden again: back to the first fit.
+        a.set_layout(PHONE);
+        assert_eq!(resizes(&a.take_terminal_asks()), vec![fit]);
+
+        // Rotation: wider and shorter.
+        a.set_layout(Layout {
+            w: PHONE.h,
+            h: PHONE.w,
+            ..PHONE
+        });
+        let turned = resizes(&a.take_terminal_asks());
+        let [(c, r)] = turned.as_slice() else {
+            panic!("{turned:?}");
+        };
+        assert!(*c > fit.0 && *r < fit.1);
+        a.set_layout(PHONE);
+        a.take_terminal_asks();
+
+        // Other sessions' cards over the terminal: less height.
+        a.set_cross_height(400.0);
+        let carded = resizes(&a.take_terminal_asks());
+        assert!(
+            carded.len() == 1 && carded[0].1 < fit.1,
+            "{carded:?} from {fit:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinch_resizes_once_it_ends_not_during() {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_state((1, true, true, None), attached_state(false, false));
+        a.toggle_terminal();
+        a.take_terminal_asks();
+        let fit = a.terminal_fit().unwrap();
+        let r = a.terminal_rect();
+        let y = r.y + 400.0;
+        let mut t = Duration::ZERO;
+        a.touch(1, TouchPhase::Started, 300.0, y, t);
+        a.touch(2, TouchPhase::Started, 500.0, y, t);
+        for i in 1..=10 {
+            t += MS;
+            a.touch(2, TouchPhase::Moved, 500.0 + 30.0 * i as f32, y, t);
+            assert!(
+                resizes(&a.take_terminal_asks()).is_empty(),
+                "nothing while pinching"
+            );
+        }
+        assert!(a.terminal_view().pt() > terminal_view::START_PT);
+        a.touch(2, TouchPhase::Ended, 800.0, y, t + MS);
+        let after = resizes(&a.take_terminal_asks());
+        let [(c, rows)] = after.as_slice() else {
+            panic!("{after:?}");
+        };
+        assert!(*c < fit.0 && *rows < fit.1, "bigger type, fewer cells");
+        assert_eq!(Some((*c, *rows)), a.terminal_fit());
+        a.touch(1, TouchPhase::Ended, 300.0, y, t + MS * 2);
+        assert!(a.take_terminal_asks().is_empty(), "once");
+    }
+
+    #[test]
+    fn a_tap_clicks_a_mouse_program_after_the_arm_and_types_into_others() {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_state((1, true, true, None), attached_state(false, true));
+        a.toggle_terminal();
+        a.take_terminal_asks();
+        let r = a.terminal_rect();
+        let (x, y) = (r.x + 5.0, r.y + 5.0);
+        a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
+        a.touch(1, TouchPhase::Ended, x, y, MS);
+        // Unarmed: the arm first, no keyboard, the click held.
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm]);
+        a.set_terminal_state((2, true, true, Some(60)), attached_state(true, true));
+        let asks = a.take_terminal_asks();
+        let click = |kind| {
+            TermAsk::Mouse(MouseAt {
+                kind,
+                col: 0,
+                row: 0,
+            })
+        };
+        use flankr_companion::{MouseButton::Left, TerminalMouseKind as K};
+        assert_eq!(
+            asks,
+            [
+                click(K::Down { button: Left }),
+                click(K::Up { button: Left })
+            ]
+        );
+        // Armed: at once.
+        a.touch(2, TouchPhase::Started, x, y, Duration::from_secs(1));
+        a.touch(2, TouchPhase::Ended, x, y, Duration::from_secs(1) + MS);
+        assert_eq!(a.take_terminal_asks().len(), 2);
+        // A program without mouse reports: the keyboard tap of before.
+        a.set_terminal_state((3, true, true, Some(60)), attached_state(true, false));
+        a.touch(3, TouchPhase::Started, x, y, Duration::from_secs(2));
+        a.touch(3, TouchPhase::Ended, x, y, Duration::from_secs(2) + MS);
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Keyboard]);
+        // A click whose arm never came is dropped at the next touch.
+        a.set_terminal_state((4, true, true, None), attached_state(false, true));
+        a.touch(4, TouchPhase::Started, x, y, Duration::from_secs(3));
+        a.touch(4, TouchPhase::Ended, x, y, Duration::from_secs(3) + MS);
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm]);
+        a.touch(5, TouchPhase::Started, x, y, Duration::from_secs(9));
+        a.touch(5, TouchPhase::Cancelled, x, y, Duration::from_secs(9) + MS);
+        a.set_terminal_state((5, true, true, Some(60)), attached_state(true, true));
+        assert!(a.take_terminal_asks().is_empty());
     }
 
     #[test]
@@ -6574,6 +6822,8 @@ mod tests {
             keys_pending: 0,
             scroll_offset: None,
             scroll_max: None,
+            cursor: false,
+            source: flankr_companion::TerminalSource::Poll,
         });
         a.set_terminal_state((3, true, true, Some(60)), state);
         assert!(a.terminal_armed());

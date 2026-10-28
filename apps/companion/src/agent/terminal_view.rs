@@ -24,12 +24,53 @@
 //!   acts at once, so it cannot wait to tell a double tap). The first
 //!   frame lands at the fit-width size (clamped to 7 pt), scrolled to its
 //!   bottom rows (plan risk 3).
+//!
+//! Plan 20261027_08, step 9:
+//!
+//! - **Fit.** The columns and rows that fit the terminal's rect at the
+//!   current type size ([`TermView::fit_at`]) go in `terminal.open` and, as
+//!   a [`TermAsk::Resize`], whenever they change: the soft keyboard shown
+//!   or hidden (the app's layout already takes libmorph's
+//!   `keyboard_inset` off the bottom, so the rect is above the keyboard),
+//!   rotation, the cards over the terminal changing height, and a pinch,
+//!   once it ends (never while two fingers are down). On an attached
+//!   terminal the type size is not fitted to the frame's width: the daemon
+//!   sizes the pane to the fit, so the frame fits and does not pan; a
+//!   frame larger than the view (the poll, or the desktop's size while it
+//!   has the tab) still pans.
+//! - **Cursor.** Drawn from [`Screen::cursor`] by herdr's DECSCUSR shape
+//!   (`herdr::CursorState.shape`, wire.rs's `CursorShapeParam`, passed
+//!   through unchanged by libherdr_term's conversion): 0 (the terminal's
+//!   default), 1 and 2 a block, reverse video of the cell under it; 3 and
+//!   4 an underline; 5 and 6 a bar at the cell's left edge; anything else
+//!   a block. Odd (blinking) and even (steady) are drawn alike, steady.
+//!   Hidden while the program hides it (`visible` false) or while the
+//!   frame is `stale`.
+//! - **Stale.** While the desktop has the tab (`Cursor::stale`, the 23:32
+//!   EDT amendment) a pill says so over the frames, which keep coming; the
+//!   next touch that sends input takes it back (the daemon re-claims on
+//!   input).
+//! - **Mouse.** When the daemon serves the mouse and the frame's cursor
+//!   says the program asked for mouse reports, a tap is a left click
+//!   (`terminal.mouse` down and up at the tapped cell) instead of the
+//!   keyboard, and a drag that starts across is a left-button drag (down,
+//!   a drag for each new cell, up); a drag that starts up or down stays the
+//!   wheel (`terminal.scroll`, which an attached terminal delivers as a
+//!   wheel event the program scrolls itself by). The cell is pane-local,
+//!   from the touch point at the current size and pan, clamped to the
+//!   frame. Both still need the arm: a click or drag on an unarmed terminal
+//!   arms first and is held until the arm lands, then sent; it is dropped
+//!   if the arm never comes. Without mouse reports a tap arms and raises the
+//!   keyboard, as before.
 
 use std::time::Duration;
 
-use flankr_companion::{Screen, TerminalClosedReason, TerminalStatus};
+use flankr_companion::{
+    Cursor, MouseButton, Screen, TerminalClosedReason, TerminalMouseKind, TerminalSource,
+    TerminalStatus,
+};
 use libcontrols::{DrawContext, Rect};
-use libflankr_term::{Color, Run, flags};
+use libflankr_term::{Color, Row, Run, flags};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 use libmsdf::font::{GlyphStyle, TerminalLine};
@@ -48,6 +89,11 @@ const STATUS_PT: f32 = 14.0;
 /// The armed frame's width and its label's type size, in points.
 const ARMED_EDGE: f32 = 3.0;
 const ARMED_PT: f32 = 13.0;
+/// The stale pill's words (plan 20261027_08, the 23:32 EDT amendment).
+pub const STALE_LABEL: &str = "Desktop has the tab \u{2014} touch to take it back";
+/// A fit's cells are counted with this much slack, so a size that fills
+/// the rect exactly is not one short from rounding.
+const FIT_SLACK: f32 = 1e-3;
 
 /// The terminal as the app last read it from the client.
 #[derive(Clone, Debug, Default)]
@@ -56,6 +102,8 @@ pub struct TermState {
     pub supported: bool,
     /// The daemon lets keys be sent (its `[terminal] input`).
     pub input_allowed: bool,
+    /// The daemon serves `terminal.mouse` (`Terminals::mouse_allowed`).
+    pub mouse_allowed: bool,
     /// The session's screen while its terminal is wanted.
     pub screen: Option<Screen>,
     /// The session's terminal, as the app can show it.
@@ -68,6 +116,30 @@ impl TermState {
         self.status
             .as_ref()
             .is_some_and(|s| s.open && s.armed_for.is_some())
+    }
+
+    /// The cursor of the frame shown, when the frames carry one.
+    pub fn cursor(&self) -> Option<Cursor> {
+        self.screen.as_ref().and_then(Screen::cursor)
+    }
+
+    /// The desktop has the tab: the frames are not the phone's size.
+    pub fn stale(&self) -> bool {
+        self.cursor().is_some_and(|c| c.stale)
+    }
+
+    /// The daemon reads the terminal from its attachment to herdr, which
+    /// it sizes to the phone's fit.
+    pub fn attached(&self) -> bool {
+        self.status
+            .as_ref()
+            .is_some_and(|s| s.open && s.source == TerminalSource::Attached)
+    }
+
+    /// Touches are the program's mouse: input and the mouse are allowed,
+    /// and the program asked for mouse reports.
+    pub fn mouse_mode(&self) -> bool {
+        self.input_allowed && self.mouse_allowed && self.cursor().is_some_and(|c| c.mouse_reporting)
     }
 
     /// The armed input's seconds left, rounded up.
@@ -97,6 +169,99 @@ pub enum TermAsk {
     /// `terminal_scroll`: lines from vertical drags, positive back into the
     /// scrollback.
     Scroll(i32),
+    /// `terminal_resize`: what fits now, when it changed.
+    Resize { cols: u16, rows: u16 },
+    /// `terminal_mouse`: a click or drag at a pane-local cell.
+    Mouse(MouseAt),
+}
+
+/// A mouse event at a pane-local cell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseAt {
+    pub kind: TerminalMouseKind,
+    pub col: u16,
+    pub row: u16,
+}
+
+impl MouseAt {
+    fn left(kind: fn(MouseButton) -> TerminalMouseKind, (col, row): (u16, u16)) -> MouseAt {
+        MouseAt {
+            kind: kind(MouseButton::Left),
+            col,
+            row,
+        }
+    }
+}
+
+fn down(button: MouseButton) -> TerminalMouseKind {
+    TerminalMouseKind::Down { button }
+}
+fn up(button: MouseButton) -> TerminalMouseKind {
+    TerminalMouseKind::Up { button }
+}
+fn dragged(button: MouseButton) -> TerminalMouseKind {
+    TerminalMouseKind::Drag { button }
+}
+
+/// How the cursor is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Bar,
+}
+
+/// herdr's DECSCUSR shape (`CursorState.shape`) as drawn: 3 and 4 an
+/// underline, 5 and 6 a bar, the rest (0 the default, 1 and 2) a block.
+pub fn cursor_shape(shape: u8) -> CursorShape {
+    match shape {
+        3 | 4 => CursorShape::Underline,
+        5 | 6 => CursorShape::Bar,
+        _ => CursorShape::Block,
+    }
+}
+
+/// Where the cursor is drawn for a grid whose top left cell is at
+/// `origin`, at `cell` by `lh` pixels a cell: its shape and rectangle, or
+/// `None` while it is hidden (`!visible`) or the frame is stale.
+pub fn cursor_mark(
+    cursor: Option<Cursor>,
+    origin: [f32; 2],
+    cell: f32,
+    lh: f32,
+) -> Option<(CursorShape, Rect)> {
+    let c = cursor.filter(|c| c.visible && !c.stale)?;
+    let x = origin[0] + c.col as f32 * cell;
+    let y = origin[1] + c.row as f32 * lh;
+    let shape = cursor_shape(c.shape);
+    let rect = match shape {
+        CursorShape::Block => Rect::new(x, y, cell, lh),
+        CursorShape::Underline => {
+            let h = (lh * 0.1).max(2.0);
+            Rect::new(x, y + lh - h, cell, h)
+        }
+        CursorShape::Bar => Rect::new(x, y, (cell * 0.15).max(2.0), lh),
+    };
+    Some((shape, rect))
+}
+
+/// The character at column `col` of `row` and its run, if the row reaches
+/// it (one column per character, as libflankr_term counts).
+pub fn char_at(row: &Row, col: usize) -> Option<(char, &Run)> {
+    let mut at = 0usize;
+    for run in row {
+        let w = run.width();
+        if col < at + w {
+            return run.text.chars().nth(col - at).map(|c| (c, run));
+        }
+        at += w;
+    }
+    None
+}
+
+/// The stale pill's words, while the desktop has the tab.
+pub fn stale_label(state: &TermState) -> Option<&'static str> {
+    state.stale().then_some(STALE_LABEL)
 }
 
 /// The status line for `state`, when there is one to show instead of (or
@@ -221,16 +386,22 @@ pub fn run_colours(run: &Run, dark: bool) -> ([f32; 4], Option<[f32; 4]>) {
 }
 
 /// What a touch on the terminal did, beyond panning and zooming the view.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Touched {
     /// The view moved (a pan or a zoom): draw again.
     pub moved: bool,
     /// A tap, with input allowed: arm, and raise the soft keyboard.
     pub tap: bool,
-    /// A vertical drag began, with input allowed: arm (no keyboard).
+    /// A vertical drag, or in mouse mode a drag across, began with input
+    /// allowed: arm (no keyboard).
     pub drag: bool,
+    /// In mouse mode, a tap: arm (no keyboard); [`mouse`](Self::mouse)
+    /// has its click.
+    pub click: bool,
     /// Lines to scroll the pane by, positive back into the scrollback.
     pub lines: i32,
+    /// Mouse events, in order, in mouse mode.
+    pub mouse: Vec<MouseAt>,
 }
 
 /// The axis a one-finger drag is locked to, from its first direction.
@@ -242,6 +413,8 @@ pub enum Axis {
     Across,
     /// Up and down: the pane scrolls.
     Wheel,
+    /// In mouse mode, across first: the left button drags.
+    Mouse,
 }
 
 /// One finger on the terminal.
@@ -302,6 +475,12 @@ pub struct TermView {
     /// When the last two-finger tap ended, for the double tap.
     last_tap: Option<Duration>,
     cache: Vec<Option<RowCache>>,
+    /// Touches are the program's mouse ([`TermState::mouse_mode`]), as last
+    /// set; a gesture keeps what it was when its first finger came down.
+    mouse_mode: bool,
+    gesture_mouse: bool,
+    /// The left button is held at this cell (a mouse drag under way).
+    mouse_held: Option<(u16, u16)>,
 }
 
 impl Default for TermView {
@@ -320,6 +499,9 @@ impl Default for TermView {
             wheel: 0.0,
             last_tap: None,
             cache: Vec::new(),
+            mouse_mode: false,
+            gesture_mouse: false,
+            mouse_held: None,
         }
     }
 }
@@ -338,15 +520,57 @@ impl TermView {
     }
 
     /// The columns and rows that fit `rect` at the starting size: the hints
-    /// for `terminal.open`.
+    /// for `terminal.open` of a new view.
     pub fn hints(rect: Rect, s: f32) -> (Option<u16>, Option<u16>) {
-        let px = START_PT * s;
-        if rect.w <= 0.0 || rect.h <= 0.0 {
-            return (None, None);
+        Self::fit_at(rect, START_PT, s).unzip()
+    }
+
+    /// The columns and rows of `pt`-point type at scale `s` that fit
+    /// `rect` (the terminal's area, above the soft keyboard when it shows):
+    /// whole cells of the renderer's cell and line pitch, at least one
+    /// each; `None` for an empty rect.
+    pub fn fit_at(rect: Rect, pt: f32, s: f32) -> Option<(u16, u16)> {
+        let px = pt * s;
+        if rect.w <= 0.0 || rect.h <= 0.0 || px <= 0.0 {
+            return None;
         }
-        let cols = (rect.w / (CELL_EM * px)).floor() as u16;
-        let rows = (rect.h / term_h(px)).floor() as u16;
-        (Some(cols.max(1)), Some(rows.max(1)))
+        let count =
+            |len: f32, pitch: f32| (len / pitch + FIT_SLACK).floor().clamp(1.0, 65535.0) as u16;
+        Some((count(rect.w, CELL_EM * px), count(rect.h, term_h(px))))
+    }
+
+    /// What fits `rect` at the view's own size now.
+    pub fn fit_size(&self, rect: Rect, s: f32) -> Option<(u16, u16)> {
+        Self::fit_at(rect, self.pt, s)
+    }
+
+    /// Two fingers are pinching: the size is not settled.
+    pub fn pinching(&self) -> bool {
+        self.pinch.is_some()
+    }
+
+    /// Whether touches are the program's mouse
+    /// ([`TermState::mouse_mode`]); a gesture under way keeps its mode.
+    pub fn set_mouse_mode(&mut self, on: bool) {
+        self.mouse_mode = on;
+    }
+
+    /// The pane-local cell under screen point `x`, `y`, at the current size
+    /// and pan, clamped to the frame; `None` without a frame.
+    pub fn cell_at(
+        &self,
+        x: f32,
+        y: f32,
+        screen: Option<&Screen>,
+        rect: Rect,
+        s: f32,
+    ) -> Option<(u16, u16)> {
+        let sc = screen.filter(|sc| sc.cols() > 0 && sc.rows() > 0)?;
+        let px = self.pt * s;
+        let col = ((x - rect.x + self.pan[0]) / (CELL_EM * px)).floor();
+        let row = ((y - rect.y + self.pan[1]) / term_h(px)).floor();
+        let clamp = |v: f32, n: u16| v.clamp(0.0, (n - 1) as f32) as u16;
+        Some((clamp(col, sc.cols()), clamp(row, sc.rows())))
     }
 
     /// The type size at which `cols` columns fill `w`, within the limits.
@@ -374,18 +598,22 @@ impl TermView {
         self.pan = [self.pan[0].clamp(0.0, m[0]), self.pan[1].clamp(0.0, m[1])];
     }
 
-    /// A new screen or size: the first frame is placed at the fit-width
-    /// size and its bottom rows; afterwards the pan is kept, within the
+    /// A new screen or size: the first frame is placed at its bottom rows,
+    /// at the fit-width size unless `attached` (the daemon sizes an
+    /// attached pane to the view's fit, so its frame fits at the size the
+    /// fit was worked out at); afterwards the pan is kept, within the
     /// frame. Returns whether anything moved.
-    pub fn follow(&mut self, screen: Option<&Screen>, rect: Rect, s: f32) -> bool {
+    pub fn follow(&mut self, screen: Option<&Screen>, rect: Rect, s: f32, attached: bool) -> bool {
         let before = (self.pt, self.pan);
         if !self.placed
             && let Some(sc) = screen.filter(|sc| sc.cols() > 0)
         {
             self.placed = true;
-            self.before_fit = self.pt;
-            self.pt = Self::fit_pt(sc.cols(), rect.w, s);
-            self.fit = true;
+            if !attached {
+                self.before_fit = self.pt;
+                self.pt = Self::fit_pt(sc.cols(), rect.w, s);
+                self.fit = true;
+            }
             self.pan = [0.0, f32::MAX];
         }
         self.clamp(screen, rect, s);
@@ -449,6 +677,8 @@ impl TermView {
                     self.multi = false;
                     self.axis = None;
                     self.wheel = 0.0;
+                    self.gesture_mouse = self.mouse_mode;
+                    self.mouse_held = None;
                 }
                 self.fingers.push(Finger {
                     id,
@@ -461,6 +691,10 @@ impl TermView {
                         dist: self.spread().max(1.0),
                         pt: self.pt,
                     });
+                    // A second finger ends a mouse drag: the button is let go.
+                    if let Some(cell) = self.mouse_held.take() {
+                        out.mouse.push(MouseAt::left(up, cell));
+                    }
                 }
             }
             TouchPhase::Moved => {
@@ -489,18 +723,37 @@ impl TermView {
                     self.fit = false;
                 } else if self.fingers.len() == 1 && !self.multi {
                     let first = self.axis.is_none();
+                    let mouse = self.gesture_mouse;
                     let axis = *self.axis.get_or_insert_with(|| {
                         if !input {
                             Axis::Free
                         } else if dy.abs() > dx.abs() {
                             Axis::Wheel
+                        } else if mouse {
+                            Axis::Mouse
                         } else {
                             Axis::Across
                         }
                     });
-                    // The wheel's first move: its arm.
-                    out.drag = first && axis == Axis::Wheel;
+                    // The wheel's or the mouse drag's first move: its arm.
+                    out.drag = first && matches!(axis, Axis::Wheel | Axis::Mouse);
                     match axis {
+                        Axis::Mouse => {
+                            if first
+                                && let Some(cell) =
+                                    self.cell_at(start[0], start[1], screen, rect, s)
+                            {
+                                out.mouse.push(MouseAt::left(down, cell));
+                                self.mouse_held = Some(cell);
+                            }
+                            if let (Some(held), Some(cell)) =
+                                (self.mouse_held, self.cell_at(x, y, screen, rect, s))
+                                && held != cell
+                            {
+                                out.mouse.push(MouseAt::left(dragged, cell));
+                                self.mouse_held = Some(cell);
+                            }
+                        }
                         Axis::Free => {
                             self.pan[0] -= x - was[0];
                             self.pan[1] -= y - was[1];
@@ -523,12 +776,26 @@ impl TermView {
                 if self.fingers.len() < 2 {
                     self.pinch = None;
                 }
+                if self.fingers.is_empty()
+                    && let Some(cell) = self.mouse_held.take()
+                {
+                    out.mouse.push(MouseAt::left(up, cell));
+                }
                 let tap = phase == TouchPhase::Ended && self.fingers.is_empty() && !self.moved;
                 if !tap {
                     return out;
                 }
                 if !self.multi {
-                    out.tap = input;
+                    if input && self.gesture_mouse {
+                        // A left click at the tapped cell.
+                        if let Some(cell) = self.cell_at(x, y, screen, rect, s) {
+                            out.click = true;
+                            out.mouse.push(MouseAt::left(down, cell));
+                            out.mouse.push(MouseAt::left(up, cell));
+                        }
+                    } else {
+                        out.tap = input;
+                    }
                     return out;
                 }
                 // Two fingers, lifted without moving: twice is the double
@@ -658,6 +925,47 @@ impl TermView {
                     }
                 }
             }
+            // The cursor, over its cell.
+            let origin = [rect.x - self.pan[0], rect.y - self.pan[1]];
+            if let Some((shape, r)) = cursor_mark(screen.cursor(), origin, cell, lh) {
+                let under = screen.cursor().and_then(|c| {
+                    grid.lines
+                        .get(c.row as usize)
+                        .and_then(|row| char_at(row, c.col as usize))
+                });
+                let (fg, bg) =
+                    under.map_or((theme().text, None), |(_, run)| run_colours(run, dark));
+                fill(list, r, fg, 0.0);
+                // A block shows its cell in reverse video.
+                if shape == CursorShape::Block
+                    && let Some((ch, run)) = under.filter(|(ch, _)| !ch.is_whitespace())
+                {
+                    let text = ch.to_string();
+                    let colour = bg.unwrap_or(theme().bg);
+                    let style = if run.flags & flags::BOLD != 0 {
+                        GlyphStyle::Bold
+                    } else {
+                        GlyphStyle::Regular
+                    };
+                    match term {
+                        Some(t) => {
+                            let line = t.shaper.line(&text, style);
+                            list.push_terminal_line(
+                                &line,
+                                t.text,
+                                t.symbols,
+                                [r.x, r.y],
+                                px,
+                                t.px_range,
+                                colour,
+                            );
+                        }
+                        None => {
+                            ctx.draw_text(list, &text, [r.x, r.y], px, colour);
+                        }
+                    }
+                }
+            }
         }
         list.push_clip_end();
         // What is happening, over the grid's top.
@@ -716,6 +1024,26 @@ impl TermView {
                 theme().fg,
             );
         }
+        // The desktop has the tab: the frames keep coming, at its size.
+        if let Some(label) = stale_label(state) {
+            let px = ARMED_PT * s;
+            let w = (label.chars().count() as f32 * px * 0.5 + 16.0 * s).min(rect.w - 16.0 * s);
+            let h = line_h(px) + 6.0 * s;
+            let pill = Rect::new(
+                rect.x + (rect.w - w) * 0.5,
+                rect.y + rect.h - h - 8.0 * s,
+                w,
+                h,
+            );
+            fill(list, pill, with_alpha(theme().warn, 0.92), h * 0.5);
+            ctx.draw_text(
+                list,
+                label,
+                [pill.x + 8.0 * s, pill.y + 3.0 * s],
+                px,
+                theme().bg,
+            );
+        }
     }
 }
 
@@ -758,6 +1086,8 @@ mod tests {
             keys_pending: 0,
             scroll_offset: None,
             scroll_max: None,
+            cursor: false,
+            source: TerminalSource::Poll,
         }
     }
 
@@ -955,7 +1285,7 @@ mod tests {
         assert_eq!(sc.cols(), 100);
         let mut v = TermView::default();
         assert_eq!(v.pt(), START_PT);
-        assert!(v.follow(Some(&sc), rect, s));
+        assert!(v.follow(Some(&sc), rect, s, false));
         // 100 columns into 800 px at scale 2: 800 / (100 * 0.6 * 2).
         assert!((v.pt() - 800.0 / 120.0).abs() < 1e-3 || v.pt() == MIN_PT);
         assert!(v.fit());
@@ -1016,7 +1346,7 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 800.0, 1200.0);
         let sc = tall();
         let mut v = TermView::default();
-        v.follow(Some(&sc), rect, 2.0);
+        v.follow(Some(&sc), rect, 2.0, false);
         let tap = |v: &mut TermView, id: u64, input: bool, at: Duration| {
             v.touch(
                 id,
@@ -1081,7 +1411,7 @@ mod tests {
         let s = 2.0;
         let sc = tall();
         let mut v = TermView::default();
-        v.follow(Some(&sc), rect, s);
+        v.follow(Some(&sc), rect, s, false);
         let pan = v.pan();
         let pitch = term_h(v.pt() * s);
         // Down 10.5 rows (past the slop first): content follows the finger
@@ -1141,7 +1471,7 @@ mod tests {
         let s = 2.0;
         let sc = tall();
         let mut v = TermView::default();
-        v.follow(Some(&sc), rect, s);
+        v.follow(Some(&sc), rect, s, false);
         // Zoomed in, so the frame is wider than the view.
         v.pt = MAX_PT;
         v.pan = [100.0, 100.0];
@@ -1265,7 +1595,7 @@ mod tests {
         let rect = Rect::new(0.0, 0.0, 800.0, 1200.0);
         let sc = screen_of(&"y".repeat(200));
         let mut v = TermView::default();
-        v.follow(Some(&sc), rect, 2.0);
+        v.follow(Some(&sc), rect, 2.0, false);
         let t = Duration::ZERO;
         let touch = |v: &mut TermView, id: u64, phase: TouchPhase, x: f32| {
             v.touch(id, phase, x, 500.0, t, Some(&sc), rect, 2.0, true)
@@ -1317,5 +1647,519 @@ mod tests {
         // 1080 / (0.6 * 11 * 2.625) = 62.3; 1500 / (1.3 * 11 * 2.625) = 39.9.
         assert_eq!((c, r), (Some(62), Some(39)));
         assert_eq!(TermView::hints(Rect::default(), 2.0), (None, None));
+    }
+
+    // Plan 20261027_08, step 9.
+
+    fn cursor(col: u16, row: u16, shape: u8) -> Cursor {
+        Cursor {
+            col,
+            row,
+            visible: true,
+            shape,
+            mouse_reporting: false,
+            alternate_screen: false,
+            stale: false,
+        }
+    }
+
+    /// `ansi` as a frame carrying `c`.
+    fn screen_with(ansi: &str, c: Option<Cursor>) -> Screen {
+        let mut grid = parse_ansi(ansi);
+        grid.cursor = c;
+        let mut sc = Screen::default();
+        assert!(sc.apply(&Frame::full(1, 1, &grid)));
+        sc
+    }
+
+    #[test]
+    fn the_fit_is_whole_cells_of_the_rect_at_the_size() {
+        let s = 2.625;
+        let rect = Rect::new(0.0, 0.0, 1080.0, 1500.0);
+        assert_eq!(TermView::fit_at(rect, START_PT, s), Some((62, 39)));
+        assert_eq!(
+            TermView::hints(rect, s),
+            (Some(62), Some(39)),
+            "the hints are the fit at the starting size"
+        );
+        // Bigger type, fewer cells.
+        let (c, r) = TermView::fit_at(rect, 14.0, s).unwrap();
+        assert!(c < 62 && r < 39);
+        // A width that is exactly 80 cells is 80, not 79 from rounding.
+        let px = START_PT * s;
+        let exact = Rect::new(0.0, 0.0, 80.0 * CELL_EM * px, 24.0 * term_h(px));
+        assert_eq!(TermView::fit_at(exact, START_PT, s), Some((80, 24)));
+        assert_eq!(TermView::fit_at(Rect::default(), START_PT, s), None);
+        // A tiny rect is still one cell.
+        assert_eq!(
+            TermView::fit_at(Rect::new(0.0, 0.0, 1.0, 1.0), START_PT, s),
+            Some((1, 1))
+        );
+        let v = TermView::default();
+        assert_eq!(v.fit_size(rect, s), Some((62, 39)));
+    }
+
+    #[test]
+    fn herdrs_cursor_shapes_draw_as_block_underline_and_bar() {
+        use CursorShape::*;
+        let want = [Block, Block, Block, Underline, Underline, Bar, Bar, Block];
+        for (shape, w) in want.iter().enumerate() {
+            assert_eq!(cursor_shape(shape as u8), *w, "shape {shape}");
+        }
+        assert_eq!(cursor_shape(200), Block);
+        let (cell, lh) = (12.0, 26.0);
+        let origin = [100.0, 50.0];
+        let (shape, r) = cursor_mark(Some(cursor(3, 2, 2)), origin, cell, lh).unwrap();
+        assert_eq!(shape, Block);
+        assert_eq!(r, Rect::new(136.0, 102.0, 12.0, 26.0));
+        let (shape, r) = cursor_mark(Some(cursor(3, 2, 4)), origin, cell, lh).unwrap();
+        assert_eq!(shape, Underline);
+        assert_eq!((r.x, r.w), (136.0, 12.0));
+        assert!(
+            r.h < 4.0 && (r.y + r.h - 128.0).abs() < 1e-3,
+            "at the cell's foot"
+        );
+        let (shape, r) = cursor_mark(Some(cursor(3, 2, 6)), origin, cell, lh).unwrap();
+        assert_eq!(shape, Bar);
+        assert_eq!((r.x, r.y, r.h), (136.0, 102.0, 26.0));
+        assert!(r.w < 3.0, "a thin bar at the left edge");
+        // Hidden: by the program, or while the desktop has the tab.
+        let hidden = Cursor {
+            visible: false,
+            ..cursor(3, 2, 2)
+        };
+        assert_eq!(cursor_mark(Some(hidden), origin, cell, lh), None);
+        let stale = Cursor {
+            stale: true,
+            ..cursor(3, 2, 2)
+        };
+        assert_eq!(cursor_mark(Some(stale), origin, cell, lh), None);
+        assert_eq!(cursor_mark(None, origin, cell, lh), None);
+    }
+
+    #[test]
+    fn the_character_under_the_cursor_is_found_across_runs() {
+        let grid = parse_ansi("ab\x1b[31mcd\x1b[0mef");
+        let row = &grid.lines[0];
+        assert_eq!(char_at(row, 0).map(|(c, _)| c), Some('a'));
+        let (c, run) = char_at(row, 3).unwrap();
+        assert_eq!(c, 'd');
+        assert_eq!(run.fg, Color::palette(1));
+        assert_eq!(char_at(row, 5).map(|(c, _)| c), Some('f'));
+        assert_eq!(char_at(row, 6), None);
+    }
+
+    /// The `SdfKind::Box` fills in `list` exactly at `r`.
+    fn fills_at(list: &DrawList, r: Rect) -> Vec<[f32; 4]> {
+        list.instances
+            .iter()
+            .filter(|i| matches!(i.kind, libmsdf::drawlist::SdfKind::Box))
+            .filter(|i| i.position == r.pos() && i.size == r.size())
+            .map(|i| i.color)
+            .collect()
+    }
+
+    #[test]
+    fn the_cursor_is_drawn_by_its_shape_and_not_when_hidden_or_stale() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let s = 2.0;
+        let draw = |c: Option<Cursor>| {
+            let mut v = TermView::default();
+            let state = TermState {
+                supported: true,
+                screen: Some(screen_with("hello\n\x1b[31mred\x1b[0m", c)),
+                status: Some(status(true)),
+                ..Default::default()
+            };
+            v.follow(state.screen.as_ref(), rect, s, true);
+            let mut list = DrawList::new();
+            v.draw(
+                &mut list,
+                &DrawContext::default(),
+                None,
+                &state,
+                rect,
+                s,
+                "x",
+            );
+            let px = v.pt() * s;
+            let mark = cursor_mark(
+                c,
+                [rect.x - v.pan()[0], rect.y - v.pan()[1]],
+                CELL_EM * px,
+                term_h(px),
+            );
+            (list, mark)
+        };
+        // A block over the red 'e' of row 1, col 1: filled in the cell's
+        // own colour (reverse video).
+        let (list, mark) = draw(Some(cursor(1, 1, 2)));
+        let (shape, r) = mark.unwrap();
+        assert_eq!(shape, CursorShape::Block);
+        assert_eq!(fills_at(&list, r), vec![palette_colour(1, dark_theme())]);
+        // The default shape, over a blank: the theme's text colour.
+        let (list, mark) = draw(Some(cursor(9, 0, 0)));
+        assert_eq!(fills_at(&list, mark.unwrap().1), vec![theme().text]);
+        // A bar and an underline.
+        for shape in [4, 6] {
+            let (list, mark) = draw(Some(cursor(0, 0, shape)));
+            let (_, r) = mark.unwrap();
+            assert_eq!(fills_at(&list, r).len(), 1, "shape {shape}");
+        }
+        // Hidden or stale: no mark is drawn at the cell.
+        let px = START_PT * s;
+        let cell = Rect::new(CELL_EM * px, term_h(px), CELL_EM * px, term_h(px));
+        for c in [
+            Cursor {
+                visible: false,
+                ..cursor(1, 1, 2)
+            },
+            Cursor {
+                stale: true,
+                ..cursor(1, 1, 2)
+            },
+        ] {
+            let (list, mark) = draw(Some(c));
+            assert_eq!(mark, None);
+            assert!(fills_at(&list, cell).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_stale_pill_shows_while_the_desktop_has_the_tab() {
+        let mut st = TermState {
+            supported: true,
+            status: Some(status(true)),
+            screen: Some(screen_with("hello", Some(cursor(0, 0, 0)))),
+            ..Default::default()
+        };
+        assert_eq!(stale_label(&st), None);
+        assert!(!st.stale());
+        let stale = Cursor {
+            stale: true,
+            ..cursor(0, 0, 0)
+        };
+        st.screen = Some(screen_with("hello", Some(stale)));
+        assert!(st.stale());
+        assert_eq!(
+            stale_label(&st),
+            Some("Desktop has the tab \u{2014} touch to take it back")
+        );
+        // Frames keep showing: no status line hides them.
+        assert_eq!(status_line(&st), None);
+        // Drawn in the warning colour.
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut v = TermView::default();
+        v.follow(st.screen.as_ref(), rect, 2.0, true);
+        let mut list = DrawList::new();
+        v.draw(
+            &mut list,
+            &DrawContext::default(),
+            None,
+            &st,
+            rect,
+            2.0,
+            "x",
+        );
+        let warn = with_alpha(theme().warn, 0.92);
+        assert!(list.instances.iter().any(|i| i.color == warn));
+        // Without a cursor (the poll): never stale.
+        st.screen = Some(screen_of("hello"));
+        assert_eq!(stale_label(&st), None);
+    }
+
+    #[test]
+    fn an_attached_frame_keeps_the_size_and_does_not_pan_when_it_fits() {
+        let rect = Rect::new(0.0, 100.0, 800.0, 600.0);
+        let s = 2.0;
+        let mut v = TermView::default();
+        let (cols, rows) = v.fit_size(rect, s).unwrap();
+        let text: String = (0..rows)
+            .map(|i| format!("{}\n", "x".repeat(cols as usize - 1 - (i as usize % 3))))
+            .collect();
+        let sc = screen_with(&text, Some(cursor(0, 0, 0)));
+        assert!(sc.cols() <= cols && sc.rows() <= rows);
+        v.follow(Some(&sc), rect, s, true);
+        assert_eq!(v.pt(), START_PT, "not fitted to the frame's width");
+        assert_eq!(v.pan(), [0.0, 0.0]);
+        assert_eq!(v.max_pan(Some(&sc), rect, s), [0.0, 0.0]);
+        // A larger frame (the desktop's size) still pans.
+        let wide = tall();
+        let mut v = TermView::default();
+        v.follow(Some(&wide), rect, s, true);
+        assert_eq!(v.pt(), START_PT);
+        let m = v.max_pan(Some(&wide), rect, s);
+        assert!(m[0] > 0.0 && m[1] > 0.0);
+        assert_eq!(v.pan(), [0.0, m[1]], "at the bottom rows");
+    }
+
+    #[test]
+    fn a_touch_maps_to_its_cell_at_the_zoom_and_pan() {
+        let rect = Rect::new(10.0, 100.0, 400.0, 600.0);
+        let s = 2.0;
+        let sc = tall();
+        let mut v = TermView {
+            pt: 10.0,
+            pan: [30.0, 45.0],
+            ..Default::default()
+        };
+        let px = 10.0 * s;
+        let (cw, lh) = (CELL_EM * px, term_h(px));
+        // The grid point (30 + 5.5 cells, 45 + 3.5 rows) from the rect.
+        let x = rect.x - 30.0 + 7.5 * cw;
+        let y = rect.y - 45.0 + 4.5 * lh;
+        assert_eq!(v.cell_at(x, y, Some(&sc), rect, s), Some((7, 4)));
+        // Zoomed in: the same point is an earlier cell.
+        v.pt = 16.0;
+        let (c, r) = v.cell_at(x, y, Some(&sc), rect, s).unwrap();
+        assert!(c < 7 && r < 4);
+        // Clamped to the frame.
+        assert_eq!(v.cell_at(-500.0, -500.0, Some(&sc), rect, s), Some((0, 0)));
+        assert_eq!(
+            v.cell_at(1e6, 1e6, Some(&sc), rect, s),
+            Some((sc.cols() - 1, sc.rows() - 1))
+        );
+        assert_eq!(v.cell_at(x, y, None, rect, s), None);
+    }
+
+    fn left(kind: fn(MouseButton) -> TerminalMouseKind, col: u16, row: u16) -> MouseAt {
+        MouseAt::left(kind, (col, row))
+    }
+
+    #[test]
+    fn a_tap_clicks_when_the_program_reports_the_mouse_and_types_when_not() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 1200.0);
+        let s = 2.0;
+        let sc = tall();
+        let mut v = TermView::default();
+        v.follow(Some(&sc), rect, s, true);
+        let tap = |v: &mut TermView, id: u64, at: [f32; 2]| {
+            v.touch(
+                id,
+                TouchPhase::Started,
+                at[0],
+                at[1],
+                Duration::ZERO,
+                Some(&sc),
+                rect,
+                s,
+                true,
+            );
+            v.touch(
+                id,
+                TouchPhase::Ended,
+                at[0],
+                at[1],
+                Duration::ZERO,
+                Some(&sc),
+                rect,
+                s,
+                true,
+            )
+        };
+        let at = [200.0, 300.0];
+        let cell = v.cell_at(at[0], at[1], Some(&sc), rect, s).unwrap();
+        // Without mouse reports: the keyboard tap of before.
+        let t = tap(&mut v, 1, at);
+        assert!(t.tap && !t.click && t.mouse.is_empty());
+        // With them: a left click at the cell, no keyboard.
+        v.set_mouse_mode(true);
+        let t = tap(&mut v, 2, at);
+        assert!(!t.tap && t.click);
+        assert_eq!(
+            t.mouse,
+            vec![left(down, cell.0, cell.1), left(up, cell.0, cell.1)]
+        );
+        // Without input: nothing, mouse or not.
+        v.touch(
+            3,
+            TouchPhase::Started,
+            at[0],
+            at[1],
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            s,
+            false,
+        );
+        let t = v.touch(
+            3,
+            TouchPhase::Ended,
+            at[0],
+            at[1],
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            s,
+            false,
+        );
+        assert_eq!(t, Touched::default());
+        // The mode a gesture started with holds to its end.
+        v.touch(
+            4,
+            TouchPhase::Started,
+            at[0],
+            at[1],
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        v.set_mouse_mode(false);
+        let t = v.touch(
+            4,
+            TouchPhase::Ended,
+            at[0],
+            at[1],
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert!(t.click);
+    }
+
+    #[test]
+    fn in_mouse_mode_a_drag_across_drags_the_button_and_a_vertical_one_is_the_wheel() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 1200.0);
+        let s = 2.0;
+        let sc = tall();
+        let mut v = TermView::default();
+        v.follow(Some(&sc), rect, s, true);
+        v.set_mouse_mode(true);
+        let pan = v.pan();
+        let px = v.pt() * s;
+        let cw = CELL_EM * px;
+        let from = [100.0, 300.0];
+        let to = [100.0 + 6.0 * cw + SLOP * s, 300.0];
+        let start = v.cell_at(from[0], from[1], Some(&sc), rect, s).unwrap();
+        let end = v.cell_at(to[0], to[1], Some(&sc), rect, s).unwrap();
+        let out = drag(&mut v, 1, from, to, 12, Some(&sc), rect, s, true);
+        assert_eq!(v.axis(), Some(Axis::Mouse));
+        assert_eq!(out.iter().filter(|t| t.drag).count(), 1, "arms once");
+        let events: Vec<MouseAt> = out.iter().flat_map(|t| t.mouse.clone()).collect();
+        assert_eq!(events.first(), Some(&left(down, start.0, start.1)));
+        assert_eq!(events.last(), Some(&left(up, end.0, end.1)));
+        let drags: Vec<&MouseAt> = events[1..events.len() - 1].iter().collect();
+        assert!(!drags.is_empty());
+        assert!(
+            drags
+                .iter()
+                .all(|m| matches!(m.kind, TerminalMouseKind::Drag { .. }))
+        );
+        // One per new cell, in order.
+        assert!(drags.windows(2).all(|w| w[0].col < w[1].col));
+        assert_eq!(drags.last().map(|m| (m.col, m.row)), Some(end));
+        assert!(out.iter().all(|t| !t.tap && !t.click && t.lines == 0));
+        assert_eq!(v.pan(), pan, "the frame does not pan");
+        // Down first: the wheel, as without mouse reports.
+        let pitch = term_h(px);
+        let out = drag(
+            &mut v,
+            2,
+            [400.0, 100.0],
+            [400.0, 100.0 + SLOP * s + 1.0 + 4.0 * pitch],
+            10,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert_eq!(v.axis(), Some(Axis::Wheel));
+        assert_eq!(out.iter().map(|t| t.lines).sum::<i32>(), 4);
+        assert!(out.iter().all(|t| t.mouse.is_empty()));
+        // A second finger during a mouse drag lets the button go.
+        let z = Duration::ZERO;
+        v.touch(
+            5,
+            TouchPhase::Started,
+            100.0,
+            300.0,
+            z,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        v.touch(
+            5,
+            TouchPhase::Moved,
+            160.0,
+            300.0,
+            z,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        let t = v.touch(
+            6,
+            TouchPhase::Started,
+            400.0,
+            300.0,
+            z,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert!(matches!(
+            t.mouse.as_slice(),
+            [MouseAt {
+                kind: TerminalMouseKind::Up { .. },
+                ..
+            }]
+        ));
+        v.touch(
+            6,
+            TouchPhase::Ended,
+            400.0,
+            300.0,
+            z,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        let t = v.touch(
+            5,
+            TouchPhase::Ended,
+            160.0,
+            300.0,
+            z,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert!(t.mouse.is_empty(), "let go once");
+    }
+
+    #[test]
+    fn mouse_mode_needs_the_daemons_mouse_and_the_programs_reports() {
+        let reporting = Cursor {
+            mouse_reporting: true,
+            ..cursor(0, 0, 0)
+        };
+        let mut st = TermState {
+            supported: true,
+            input_allowed: true,
+            mouse_allowed: true,
+            status: Some(status(true)),
+            screen: Some(screen_with("htop", Some(reporting))),
+        };
+        assert!(st.mouse_mode());
+        st.mouse_allowed = false;
+        assert!(!st.mouse_mode());
+        st.mouse_allowed = true;
+        st.input_allowed = false;
+        assert!(!st.mouse_mode());
+        st.input_allowed = true;
+        st.screen = Some(screen_with("bash", Some(cursor(0, 0, 0))));
+        assert!(!st.mouse_mode());
+        st.screen = Some(screen_of("polled"));
+        assert!(!st.mouse_mode());
     }
 }

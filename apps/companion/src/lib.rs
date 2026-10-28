@@ -1440,18 +1440,24 @@ impl App {
             let state = TermState {
                 supported: stamp.1,
                 input_allowed: stamp.2,
+                mouse_allowed: t.mouse_allowed(),
                 screen: shown.then(|| t.screen(pane)).flatten(),
                 status,
             };
             agent.set_terminal_state(stamp, state);
         }
         for ask in agent.take_terminal_asks() {
-            log::info!("terminal: {ask:?}");
+            // Mouse events are many during a drag: not logged one by one.
+            if !matches!(ask, TermAsk::Mouse(_)) {
+                log::info!("terminal: {ask:?}");
+            }
             match ask {
                 TermAsk::Open { cols, rows } => companion.terminal_open(pane, cols, rows),
                 TermAsk::Close => companion.terminal_close(pane),
                 TermAsk::Arm => companion.terminal_arm_input(pane),
                 TermAsk::Scroll(lines) => companion.terminal_scroll(pane, lines),
+                TermAsk::Resize { cols, rows } => companion.terminal_resize(pane, cols, rows),
+                TermAsk::Mouse(m) => companion.terminal_mouse(pane, m.kind, m.col, m.row, 0),
                 // Raised once armed, below: before, keys would have nowhere
                 // to go, and the keyboard would leave at once.
                 TermAsk::Keyboard => self.term_keyboard_at = Some(Instant::now()),
