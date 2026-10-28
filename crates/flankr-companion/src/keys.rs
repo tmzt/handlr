@@ -300,7 +300,9 @@ pub struct RemoteInfo {
     pub paired_at: Option<u64>,
     /// The remote in use.
     pub active: bool,
-    /// The remote in use, and its `hello` answered on the open connection.
+    /// Its link's `hello` is answered: for the remote in use, and, since
+    /// every listed remote keeps a link (plan 20261028_03, the 18:51 EDT
+    /// amendment), for those in the background too.
     pub online: bool,
     /// The whole fingerprint, BLAKE2s-256 of the daemon's key, as 64
     /// lower-case hex digits ([`fingerprint_hex`]; plan 20261024_02, the
@@ -319,6 +321,14 @@ impl Remotes {
     /// The rows of the Remotes section, in pairing order; `online` says
     /// whether the active remote's connection is up.
     pub fn info(&self, online: bool) -> Vec<RemoteInfo> {
+        let active = self.active;
+        self.info_with(|id| online && active == Some(id))
+    }
+
+    /// The rows, each remote's `online` from `online(id)`: whether its own
+    /// link's `hello` is answered (plan 20261028_03, the 18:51 EDT
+    /// amendment: every listed remote keeps a link).
+    pub fn info_with(&self, online: impl Fn(RemoteId) -> bool) -> Vec<RemoteInfo> {
         self.list
             .iter()
             .zip(self.display_names())
@@ -331,7 +341,7 @@ impl Remotes {
                     fingerprint: r.id.fingerprint(),
                     paired_at: r.paired_at,
                     active,
-                    online: active && online,
+                    online: online(r.id),
                     fingerprint_hex: fingerprint_hex(&r.public_key),
                     fingerprint_words: link::fingerprint_words_text(&r.public_key),
                     nickname: r.nickname.clone(),

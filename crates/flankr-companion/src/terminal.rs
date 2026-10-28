@@ -207,6 +207,17 @@ impl Terminals {
         self.book.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Swaps this book's contents with `other`'s, both counted as changed
+    /// (a remote coming into use, plan 20261028_03).
+    pub(crate) fn swap_with(&self, other: &Terminals) {
+        if std::ptr::eq(self, other) {
+            return;
+        }
+        std::mem::swap(&mut *self.lock(), &mut *other.lock());
+        self.changes.fetch_add(1, Ordering::AcqRel);
+        other.changes.fetch_add(1, Ordering::AcqRel);
+    }
+
     /// Runs `f` on the book; counts a change when it says so.
     pub(crate) fn update<R>(&self, f: impl FnOnce(&mut Book) -> (R, bool)) -> R {
         let (r, changed) = f(&mut self.lock());
@@ -450,6 +461,20 @@ impl Book {
             .into_iter()
             .collect();
         (acts, true)
+    }
+
+    /// Every terminal is closed and forgotten (its remote goes out of
+    /// use).
+    pub(crate) fn close_all(&mut self) -> (Vec<Act>, bool) {
+        let sessions: Vec<String> = self.sessions.keys().cloned().collect();
+        let mut acts = Vec::new();
+        let mut changed = false;
+        for session in sessions {
+            let (more, c) = self.close(&session);
+            acts.extend(more);
+            changed |= c;
+        }
+        (acts, changed)
     }
 
     /// `terminal.open` was answered.

@@ -283,5 +283,7 @@ fn print_event(event: Event) {
         // Gemini's lines also come as Say.
         Event::Conversation { .. } => {}
         Event::Error(e) => println!("! {e}"),
+        Event::Background { remote, event } => println!("* in the background, {remote}: {event:?}"),
+        other => println!("* {other:?}"),
     }
 }

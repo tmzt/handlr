@@ -21,6 +21,7 @@
 //! [`Input::RemoveRemote`] (plan 20261028_01). `examples/text.rs` drives it
 //! from typed lines.
 
+pub mod activity;
 pub mod client;
 pub mod cross;
 pub mod keys;
@@ -38,8 +39,8 @@ use std::thread;
 use std::time::Duration;
 
 pub use client::{
-    CACHED_VIEWS, DICTATION_SILENCE, DeviceCodeFallback, Dictation, DictationPhase, Event, Input,
-    Pressure, PromptMode, Settings, Speaker, Suggestion,
+    CACHED_VIEWS, DICTATION_SILENCE, DRAWER_LIST_INTERVAL, DeviceCodeFallback, Dictation,
+    DictationPhase, Event, Input, Pressure, PromptMode, Settings, Speaker, Suggestion,
 };
 pub use cross::{SessionCard, SessionCardKind, is_terminal_only};
 pub use keys::{

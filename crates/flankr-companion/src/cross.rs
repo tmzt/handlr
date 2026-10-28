@@ -184,6 +184,11 @@ pub struct Cross {
 }
 
 impl Cross {
+    /// The cards as last given.
+    pub fn shown(&self) -> &[SessionCard] {
+        &self.shown
+    }
+
     /// The user interacted with the session in `pane_id` at `now`.
     pub fn interact(&mut self, pane_id: &str, agent: Option<&AgentInfo>, now: Duration) {
         let session = agent.and_then(session_id).map(str::to_string);
@@ -399,6 +404,9 @@ mod tests {
                 pending_question: None,
             }),
             turn,
+            idle_ms: None,
+            subagents_running: None,
+            summary: None,
         }
     }
 

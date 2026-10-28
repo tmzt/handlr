@@ -570,3 +570,27 @@ Plan 20261028_03 (the session drawer), step 1. Strictly additive:
   most `TURN_TEXT_MAX` characters). Appended, defaulted when absent and left
   off the wire when `None`, so older lists parse and older clients ignore
   them.
+
+## flankr-companion 0.5.0 — 2026-10-28 (the commit tagged `flankr-companion-v0.5.0`)
+
+Plan 20261028_03 (the session drawer), steps 3 and 4, with the 18:48 and
+18:51 EDT amendments. Not strictly additive:
+
+- **Breaking:** `Input` and `Event` are `#[non_exhaustive]`; matches need a
+  wildcard arm. Later variants are patch bumps.
+- **Breaking:** `Input::SwitchRemote(RemoteId)`, `Input::DrawerShown(bool)`
+  and `Input::ToRemote { remote, input }`; `Event::Background { remote,
+  event }` carries every event of a remote not in use.
+- **Breaking (behaviour):** every listed remote keeps its own link (a
+  connection manager); those not in use are in the daemon's background
+  mode. `RemoteInfo::online` is now each remote's own link, not only the
+  active one's. Switching closes no link.
+- **Added:** `DRAWER_LIST_INTERVAL` (3 s): while the drawer shows, the active
+  remote's agents are listed at once and every 3 s, also with an agent view
+  open.
+- **Added:** the `activity` module: `Activity`, `NeedsInput`, `Signals`,
+  `activity()`, `short_age()`, `RECENT`, `TOOL_WAIT`, `SUBAGENT_LIVE`.
+- **Added:** `State::replay`, `State::leave_foreground`,
+  `State::trade_terminals`; `Remotes::info_with`; `Cross::shown`.
+- libflankr_proto 0.5.0 → 0.5.1 (semver-compatible; `AgentInfo`'s
+  `idle_ms`, `subagents_running`, `summary`).

@@ -62,7 +62,16 @@ struct Server {
     pair_mode: Arc<Mutex<Option<PairMode>>>,
     /// The requests held, one per accepted request.
     held: mpsc::Receiver<Held>,
+    /// Every request on a link, with the phone key that sent it.
+    requests: Requests,
+    /// A sender per open link, for notifications.
+    links: Links,
 }
+
+/// Every request on a link, with the phone key that sent it.
+type Requests = Arc<Mutex<Vec<([u8; 32], Value)>>>;
+/// A sender per open link.
+type Links = Arc<Mutex<Vec<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>>>;
 
 /// A `flankr pair` run on the test server.
 #[derive(Clone, Copy)]
@@ -102,7 +111,13 @@ impl Server {
         let close_after_hello = Arc::new(AtomicUsize::new(0));
         let pair_mode = Arc::new(Mutex::new(None));
         let (held_tx, held) = mpsc::channel();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let agents = Arc::new(Mutex::new(json!([])));
+        let links = Arc::new(Mutex::new(Vec::new()));
         let ctx = Ctx {
+            requests: requests.clone(),
+            agents,
+            links: links.clone(),
             pair_mode: pair_mode.clone(),
             held: held_tx,
             key: key.clone(),
@@ -139,7 +154,29 @@ impl Server {
             close_after_hello,
             pair_mode,
             held,
+            requests,
+            links,
         }
+    }
+
+    /// Sends `method` with `params` on every open link.
+    fn notify(&self, method: &str, params: Value) {
+        let note = json!({"jsonrpc": "2.0", "method": method, "params": params});
+        let bytes = serde_json::to_vec(&note).unwrap();
+        for link in self.links.lock().unwrap().iter() {
+            let _ = link.send(bytes.clone());
+        }
+    }
+
+    /// The requests of `method` seen so far.
+    fn seen(&self, method: &str) -> Vec<Value> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, r)| r["method"] == method)
+            .map(|(_, r)| r.clone())
+            .collect()
     }
 
     /// The pairing string an older `flankr pair` would show for
@@ -201,6 +238,10 @@ struct Ctx {
     close_after_hello: Arc<AtomicUsize>,
     pair_mode: Arc<Mutex<Option<PairMode>>>,
     held: mpsc::Sender<Held>,
+    requests: Requests,
+    /// The `agents` that `agents.list` answers with.
+    agents: Arc<Mutex<Value>>,
+    links: Links,
 }
 
 impl Ctx {
@@ -247,12 +288,27 @@ impl Ctx {
             let _ = stream.shutdown().await;
             return;
         }
-        while let Ok(message) = stream.recv_message().await {
+        let (mut read, mut write) = stream.into_split();
+        let (out, mut outgoing) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        self.links.lock().unwrap().push(out.clone());
+        tokio::spawn(async move {
+            while let Some(message) = outgoing.recv().await {
+                if write.send_message(&message).await.is_err() {
+                    return;
+                }
+            }
+        });
+        while let Ok(message) = read.recv_message().await {
             let request: Value = serde_json::from_slice(&message).unwrap();
+            self.requests
+                .lock()
+                .unwrap()
+                .push((peer_key, request.clone()));
             if request.get("id").is_none() {
                 continue;
             }
             let result = match request["method"].as_str() {
+                Some("agents.list") => json!({"agents": self.agents.lock().unwrap().clone()}),
                 Some("turn.start") => json!({"outcome": "done", "ran": []}),
                 // As the daemon's `Link::unpair`: the key leaves auth.toml.
                 Some("link.unpair") => {
@@ -262,14 +318,11 @@ impl Ctx {
                 _ => json!({}),
             };
             let response = json!({"jsonrpc": "2.0", "id": request["id"], "result": result});
-            if stream
-                .send_message(&serde_json::to_vec(&response).unwrap())
-                .await
-                .is_err()
-            {
+            if out.send(serde_json::to_vec(&response).unwrap()).is_err() {
                 return;
             }
         }
+        self.links.lock().unwrap().retain(|l| !l.same_channel(&out));
     }
 }
 
@@ -363,11 +416,21 @@ fn stored(dir: &tempfile::TempDir) -> Remotes {
 }
 
 /// The next event that is not a `Disconnected` from the attempts on the
-/// missing socket, the remotes list or the cache's size.
+/// missing socket, the remotes list, the cache's size, a remote's in the
+/// background, or what a remote coming in front gives of itself (its
+/// agents, pending panes, focus, cards and dictation card).
 fn next_event(c: &Companion) -> Event {
     loop {
         match c.wait_timeout(TIMEOUT).expect("an event within 5 s") {
-            Event::Disconnected { .. } | Event::Remotes(_) | Event::Cache { .. } => continue,
+            Event::Disconnected { .. }
+            | Event::Remotes(_)
+            | Event::Cache { .. }
+            | Event::Background { .. }
+            | Event::Agents(_)
+            | Event::PendingPanes(_)
+            | Event::Focus(_)
+            | Event::SessionCards(_)
+            | Event::Dictation(_) => continue,
             e => return e,
         }
     }
@@ -1543,4 +1606,232 @@ fn a_new_run_for_the_daemon_being_paired_keeps_the_key_and_asks_again() {
     second.answer(PairResult::Added);
     expect_paired(&c);
     assert_eq!(ids(&dir), [RemoteId::of(&server.key.public)]);
+}
+
+// The connection manager (plan 20261028_03, the 18:51 EDT amendment):
+// every listed remote has a link, the inactive ones in the background.
+
+/// Waits until `f` holds, for up to 5 s.
+fn eventually(what: &str, f: impl Fn() -> bool) {
+    let deadline = Instant::now() + TIMEOUT;
+    while !f() {
+        assert!(Instant::now() < deadline, "not within 5 s: {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Waits for an event for which `f` holds, skipping others.
+fn expect_event(c: &Companion, what: &str, f: impl Fn(&Event) -> bool) -> Event {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match c.wait_timeout(left) {
+            Some(e) if f(&e) => return e,
+            Some(_) => {}
+            None => panic!("no event where {what} within 5 s"),
+        }
+    }
+}
+
+/// The `background` of the last `client.options` the server saw.
+fn last_background(server: &Server) -> Option<bool> {
+    server
+        .seen("client.options")
+        .last()
+        .map(|r| r["params"]["background"].as_bool().unwrap())
+}
+
+/// A companion with `a` (active) and `b` listed, both authorized, once both
+/// links are online.
+fn both_online(
+    dir: &tempfile::TempDir,
+    a: &Server,
+    b: &Server,
+) -> (Companion, ServerRecord, ServerRecord) {
+    let mut keys = FileKeyStore::new(keys_dir(dir));
+    let ra = remote(&mut keys, a, vec![a.addr.clone()], Some(10), true);
+    let rb = remote(&mut keys, b, vec![b.addr.clone()], Some(20), true);
+    keys.set_remotes(&Remotes {
+        active: Some(ra.id),
+        list: vec![ra.clone(), rb.clone()],
+    })
+    .unwrap();
+    let c = companion(dir);
+    a.next_seen();
+    b.next_seen();
+    expect_remotes(&c, "both online", |rows| {
+        rows.len() == 2 && rows.iter().all(|r| r.online) && rows[0].active
+    });
+    eventually("a in front and b in the background", || {
+        last_background(a) == Some(false) && last_background(b) == Some(true)
+    });
+    (c, ra, rb)
+}
+
+#[test]
+fn every_remote_is_connected_and_a_switch_flips_the_background_without_reconnecting() {
+    let (a, b) = (Server::start(), Server::start());
+    let dir = tempfile::tempdir().unwrap();
+    let (c, ra, rb) = both_online(&dir, &a, &b);
+    assert_eq!(a.accepts.load(Ordering::SeqCst), 1);
+    assert_eq!(b.accepts.load(Ordering::SeqCst), 1);
+
+    // Ignored: the remote in use, and one not paired.
+    c.send(Input::SwitchRemote(ra.id));
+    c.send(Input::SwitchRemote(RemoteId::of(&[9; 32])));
+    c.send(Input::SwitchRemote(rb.id));
+    // b's connection as it stands comes untagged.
+    expect_event(
+        &c,
+        "b's connection, in front",
+        |e| matches!(e, Event::Connected { server } if server == "flankr"),
+    );
+    let rows = expect_remotes(&c, "b in use", |rows| rows[1].active);
+    assert!(!rows[0].active && rows.iter().all(|r| r.online));
+    assert_eq!(stored(&dir).active, Some(rb.id));
+    eventually("a in the background and b in front", || {
+        last_background(&a) == Some(true) && last_background(&b) == Some(false)
+    });
+    // No link was closed or made.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(a.accepts.load(Ordering::SeqCst), 1);
+    assert_eq!(b.accepts.load(Ordering::SeqCst), 1);
+    assert_eq!(a.links.lock().unwrap().len(), 1);
+    assert_eq!(b.links.lock().unwrap().len(), 1);
+
+    // The app's backgrounding puts both in the background; back in front,
+    // only b.
+    c.send(Input::Background(true));
+    eventually("both in the background", || {
+        last_background(&a) == Some(true) && last_background(&b) == Some(true)
+    });
+    c.send(Input::Background(false));
+    eventually("b in front again", || last_background(&b) == Some(false));
+    assert_eq!(last_background(&a), Some(true));
+}
+
+#[test]
+fn background_events_arrive_tagged_with_their_remote() {
+    let (a, b) = (Server::start(), Server::start());
+    let dir = tempfile::tempdir().unwrap();
+    let (c, ra, rb) = both_online(&dir, &a, &b);
+    b.notify("vocabulary.changed", json!({"vocabulary": ["bee"]}));
+    let e = expect_event(
+        &c,
+        "b's vocabulary",
+        |e| matches!(e, Event::Background { event, .. } if matches!(**event, Event::Vocabulary(_))),
+    );
+    assert_eq!(
+        e,
+        Event::Background {
+            remote: rb.id,
+            event: Box::new(Event::Vocabulary(vec!["bee".into()]))
+        }
+    );
+    a.notify("vocabulary.changed", json!({"vocabulary": ["ay"]}));
+    expect_event(&c, "a's vocabulary, untagged", |e| {
+        *e == Event::Vocabulary(vec!["ay".into()])
+    });
+
+    // After the switch, the other way round.
+    c.send(Input::SwitchRemote(rb.id));
+    expect_remotes(&c, "b in use", |rows| rows[1].active);
+    a.notify("vocabulary.changed", json!({"vocabulary": ["ay2"]}));
+    expect_event(&c, "a's vocabulary, tagged", |e| {
+        *e == Event::Background {
+            remote: ra.id,
+            event: Box::new(Event::Vocabulary(vec!["ay2".into()])),
+        }
+    });
+}
+
+#[test]
+fn each_state_redb_stays_open_while_listed_and_removal_closes_one_link() {
+    let (a, b) = (Server::start(), Server::start());
+    let dir = tempfile::tempdir().unwrap();
+    let (c, ra, rb) = both_online(&dir, &a, &b);
+    let data = data_dir(&dir);
+    // Both are open (redb holds a lock on each), before and after a switch.
+    assert!(RemoteState::open(&data, &ra).is_err());
+    assert!(RemoteState::open(&data, &rb).is_err());
+    c.send(Input::SwitchRemote(rb.id));
+    expect_remotes(&c, "b in use", |rows| rows[1].active);
+    assert!(RemoteState::open(&data, &ra).is_err());
+    assert!(RemoteState::open(&data, &rb).is_err());
+
+    // Removing a (now in the background) closes its link and its state;
+    // b's stay.
+    c.send(Input::RemoveRemote(ra.id));
+    expect_event(
+        &c,
+        "a removed",
+        |e| matches!(e, Event::RemoteRemoved { id, daemon: true, .. } if *id == ra.id),
+    );
+    eventually("a's link closed", || a.links.lock().unwrap().is_empty());
+    assert!(!RemoteState::dir(&data, ra.id).exists());
+    assert!(RemoteState::open(&data, &rb).is_err());
+    assert_eq!(b.links.lock().unwrap().len(), 1);
+    assert_eq!(b.accepts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn an_unreachable_remote_stays_in_use_and_retries() {
+    let a = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let mut keys = FileKeyStore::new(keys_dir(&dir));
+    let ra = remote(&mut keys, &a, vec![a.addr.clone()], Some(10), true);
+    let unreachable = Server::start();
+    let rb = remote(&mut keys, &unreachable, vec![closed_addr()], Some(20), true);
+    keys.set_remotes(&Remotes {
+        active: Some(ra.id),
+        list: vec![ra.clone(), rb.clone()],
+    })
+    .unwrap();
+    let c = companion(&dir);
+    a.next_seen();
+    expect_remotes(&c, "a online", |rows| rows[0].online && !rows[1].online);
+
+    c.send(Input::SwitchRemote(rb.id));
+    expect_remotes(&c, "b in use, offline", |rows| {
+        rows[1].active && !rows[1].online && rows[0].online
+    });
+    // Its retries come untagged, with their delay; it stays in use.
+    for _ in 0..2 {
+        expect_event(
+            &c,
+            "b retrying",
+            |e| matches!(e, Event::Disconnected { retry_in_ms } if *retry_in_ms > 0),
+        );
+    }
+    assert_eq!(stored(&dir).active, Some(rb.id));
+    eventually("a in the background", || last_background(&a) == Some(true));
+    assert_eq!(a.accepts.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn the_drawer_lists_the_active_remote_every_3_s_with_a_view_open() {
+    let (a, b) = (Server::start(), Server::start());
+    let dir = tempfile::tempdir().unwrap();
+    let (c, _ra, _rb) = both_online(&dir, &a, &b);
+    c.send(Input::OpenAgent("w1:p1".into()));
+    eventually("the view subscribed", || {
+        !a.seen("session.subscribe").is_empty()
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    let (before_a, before_b) = (a.seen("agents.list").len(), b.seen("agents.list").len());
+
+    // Shown: once at once, then every 3 s, the view open.
+    c.send(Input::DrawerShown(true));
+    eventually("a list at once", || {
+        a.seen("agents.list").len() == before_a + 1
+    });
+    std::thread::sleep(Duration::from_millis(3300));
+    assert_eq!(a.seen("agents.list").len(), before_a + 2);
+    // Only the active remote's.
+    assert_eq!(b.seen("agents.list").len(), before_b);
+
+    // Hidden: today's cadence, which lists nothing with a view open.
+    c.send(Input::DrawerShown(false));
+    std::thread::sleep(Duration::from_millis(3300));
+    assert_eq!(a.seen("agents.list").len(), before_a + 2);
 }

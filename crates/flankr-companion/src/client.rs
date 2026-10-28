@@ -28,8 +28,10 @@ use crate::terminal::{Act, Terminals};
 use crate::view::{Outline, Sections, ViewSection, ViewWindow};
 use crate::wire;
 
-/// What the app tells the client.
+/// What the app tells the client. Not exhaustive: a later variant is not
+/// a breaking change (plan 20261028_03, the 18:48 EDT amendment, item 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Input {
     /// What `flankr pair` shows: the pairing URL, the bare `flankr1…`
     /// string, or the QR code's `data:image/png;base64,` URL. The `net`
@@ -63,6 +65,25 @@ pub enum Input {
         id: RemoteId,
         nickname: Option<String>,
     },
+    /// A tap on a remote's card in the drawer that is not in use (plan
+    /// 20261028_03, 3.7 and the 18:51 EDT amendment): the `net` thread
+    /// writes `active` first, puts the old remote's link in the background
+    /// (its agent view, terminals and a prompt for one of its panes
+    /// closed) and this one's in front, and gives this remote's sessions,
+    /// cards and connection as they stand, then [`Event::Remotes`]. No
+    /// link is closed or made: every listed remote stays connected.
+    /// Ignored for the remote in use, one not listed, or one being
+    /// removed.
+    SwitchRemote(RemoteId),
+    /// The drawer is shown (`true`) or hidden (plan 20261028_03, 3.12 item
+    /// 48): while shown, the active remote's agents are listed every
+    /// [`DRAWER_LIST_INTERVAL`], also with an agent view open, and once at
+    /// once when it is shown.
+    DrawerShown(bool),
+    /// `input` for the link of `remote`, in use or not: an answer to one
+    /// of its [`Event::Background`] events, such as an approval
+    /// ([`Input::Answer`]). Handled by the `net` thread.
+    ToRemote { remote: RemoteId, input: Box<Input> },
     /// What STT heard, or a typed line.
     Utterance(String),
     /// The tap, or Enter.
@@ -418,6 +439,9 @@ pub const LIST_INTERVAL: Duration = Duration::from_secs(15);
 /// The least time between the last list sent and one asked for since (as
 /// on `focus.changed`).
 pub const LIST_MIN_INTERVAL: Duration = Duration::from_secs(5);
+/// How often the agents are listed while the drawer shows
+/// ([`Input::DrawerShown`]; plan 20261028_03, 3.12 item 48).
+pub const DRAWER_LIST_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Where a dictated message stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -489,8 +513,10 @@ pub struct DeviceCodeFallback {
     pub replace: bool,
 }
 
-/// What the client tells the app.
+/// What the client tells the app. Not exhaustive: a later variant is not
+/// a breaking change (plan 20261028_03, the 18:48 EDT amendment, item 6).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Event {
     /// `hello` was answered.
     Connected {
@@ -713,6 +739,15 @@ pub enum Event {
     /// rest. A new question or approval also gives [`Event::Ding`].
     SessionCards(Vec<crate::cross::SessionCard>),
     Error(String),
+    /// An event of a remote that is not in use (plan 20261028_03, the
+    /// 18:51 EDT amendment): its link stays open in the daemon's background
+    /// mode, so these are mostly what needs the user (a confirmation, a
+    /// question, a finished turn's notice) and its connection's comings
+    /// and goings. The events of the remote in use come untagged.
+    Background {
+        remote: RemoteId,
+        event: Box<Event>,
+    },
 }
 
 /// Who said a line of [`Event::Conversation`].
@@ -1235,6 +1270,14 @@ pub struct State {
     cross: crate::cross::Cross,
     /// The terminals, shared with the app (plan 20261027_07, step 4).
     terminals: Arc<Terminals>,
+    /// The drawer is shown ([`Input::DrawerShown`]).
+    drawer: bool,
+    /// The server's name, vocabulary and terminal mode from the last
+    /// `hello`, and the last retry delay: given again by
+    /// [`State::replay`].
+    server_name: String,
+    vocabulary: Vec<String>,
+    retry_in_ms: u32,
 }
 
 /// A refresh running (plan 20261022_03, the L3 amendment of 2026-10-24
@@ -1676,6 +1719,10 @@ impl State {
             closed: VecDeque::new(),
             cache_shown: 0,
             refresh: None,
+            drawer: false,
+            server_name: String::new(),
+            vocabulary: Vec::new(),
+            retry_in_ms: 0,
         }
     }
 
@@ -1748,6 +1795,64 @@ impl State {
     /// The terminals, as the app reads them.
     pub fn terminals(&self) -> &Arc<Terminals> {
         &self.terminals
+    }
+
+    /// What the app shows of this daemon, as it stands, for when its
+    /// remote comes into use (plan 20261028_03, the 18:51 EDT amendment):
+    /// the connection (`Connected`, `Vocabulary` and `Llm` online, else
+    /// `Disconnected` with the last retry delay), then the agents, the
+    /// pending panes, herdr's focus, the other sessions'
+    /// cards, the dictation card and the closed views' size, each given
+    /// even when empty so the app drops the last remote's.
+    pub fn replay(&self) -> Vec<Event> {
+        let mut events = Vec::new();
+        if self.online() {
+            events.push(Event::Connected {
+                server: self.server_name.clone(),
+            });
+            events.push(Event::Vocabulary(self.vocabulary.clone()));
+            events.push(Event::Llm(self.llm.clone()));
+        } else {
+            events.push(Event::Disconnected {
+                retry_in_ms: self.retry_in_ms,
+            });
+        }
+        events.push(Event::Agents(self.agents.clone()));
+        events.push(Event::PendingPanes(self.pending_panes()));
+        events.push(Event::Focus(self.focus.clone()));
+        events.push(Event::SessionCards(self.cross.shown().to_vec()));
+        events.push(Event::Dictation(self.shown.clone()));
+        events.push(Event::Cache {
+            bytes: self.cache_bytes(),
+        });
+        events
+    }
+
+    /// This daemon's remote goes out of use (plan 20261028_03, 3.7 item 28
+    /// and the 18:51 EDT amendment): its agent view is closed (kept in the
+    /// cache, as Back keeps it), a prompt for one of its panes is dropped
+    /// (one for the general agent stays), the drawer is no longer its, and
+    /// its terminals are closed on the daemon. The link stays; the caller
+    /// puts it in the background ([`Input::Background`]).
+    pub fn leave_foreground(&mut self) -> Vec<Output> {
+        let mut out = Vec::new();
+        self.close_view(&mut out);
+        if self.dictation.as_ref().is_some_and(|d| !d.general_agent) {
+            self.clear_dictation(&mut out);
+        }
+        self.drawer = false;
+        let acts = self.terminals.update(|b| b.close_all());
+        self.terminal_acts(acts, &mut out);
+        out
+    }
+
+    /// Trades the terminals of `a` and `b`, contents and all, so that the
+    /// [`Terminals`] the app reads stays the same object while it moves to
+    /// the remote coming into use: each state keeps its own daemon's
+    /// terminal mode and terminals in what it then holds.
+    pub fn trade_terminals(a: &mut State, b: &mut State) {
+        a.terminals.swap_with(&b.terminals);
+        std::mem::swap(&mut a.terminals, &mut b.terminals);
     }
 
     /// A message of the link's terminal kind came: a frame, shown when it
@@ -1914,6 +2019,7 @@ impl State {
     pub fn disconnected(&mut self, retry_in_ms: u32) -> Vec<Output> {
         let mut out = Vec::new();
         self.link = Link::Offline;
+        self.retry_in_ms = retry_in_ms;
         self.sent.clear();
         // Terminals are opened again on the next connection.
         self.terminals.update(|b| ((), b.disconnected()));
@@ -2081,10 +2187,21 @@ impl State {
             Input::Settings(settings) => self.set_settings(settings, &mut out),
             Input::RemoveRemote(id) => self.unpair(id, &mut out),
             // The net thread's: it knows the remotes.
-            Input::Unpair | Input::CancelPairing | Input::SetNickname { .. } => {
+            Input::Unpair
+            | Input::CancelPairing
+            | Input::SetNickname { .. }
+            | Input::SwitchRemote(_)
+            | Input::ToRemote { .. } => {
                 log::debug!("{input:?}: handled by the net thread");
             }
             Input::Refresh => self.refresh(&mut out),
+            Input::DrawerShown(on) => {
+                self.drawer = on;
+                if on && self.online() && !self.background && !self.listing {
+                    self.list_wanted = false;
+                    self.ask_list(&mut out);
+                }
+            }
             Input::Replay(text) => {
                 if self.settings.sound && !text.trim().is_empty() {
                     if self.speaking {
@@ -4067,6 +4184,8 @@ impl State {
                     if hello.session_id.is_some() {
                         self.session_id = hello.session_id;
                     }
+                    self.server_name = hello.server.clone();
+                    self.vocabulary = hello.vocabulary.clone();
                     out.push(event(Event::Connected {
                         server: hello.server,
                     }));
@@ -4686,6 +4805,7 @@ impl State {
             }
             wire::methods::VOCABULARY_CHANGED => {
                 if let Some(v) = parse_or_log::<wire::VocabularyChanged>(note) {
+                    self.vocabulary = v.vocabulary.clone();
                     out.push(event(Event::Vocabulary(v.vocabulary)));
                 }
             }
@@ -4997,6 +5117,16 @@ impl State {
         // In a view, only while another session used within the hour is
         // watched for its questions and turns (plan 20261022_03, the L3
         // amendment of 2026-10-24 15:56 EDT, item 5).
+        if self.drawer {
+            let due = self
+                .listed_at
+                .is_none_or(|at| self.now.saturating_sub(at) >= DRAWER_LIST_INTERVAL);
+            if due {
+                self.list_wanted = false;
+                self.ask_list(out);
+            }
+            return;
+        }
         let viewed = self.view.as_ref().map(|v| v.pane_id.as_str());
         if viewed.is_some() && !self.cross.watching(viewed, self.now) {
             return;
@@ -7838,6 +7968,63 @@ mod tests {
             requests(&s.input(Input::Tick(secs(45.0))), "agents.list").len(),
             1
         );
+    }
+
+    #[test]
+    fn the_drawer_lists_at_once_and_every_3_s_also_with_a_view_open() {
+        let mut s = overview();
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        if !requests(&out, "agents.list").is_empty() {
+            answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
+        }
+        s.input(Input::Tick(secs(1.0)));
+        // Shown: at once, though the last list was a second ago.
+        let out = s.input(Input::DrawerShown(true));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
+        assert!(requests(&s.input(Input::Tick(secs(3.9))), "agents.list").is_empty());
+        let out = s.input(Input::Tick(secs(4.0)));
+        assert_eq!(requests(&out, "agents.list").len(), 1);
+        answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
+        // Hidden: with the view open and nothing watched, none.
+        s.input(Input::DrawerShown(false));
+        for t in [7.0, 20.0, 40.0] {
+            assert!(requests(&s.input(Input::Tick(secs(t))), "agents.list").is_empty());
+        }
+        // Not while the app is in the background.
+        s.input(Input::Background(true));
+        let out = s.input(Input::DrawerShown(true));
+        assert!(requests(&out, "agents.list").is_empty());
+    }
+
+    #[test]
+    fn a_replay_gives_what_the_daemon_showed_and_leaving_closes_the_view() {
+        let mut s = overview();
+        let replay = s.replay();
+        assert_eq!(
+            replay[..3],
+            [
+                Event::Connected {
+                    server: "flankr".into()
+                },
+                Event::Vocabulary(vec![]),
+                Event::Llm(wire::LlmInfo::available()),
+            ]
+        );
+        assert!(matches!(&replay[3], Event::Agents(a) if a.len() == 1 && a[0].pane_id == "w2:pZ"));
+        assert_eq!(replay[4], Event::PendingPanes(vec![]));
+        assert_eq!(replay.last(), Some(&Event::Cache { bytes: 0 }));
+
+        s.input(Input::OpenAgent("w2:pZ".into()));
+        s.input(Input::DrawerShown(true));
+        s.leave_foreground();
+        assert_eq!(s.cached_panes(), vec!["w2:pZ".to_string()]);
+        // The drawer is no longer this daemon's.
+        assert!(requests(&s.input(Input::Tick(secs(4.0))), "agents.list").is_empty());
+
+        // Offline, the replay says so with the last retry delay.
+        s.disconnected(2000);
+        assert_eq!(s.replay()[0], Event::Disconnected { retry_in_ms: 2000 });
     }
 
     #[test]

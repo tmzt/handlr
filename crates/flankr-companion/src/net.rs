@@ -1,14 +1,21 @@
-//! The `net` thread: a Tokio current-thread runtime that keeps a connection
-//! to the daemon, reconnects with backoff, and drives
-//! [`State`](crate::client::State) (plan 20261022_04, decision 2, and the
-//! 18:10 EDT amendment's steps 1 and 2).
+//! The `net` thread: a Tokio current-thread runtime that keeps the
+//! connections to the daemons, reconnects each with its own backoff, and
+//! drives a [`State`](crate::client::State) for each (plan 20261022_04,
+//! decision 2, and the 18:10 EDT amendment's steps 1 and 2).
 //!
 //! The phone keeps a list of paired remotes ([`Remotes`], plan 20261028_01)
-//! in the [`KeyStore`]. With an active remote, the thread connects to it
-//! over flankr link: TCP to the record's addresses in order, `IK` with that
-//! remote's own phone key, and `hello` carried in the handshake. Without
-//! one, it connects to the daemon's local socket. The active remote's
-//! `state.redb` ([`RemoteState`]) is open while it is active.
+//! in the [`KeyStore`]. The thread is a connection manager (plan
+//! 20261028_03, the 18:51 EDT amendment): every listed remote has its own
+//! link over flankr link (TCP to the record's addresses in order, `IK`
+//! with that remote's own phone key, and `hello` carried in the
+//! handshake), its own state and its `state.redb` ([`RemoteState`]), open
+//! while it is listed. The active remote's link is in front; the others
+//! are in the daemon's background mode (`client.options` with
+//! `background`), and their events reach the app as
+//! [`Event::Background`]. [`Input::SwitchRemote`] swaps which is in front
+//! without closing or making a link; the app's own backgrounding puts
+//! every link in the background. With no remote listed, the thread
+//! connects to the daemon's local socket instead.
 //!
 //! [`Input::Pair`] takes the pairing URL, the bare string or the QR code's
 //! data URL (plan 20261022_06, step 5). The thread makes the new remote's
@@ -73,6 +80,7 @@
 //! [`State::terminal_frame`], which shows it on its terminal's screen and
 //! acknowledges it. Terminal bytes count like any other message's.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
@@ -90,7 +98,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::CompanionConfig;
-use crate::client::{DeviceCodeFallback, Event, Input, Output, State, TICK, UNPAIR_WAIT};
+use crate::client::{DeviceCodeFallback, Event, Input, Output, Settings, State, TICK, UNPAIR_WAIT};
 use crate::keys::{KeyStore, MAX_REMOTES, RemoteId, RemoteInfo, Remotes, ServerRecord};
 use crate::remote_state::RemoteState;
 use crate::scan::{self, Pairing};
@@ -150,7 +158,6 @@ impl Backoff {
         self.next = self.initial;
     }
 }
-
 /// Runs the thread until the app drops its [`Companion`](crate::Companion).
 pub(crate) fn run(
     config: CompanionConfig,
@@ -171,26 +178,28 @@ pub(crate) fn run(
             return;
         }
     };
-    let mut state = State::with_terminals(config.client.clone(), terminals);
-    state.set_dictation_silence(config.dictation_silence);
     let (tasks_tx, tasks) = tokio::sync::mpsc::unbounded_channel();
+    let (wire_tx, wire) = tokio::sync::mpsc::unbounded_channel();
     let net = Net {
-        state,
         start: tokio::time::Instant::now(),
-        backoff: Backoff::new(config.backoff_initial, config.backoff_max),
         config,
         keys,
         remotes: Remotes::default(),
-        server: None,
-        remote_state: None,
+        links: Vec::new(),
+        terminals,
+        pending: VecDeque::new(),
+        app_background: false,
+        drawer: false,
+        settings: None,
         probe: None,
         checks: Vec::new(),
         next_probe: 0,
         removing: Vec::new(),
-        switch: false,
         shown: None,
         tasks_tx,
         tasks,
+        wire_tx,
+        wire,
         inputs,
         events,
         bytes,
@@ -204,11 +213,20 @@ struct Net {
     keys: Box<dyn KeyStore>,
     /// The paired remotes, as last read or written.
     remotes: Remotes,
-    /// The remote of the current link connection. `None` on the local
-    /// socket.
-    server: Option<ServerRecord>,
-    /// The active remote's `state.redb`, open while it is active.
-    remote_state: Option<RemoteState>,
+    /// One link per listed remote, or the local socket's while none is
+    /// listed (plan 20261028_03, the 18:51 EDT amendment).
+    links: Vec<LinkSlot>,
+    /// The terminals the app reads: held by the active link's state.
+    terminals: Arc<Terminals>,
+    /// Outputs still to be carried out, by link, in order.
+    pending: VecDeque<(LinkKey, Vec<Output>)>,
+    /// The app is in the background ([`Input::Background`]): so is every
+    /// link.
+    app_background: bool,
+    /// The drawer is shown ([`Input::DrawerShown`]): the active link's.
+    drawer: bool,
+    /// The settings last given, for links made later.
+    settings: Option<Settings>,
     /// The pairing in progress.
     probe: Option<Probe>,
     /// The address checks in progress, at most one per remote.
@@ -217,22 +235,100 @@ struct Net {
     next_probe: u64,
     /// Remotes whose removal has begun.
     removing: Vec<RemoteId>,
-    /// The active remote changed: leave the current connection.
-    switch: bool,
     /// The rows last given as [`Event::Remotes`].
     shown: Option<Vec<RemoteInfo>>,
     tasks_tx: UnboundedSender<Done>,
     tasks: UnboundedReceiver<Done>,
-    state: State,
+    /// What the links' tasks report.
+    wire_tx: UnboundedSender<Wire>,
+    wire: UnboundedReceiver<Wire>,
     /// The clock [`Input::Tick`] carries: the time since the thread began.
     start: tokio::time::Instant,
-    backoff: Backoff,
     inputs: UnboundedReceiver<Input>,
     events: mpsc::Sender<Event>,
-    /// The bytes sent and received since the thread began.
+    /// The bytes sent and received since the thread began, on every link.
     bytes: Arc<AtomicU64>,
     /// Sees each event, on this thread, before the app is given it.
     tap: Tap,
+}
+
+/// Which daemon a link is to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinkKey {
+    /// The daemon's local socket, used while no remote is listed.
+    Local,
+    /// A listed remote, over flankr link.
+    Remote(RemoteId),
+}
+
+/// One daemon's connection and the state it drives.
+struct LinkSlot {
+    key: LinkKey,
+    state: State,
+    /// The remote's `state.redb`, open while it is listed.
+    _remote_state: Option<RemoteState>,
+    backoff: Backoff,
+    /// Bumped with each attempt and each end: what an older attempt or
+    /// connection reports is dropped.
+    generation: u64,
+    conn: LinkConn,
+}
+
+/// Where a link's connection stands.
+enum LinkConn {
+    /// Not connected: the next attempt is at this time.
+    Waiting(tokio::time::Instant),
+    /// An attempt is on its way.
+    Connecting(JoinHandle<()>),
+    /// Connected: its sending half, and the task reading it.
+    Open {
+        write: Writer,
+        reader: JoinHandle<()>,
+    },
+}
+
+impl LinkSlot {
+    /// Ends the attempt or connection, if any; the next attempt is at
+    /// `next`.
+    fn stop(&mut self, next: tokio::time::Instant) {
+        self.generation += 1;
+        match std::mem::replace(&mut self.conn, LinkConn::Waiting(next)) {
+            LinkConn::Connecting(task) => task.abort(),
+            LinkConn::Open { reader, .. } => reader.abort(),
+            LinkConn::Waiting(_) => {}
+        }
+    }
+
+    /// An attempt or a connection is under way.
+    fn busy(&self) -> bool {
+        !matches!(self.conn, LinkConn::Waiting(_))
+    }
+}
+
+impl Drop for LinkSlot {
+    fn drop(&mut self) {
+        self.stop(tokio::time::Instant::now());
+    }
+}
+
+/// What a link's tasks report to the thread.
+enum Wire {
+    /// The attempt `generation` connected, its handshake done.
+    Connected {
+        key: LinkKey,
+        generation: u64,
+        conn: Conn,
+    },
+    /// The attempt `generation` reached no address.
+    Failed { key: LinkKey, generation: u64 },
+    /// A message on connection `generation`.
+    Message {
+        key: LinkKey,
+        generation: u64,
+        message: Message,
+    },
+    /// Connection `generation` closed.
+    Closed { key: LinkKey, generation: u64 },
 }
 
 /// A pairing in progress beside the open connection (decision 10): a
@@ -308,14 +404,6 @@ enum Done {
 /// over the link so far ([`Companion::spawn_tapped`](crate::Companion::spawn_tapped)).
 pub(crate) type Tap = Box<dyn Fn(&Event, u64) + Send>;
 
-/// How a session ended.
-enum End {
-    /// The connection closed, or the active remote changed; reconnect.
-    Closed,
-    /// The app is gone; stop.
-    AppGone,
-}
-
 /// A connection, its handshake done.
 enum Conn {
     /// The daemon's socket. `hello` is still to be sent: this is it.
@@ -364,74 +452,37 @@ fn unix_now() -> u64 {
 impl Net {
     async fn run(mut self) {
         self.load_remotes();
+        let mut ticks = tokio::time::interval(TICK);
+        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
-            self.switch = false;
-            if let Some(conn) = self.connect().await {
-                match self.session(conn).await {
-                    End::AppGone => return,
-                    End::Closed => {}
+            let wake = self.next_attempt();
+            tokio::select! {
+                _ = ticks.tick() => self.tick_all(),
+                _ = tokio::time::sleep_until(wake) => self.start_due(),
+                wire = self.wire.recv() => {
+                    if let Some(wire) = wire {
+                        self.on_wire(wire).await;
+                    }
+                }
+                done = self.tasks.recv() => {
+                    if let Some(done) = done {
+                        self.task_done(done);
+                    }
+                }
+                input = self.inputs.recv() => {
+                    let Some(input) = input else { return };
+                    self.on_input(input).await;
                 }
             }
-            if self.state.online() || self.switch {
-                self.backoff.reset();
-            }
-            let delay = if self.switch {
-                Duration::ZERO
-            } else {
-                self.backoff.next_delay()
-            };
-            let retry_in_ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
-            let outputs = self.state.disconnected(retry_in_ms);
-            if self.emit_offline(outputs) {
-                self.backoff.reset();
-                continue;
-            }
+            self.flush().await;
             self.show_remotes();
-            if self.switch {
-                continue;
-            }
-            let sleep = tokio::time::sleep(delay);
-            tokio::pin!(sleep);
-            loop {
-                tokio::select! {
-                    _ = &mut sleep => break,
-                    done = self.tasks.recv() => {
-                        if let Some(done) = done {
-                            self.task_done(done);
-                        }
-                        if self.switch {
-                            break;
-                        }
-                    }
-                    input = self.inputs.recv() => {
-                        let Some(input) = input else { return };
-                        let Some(input) = self.net_input(input) else {
-                            if self.switch {
-                                break;
-                            }
-                            continue;
-                        };
-                        let tick = self.tick();
-                        let mut outputs = self.state.input(tick);
-                        outputs.extend(self.state.input(input));
-                        if self.emit_offline(outputs) {
-                            // A refresh: connect now, the backoff
-                            // started over.
-                            self.backoff.reset();
-                            break;
-                        }
-                        if self.switch {
-                            break;
-                        }
-                    }
-                }
-            }
         }
     }
 
     /// Reads the list (migrating the old single record), moves the data
     /// plan's app-wide store in, sweeps state directories no remote lists,
-    /// opens the active remote's state, and gives [`Event::Remotes`].
+    /// makes a link (and opens the state) for each remote, and gives
+    /// [`Event::Remotes`].
     fn load_remotes(&mut self) {
         match self.keys.remotes() {
             Ok(remotes) => self.remotes = remotes,
@@ -446,30 +497,209 @@ impl Net {
             }
             RemoteState::sweep(&dir, &self.remotes);
         }
-        self.open_state();
+        self.add_links();
         self.show_remotes();
     }
 
-    /// Opens the active remote's `state.redb`, closing any other.
-    fn open_state(&mut self) {
-        let active = self.remotes.active_record().cloned();
-        if self.remote_state.as_ref().map(RemoteState::id) == active.as_ref().map(|r| r.id) {
-            return;
+    /// The links there should be: one per listed remote, or the local
+    /// socket's while none is listed.
+    fn wanted(&self) -> Vec<LinkKey> {
+        if self.remotes.list.is_empty() {
+            vec![LinkKey::Local]
+        } else {
+            self.remotes
+                .list
+                .iter()
+                .map(|r| LinkKey::Remote(r.id))
+                .collect()
         }
-        self.remote_state = None;
-        let (Some(dir), Some(remote)) = (self.config.data_dir.as_deref(), active) else {
+    }
+
+    /// The link the app is using: the active remote's, or the local
+    /// socket's while none is listed.
+    fn active_key(&self) -> Option<LinkKey> {
+        if self.remotes.list.is_empty() {
+            Some(LinkKey::Local)
+        } else {
+            self.remotes.active.map(LinkKey::Remote)
+        }
+    }
+
+    fn is_active(&self, key: LinkKey) -> bool {
+        self.active_key() == Some(key)
+    }
+
+    fn index(&self, key: LinkKey) -> Option<usize> {
+        self.links.iter().position(|l| l.key == key)
+    }
+
+    fn slot_mut(&mut self, key: LinkKey) -> Option<&mut LinkSlot> {
+        self.links.iter_mut().find(|l| l.key == key)
+    }
+
+    /// Makes the links that are wanted and missing, each connecting at
+    /// once: in the background unless it is the active one and the app is
+    /// in front. The first, made while no state holds the app's terminals,
+    /// is given them if it is the active one.
+    fn add_links(&mut self) {
+        for key in self.wanted() {
+            if self.index(key).is_some() {
+                continue;
+            }
+            let holder = self
+                .links
+                .iter()
+                .any(|l| Arc::ptr_eq(l.state.terminals(), &self.terminals));
+            let terminals = if !holder && self.is_active(key) {
+                Arc::clone(&self.terminals)
+            } else {
+                Arc::default()
+            };
+            let mut state = State::with_terminals(self.config.client.clone(), terminals);
+            state.set_dictation_silence(self.config.dictation_silence);
+            if let Some(settings) = self.settings {
+                state.input(Input::Settings(settings));
+            }
+            let background = self.app_background || !self.is_active(key);
+            state.input(Input::Background(background));
+            let remote_state = match key {
+                LinkKey::Remote(id) => self.open_state(id),
+                LinkKey::Local => None,
+            };
+            log::info!(
+                "links: {}",
+                match key {
+                    LinkKey::Local => "the local socket".to_string(),
+                    LinkKey::Remote(id) => format!(
+                        "{id}{}",
+                        if background {
+                            ", in the background"
+                        } else {
+                            ""
+                        }
+                    ),
+                }
+            );
+            self.links.push(LinkSlot {
+                key,
+                state,
+                _remote_state: remote_state,
+                backoff: Backoff::new(self.config.backoff_initial, self.config.backoff_max),
+                generation: 0,
+                conn: LinkConn::Waiting(tokio::time::Instant::now()),
+            });
+        }
+    }
+
+    /// Closes the links no longer wanted, and their states.
+    fn drop_links(&mut self) {
+        let wanted = self.wanted();
+        self.links.retain(|l| wanted.contains(&l.key));
+    }
+
+    /// Opens `id`'s `state.redb`.
+    fn open_state(&self, id: RemoteId) -> Option<RemoteState> {
+        let dir = self.config.data_dir.as_deref()?;
+        let remote = self.remotes.get(id)?;
+        match RemoteState::open(dir, remote) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                log::warn!("state: opening {}'s: {e}", remote.name);
+                None
+            }
+        }
+    }
+
+    /// Moves the app's terminals to `key`'s state from the state holding
+    /// them, each keeping its own daemon's terminal mode.
+    fn give_terminals(&mut self, key: LinkKey) {
+        let Some(to) = self.index(key) else {
             return;
         };
-        match RemoteState::open(dir, &remote) {
-            Ok(state) => self.remote_state = Some(state),
-            Err(e) => log::warn!("state: opening {}'s: {e}", remote.name),
+        let Some(from) = self
+            .links
+            .iter()
+            .position(|l| Arc::ptr_eq(l.state.terminals(), &self.terminals))
+        else {
+            return;
+        };
+        if from == to {
+            return;
         }
+        let (a, b) = if from < to {
+            let (left, right) = self.links.split_at_mut(to);
+            (&mut left[from].state, &mut right[0].state)
+        } else {
+            let (left, right) = self.links.split_at_mut(from);
+            (&mut right[0].state, &mut left[to].state)
+        };
+        State::trade_terminals(a, b);
+    }
+
+    /// Brings `key`'s link in front: the app's terminals move to it, what
+    /// it holds is given to the app as it stands ([`State::replay`]), and
+    /// it leaves the background unless the app is there.
+    fn promote(&mut self, key: LinkKey) {
+        self.give_terminals(key);
+        let tick = self.tick_for(key);
+        let (background, drawer) = (self.app_background, self.drawer);
+        let Some(slot) = self.slot_mut(key) else {
+            return;
+        };
+        let mut outputs: Vec<Output> = slot.state.replay().into_iter().map(Output::Event).collect();
+        outputs.extend(slot.state.input(tick));
+        outputs.extend(slot.state.input(Input::Background(background)));
+        if drawer {
+            outputs.extend(slot.state.input(Input::DrawerShown(true)));
+        }
+        self.pending.push_back((key, outputs));
+    }
+
+    /// Puts the active remote's link in the background and `id`'s in
+    /// front (plan 20261028_03, the 18:51 EDT amendment, item 3): `active`
+    /// is written first; no link is closed or made.
+    async fn switch_remote(&mut self, id: RemoteId) {
+        if self.remotes.active == Some(id) {
+            log::info!("remotes: {id} is already in use");
+            return;
+        }
+        if self.remotes.get(id).is_none() {
+            log::info!("remotes: not switching to {id}: it is not paired");
+            return;
+        }
+        if self.removing.contains(&id) {
+            log::info!("remotes: not switching to {id}: it is being removed");
+            return;
+        }
+        let old = self.active_key();
+        let previous = self.remotes.active;
+        self.remotes.active = Some(id);
+        if !self.write_remotes() {
+            self.remotes.active = previous;
+            return;
+        }
+        log::info!("remotes: {id} in use; the one before in the background");
+        if let Some(old) = old {
+            let tick = self.tick_for(old);
+            if let Some(slot) = self.slot_mut(old) {
+                let mut outputs = slot.state.input(tick);
+                outputs.extend(slot.state.leave_foreground());
+                outputs.extend(slot.state.input(Input::Background(true)));
+                self.pending.push_back((old, outputs));
+            }
+        }
+        self.promote(LinkKey::Remote(id));
+        self.flush().await;
     }
 
     /// Gives [`Event::Remotes`] if the rows changed since last given.
     fn show_remotes(&mut self) {
-        let online = self.state.online() && self.server.is_some();
-        let rows = self.remotes.info(online);
+        let links = &self.links;
+        let rows = self.remotes.info_with(|id| {
+            links
+                .iter()
+                .any(|l| l.key == LinkKey::Remote(id) && l.state.online())
+        });
         if self.shown.as_ref() != Some(&rows) {
             self.shown = Some(rows.clone());
             self.emit(Event::Remotes(rows));
@@ -488,9 +718,70 @@ impl Net {
         }
     }
 
+    /// An input from the app: the thread's own (pairing, remotes, the
+    /// switch), one for every link (the app's backgrounding, settings,
+    /// the speaker and microphone, memory, the cache), one for a named
+    /// remote's link ([`Input::ToRemote`]), or else the active link's.
+    async fn on_input(&mut self, input: Input) {
+        let Some(input) = self.net_input(input) else {
+            return;
+        };
+        match input {
+            Input::SwitchRemote(id) => self.switch_remote(id).await,
+            Input::ToRemote { remote, input } => self.give(LinkKey::Remote(remote), *input),
+            Input::Background(on) => {
+                self.app_background = on;
+                for key in self.keys_of_links() {
+                    let background = on || !self.is_active(key);
+                    self.give(key, Input::Background(background));
+                }
+            }
+            Input::Settings(settings) => {
+                self.settings = Some(settings);
+                self.give_all(Input::Settings(settings));
+            }
+            input @ (Input::Speaking(_)
+            | Input::Listening(_)
+            | Input::Memory(_)
+            | Input::ClearCache) => self.give_all(input),
+            Input::DrawerShown(on) => {
+                self.drawer = on;
+                if let Some(key) = self.active_key() {
+                    self.give(key, Input::DrawerShown(on));
+                }
+            }
+            input => match self.active_key() {
+                Some(key) => self.give(key, input),
+                None => log::info!("no remote in use for {input:?}"),
+            },
+        }
+    }
+
+    fn keys_of_links(&self) -> Vec<LinkKey> {
+        self.links.iter().map(|l| l.key).collect()
+    }
+
+    /// Gives `input` to `key`'s state, after the clock.
+    fn give(&mut self, key: LinkKey, input: Input) {
+        let tick = self.tick_for(key);
+        let Some(slot) = self.slot_mut(key) else {
+            log::info!("no link for {input:?}");
+            return;
+        };
+        let mut outputs = slot.state.input(tick);
+        outputs.extend(slot.state.input(input));
+        self.pending.push_back((key, outputs));
+    }
+
+    fn give_all(&mut self, input: Input) {
+        for key in self.keys_of_links() {
+            self.give(key, input.clone());
+        }
+    }
+
     /// The inputs the thread handles itself: pairing and removing remotes.
-    /// Others are returned for the state; so is [`Input::RemoveRemote`] of
-    /// the active remote, which goes over the open link.
+    /// Others are returned; so is [`Input::RemoveRemote`] of the active
+    /// remote, which goes over its link.
     fn net_input(&mut self, input: Input) -> Option<Input> {
         match input {
             Input::Pair(text) => {
@@ -534,9 +825,6 @@ impl Net {
             return;
         }
         let kept = self.remotes.get(id).and_then(|r| r.nickname.clone());
-        if let Some(server) = self.server.as_mut().filter(|s| s.id == id) {
-            server.nickname = kept.clone();
-        }
         log::info!(
             "remotes: {id}'s nickname {}",
             if kept.is_some() { "set" } else { "cleared" }
@@ -579,7 +867,7 @@ impl Net {
         let tasks = self.tasks_tx.clone();
         match key {
             Some(key) => {
-                let hello = serde_json::to_vec(&self.state.hello_request()).unwrap_or_default();
+                let hello = self.probe_hello();
                 tokio::spawn(async move {
                     let daemon = revoke(&record, key, &hello).await;
                     let _ = tasks.send(Done::Revoked { id, daemon });
@@ -593,21 +881,28 @@ impl Net {
         None
     }
 
-    /// Removes `id` here: its state closed and its directory deleted, its
-    /// key deleted, the list written without it (last), then the events
-    /// (decisions 22 and 23). Removing the active remote makes the most
-    /// recently paired of the rest active.
+    /// Removes `id` here: its link and state closed and its directory
+    /// deleted, its key deleted, the list written without it (last), then
+    /// the events (decisions 22 and 23). Removing the active remote brings
+    /// the most recently paired of the rest in front.
     fn finish_remove(&mut self, id: RemoteId, daemon: bool) {
         self.removing.retain(|r| *r != id);
         let Some(record) = self.remotes.get(id).cloned() else {
             return;
         };
         let was_active = self.remotes.active == Some(id);
+        self.remotes.list.retain(|r| r.id != id);
         if was_active {
-            self.remote_state = None;
-            self.server = None;
-            self.state.set_session_id(None);
+            self.remotes.active = self.remotes.most_recent(&self.removing);
         }
+        // The link coming in front (the local socket's, with none left) is
+        // made before the removed one goes, so the app's terminals move
+        // to it.
+        self.add_links();
+        if was_active && let Some(key) = self.active_key() {
+            self.promote(key);
+        }
+        self.drop_links();
         if let Some(dir) = self.config.data_dir.as_deref()
             && let Err(e) = RemoteState::delete(dir, id)
         {
@@ -621,25 +916,12 @@ impl Net {
                 record.name
             )));
         }
-        self.remotes.list.retain(|r| r.id != id);
-        if was_active {
-            self.remotes.active = self.remotes.most_recent(&self.removing);
-            self.switch = true;
-            // Another daemon's sessions are not to be shown from the cache.
-            let outputs = self.state.input(Input::ClearCache);
-            for output in outputs {
-                if let Output::Event(e) = output {
-                    self.emit(e);
-                }
-            }
-        }
         self.write_remotes();
         log::info!(
             "remotes: removed {}{}",
             record.name,
             if daemon { "" } else { " here only" }
         );
-        self.open_state();
         self.emit(Event::RemoteRemoved {
             id,
             name: record.name,
@@ -713,10 +995,6 @@ impl Net {
         }
         listed.name = check.name.clone();
         listed.addresses = check.addresses.clone();
-        if let Some(server) = self.server.as_mut().filter(|s| s.id == check.id) {
-            server.name = check.name.clone();
-            server.addresses = check.addresses;
-        }
         if !self.write_remotes() {
             return;
         }
@@ -775,16 +1053,13 @@ impl Net {
         self.emit(Event::Paired {
             name: self.config.device_name.clone(),
         });
+        // Its link, in the background unless it is the first; the first
+        // takes the app's place from the local socket's.
+        self.add_links();
         if first {
-            self.switch = true;
-            let outputs = self.state.input(Input::ClearCache);
-            for output in outputs {
-                if let Output::Event(e) = output {
-                    self.emit(e);
-                }
-            }
-            self.open_state();
+            self.promote(LinkKey::Remote(record.id));
         }
+        self.drop_links();
         self.show_remotes();
     }
 
@@ -798,123 +1073,6 @@ impl Net {
         log::info!("pairing with {}: {why}", probe.record.name);
         if let Err(e) = self.keys.delete_static_key(&probe.record.key_name) {
             log::warn!("pairing: deleting the probe's key: {e}");
-        }
-    }
-
-    /// The clock now, as an input. Given before every input and message,
-    /// so the state's times are those of what it is told. The phone's
-    /// local time of day goes with it, for reading clock times as relative
-    /// when the daemon cannot say how to read a reply.
-    fn tick(&mut self) -> Input {
-        self.state.set_local_time(local_now());
-        Input::Tick(self.start.elapsed())
-    }
-
-    fn emit(&self, event: Event) {
-        (self.tap)(&event, self.bytes.load(Ordering::Relaxed));
-        let _ = self.events.send(event);
-    }
-
-    /// Gives events while there is no connection, and removes the active
-    /// remote when told to. The state sends nothing while offline, so
-    /// anything else is only logged. Whether the state asked to connect
-    /// now ([`Output::Reconnect`]).
-    fn emit_offline(&mut self, outputs: Vec<Output>) -> bool {
-        let mut reconnect = false;
-        for output in outputs {
-            match output {
-                Output::Event(e) => self.emit(e),
-                Output::Remove { id, daemon } => self.finish_remove(id, daemon),
-                Output::Reconnect => reconnect = true,
-                other => log::warn!("nothing to send it on: {other:?}"),
-            }
-        }
-        reconnect
-    }
-
-    /// Starts a connection in the state and returns its `hello`, serialized.
-    fn hello(&mut self) -> Result<Vec<u8>, String> {
-        let mut hello = None;
-        for output in self.state.connected() {
-            match output {
-                Output::Send(request) if hello.is_none() => {
-                    hello = Some(serde_json::to_vec(&request).map_err(|e| e.to_string())?);
-                }
-                Output::Event(e) => self.emit(e),
-                other => log::warn!("not sent before hello: {other:?}"),
-            }
-        }
-        hello.ok_or_else(|| "the state gave no hello".to_string())
-    }
-
-    /// Connects to the active remote over the link, or, with none, to the
-    /// daemon's socket.
-    async fn connect(&mut self) -> Option<Conn> {
-        self.server = None;
-        let Some(server) = self.remotes.active_record().cloned() else {
-            return self.connect_local().await;
-        };
-        let key = match self.keys.static_key(&server.key_name) {
-            Ok(Some(key)) => key,
-            Ok(None) => {
-                self.emit(Event::Error(format!(
-                    "paired with {}, but this client has no key; pair again",
-                    server.name
-                )));
-                return None;
-            }
-            Err(e) => {
-                self.emit(Event::Error(format!("reading this client's key: {e}")));
-                return None;
-            }
-        };
-        self.state.set_session_id(server.session_id.clone());
-        let hello = match self.hello() {
-            Ok(hello) => hello,
-            Err(e) => {
-                log::error!("{e}");
-                return None;
-            }
-        };
-        for addr in &server.addresses {
-            let stream = match tcp_connect(addr).await {
-                Ok(stream) => stream,
-                Err(e) => {
-                    log::debug!("connecting to {addr}: {e}");
-                    continue;
-                }
-            };
-            let handshake = link::reconnect(stream, &key, &server.public_key, Some(&hello));
-            match timeout(HANDSHAKE_TIMEOUT, handshake).await {
-                Ok(Ok(stream)) => {
-                    log::info!("connected to {} at {addr}", server.name);
-                    self.server = Some(server);
-                    return Some(Conn::Link(stream));
-                }
-                Ok(Err(e)) => log::debug!("reconnecting to {addr}: {e}"),
-                Err(_) => log::debug!("reconnecting to {addr}: the handshake timed out"),
-            }
-        }
-        None
-    }
-
-    async fn connect_local(&mut self) -> Option<Conn> {
-        let socket = &self.config.socket;
-        match UnixStream::connect(socket).await {
-            Ok(stream) => {
-                log::info!("connected to {}", socket.display());
-                match self.hello() {
-                    Ok(hello) => Some(Conn::Unix(stream, hello)),
-                    Err(e) => {
-                        log::error!("{e}");
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                log::debug!("connecting to {}: {e}", socket.display());
-                None
-            }
         }
     }
 
@@ -1161,7 +1319,7 @@ impl Net {
                 return;
             }
         };
-        let hello = serde_json::to_vec(&self.state.hello_request()).unwrap_or_default();
+        let hello = self.probe_hello();
         let tasks = self.tasks_tx.clone();
         let window = self.config.pairing_window;
         let Some(probe) = self.probe.as_mut() else {
@@ -1227,7 +1385,7 @@ impl Net {
         );
         let token = self.next_probe;
         self.next_probe += 1;
-        let hello = serde_json::to_vec(&self.state.hello_request()).unwrap_or_default();
+        let hello = self.probe_hello();
         let tasks = self.tasks_tx.clone();
         let server_key = listed.public_key;
         let targets = addresses.clone();
@@ -1246,46 +1404,280 @@ impl Net {
         });
     }
 
-    /// Stores a `session_id` that `hello` changed in the active record.
-    fn persist_session(&mut self) {
-        let Some(server) = self.server.as_mut() else {
-            return;
-        };
-        let current = self.state.session_id();
-        if server.session_id.as_deref() == current {
-            return;
+    /// The clock now, as an input for `key`'s state. Given before every
+    /// input and message, so the state's times are those of what it is
+    /// told. The phone's local time of day goes with it, for reading clock
+    /// times as relative when the daemon cannot say how to read a reply.
+    fn tick_for(&mut self, key: LinkKey) -> Input {
+        if let Some(slot) = self.slot_mut(key) {
+            slot.state.set_local_time(local_now());
         }
-        server.session_id = current.map(str::to_string);
-        let (id, session_id) = (server.id, server.session_id.clone());
-        let Some(listed) = self.remotes.get_mut(id) else {
-            return;
-        };
-        listed.session_id = session_id;
-        if let Err(e) = self.keys.set_remotes(&self.remotes) {
-            log::warn!("storing the session id: {e}");
+        Input::Tick(self.start.elapsed())
+    }
+
+    /// Every link's state is told the time.
+    fn tick_all(&mut self) {
+        for key in self.keys_of_links() {
+            let tick = self.tick_for(key);
+            if let Some(slot) = self.slot_mut(key) {
+                let outputs = slot.state.input(tick);
+                self.pending.push_back((key, outputs));
+            }
         }
     }
 
-    async fn session(&mut self, conn: Conn) -> End {
+    fn emit(&self, event: Event) {
+        (self.tap)(&event, self.bytes.load(Ordering::Relaxed));
+        let _ = self.events.send(event);
+    }
+
+    /// Gives `key`'s event to the app: as it is for the link in use,
+    /// tagged with its remote otherwise ([`Event::Background`]).
+    fn route(&self, key: LinkKey, event: Event) {
+        match key {
+            LinkKey::Remote(remote) if !self.is_active(key) => self.emit(Event::Background {
+                remote,
+                event: Box::new(event),
+            }),
+            _ => self.emit(event),
+        }
+    }
+
+    /// The `hello` a probe beside the links sends: this client's, with no
+    /// session to continue.
+    fn probe_hello(&self) -> Vec<u8> {
+        let request = State::new(self.config.client.clone()).hello_request();
+        serde_json::to_vec(&request).unwrap_or_default()
+    }
+
+    /// When the next link waiting is to connect.
+    fn next_attempt(&self) -> tokio::time::Instant {
+        self.links
+            .iter()
+            .filter_map(|l| match l.conn {
+                LinkConn::Waiting(at) => Some(at),
+                _ => None,
+            })
+            .min()
+            .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(3600))
+    }
+
+    /// Starts every link whose attempt is due.
+    fn start_due(&mut self) {
+        let now = tokio::time::Instant::now();
+        let due: Vec<LinkKey> = self
+            .links
+            .iter()
+            .filter(|l| matches!(l.conn, LinkConn::Waiting(at) if at <= now))
+            .map(|l| l.key)
+            .collect();
+        for key in due {
+            self.start_connect(key);
+        }
+    }
+
+    /// Starts connecting `key`'s link: over flankr link to the remote's
+    /// addresses in order with its own phone key and `hello` in the
+    /// handshake, or to the daemon's socket.
+    fn start_connect(&mut self, key: LinkKey) {
+        let record = match key {
+            LinkKey::Remote(id) => match self.remotes.get(id) {
+                Some(record) => Some(record.clone()),
+                None => return,
+            },
+            LinkKey::Local => None,
+        };
+        let static_key = match &record {
+            None => None,
+            Some(server) => match self.keys.static_key(&server.key_name) {
+                Ok(Some(k)) => Some(k),
+                Ok(None) => {
+                    self.route(
+                        key,
+                        Event::Error(format!(
+                            "paired with {}, but this client has no key; pair again",
+                            server.name
+                        )),
+                    );
+                    self.offline(key);
+                    return;
+                }
+                Err(e) => {
+                    self.route(key, Event::Error(format!("reading this client's key: {e}")));
+                    self.offline(key);
+                    return;
+                }
+            },
+        };
+        let wire = self.wire_tx.clone();
+        let socket = self.config.socket.clone();
+        let Some(slot) = self.slot_mut(key) else {
+            return;
+        };
+        if let Some(server) = &record {
+            slot.state.set_session_id(server.session_id.clone());
+        }
+        slot.generation += 1;
+        let generation = slot.generation;
+        let mut hello = None;
+        let mut events = Vec::new();
+        for output in slot.state.connected() {
+            match output {
+                Output::Send(request) if hello.is_none() => {
+                    hello = serde_json::to_vec(&request).ok();
+                }
+                Output::Event(e) => events.push(e),
+                other => log::warn!("not sent before hello: {other:?}"),
+            }
+        }
+        let task = tokio::spawn(async move {
+            let conn = match (hello, record, static_key) {
+                (None, _, _) => {
+                    log::error!("the state gave no hello");
+                    None
+                }
+                (Some(hello), Some(server), Some(k)) => {
+                    link_connect(&server, &k, &hello).await.map(Conn::Link)
+                }
+                (Some(hello), _, _) => local_connect(&socket)
+                    .await
+                    .map(|stream| Conn::Unix(stream, hello)),
+            };
+            let _ = wire.send(match conn {
+                Some(conn) => Wire::Connected {
+                    key,
+                    generation,
+                    conn,
+                },
+                None => Wire::Failed { key, generation },
+            });
+        });
+        slot.conn = LinkConn::Connecting(task);
+        for e in events {
+            self.route(key, e);
+        }
+    }
+
+    /// `key`'s attempt failed or its connection ended: the next attempt
+    /// is after its backoff (from the start again once it had said hello).
+    fn offline(&mut self, key: LinkKey) {
+        let Some(slot) = self.slot_mut(key) else {
+            return;
+        };
+        if slot.state.online() {
+            slot.backoff.reset();
+        }
+        let delay = slot.backoff.next_delay();
+        slot.stop(tokio::time::Instant::now() + delay);
+        let retry_in_ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
+        let outputs = slot.state.disconnected(retry_in_ms);
+        self.pending.push_back((key, outputs));
+    }
+
+    /// Connects `key`'s link now, its backoff started over (a refresh).
+    fn reconnect_now(&mut self, key: LinkKey) {
+        if let Some(slot) = self.slot_mut(key)
+            && !slot.busy()
+        {
+            slot.backoff.reset();
+            slot.conn = LinkConn::Waiting(tokio::time::Instant::now());
+        }
+    }
+
+    /// What a link's tasks reported.
+    async fn on_wire(&mut self, wire: Wire) {
+        match wire {
+            Wire::Connected {
+                key,
+                generation,
+                conn,
+            } => self.opened(key, generation, conn).await,
+            Wire::Failed { key, generation } => {
+                if self
+                    .slot_mut(key)
+                    .is_some_and(|s| s.generation == generation)
+                {
+                    self.offline(key);
+                }
+            }
+            Wire::Message {
+                key,
+                generation,
+                message,
+            } => {
+                if self
+                    .slot_mut(key)
+                    .is_none_or(|s| s.generation != generation)
+                {
+                    return;
+                }
+                let tick = self.tick_for(key);
+                let Some(slot) = self.slot_mut(key) else {
+                    return;
+                };
+                let outputs = match message {
+                    Message::Terminal(frame) => slot.state.terminal_frame(&frame),
+                    Message::Json(message) => match serde_json::from_slice::<Incoming>(&message) {
+                        Ok(message) => {
+                            let mut outputs = slot.state.input(tick);
+                            outputs.extend(slot.state.incoming(message));
+                            outputs
+                        }
+                        Err(e) => {
+                            log::warn!("a message from the daemon is not JSON-RPC: {e}");
+                            return;
+                        }
+                    },
+                    other => {
+                        log::debug!("ignoring a link message of kind {:?}", other.kind());
+                        return;
+                    }
+                };
+                self.pending.push_back((key, outputs));
+                self.persist_session(key);
+            }
+            Wire::Closed { key, generation } => {
+                if self
+                    .slot_mut(key)
+                    .is_some_and(|s| s.generation == generation)
+                {
+                    self.offline(key);
+                }
+            }
+        }
+    }
+
+    /// `key`'s attempt `generation` connected: its reader starts, and on
+    /// the socket `hello` is sent.
+    async fn opened(&mut self, key: LinkKey, generation: u64, conn: Conn) {
+        let bytes = Arc::clone(&self.bytes);
+        let wire = self.wire_tx.clone();
+        let Some(slot) = self
+            .links
+            .iter_mut()
+            .find(|l| l.key == key && l.generation == generation)
+        else {
+            return;
+        };
         let (messages_tx, mut messages) = tokio::sync::mpsc::unbounded_channel();
         let (reader, mut write, first) = match conn {
             Conn::Unix(stream, hello) => {
                 let (read, write) = stream.into_split();
                 (
-                    read_lines(read, messages_tx, Arc::clone(&self.bytes)),
+                    read_lines(read, messages_tx, Arc::clone(&bytes)),
                     Writer::Unix(write),
                     Some(hello),
                 )
             }
             Conn::Link(stream) => {
                 let (read, write) = stream.into_split();
-                let bytes = Arc::clone(&self.bytes);
+                let counted = Arc::clone(&bytes);
                 let reader = tokio::spawn(async move {
                     let mut read = read;
                     loop {
                         match read.recv().await {
                             Ok(message) => {
-                                bytes.fetch_add(message.bytes().len() as u64, Ordering::Relaxed);
+                                counted.fetch_add(message.bytes().len() as u64, Ordering::Relaxed);
                                 if messages_tx.send(message).is_err() {
                                     break;
                                 }
@@ -1300,117 +1692,170 @@ impl Net {
                 (reader, Writer::Link(write), None)
             }
         };
-        let mut end = None;
-        if let Some(hello) = first
-            && let Err(e) = write.send(&hello, &self.bytes).await
-        {
-            log::debug!("writing to the daemon: {e}");
-            end = Some(End::Closed);
-        }
-        let mut ticks = tokio::time::interval(TICK);
-        ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        while end.is_none() {
-            tokio::select! {
-                _ = ticks.tick() => {
-                    let tick = self.tick();
-                    let outputs = self.state.input(tick);
-                    end = self.carry_out(outputs, &mut write).await;
+        // Tags what the reader reads with the link; its end, once the
+        // reader stops or is aborted.
+        tokio::spawn(async move {
+            while let Some(message) = messages.recv().await {
+                let sent = wire.send(Wire::Message {
+                    key,
+                    generation,
+                    message,
+                });
+                if sent.is_err() {
+                    return;
                 }
-                message = messages.recv() => match message {
-                    Some(Message::Terminal(frame)) => {
-                        let outputs = self.state.terminal_frame(&frame);
-                        end = self.carry_out(outputs, &mut write).await;
-                    }
-                    Some(Message::Json(message)) => match serde_json::from_slice::<Incoming>(&message) {
-                        Ok(message) => {
-                            let tick = self.tick();
-                            let mut outputs = self.state.input(tick);
-                            outputs.extend(self.state.incoming(message));
-                            self.persist_session();
-                            end = self.carry_out(outputs, &mut write).await;
-                            self.show_remotes();
-                        }
-                        Err(e) => log::warn!("a message from the daemon is not JSON-RPC: {e}"),
-                    },
-                    Some(other) => log::debug!("ignoring a link message of kind {:?}", other.kind()),
-                    None => end = Some(End::Closed),
-                },
-                done = self.tasks.recv() => {
-                    if let Some(done) = done {
-                        self.task_done(done);
-                    }
+            }
+            let _ = wire.send(Wire::Closed { key, generation });
+        });
+        let failed = match first {
+            Some(hello) => match write.send(&hello, &bytes).await {
+                Ok(()) => false,
+                Err(e) => {
+                    log::debug!("writing to the daemon: {e}");
+                    true
                 }
-                input = self.inputs.recv() => match input {
-                    Some(input) => {
-                        if let Some(input) = self.net_input(input) {
-                            let tick = self.tick();
-                            let mut outputs = self.state.input(tick);
-                            outputs.extend(self.state.input(input));
-                            end = self.carry_out(outputs, &mut write).await;
-                        }
-                    }
-                    None => end = Some(End::AppGone),
-                },
-            }
-            if end.is_none() && self.switch {
-                end = Some(End::Closed);
-            }
+            },
+            None => false,
+        };
+        slot.conn = LinkConn::Open { write, reader };
+        if failed {
+            self.offline(key);
         }
-        reader.abort();
-        end.unwrap_or(End::Closed)
     }
 
-    /// Carries out the state's outputs; `Some` when the session must end.
-    async fn carry_out(&mut self, outputs: Vec<Output>, write: &mut Writer) -> Option<End> {
+    /// Stores a `session_id` that `hello` changed in `key`'s record.
+    fn persist_session(&mut self, key: LinkKey) {
+        let LinkKey::Remote(id) = key else {
+            return;
+        };
+        let Some(current) = self
+            .links
+            .iter()
+            .find(|l| l.key == key)
+            .map(|l| l.state.session_id().map(str::to_string))
+        else {
+            return;
+        };
+        let Some(listed) = self.remotes.get_mut(id) else {
+            return;
+        };
+        if listed.session_id == current {
+            return;
+        }
+        listed.session_id = current;
+        if let Err(e) = self.keys.set_remotes(&self.remotes) {
+            log::warn!("storing the session id: {e}");
+        }
+    }
+
+    /// Carries out the outputs waiting, in order, until none are left.
+    async fn flush(&mut self) {
+        while let Some((key, outputs)) = self.pending.pop_front() {
+            self.carry_out(key, outputs).await;
+        }
+    }
+
+    /// Carries out `key`'s state's outputs: its events to the app, its
+    /// requests on its link (logged and dropped while it is not open).
+    async fn carry_out(&mut self, key: LinkKey, outputs: Vec<Output>) {
         for output in outputs {
-            match output {
-                Output::Event(e) => self.emit(e),
-                Output::Send(request) => {
-                    let message = match serde_json::to_vec(&request) {
-                        Ok(message) => message,
-                        Err(e) => {
-                            log::error!("serializing {}: {e}", request.method);
-                            continue;
-                        }
-                    };
-                    if let Err(e) = write.send(&message, &self.bytes).await {
-                        log::debug!("writing to the daemon: {e}");
-                        return Some(End::Closed);
-                    }
+            let message = match output {
+                Output::Event(e) => {
+                    self.route(key, e);
+                    continue;
                 }
-                Output::Notify(note) => {
-                    let message = match serde_json::to_vec(&note) {
-                        Ok(message) => message,
-                        Err(e) => {
-                            log::error!("serializing {}: {e}", note.method);
-                            continue;
-                        }
-                    };
-                    if let Err(e) = write.send(&message, &self.bytes).await {
-                        log::debug!("writing to the daemon: {e}");
-                        return Some(End::Closed);
+                Output::Send(request) => match serde_json::to_vec(&request) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        log::error!("serializing {}: {e}", request.method);
+                        continue;
                     }
-                }
+                },
+                Output::Notify(note) => match serde_json::to_vec(&note) {
+                    Ok(message) => message,
+                    Err(e) => {
+                        log::error!("serializing {}: {e}", note.method);
+                        continue;
+                    }
+                },
                 Output::Close(reason) => {
-                    log::warn!("closing the connection: {reason}");
-                    return Some(End::Closed);
+                    if self.slot_mut(key).is_some_and(|s| s.busy()) {
+                        log::warn!("closing the connection: {reason}");
+                        self.offline(key);
+                    }
+                    continue;
                 }
-                // The active remote is removed: the connection was its.
+                // The remote is removed: its link with it.
                 Output::Remove { id, daemon } => {
                     self.finish_remove(id, daemon);
-                    return Some(End::Closed);
+                    continue;
                 }
-                // Already connected.
-                Output::Reconnect => {}
+                Output::Reconnect => {
+                    self.reconnect_now(key);
+                    continue;
+                }
+            };
+            let bytes = Arc::clone(&self.bytes);
+            let Some(slot) = self.slot_mut(key) else {
+                continue;
+            };
+            let LinkConn::Open { write, .. } = &mut slot.conn else {
+                log::debug!("not connected: a message to the daemon dropped");
+                continue;
+            };
+            if let Err(e) = write.send(&message, &bytes).await {
+                log::debug!("writing to the daemon: {e}");
+                self.offline(key);
             }
         }
-        None
     }
 }
 
 /// The note when the list is full (decision 12).
 fn full_note() -> String {
     format!("{MAX_REMOTES} remotes is the most this phone keeps: remove one to pair another")
+}
+
+/// Connects to `server` over flankr link: TCP to its addresses in order,
+/// `IK` with this phone's `key` for it, and `hello` in the handshake.
+async fn link_connect(
+    server: &ServerRecord,
+    key: &Arc<dyn StaticKey>,
+    hello: &[u8],
+) -> Option<LinkStream<TcpStream>> {
+    for addr in &server.addresses {
+        let stream = match tcp_connect(addr).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                log::debug!("connecting to {addr}: {e}");
+                continue;
+            }
+        };
+        let handshake = link::reconnect(stream, key, &server.public_key, Some(hello));
+        match timeout(HANDSHAKE_TIMEOUT, handshake).await {
+            Ok(Ok(stream)) => {
+                log::info!("connected to {} at {addr}", server.name);
+                return Some(stream);
+            }
+            Ok(Err(e)) => log::debug!("reconnecting to {addr}: {e}"),
+            Err(_) => log::debug!("reconnecting to {addr}: the handshake timed out"),
+        }
+    }
+    None
+}
+
+/// Connects to the daemon's socket.
+async fn local_connect(socket: &std::path::Path) -> Option<UnixStream> {
+    match UnixStream::connect(socket).await {
+        Ok(stream) => {
+            log::info!("connected to {}", socket.display());
+            Some(stream)
+        }
+        Err(e) => {
+            log::debug!("connecting to {}: {e}", socket.display());
+            None
+        }
+    }
 }
 
 /// Opens a link to one of `addresses` with `IK` and `hello`, each address
