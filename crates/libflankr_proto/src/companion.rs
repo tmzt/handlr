@@ -93,6 +93,11 @@ pub struct TerminalInfo {
     /// still apply.
     #[serde(default)]
     pub input: bool,
+    /// Whether the daemon serves `terminal.mouse` (its terminals can be
+    /// read from herdr's attachment; plan 20261027_08, decision 10). Added
+    /// in libflankr_proto 0.4.2; not written when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mouse: bool,
 }
 
 /// What the daemon's `[llm]` makes available to a companion (plan
@@ -317,7 +322,10 @@ mod tests {
                 summaries: true,
                 reason: Some("[llm.uses.general_agent] enabled = false".into()),
             }),
-            terminal: Some(TerminalInfo { input: true }),
+            terminal: Some(TerminalInfo {
+                input: true,
+                mouse: true,
+            }),
         });
         round_trip(ServerCapabilities {
             llm: Some(LlmInfo::available()),
@@ -325,7 +333,10 @@ mod tests {
         });
         round_trip(ServerCapabilities {
             llm: None,
-            terminal: Some(TerminalInfo { input: false }),
+            terminal: Some(TerminalInfo {
+                input: false,
+                mouse: false,
+            }),
         });
         round_trip(ServerCapabilities {
             llm: None,
@@ -474,14 +485,42 @@ mod tests {
         assert_eq!(
             serde_json::to_value(ServerCapabilities {
                 llm: None,
-                terminal: Some(TerminalInfo { input: false }),
+                terminal: Some(TerminalInfo {
+                    input: false,
+                    mouse: false,
+                }),
             })
             .unwrap(),
             json!({"terminal": {"input": false}})
         );
         let c: ServerCapabilities = serde_json::from_value(json!({"terminal": {}})).unwrap();
-        assert_eq!(c.terminal, Some(TerminalInfo { input: false }));
+        assert_eq!(
+            c.terminal,
+            Some(TerminalInfo {
+                input: false,
+                mouse: false,
+            })
+        );
         let c: ServerCapabilities = serde_json::from_value(json!({})).unwrap();
         assert_eq!(c.terminal, None);
+        // Plan 20261027_08, step 6: `mouse` defaults from older JSON and is
+        // written only when true.
+        let c: ServerCapabilities =
+            serde_json::from_value(json!({"terminal": {"input": true}})).unwrap();
+        assert_eq!(
+            c.terminal,
+            Some(TerminalInfo {
+                input: true,
+                mouse: false,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TerminalInfo {
+                input: true,
+                mouse: true,
+            })
+            .unwrap(),
+            json!({"input": true, "mouse": true})
+        );
     }
 }

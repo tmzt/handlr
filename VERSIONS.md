@@ -395,3 +395,31 @@ appending to a struct is additive; plan 20261027_08, decision 9):
   grid that differs from the last only in its cursor makes a frame with no
   rows.
 
+## libflankr_proto 0.4.2 — 2026-10-28 (the commit tagged `libflankr_proto-v0.4.2`)
+
+Additive (new methods and types, appended fields and open enums, by the
+owner's ruling that appending to a struct is additive, and the same with
+open enums; plan 20261027_08, decision 10):
+
+- **Added:** `TerminalOpenParams::cursor: bool` (appended, default false,
+  not written when false): the phone reads libflankr_term 0.1.1's cursor
+  trailer.
+- **Added:** `TerminalOpenResult::cursor: bool` (appended, default false,
+  not written when false): this terminal's frames carry the trailer; and
+  `TerminalOpenResult::source: TerminalSource` (appended, default `Poll`).
+- **Added:** `TerminalSource { Poll, Attached, Unknown }`, open
+  (`non_exhaustive`; a source this crate does not know reads as
+  `Unknown`), snake case.
+- **Added:** `companion::TerminalInfo::mouse: bool` (appended, default
+  false, not written when false): the daemon serves `terminal.mouse`.
+- **Added:** `common::methods::TERMINAL_MOUSE` (`terminal.mouse`) with
+  `TerminalMouseParams { terminal_id, kind, col, row, modifiers }`, the
+  kind flattened into the object (`{"terminal_id": 1, "kind": "down",
+  "button": "left", "col": 4, "row": 2}`; `modifiers` defaults to 0 and is
+  not written when 0); `TerminalMouseKind { Down { button }, Up { button },
+  Drag { button }, Moved, Unknown }`, open; `MouseButton { Left, Right,
+  Middle }`. Answered `{}`.
+- **Added:** `common::methods::TERMINAL_RESIZE` (`terminal.resize`) with
+  `TerminalResizeParams { terminal_id, cols, rows }`, answered `{}`.
+
+`companion::VERSION` stays 1 and the link prologue `flankr.link/1`.

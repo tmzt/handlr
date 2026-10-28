@@ -100,6 +100,17 @@ pub mod methods {
     /// Notification, daemon → phone: a terminal ended
     /// ([`TerminalClosedParams`](super::TerminalClosedParams)).
     pub const TERMINAL_CLOSED: &str = "terminal.closed";
+    /// A mouse event into an armed, attached terminal
+    /// ([`TerminalMouseParams`](super::TerminalMouseParams)), answered `{}`
+    /// (plan 20261027_08, decision 10). Gated as [`TERMINAL_INPUT`] is; a
+    /// daemon offers it when its `TerminalInfo::mouse` is true. Added in
+    /// 0.4.2.
+    pub const TERMINAL_MOUSE: &str = "terminal.mouse";
+    /// The phone's fit for a terminal changed
+    /// ([`TerminalResizeParams`](super::TerminalResizeParams)), answered
+    /// `{}` (plan 20261027_08, decision 10 and the amendment of 23:24
+    /// EDT). Added in 0.4.2.
+    pub const TERMINAL_RESIZE: &str = "terminal.resize";
 }
 
 /// Topics for `events.subscribe`.
@@ -1308,6 +1319,11 @@ pub struct TerminalOpenParams {
     /// The rows the phone could show. A hint only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows_hint: Option<u16>,
+    /// The phone reads libflankr_term 0.1.1's cursor trailer, so the
+    /// daemon may write it (plan 20261027_08, decision 10). Absent (false)
+    /// from older phones, whose frames never carry it. Added in 0.4.2.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cursor: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1319,6 +1335,33 @@ pub struct TerminalOpenResult {
     /// the row count of the visible frame).
     pub cols: u16,
     pub rows: u16,
+    /// This terminal's frames carry the cursor trailer (only when the
+    /// phone asked, and only while the frames come from a source that
+    /// knows the cursor). Added in 0.4.2.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cursor: bool,
+    /// Where the daemon reads the terminal from. An older daemon sends
+    /// none: [`TerminalSource::Poll`]. Added in 0.4.2.
+    #[serde(default)]
+    pub source: TerminalSource,
+}
+
+/// Where a terminal's frames come from (plan 20261027_08, decisions 10
+/// and 11). Open: a source this crate does not know reads as `Unknown`.
+/// Added in 0.4.2.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TerminalSource {
+    /// herdr's `pane.read` poll (plan 20261027_07).
+    #[default]
+    Poll,
+    /// The daemon's attachment to herdr as a client: the surface, with
+    /// the cursor, and mouse input.
+    Attached,
+    /// A source from a newer daemon.
+    #[serde(other)]
+    Unknown,
 }
 
 /// `terminal.close`, answered with [`Empty`].
@@ -1408,6 +1451,77 @@ pub enum TerminalClosedReason {
 pub struct TerminalClosedParams {
     pub terminal_id: u32,
     pub reason: TerminalClosedReason,
+}
+
+/// `terminal.mouse`, answered with [`Empty`]: one mouse event into an
+/// armed terminal the daemon reads from herdr's attachment
+/// ([`TerminalSource::Attached`]); on a polled terminal it is refused
+/// (plan 20261027_08, decisions 10 and 12). Added in 0.4.2.
+///
+/// `col` and `row` are cells of the pane, from 0 at its top left, as herdr
+/// expects. `modifiers` is the `modifiers` byte of herdr's
+/// `ClientPaneInputEvent`, passed through as herdr numbers its bits; 0
+/// (none) when absent. The kind is
+/// flattened into the object, its button beside it:
+///
+/// ```json
+/// {"terminal_id": 1, "kind": "down", "button": "left", "col": 4, "row": 2}
+/// {"terminal_id": 1, "kind": "moved", "col": 5, "row": 2, "modifiers": 4}
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalMouseParams {
+    pub terminal_id: u32,
+    #[serde(flatten)]
+    pub kind: TerminalMouseKind,
+    pub col: u16,
+    pub row: u16,
+    #[serde(default, skip_serializing_if = "is_zero_u8")]
+    pub modifiers: u8,
+}
+
+fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
+}
+
+/// A [`TerminalMouseParams`] event, tagged by `kind` (snake case), a
+/// button's event with its `button` beside it. Open: a kind this crate
+/// does not know reads as `Unknown`, which the daemon ignores. Added in
+/// 0.4.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TerminalMouseKind {
+    /// A button pressed.
+    Down { button: MouseButton },
+    /// A button released.
+    Up { button: MouseButton },
+    /// The pointer moved with a button held.
+    Drag { button: MouseButton },
+    /// The pointer moved with no button held.
+    Moved,
+    /// A kind from a newer phone.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A mouse button, snake case on the wire. Added in 0.4.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// `terminal.resize`, answered with [`Empty`]: the columns and rows that
+/// fit the phone's terminal area now, keyboard included (plan 20261027_08,
+/// the amendment of 23:24 EDT). The daemon clamps them and applies them
+/// to an attached terminal; a polled one cannot be sized. Added in 0.4.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalResizeParams {
+    pub terminal_id: u32,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[cfg(test)]
@@ -2457,6 +2571,7 @@ mod tests {
             pane_id: "w2:p4".into(),
             cols_hint: Some(60),
             rows_hint: None,
+            cursor: false,
         };
         round_trip(open.clone());
         assert_eq!(
@@ -2471,6 +2586,8 @@ mod tests {
             terminal_id: 1,
             cols: 200,
             rows: 60,
+            cursor: false,
+            source: TerminalSource::Poll,
         });
         round_trip(TerminalCloseParams { terminal_id: 1 });
         assert_eq!(
@@ -2522,5 +2639,126 @@ mod tests {
         let c: TerminalClosedParams =
             serde_json::from_value(json!({"terminal_id": 3, "reason": "resized_away"})).unwrap();
         assert_eq!(c.reason, TerminalClosedReason::Unknown);
+    }
+
+    /// Plan 20261027_08, step 6: the appended fields default from older
+    /// JSON; `terminal.mouse` and `terminal.resize`.
+    #[test]
+    fn terminal_cursor_source_mouse_and_resize() {
+        assert_eq!(methods::TERMINAL_MOUSE, "terminal.mouse");
+        assert_eq!(methods::TERMINAL_RESIZE, "terminal.resize");
+
+        // Older JSON.
+        let old: TerminalOpenParams = serde_json::from_value(json!({"pane_id": "w1:p1"})).unwrap();
+        assert!(!old.cursor);
+        let old: TerminalOpenResult =
+            serde_json::from_value(json!({"terminal_id": 1, "cols": 80, "rows": 24})).unwrap();
+        assert!(!old.cursor);
+        assert_eq!(old.source, TerminalSource::Poll);
+
+        // New JSON.
+        let open = TerminalOpenParams {
+            pane_id: "w1:p1".into(),
+            cols_hint: Some(48),
+            rows_hint: Some(30),
+            cursor: true,
+        };
+        round_trip(open.clone());
+        assert_eq!(
+            serde_json::to_value(&open).unwrap(),
+            json!({"pane_id": "w1:p1", "cols_hint": 48, "rows_hint": 30, "cursor": true})
+        );
+        let attached = TerminalOpenResult {
+            terminal_id: 2,
+            cols: 48,
+            rows: 30,
+            cursor: true,
+            source: TerminalSource::Attached,
+        };
+        round_trip(attached);
+        assert_eq!(
+            serde_json::to_value(attached).unwrap(),
+            json!({"terminal_id": 2, "cols": 48, "rows": 30, "cursor": true, "source": "attached"})
+        );
+        assert_eq!(
+            serde_json::to_value(TerminalOpenResult {
+                cursor: false,
+                source: TerminalSource::Poll,
+                ..attached
+            })
+            .unwrap(),
+            json!({"terminal_id": 2, "cols": 48, "rows": 30, "source": "poll"})
+        );
+        let newer: TerminalOpenResult = serde_json::from_value(
+            json!({"terminal_id": 2, "cols": 48, "rows": 30, "source": "observed"}),
+        )
+        .unwrap();
+        assert_eq!(newer.source, TerminalSource::Unknown);
+
+        // Each mouse kind round-trips, flat.
+        for (kind, wire) in [
+            (
+                TerminalMouseKind::Down {
+                    button: MouseButton::Left,
+                },
+                json!({"kind": "down", "button": "left"}),
+            ),
+            (
+                TerminalMouseKind::Up {
+                    button: MouseButton::Right,
+                },
+                json!({"kind": "up", "button": "right"}),
+            ),
+            (
+                TerminalMouseKind::Drag {
+                    button: MouseButton::Middle,
+                },
+                json!({"kind": "drag", "button": "middle"}),
+            ),
+            (TerminalMouseKind::Moved, json!({"kind": "moved"})),
+        ] {
+            for modifiers in [0, 4] {
+                let params = TerminalMouseParams {
+                    terminal_id: 1,
+                    kind,
+                    col: 4,
+                    row: 2,
+                    modifiers,
+                };
+                round_trip(params);
+                let mut expected = json!({"terminal_id": 1, "col": 4, "row": 2});
+                for (k, v) in wire.as_object().unwrap() {
+                    expected[k] = v.clone();
+                }
+                if modifiers != 0 {
+                    expected["modifiers"] = json!(modifiers);
+                }
+                assert_eq!(serde_json::to_value(params).unwrap(), expected);
+            }
+        }
+        // A kind from a newer phone reads as Unknown; modifiers default.
+        let newer: TerminalMouseParams =
+            serde_json::from_value(json!({"terminal_id": 1, "kind": "pinch", "col": 0, "row": 0}))
+                .unwrap();
+        assert_eq!(newer.kind, TerminalMouseKind::Unknown);
+        assert_eq!(newer.modifiers, 0);
+        // A button's kind needs its button.
+        assert!(
+            serde_json::from_value::<TerminalMouseParams>(
+                json!({"terminal_id": 1, "kind": "down", "col": 0, "row": 0})
+            )
+            .is_err()
+        );
+
+        let resize = TerminalResizeParams {
+            terminal_id: 1,
+            cols: 48,
+            rows: 22,
+        };
+        round_trip(resize);
+        assert_eq!(
+            serde_json::to_value(resize).unwrap(),
+            json!({"terminal_id": 1, "cols": 48, "rows": 22})
+        );
     }
 }
