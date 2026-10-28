@@ -9,7 +9,7 @@
 //! flankr ctl [--listen <flankr.sock>] [--client <name>] [--follow] [--handle <text>]
 //!            <method> [<params as JSON>]
 //! flankr pair [--listen <flankr.sock>] [--name <name>] [--protocols companion,harness]
-//!             [--replace] [--code <code>] [--qr-png <file>]
+//!             [--replace] [--code <code>] [--qr-png <file>] [--timeout <secs>]
 //! flankr session tail [--listen <flankr.sock>] [--pane <id or name>] [--follow]
 //!                     [--entries N] [--history N] [--outline] [--from N] [--to N]
 //! flankr prompt [--use general_agent] [--agent <name>] [--prompts <ADDITIONAL_PROMPTS.md>]
@@ -54,6 +54,8 @@ struct AppArgs {
     /// The device code, instead of prompting for it.
     code: Option<String>,
     qr_png: Option<String>,
+    /// `pair`'s offer lifetime in seconds, 1 to 300.
+    timeout: Option<String>,
     /// `session tail`'s pane, backfill size and history to page back.
     pane: Option<String>,
     entries: Option<String>,
@@ -88,6 +90,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
         replace: false,
         code: None,
         qr_png: None,
+        timeout: None,
         pane: None,
         entries: None,
         history: None,
@@ -126,6 +129,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> AppArgs {
             "--code" => parsed.code = args.next(),
             "--replace" => parsed.replace = true,
             "--qr-png" => parsed.qr_png = args.next(),
+            "--timeout" => parsed.timeout = args.next(),
             "--pane" => parsed.pane = args.next(),
             "--entries" => parsed.entries = args.next(),
             "--history" => parsed.history = args.next(),
@@ -306,16 +310,27 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
 async fn pair(args: AppArgs) -> Result<i32, Box<dyn std::error::Error>> {
     let config = flankr::config::AppConfig::load_or_default(args.config.as_deref().map(Path::new));
     let socket = daemon_socket(&args, &config);
-    let usage = "usage: flankr pair [--listen <socket>] [--name <name>] [--protocols companion,harness] [--replace] [--code <code>] [--qr-png <file>]";
+    let usage = "usage: flankr pair [--listen <socket>] [--name <name>] [--protocols companion,harness] [--replace] [--code <code>] [--qr-png <file>] [--timeout <secs>]";
     if !args.positional.is_empty() {
         return Err(usage.into());
     }
+    let timeout_secs = match args.timeout.as_deref() {
+        Some(value) => match flankr::pair::parse_timeout(value) {
+            Ok(secs) => Some(secs),
+            Err(e) => {
+                eprintln!("flankr pair: {e}");
+                return Ok(2);
+            }
+        },
+        None => None,
+    };
     let options = flankr::pair::PairOptions {
         name: args.name.clone(),
         protocols: (!args.protocols.is_empty()).then(|| args.protocols.clone()),
         replace: args.replace,
         code: args.code.clone(),
         qr_png: args.qr_png.as_deref().map(PathBuf::from),
+        timeout_secs,
     };
     Ok(flankr::pair::run(&socket, options).await?)
 }
@@ -416,7 +431,7 @@ flankr [serve] [--config <file>] [--transport <name> | --remote <user@host> |
 flankr ctl [--listen <flankr.sock>] [--client <name>] [--follow] [--handle <text>]
            <method> [<params as JSON>]
 flankr pair [--listen <flankr.sock>] [--name <name>] [--protocols companion,harness]
-            [--replace] [--code <code>] [--qr-png <file>]
+            [--replace] [--code <code>] [--qr-png <file>] [--timeout <secs>]
 flankr session tail [--listen <flankr.sock>] [--pane <id or name>] [--follow]
                     [--entries N] [--history N] [--outline] [--from N] [--to N]
 flankr prompt [--use general_agent] [--agent <name>] [--prompts <ADDITIONAL_PROMPTS.md>]

@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::companion::{self as turns, Session};
 use super::link::auth::AuthEntry;
+use super::link::pair_mode;
 use super::subscriptions::{self, Subscription};
 use super::{CoreEvent, Daemon};
 use crate::core::agents::{self, extract_agent_name_for_pane};
@@ -504,6 +505,9 @@ async fn serve<S>(
         sub.cancel();
     }
     conn.terminals.close_all(&conn.daemon);
+    if let Some(link) = &conn.daemon.link {
+        link.end_pair_mode(conn.id);
+    }
     if let Some(principal) = conn.principal.get() {
         let opened: Vec<u64> = conn.opened.lock().unwrap().drain().collect();
         for confirm_id in opened {
@@ -1138,7 +1142,10 @@ async fn call(
             conn.topics.lock().unwrap().extend(p.topics);
             ok(common::Empty {})
         }
-        methods::LINK_PAIR_BEGIN | methods::LINK_PAIR_ADD => {
+        methods::LINK_PAIR_BEGIN
+        | methods::LINK_PAIR_ADD
+        | pair_mode::methods::LINK_PAIR_CODE
+        | pair_mode::methods::LINK_PAIR_ANSWER => {
             if !matches!(conn.origin, Origin::Local) {
                 return Err(ErrorObject::new(
                     codes::NOT_PERMITTED,
@@ -1152,12 +1159,57 @@ async fn call(
                 ));
             };
             if method == methods::LINK_PAIR_BEGIN {
-                let _: common::LinkPairBeginParams = params(raw)?;
-                let result = link
-                    .pair_begin()
+                // Plan 20261028_01, the 14:37 to 14:44 EDT amendments: a
+                // fresh offer, and pair mode for this connection.
+                let p: pair_mode::PairBeginParams = params(raw)?;
+                let begun = link
+                    .pair_begin(conn.id, p)
                     .await
                     .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
-                return ok(result);
+                let out = conn.out.downgrade();
+                let mut events = begun.events;
+                tokio::spawn(async move {
+                    while let Some(event) = events.recv().await {
+                        let line = match event {
+                            pair_mode::PairEvent::Request(info) => serde_json::to_string(
+                                &Notification::new(pair_mode::methods::LINK_PAIR_REQUEST, info),
+                            ),
+                            pair_mode::PairEvent::Ended(ended) => serde_json::to_string(
+                                &Notification::new(pair_mode::methods::LINK_PAIR_ENDED, ended),
+                            ),
+                        };
+                        match (out.upgrade(), line) {
+                            (Some(out), Ok(line)) => {
+                                let _ = out.send(Outgoing::Line(line));
+                            }
+                            (None, _) => break,
+                            _ => {}
+                        }
+                    }
+                });
+                let mut result = serde_json::to_value(begun.result)
+                    .map_err(|e| ErrorObject::new(codes::INTERNAL_ERROR, e.to_string()))?;
+                if let (Some(obj), Ok(Value::Object(extra))) =
+                    (result.as_object_mut(), serde_json::to_value(begun.extra))
+                {
+                    obj.extend(extra);
+                }
+                return Ok(result);
+            }
+            if method == pair_mode::methods::LINK_PAIR_CODE {
+                let p: pair_mode::PairCodeParams = params(raw)?;
+                let info = link
+                    .pair_code(conn.id, &p.code)
+                    .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
+                return ok(info);
+            }
+            if method == pair_mode::methods::LINK_PAIR_ANSWER {
+                let p: pair_mode::PairAnswerParams = params(raw)?;
+                let answered = link
+                    .pair_answer(conn.id, p)
+                    .await
+                    .map_err(|e| ErrorObject::new(codes::INVALID_PARAMS, e))?;
+                return ok(answered);
             }
             let p: common::LinkPairAddParams = params(raw)?;
             let added = link

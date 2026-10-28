@@ -1,41 +1,51 @@
-//! `flankr pair`: print the daemon's pairing URL and its QR code as a
-//! `data:` URL, read the code the device shows, add the device with
-//! `link.pair_add`, and wait for it to connect (plan 20261022_02, decision
-//! 5 as amended at 23:07 EDT; plan 20261022_06, step 3 as amended at 22:55
-//! and 23:07 EDT).
+//! `flankr pair`: put the daemon in pair mode for this run, print its
+//! pairing URL, its QR code as a `data:` URL and its fingerprint, wait for
+//! the phone's pairing request (or a pasted device code), print the six
+//! pairing words, and add the device only when the owner types `yes`
+//! (docs/design/20261028_01_MULTIPLE_REMOTES_PLAN.md, the amendments of
+//! 14:37, 14:40, 14:42 and 14:44 EDT; earlier, plan 20261022_02, decision
+//! 5, and plan 20261022_06, step 3).
 //!
-//! Only public keys move: the URL holds the server's key and addresses,
-//! and the device code the device's key and name.
+//! Only public keys move: the URL holds the server's key, addresses and
+//! this run's offer; the phone's request (or its device code) its key and
+//! name.
 //!
-//! Beside the URL and the QR code it prints the daemon's fingerprint and
-//! six-digit confirmation code, both from its link static public key, so
-//! the owner can check them against the phone (plan 20261028_01, the 13:03
-//! EDT amendment's item 7). The pairing itself is unchanged.
+//! * The fingerprint is printed as its `3f9a 12c4` label and six words.
+//! * The run makes one attempt: once a request is held, any answer but
+//!   `yes`, the phone's Cancel, or the offer expiring ends it with a
+//!   non-zero status and nothing added.
+//! * When the offer expires (60 s by default, `--timeout` 1 to 300), the
+//!   run just exits non-zero, ending an open prompt line and printing
+//!   nothing else.
 
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use futures_util::StreamExt;
-use libflankr_proto::common::{
-    HelloParams, LinkPairAddParams, LinkPairAddResult, LinkPairBeginParams, LinkPairBeginResult,
-    LinkPairDone, methods, protocols,
-};
+use libflankr_proto::common::{HelloParams, LinkPairBeginResult, methods, protocols};
 use libflankr_proto::link::{
-    PAIRING_PREFIX, PAIRING_URL_SCHEME, PairingPayload, confirmation_code, fingerprint_text,
+    PAIR_TIMEOUT_MAX_SECS, PAIRING_PREFIX, PAIRING_URL_SCHEME, PairingPayload, fingerprint_text,
+    fingerprint_words_text,
 };
 use libflankr_proto::{ErrorObject, Id, Incoming, Notification, Request};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::mpsc;
 use tokio_util::codec::{FramedRead, LinesCodec};
 
 use crate::server::conn::MAX_LINE;
+use crate::server::link::pair_mode::{
+    PairAnswerParams, PairAnswerResult, PairBeginExtra, PairBeginParams, PairCodeParams, PairEnded,
+    PairRequestInfo, methods as pair_methods,
+};
 
-/// The prompt for the device's code.
-pub const PROMPT: &str = "Paste the pairing code from the device: ";
+/// What `flankr pair` asks once a request is held.
+pub const PROMPT: &str = "Do the six words on the phone match? Type yes to pair: ";
 
 /// What `flankr pair` says of a pasted server address.
 pub const NOT_A_DEVICE_CODE: &str =
@@ -50,10 +60,10 @@ pub struct Shown {
     pub png: Vec<u8>,
     /// Whether some address can be reached from another machine.
     pub remote: bool,
-    /// The daemon's fingerprint, `3f9a 12c4`.
+    /// The daemon's fingerprint label, `3f9a 12c4`.
     pub fingerprint: String,
-    /// The six-digit confirmation code the phone shows while pairing.
-    pub confirmation: String,
+    /// The daemon's fingerprint as six words.
+    pub fingerprint_words: String,
 }
 
 impl Shown {
@@ -66,15 +76,15 @@ impl Shown {
             png,
             remote: payload.has_remote_address(),
             fingerprint: fingerprint_text(&payload.server_key),
-            confirmation: confirmation_code(&payload.server_key),
+            fingerprint_words: fingerprint_words_text(&payload.server_key),
         })
     }
 
-    /// The lines naming the daemon, printed after the QR code.
+    /// The line naming the daemon, printed after the QR code.
     pub fn identity(&self) -> String {
         format!(
-            "Fingerprint: {}\nConfirmation code: {} (the phone shows the same code while pairing)",
-            self.fingerprint, self.confirmation
+            "Daemon fingerprint: {} ({})",
+            self.fingerprint, self.fingerprint_words
         )
     }
 
@@ -101,6 +111,28 @@ pub struct PairOptions {
     pub code: Option<String>,
     /// Also write the QR code here, never over an existing file.
     pub qr_png: Option<PathBuf>,
+    /// How long the offer lasts, 1 to 300 seconds; the daemon's default
+    /// (60) when `None`.
+    pub timeout_secs: Option<u16>,
+}
+
+/// `--timeout`'s value: whole seconds from 1 to 300.
+pub fn parse_timeout(value: &str) -> Result<u16, String> {
+    match value.trim().parse::<u64>() {
+        Ok(secs) if (1..=u64::from(PAIR_TIMEOUT_MAX_SECS)).contains(&secs) => Ok(secs as u16),
+        Ok(secs) if secs > u64::from(PAIR_TIMEOUT_MAX_SECS) => Err(format!(
+            "--timeout {secs} is too long: a pairing offer lasts at most {PAIR_TIMEOUT_MAX_SECS} seconds"
+        )),
+        _ => Err(format!(
+            "--timeout takes whole seconds from 1 to {PAIR_TIMEOUT_MAX_SECS}, not '{value}'"
+        )),
+    }
+}
+
+/// Whether the owner's answer is `yes`: exactly that word, in any case,
+/// with surrounding space.
+pub fn is_yes(line: &str) -> bool {
+    line.trim().eq_ignore_ascii_case("yes")
 }
 
 /// What a pasted line is.
@@ -218,58 +250,116 @@ impl Daemon {
         }
     }
 
-    /// Waits for `link.pair_done` for `name`.
-    async fn pair_done(&mut self, name: &str) -> Result<LinkPairDone, String> {
+    /// The next notification. Cancel-safe while no call is waiting.
+    async fn note(&mut self) -> Result<Notification, String> {
+        if !self.notes.is_empty() {
+            return Ok(self.notes.remove(0));
+        }
         loop {
-            let note = if !self.notes.is_empty() {
-                self.notes.remove(0)
-            } else {
-                match self.next().await? {
-                    Incoming::Notification(note) => note,
-                    _ => continue,
-                }
-            };
-            if note.method != methods::LINK_PAIR_DONE {
-                continue;
-            }
-            let done: LinkPairDone = serde_json::from_value(note.params)
-                .map_err(|e| format!("unexpected notification: {e}"))?;
-            if done.name == name {
-                return Ok(done);
+            if let Incoming::Notification(note) = self.next().await? {
+                return Ok(note);
             }
         }
     }
 }
 
-/// Run `flankr pair`. Returns the process exit code.
+/// What ended the wait for a request, or the owner's answer.
+enum Wait {
+    Request(PairRequestInfo),
+    Ended(PairEnded),
+    /// The offer's time is up, by this side's clock.
+    TimeUp,
+}
+
+/// Reads standard input line by line on its own thread. The channel
+/// closes at end of input.
+fn stdin_lines() -> mpsc::UnboundedReceiver<String> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        let stdin = std::io::stdin();
+        loop {
+            let mut line = String::new();
+            match stdin.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Run `flankr pair` on the terminal. Returns the process exit code.
 pub async fn run(socket: &Path, options: PairOptions) -> Result<i32, String> {
+    run_with(socket, options, stdin_lines(), std::io::stdout()).await
+}
+
+/// Run `flankr pair`, reading the owner's lines from `input` and printing
+/// to `out`; warnings and errors go to standard error. Returns the exit
+/// code: 0 once a device is added, 1 otherwise.
+pub async fn run_with<W: Write + Send>(
+    socket: &Path,
+    options: PairOptions,
+    mut input: mpsc::UnboundedReceiver<String>,
+    mut out: W,
+) -> Result<i32, String> {
     let mut daemon = Daemon::connect(socket).await?;
-    let begun = match daemon
-        .call(methods::LINK_PAIR_BEGIN, LinkPairBeginParams {})
-        .await?
-    {
+    let params = PairBeginParams {
+        timeout_secs: options.timeout_secs,
+    };
+    let begun = match daemon.call(methods::LINK_PAIR_BEGIN, params).await? {
         Ok(result) => result,
         Err(error) => {
             eprintln!("flankr pair: {}", error.message);
             return Ok(1);
         }
     };
+    let extra: PairBeginExtra =
+        serde_json::from_value(begun.clone()).map_err(|e| format!("unexpected reply: {e}"))?;
     let begun: LinkPairBeginResult =
         serde_json::from_value(begun).map_err(|e| format!("unexpected reply: {e}"))?;
-    show(&begun, options.qr_png.as_deref())?;
+    show(&mut out, &begun, options.qr_png.as_deref())?;
+    let secs = extra.expires_in_secs;
+    say(
+        &mut out,
+        &format!(
+            "Scan the QR code with the phone, or paste its device code here. \
+             The link expires in {secs} s.\n"
+        ),
+    )?;
+    // The daemon ends the run when the offer expires; this side's clock,
+    // a little later, is only a fallback.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(u64::from(secs) + 2);
 
-    let added = loop {
-        let line = match &options.code {
-            Some(code) => code.clone(),
-            None => match prompt().await? {
-                Some(line) => line,
-                None => return Ok(1),
+    // Wait for the run's one request: the phone's, or a pasted code.
+    let mut pasted = options.code.clone();
+    let mut input_open = true;
+    let wait = loop {
+        let line = match pasted.take() {
+            Some(code) => Some(code),
+            None => tokio::select! {
+                note = daemon.note() => match pair_note(note?) {
+                    Some(wait) => break wait,
+                    None => continue,
+                },
+                line = input.recv(), if input_open => match line {
+                    Some(line) => Some(line),
+                    None => {
+                        input_open = false;
+                        None
+                    }
+                },
+                _ = tokio::time::sleep_until(deadline) => break Wait::TimeUp,
             },
         };
+        let Some(line) = line else { continue };
         let code = match Pasted::classify(&line) {
-            Pasted::Empty => return Ok(1),
+            Pasted::Empty => continue,
             Pasted::ServerAddress => {
-                println!("{NOT_A_DEVICE_CODE}");
+                say(&mut out, &format!("{NOT_A_DEVICE_CODE}\n"))?;
                 if options.code.is_some() {
                     return Ok(1);
                 }
@@ -277,16 +367,14 @@ pub async fn run(socket: &Path, options: PairOptions) -> Result<i32, String> {
             }
             Pasted::Code(code) => code,
         };
-        let params = LinkPairAddParams {
-            code,
-            name: options.name.clone(),
-            protocols: options.protocols.clone(),
-            replace: options.replace,
-        };
-        match daemon.call(methods::LINK_PAIR_ADD, params).await? {
-            Ok(result) => {
-                break serde_json::from_value::<LinkPairAddResult>(result)
-                    .map_err(|e| format!("unexpected reply: {e}"))?;
+        match daemon
+            .call(pair_methods::LINK_PAIR_CODE, PairCodeParams { code })
+            .await?
+        {
+            Ok(info) => {
+                break Wait::Request(
+                    serde_json::from_value(info).map_err(|e| format!("unexpected reply: {e}"))?,
+                );
             }
             Err(error) => {
                 eprintln!("flankr pair: {}", error.message);
@@ -296,40 +384,88 @@ pub async fn run(socket: &Path, options: PairOptions) -> Result<i32, String> {
             }
         }
     };
+    let request = match wait {
+        Wait::Request(request) => request,
+        // Expired: just exit (the 14:42 EDT amendment).
+        Wait::Ended(_) | Wait::TimeUp => return Ok(1),
+    };
 
-    println!("Added {} ({})", added.name, added.protocols.join(", "));
-    println!("Waiting for {} to connect (Ctrl-C to stop)...", added.name);
-    let done = daemon.pair_done(&added.name).await?;
-    if done.paired {
-        println!("{} connected", done.name);
-        return Ok(0);
-    }
-    eprintln!(
-        "{} did not connect: {}",
-        done.name,
-        done.error.as_deref().unwrap_or("unknown error")
-    );
-    Ok(1)
-}
-
-/// Prompts for the device code and reads one line from standard input,
-/// off the runtime. `None` at end of input.
-async fn prompt() -> Result<Option<String>, String> {
-    print!("{PROMPT}");
-    let _ = std::io::stdout().flush();
-    tokio::task::spawn_blocking(|| {
-        let mut line = String::new();
-        match std::io::stdin().read_line(&mut line) {
-            Ok(0) => Ok(None),
-            Ok(_) => Ok(Some(line)),
-            Err(e) => Err(format!("read standard input: {e}")),
+    say(
+        &mut out,
+        &format!(
+            "Pairing request from {}\nPairing words: {}\n{PROMPT}",
+            request.name, request.words
+        ),
+    )?;
+    let answer = loop {
+        tokio::select! {
+            note = daemon.note() => match pair_note(note?) {
+                Some(Wait::Ended(ended)) => {
+                    say(&mut out, "\n")?;
+                    if ended.reason == "cancelled" {
+                        eprintln!("The phone cancelled the pairing; nothing was added.");
+                    }
+                    return Ok(1);
+                }
+                _ => continue,
+            },
+            line = input.recv() => break line.as_deref().is_some_and(is_yes),
+            _ = tokio::time::sleep_until(deadline) => {
+                say(&mut out, "\n")?;
+                return Ok(1);
+            }
         }
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    };
+    let params = PairAnswerParams {
+        yes: answer,
+        name: options.name.clone(),
+        protocols: options.protocols.clone(),
+        replace: options.replace,
+    };
+    let answered = match daemon.call(pair_methods::LINK_PAIR_ANSWER, params).await? {
+        Ok(result) => serde_json::from_value::<PairAnswerResult>(result)
+            .map_err(|e| format!("unexpected reply: {e}"))?,
+        Err(error) => {
+            eprintln!("flankr pair: {}", error.message);
+            return Ok(1);
+        }
+    };
+    match (answered.added, answered.name) {
+        (true, Some(name)) => {
+            let protocols = answered.protocols.unwrap_or_default().join(", ");
+            say(&mut out, &format!("Added {name} ({protocols})\n"))?;
+            Ok(0)
+        }
+        _ => {
+            say(&mut out, "Not paired: the answer was not yes.\n")?;
+            Ok(1)
+        }
+    }
 }
 
-fn show(result: &LinkPairBeginResult, qr_png: Option<&Path>) -> Result<(), String> {
+/// A pair-mode notification, if `note` is one.
+fn pair_note(note: Notification) -> Option<Wait> {
+    match note.method.as_str() {
+        pair_methods::LINK_PAIR_REQUEST => {
+            serde_json::from_value(note.params).ok().map(Wait::Request)
+        }
+        pair_methods::LINK_PAIR_ENDED => serde_json::from_value(note.params).ok().map(Wait::Ended),
+        _ => None,
+    }
+}
+
+/// Writes `text` to `out` and flushes it.
+fn say(out: &mut impl Write, text: &str) -> Result<(), String> {
+    out.write_all(text.as_bytes())
+        .and_then(|()| out.flush())
+        .map_err(|e| format!("write: {e}"))
+}
+
+fn show(
+    out: &mut impl Write,
+    result: &LinkPairBeginResult,
+    qr_png: Option<&Path>,
+) -> Result<(), String> {
     for warning in &result.warnings {
         eprintln!("warning: {warning}");
     }
@@ -340,15 +476,18 @@ fn show(result: &LinkPairBeginResult, qr_png: Option<&Path>) -> Result<(), Strin
              (run tailscale serve, or pass --listen to flankr serve)"
         );
     }
-    println!("{}", shown.url);
-    println!();
-    println!("{}", shown.data_url());
-    println!();
-    println!("{}", shown.identity());
-    println!();
+    say(
+        out,
+        &format!(
+            "{}\n\n{}\n\n{}\n\n",
+            shown.url,
+            shown.data_url(),
+            shown.identity()
+        ),
+    )?;
     if let Some(path) = qr_png {
         write_png(path, &shown.png)?;
-        println!("Wrote {}", path.display());
+        say(out, &format!("Wrote {}\n", path.display()))?;
     }
     Ok(())
 }
@@ -374,6 +513,7 @@ mod tests {
         PairingPayload {
             server_key: generate_keypair().unwrap().public,
             addresses: addresses.iter().map(|a| a.to_string()).collect(),
+            offer: Some([7; 16]),
         }
         .encode()
         .unwrap()
@@ -401,22 +541,49 @@ mod tests {
     }
 
     #[test]
-    fn the_fingerprint_and_confirmation_code_come_from_the_server_key() {
+    fn the_fingerprint_label_and_words_come_from_the_server_key() {
         let pairing = PairingPayload {
             server_key: [0u8; 32],
             addresses: vec!["m4.tail1a2b3c.ts.net:7347".to_string()],
+            offer: Some([0; 16]),
         }
         .encode()
         .unwrap();
         let shown = Shown::new(&pairing).unwrap();
         // libflankr_proto's fixed vectors for the all-zero key.
         assert_eq!(shown.fingerprint, "320b 5ea9");
-        assert_eq!(shown.confirmation, "543268");
+        assert_eq!(
+            shown.fingerprint_words,
+            "craft foot price devote father throw"
+        );
         assert_eq!(
             shown.identity(),
-            "Fingerprint: 320b 5ea9\n\
-             Confirmation code: 543268 (the phone shows the same code while pairing)"
+            "Daemon fingerprint: 320b 5ea9 (craft foot price devote father throw)"
         );
+    }
+
+    #[test]
+    fn the_timeout_is_1_to_300_seconds() {
+        assert_eq!(parse_timeout("1"), Ok(1));
+        assert_eq!(parse_timeout("60"), Ok(60));
+        assert_eq!(parse_timeout(" 300 "), Ok(300));
+        let err = parse_timeout("301").unwrap_err();
+        assert!(err.contains("at most 300"), "{err}");
+        assert!(parse_timeout("100000").unwrap_err().contains("at most 300"));
+        for bad in ["0", "-1", "1.5", "", "a minute"] {
+            let err = parse_timeout(bad).unwrap_err();
+            assert!(err.contains("1 to 300"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn only_yes_pairs() {
+        for yes in ["yes", "YES", " Yes \n", "yEs\r\n"] {
+            assert!(is_yes(yes), "{yes:?}");
+        }
+        for no in ["y", "yes please", "no", "", "\n", "ye s", "yess"] {
+            assert!(!is_yes(no), "{no:?}");
+        }
     }
 
     #[test]

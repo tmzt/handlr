@@ -5,14 +5,20 @@
 //!
 //! * By default the link binds only `127.0.0.1:7347`. `[link] listen`
 //!   replaces that and turns off the Tailscale check.
-//! * Every connection is `IK`. A handshake must finish within
+//! * A connection is `IK`, or a pairing request (`NK`) while a
+//!   `flankr pair` run is in pair mode ([`pair_mode`]; plan 20261028_01,
+//!   the amendments of 14:37 to 14:44 EDT). A handshake must finish within
 //!   [`HANDSHAKE_TIMEOUT`], and a key not in `auth.toml` gets no reply.
 //! * Pairing moves only public keys: `link.pair_begin` gives the pairing
-//!   URL (the server's key and addresses) and holds nothing pending;
-//!   `link.pair_add` checks a device code against the server's key and
-//!   appends the device to `auth.toml`. The device's first `hello` after
-//!   that is answered with `paired: true`, and `link.pair_done` goes to the
-//!   connection that added it.
+//!   URL (the server's key, addresses and a fresh offer) and puts the
+//!   daemon in pair mode for the connection that asked; a phone's request
+//!   with the offer, or a pasted device code (`link.pair_code`), is added
+//!   to `auth.toml` only when the owner answers `yes` to its six words
+//!   (`link.pair_answer`). `link.pair_add` still adds a device code at
+//!   once, for the daemon socket's own tools. The device's first `hello`
+//!   after it is added is answered with `paired: true`, and
+//!   `link.pair_done` goes to the connection that added it by
+//!   `link.pair_add`.
 //! * `link.unpair`, over a paired link only, removes the calling device's
 //!   entry from `auth.toml` and closes its connections once the answer is
 //!   queued (plan 20261024_02, decision 6).
@@ -28,6 +34,7 @@
 
 pub mod auth;
 pub mod keyfile;
+pub mod pair_mode;
 pub mod tailscale;
 
 use std::collections::HashMap;
@@ -41,7 +48,8 @@ use libflankr_proto::common::{
     LinkPairAddParams, LinkPairAddResult, LinkPairBeginResult, LinkPairDone,
 };
 use libflankr_proto::link::{
-    DeviceCode, KEY_LEN, PairingPayload, PairingStringError, StaticKeypair, accept,
+    DeviceCode, Incoming as LinkIncoming, KEY_LEN, PairingPayload, PairingStringError,
+    StaticKeypair, accept_incoming, generate_offer,
 };
 use libflankr_proto::{Incoming, Request};
 use tokio::net::{TcpListener, TcpStream};
@@ -49,6 +57,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use self::auth::{AuthEntry, AuthFile};
+use self::pair_mode::{PairBeginExtra, PairBeginParams, PairEvent, PairRun};
 use self::tailscale::Tailscale;
 use super::Daemon;
 use crate::config::LinkConfig;
@@ -163,6 +172,16 @@ pub struct Link {
     auth_lock: Mutex<()>,
     /// The addresses of an explicit `listen`, as bound.
     bound: Mutex<Vec<String>>,
+    /// The `flankr pair` run in pair mode.
+    pair_run: Mutex<Option<PairRun>>,
+}
+
+/// What `link.pair_begin` gives: the result to answer with, and the run's
+/// events for its connection.
+pub struct Begun {
+    pub result: LinkPairBeginResult,
+    pub extra: PairBeginExtra,
+    pub events: tokio::sync::mpsc::UnboundedReceiver<PairEvent>,
 }
 
 /// A device name: 1 to 64 of ASCII letters, digits, `.`, `_` and `-`.
@@ -186,6 +205,7 @@ impl Link {
             next_conn: AtomicU64::new(1),
             auth_lock: Mutex::new(()),
             bound: Mutex::new(Vec::new()),
+            pair_run: Mutex::new(None),
         }))
     }
 
@@ -252,24 +272,41 @@ impl Link {
         (ts.addresses(), ts.warning().into_iter().collect())
     }
 
-    /// `link.pair_begin`: the pairing URL and string. They hold only the
-    /// server's public key and addresses, and nothing is held pending.
-    pub async fn pair_begin(&self) -> Result<LinkPairBeginResult, String> {
+    /// `link.pair_begin` from the daemon-socket connection `owner`: the
+    /// pairing URL and string, with the server's public key, its addresses
+    /// and a fresh offer, and pair mode for `owner` until the offer
+    /// expires or `owner` closes (plan 20261028_01, the 14:37 and 14:40
+    /// EDT amendments).
+    pub async fn pair_begin(
+        self: &Arc<Self>,
+        owner: u64,
+        params: PairBeginParams,
+    ) -> Result<Begun, String> {
+        let secs = pair_mode::timeout_secs(params.timeout_secs)?;
         let (addresses, warnings) = self.addresses().await;
         if addresses.is_empty() {
             return Err("the link has no address to pair with".to_string());
         }
+        let offer = generate_offer().map_err(|e| format!("pairing offer: {e}"))?;
         let payload = PairingPayload {
             server_key: self.keypair.public,
             addresses: addresses.clone(),
+            offer: Some(offer),
         };
         let pairing = payload.encode().map_err(|e| e.to_string())?;
         let url = payload.url().map_err(|e| e.to_string())?;
-        Ok(LinkPairBeginResult {
-            url,
-            pairing,
-            addresses,
-            warnings,
+        let events = self.start_run(owner, offer, secs);
+        Ok(Begun {
+            result: LinkPairBeginResult {
+                url,
+                pairing,
+                addresses,
+                warnings,
+            },
+            extra: PairBeginExtra {
+                expires_in_secs: secs,
+            },
+            events,
         })
     }
 
@@ -284,14 +321,38 @@ impl Link {
             Some(name) if !name.is_empty() => name.to_string(),
             _ => code.name.clone(),
         };
+        let (result, done) =
+            self.add_key_awaiting(&code.key, &name, params.protocols, params.replace)?;
+        Ok(Added { result, done })
+    }
+
+    /// Adds `key` to `auth.toml` as `name`, for `protocols`.
+    fn add_key(
+        &self,
+        key: &[u8; KEY_LEN],
+        name: &str,
+        protocols: Option<Vec<String>>,
+        replace: bool,
+    ) -> Result<LinkPairAddResult, String> {
+        self.add_key_awaiting(key, name, protocols, replace)
+            .map(|(result, _)| result)
+    }
+
+    /// [`Link::add_key`], awaiting the device's first `hello`.
+    fn add_key_awaiting(
+        &self,
+        key: &[u8; KEY_LEN],
+        name: &str,
+        protocols: Option<Vec<String>>,
+        replace: bool,
+    ) -> Result<(LinkPairAddResult, oneshot::Receiver<LinkPairDone>), String> {
+        let name = name.to_string();
         if !valid_name(&name) {
             return Err(format!(
                 "'{name}' is not a valid name: use 1 to 64 letters, digits, '.', '_' or '-'"
             ));
         }
-        let protocols = params
-            .protocols
-            .unwrap_or_else(|| vec![auth::COMPANION.to_string()]);
+        let protocols = protocols.unwrap_or_else(|| vec![auth::COMPANION.to_string()]);
         let protocols: Vec<String> = protocols
             .iter()
             .map(|p| auth::short_protocol(p.trim()).to_ascii_lowercase())
@@ -308,30 +369,27 @@ impl Link {
             ));
         }
 
-        let entry = AuthEntry::new(&name, &code.key, protocols.clone());
+        let entry = AuthEntry::new(&name, key, protocols.clone());
         let replaced = {
             let _guard = self.auth_lock.lock().unwrap();
-            auth::add(&self.settings.auth_path, entry, params.replace).map_err(|e| e.to_string())?
+            auth::add(&self.settings.auth_path, entry, replace).map_err(|e| e.to_string())?
         };
         if let Some(old) = replaced.and_then(|old| old.public_key())
-            && old != code.key
+            && old != *key
         {
             self.close_where(|c| c.key == old, "its entry was replaced");
             self.awaiting.lock().unwrap().remove(&old);
         }
         let (done_tx, done) = oneshot::channel();
         self.awaiting.lock().unwrap().insert(
-            code.key,
+            *key,
             Awaiting {
                 name: name.clone(),
                 done: done_tx,
             },
         );
         log::info!("Added '{name}' ({}) to auth.toml", protocols.join(", "));
-        Ok(Added {
-            result: LinkPairAddResult { name, protocols },
-            done,
-        })
+        Ok((LinkPairAddResult { name, protocols }, done))
     }
 
     /// A connection with `key` had its `hello` accepted. Returns whether
@@ -496,7 +554,7 @@ async fn handle(daemon: Arc<Daemon>, stream: TcpStream, peer: SocketAddr) {
     let mut known: Option<AuthEntry> = None;
     let accepted = tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
-        accept(stream, &link.keypair, |key| {
+        accept_incoming(stream, &link.keypair, |key| {
             known = match link.auth() {
                 Ok(file) => file.find_key(key).cloned(),
                 Err(e) => {
@@ -509,7 +567,11 @@ async fn handle(daemon: Arc<Daemon>, stream: TcpStream, peer: SocketAddr) {
     )
     .await;
     let accepted = match accepted {
-        Ok(Ok(accepted)) => accepted,
+        Ok(Ok(LinkIncoming::Link(accepted))) => accepted,
+        Ok(Ok(LinkIncoming::Pair(incoming))) => {
+            link.pair_incoming(*incoming, &peer.to_string()).await;
+            return;
+        }
         Ok(Err(e)) => {
             log::info!("Refused a link connection from {peer}: {e}");
             return;

@@ -667,3 +667,561 @@ fn test_config() -> AppConfig {
         ..AppConfig::default()
     }
 }
+
+// Pair mode: the six-word pairing (plan 20261028_01, the amendments of
+// 14:37, 14:40, 14:42 and 14:44 EDT). The phone is played over the
+// loopback link with libflankr_proto's NK request.
+
+mod pair_mode {
+    use super::*;
+    use libflankr_proto::link::{
+        LinkError, OFFER_LEN, PairAck, PairRefusal, PairRequest, PairResponse, PairResult,
+        pairing_words_text, recv_pair_result, request_pairing,
+    };
+
+    type Response = Result<PairResponse<TcpStream>, LinkError>;
+
+    /// `link.pair_begin` with `params`: the payload, with its offer, and
+    /// the result.
+    async fn begin(local: &mut Local, params: Value) -> (PairingPayload, Value) {
+        let r = local.call("link.pair_begin", params).await;
+        let result = r["result"].clone();
+        let payload = PairingPayload::decode(result["pairing"].as_str().expect("pairing")).unwrap();
+        assert!(payload.offer.is_some(), "{r}");
+        (payload, result)
+    }
+
+    /// The phone: a new key, and a pairing request with `offer`.
+    async fn request(env: &Env, name: &str, offer: [u8; OFFER_LEN]) -> (StaticKeypair, Response) {
+        let keypair = generate_keypair().unwrap();
+        let tcp = TcpStream::connect(&env.address).await.unwrap();
+        let response = tokio::time::timeout(
+            WAIT,
+            request_pairing(
+                tcp,
+                &env.link.public_key(),
+                &PairRequest {
+                    device_key: keypair.public,
+                    name: name.to_string(),
+                    offer,
+                },
+            ),
+        )
+        .await
+        .expect("an answer in time");
+        (keypair, response)
+    }
+
+    fn ack(response: &Response) -> PairAck {
+        response.as_ref().map(|r| r.ack).expect("an ack")
+    }
+
+    fn has_key(env: &Env, key: &[u8; 32]) -> bool {
+        env.auth_path().exists() && env.auth().find_key(key).is_some()
+    }
+
+    async fn result_of(response: Response) -> PairResult {
+        let mut session = response.unwrap().stream;
+        tokio::time::timeout(WAIT, recv_pair_result(&mut session))
+            .await
+            .expect("a result in time")
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_request_with_the_offer_is_added_only_after_yes() {
+        let env = start().await;
+        let mut local = Local::connect(&env.socket).await;
+        let (payload, begun) = begin(&mut local, json!({})).await;
+        assert_eq!(begun["expires_in_secs"], 60, "{begun}");
+        let offer = payload.offer.unwrap();
+
+        let (phone, response) = request(&env, "s23", offer).await;
+        let PairAck::Accepted { expires_in_secs } = ack(&response) else {
+            panic!("refused: {:?}", ack(&response));
+        };
+        assert!((58..=60).contains(&expires_in_secs), "{expires_in_secs}");
+
+        // Both sides show the same six words; nothing is written yet.
+        let note = local.note("link.pair_request").await;
+        let words = pairing_words_text(&payload.server_key, &offer, &phone.public);
+        assert_eq!(note["params"]["name"], "s23", "{note}");
+        assert_eq!(note["params"]["words"], words, "{note}");
+        assert_eq!(note["params"]["via"], "link", "{note}");
+        assert!(!has_key(&env, &phone.public));
+
+        let r = local.call("link.pair_answer", json!({"yes": true})).await;
+        assert_eq!(
+            r["result"],
+            json!({"added": true, "name": "s23", "protocols": ["companion"]}),
+            "{r}"
+        );
+        assert_eq!(result_of(response).await, PairResult::Added);
+        assert!(has_key(&env, &phone.public));
+
+        // The phone then connects with IK: its first hello says paired.
+        let companion = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0", "id": 0, "method": "hello",
+            "params": {"protocol": "flankr.companion", "version": 1, "client": "phone"}
+        }))
+        .unwrap();
+        let mut stream = reconnect_with(&env, &phone.private, &companion)
+            .await
+            .unwrap();
+        assert_eq!(recv(&mut stream).await["result"]["paired"], true);
+
+        // The run is over: another request is refused.
+        let (_, again) = request(&env, "t3", offer).await;
+        assert_eq!(ack(&again), PairAck::Refused(PairRefusal::Busy));
+    }
+
+    #[tokio::test]
+    async fn no_adds_nothing_and_ends_the_run() {
+        let env = start().await;
+        let mut local = Local::connect(&env.socket).await;
+        let (payload, _) = begin(&mut local, json!({})).await;
+        let offer = payload.offer.unwrap();
+        let (phone, response) = request(&env, "s23", offer).await;
+        local.note("link.pair_request").await;
+
+        let r = local.call("link.pair_answer", json!({"yes": false})).await;
+        assert_eq!(r["result"], json!({"added": false}), "{r}");
+        assert_eq!(result_of(response).await, PairResult::Refused);
+        assert!(!has_key(&env, &phone.public));
+        assert!(!env.auth_path().exists());
+
+        // One attempt per run: no second answer, no second request.
+        let r = local.call("link.pair_answer", json!({"yes": true})).await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        let (_, again) = request(&env, "s23", offer).await;
+        assert_eq!(ack(&again), PairAck::Refused(PairRefusal::Busy));
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn the_offer_expiring_drops_a_held_request() {
+        let env = start().await;
+        let mut local = Local::connect(&env.socket).await;
+        let (payload, begun) = begin(&mut local, json!({"timeout_secs": 1})).await;
+        assert_eq!(begun["expires_in_secs"], 1, "{begun}");
+        let offer = payload.offer.unwrap();
+        let (phone, response) = request(&env, "s23", offer).await;
+        local.note("link.pair_request").await;
+
+        let ended = local.note("link.pair_ended").await;
+        assert_eq!(ended["params"], json!({"reason": "expired"}));
+        assert_eq!(result_of(response).await, PairResult::Expired);
+
+        // A yes after expiry adds nothing; the offer is refused as expired.
+        let r = local.call("link.pair_answer", json!({"yes": true})).await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        let (_, late) = request(&env, "t3", offer).await;
+        assert_eq!(ack(&late), PairAck::Refused(PairRefusal::Expired));
+        assert!(!has_key(&env, &phone.public));
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn an_expired_offer_with_nothing_held_is_refused() {
+        let env = start().await;
+        let mut local = Local::connect(&env.socket).await;
+        let (payload, _) = begin(&mut local, json!({"timeout_secs": 1})).await;
+        let ended = local.note("link.pair_ended").await;
+        assert_eq!(ended["params"], json!({"reason": "expired"}));
+        let (_, late) = request(&env, "s23", payload.offer.unwrap()).await;
+        assert_eq!(ack(&late), PairAck::Refused(PairRefusal::Expired));
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn the_phone_cancelling_or_dropping_ends_the_run() {
+        let env = start().await;
+        let mut local = Local::connect(&env.socket).await;
+        let (payload, _) = begin(&mut local, json!({})).await;
+        let offer = payload.offer.unwrap();
+        let (phone, response) = request(&env, "s23", offer).await;
+        local.note("link.pair_request").await;
+        // Cancel on the phone closes its session.
+        drop(response);
+        let ended = local.note("link.pair_ended").await;
+        assert_eq!(ended["params"], json!({"reason": "cancelled"}));
+        let r = local.call("link.pair_answer", json!({"yes": true})).await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        assert!(!has_key(&env, &phone.public));
+        let (_, again) = request(&env, "s23", offer).await;
+        assert_eq!(ack(&again), PairAck::Refused(PairRefusal::Busy));
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn refused_requests_do_not_count_and_a_held_one_makes_others_busy() {
+        let env = start().await;
+        let mut local = Local::connect(&env.socket).await;
+        let (payload, _) = begin(&mut local, json!({})).await;
+        let offer = payload.offer.unwrap();
+
+        // An offer from another run, or none at all: refused, not counted.
+        let mut wrong = offer;
+        wrong[0] ^= 1;
+        let (_, refused) = request(&env, "mallory", wrong).await;
+        assert_eq!(ack(&refused), PairAck::Refused(PairRefusal::WrongOffer));
+        let (_, refused) = request(&env, "mallory", [0; OFFER_LEN]).await;
+        assert_eq!(ack(&refused), PairAck::Refused(PairRefusal::WrongOffer));
+
+        // The run's attempt is still open.
+        let (phone, response) = request(&env, "s23", offer).await;
+        assert!(matches!(ack(&response), PairAck::Accepted { .. }));
+        let note = local.note("link.pair_request").await;
+        assert_eq!(note["params"]["name"], "s23");
+
+        // While it is held, any other request is busy, even with the offer.
+        let (other, busy) = request(&env, "t3", offer).await;
+        assert_eq!(ack(&busy), PairAck::Refused(PairRefusal::Busy));
+
+        let r = local
+            .call(
+                "link.pair_answer",
+                json!({"yes": true, "name": "phone", "protocols": ["harness"]}),
+            )
+            .await;
+        assert_eq!(r["result"]["name"], "phone", "{r}");
+        assert_eq!(result_of(response).await, PairResult::Added);
+        let file = env.auth();
+        assert_eq!(file.clients.len(), 1);
+        assert_eq!(
+            file.find_name("phone").unwrap().key,
+            format_key(&phone.public)
+        );
+        assert!(file.find_key(&other.public).is_none());
+    }
+
+    #[tokio::test]
+    async fn without_pair_mode_a_request_gets_no_reply() {
+        let env = start().await;
+        let (_, response) = request(&env, "s23", [1; OFFER_LEN]).await;
+        assert!(response.is_err());
+
+        // Pair mode lasts as long as the connection that began it.
+        let mut local = Local::connect(&env.socket).await;
+        let (payload, _) = begin(&mut local, json!({})).await;
+        assert!(env.link.in_pair_mode());
+        drop(local);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while env.link.in_pair_mode() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "pair mode stayed on"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let (_, response) = request(&env, "s23", payload.offer.unwrap()).await;
+        assert!(response.is_err());
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn each_run_has_a_fresh_offer_and_replaces_the_last() {
+        let env = start().await;
+        let mut first = Local::connect(&env.socket).await;
+        let (one, _) = begin(&mut first, json!({})).await;
+        let mut second = Local::connect(&env.socket).await;
+        let (two, _) = begin(&mut second, json!({})).await;
+        assert_ne!(one.offer, two.offer);
+        let ended = first.note("link.pair_ended").await;
+        assert_eq!(ended["params"], json!({"reason": "replaced"}));
+        let (_, stale) = request(&env, "s23", one.offer.unwrap()).await;
+        assert_eq!(ack(&stale), PairAck::Refused(PairRefusal::WrongOffer));
+        let (_, fresh) = request(&env, "s23", two.offer.unwrap()).await;
+        assert!(matches!(ack(&fresh), PairAck::Accepted { .. }));
+        second.note("link.pair_request").await;
+        // The first run's connection cannot answer the second's request.
+        let r = first.call("link.pair_answer", json!({"yes": true})).await;
+        assert_eq!(r["error"]["code"], -32602, "{r}");
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn the_timeout_is_1_to_300_seconds() {
+        let env = start().await;
+        let mut local = Local::connect(&env.socket).await;
+        for bad in [0, 301, 3600] {
+            let r = local
+                .call("link.pair_begin", json!({"timeout_secs": bad}))
+                .await;
+            assert_eq!(r["error"]["code"], -32602, "{r}");
+            let message = r["error"]["message"].as_str().unwrap();
+            assert!(message.contains("1 to 300"), "{message}");
+        }
+        let (_, begun) = begin(&mut local, json!({"timeout_secs": 300})).await;
+        assert_eq!(begun["expires_in_secs"], 300);
+        let (_, begun) = begin(&mut local, json!({"timeout_secs": 1})).await;
+        assert_eq!(begun["expires_in_secs"], 1);
+    }
+
+    // `flankr pair` itself, with its input and output in memory.
+
+    #[derive(Clone, Default)]
+    struct Out(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Out {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Out {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+
+        /// Waits until the output contains `part`.
+        async fn until_contains(&self, part: &str) -> String {
+            let deadline = tokio::time::Instant::now() + WAIT;
+            loop {
+                let text = self.text();
+                if text.contains(part) {
+                    return text;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "output never had {part:?}:\n{text}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+
+        /// Waits until the output ends with `tail`.
+        async fn until_ends_with(&self, tail: &str) -> String {
+            let deadline = tokio::time::Instant::now() + WAIT;
+            loop {
+                let text = self.text();
+                if text.ends_with(tail) {
+                    return text;
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "output never ended with {tail:?}:\n{text}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+
+    struct Run {
+        out: Out,
+        input: tokio::sync::mpsc::UnboundedSender<String>,
+        exit: tokio::task::JoinHandle<Result<i32, String>>,
+        /// The payload it printed.
+        payload: PairingPayload,
+    }
+
+    const WAITING: &str =
+        "Scan the QR code with the phone, or paste its device code here. The link expires in ";
+    const PROMPT: &str = "Do the six words on the phone match? Type yes to pair: ";
+
+    /// Starts `flankr pair` with `options`, waits for its link, and checks
+    /// all it printed so far.
+    async fn flankr_pair(env: &Env, options: flankr::pair::PairOptions) -> Run {
+        let secs = options.timeout_secs.unwrap_or(60);
+        let out = Out::default();
+        let (input, lines) = tokio::sync::mpsc::unbounded_channel();
+        let socket = env.socket.clone();
+        let printed = out.clone();
+        let exit =
+            tokio::spawn(
+                async move { flankr::pair::run_with(&socket, options, lines, printed).await },
+            );
+        let waiting = format!("{WAITING}{secs} s.\n");
+        let text = out.until_contains(&waiting).await;
+        let text = &text[..text.find(&waiting).unwrap() + waiting.len()];
+        let url = text.lines().next().unwrap();
+        let payload = PairingPayload::decode(url).unwrap();
+        let shown = flankr::pair::Shown::new(url).unwrap();
+        let server = env.link.public_key();
+        assert_eq!(
+            text,
+            format!(
+                "{}\n\n{}\n\nDaemon fingerprint: {} ({})\n\n{WAITING}{secs} s.\n",
+                shown.url,
+                shown.data_url(),
+                libflankr_proto::link::fingerprint_text(&server),
+                libflankr_proto::link::fingerprint_words_text(&server),
+            )
+        );
+        Run {
+            out,
+            input,
+            exit,
+            payload,
+        }
+    }
+
+    async fn exit_code(run: Run) -> i32 {
+        tokio::time::timeout(WAIT, run.exit)
+            .await
+            .expect("flankr pair exits in time")
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn flankr_pair_prints_the_words_and_adds_on_yes() {
+        let env = start().await;
+        let run = flankr_pair(&env, flankr::pair::PairOptions::default()).await;
+        let offer = run.payload.offer.unwrap();
+        let (phone, response) = request(&env, "s23", offer).await;
+        let words = pairing_words_text(&env.link.public_key(), &offer, &phone.public);
+        let text = run.out.until_ends_with(PROMPT).await;
+        assert!(
+            text.ends_with(&format!(
+                " s.\nPairing request from s23\nPairing words: {words}\n{PROMPT}"
+            )),
+            "{text}"
+        );
+        assert!(!has_key(&env, &phone.public));
+        run.input.send(" YES \n".to_string()).unwrap();
+        let out = run.out.clone();
+        assert_eq!(exit_code(run).await, 0);
+        assert!(
+            out.text()
+                .ends_with(&format!("{PROMPT}Added s23 (companion)\n"))
+        );
+        assert_eq!(result_of(response).await, PairResult::Added);
+        assert!(has_key(&env, &phone.public));
+    }
+
+    #[tokio::test]
+    async fn flankr_pair_adds_nothing_without_yes() {
+        let env = start().await;
+        let run = flankr_pair(&env, flankr::pair::PairOptions::default()).await;
+        let (phone, response) = request(&env, "s23", run.payload.offer.unwrap()).await;
+        run.out.until_ends_with(PROMPT).await;
+        run.input.send("y\n".to_string()).unwrap();
+        let out = run.out.clone();
+        assert_eq!(exit_code(run).await, 1);
+        assert!(
+            out.text()
+                .ends_with(&format!("{PROMPT}Not paired: the answer was not yes.\n"))
+        );
+        assert_eq!(result_of(response).await, PairResult::Refused);
+        assert!(!has_key(&env, &phone.public));
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn flankr_pair_just_exits_when_the_offer_expires() {
+        let env = start().await;
+        // Waiting for the phone: nothing more is printed.
+        let options = flankr::pair::PairOptions {
+            timeout_secs: Some(1),
+            ..Default::default()
+        };
+        let run = flankr_pair(&env, options.clone()).await;
+        let out = run.out.clone();
+        assert_eq!(exit_code(run).await, 1);
+        assert!(out.text().ends_with(&format!("{WAITING}1 s.\n")));
+
+        // At the prompt: the prompt line is ended, and nothing else.
+        let run = flankr_pair(&env, options).await;
+        let (phone, response) = request(&env, "s23", run.payload.offer.unwrap()).await;
+        run.out.until_ends_with(PROMPT).await;
+        let out = run.out.clone();
+        assert_eq!(exit_code(run).await, 1);
+        assert!(
+            out.text().ends_with(&format!("{PROMPT}\n")),
+            "{}",
+            out.text()
+        );
+        assert_eq!(result_of(response).await, PairResult::Expired);
+        assert!(!has_key(&env, &phone.public));
+    }
+
+    #[tokio::test]
+    async fn flankr_pair_exits_when_the_phone_cancels() {
+        let env = start().await;
+        let run = flankr_pair(&env, flankr::pair::PairOptions::default()).await;
+        let (phone, response) = request(&env, "s23", run.payload.offer.unwrap()).await;
+        run.out.until_ends_with(PROMPT).await;
+        drop(response);
+        let out = run.out.clone();
+        assert_eq!(exit_code(run).await, 1);
+        assert!(out.text().ends_with(&format!("{PROMPT}\n")));
+        assert!(!has_key(&env, &phone.public));
+        assert!(!env.auth_path().exists());
+    }
+
+    #[tokio::test]
+    async fn the_device_code_fallback_asks_for_yes_with_the_words() {
+        let env = start().await;
+        let options = flankr::pair::PairOptions {
+            protocols: Some(vec!["harness".to_string()]),
+            ..Default::default()
+        };
+        let run = flankr_pair(&env, options).await;
+        let offer = run.payload.offer.unwrap();
+        let server = run.payload.server_key;
+
+        // A server address, an empty line and a foreign code don't count.
+        run.input
+            .send(format!("{}\n", run.payload.url().unwrap()))
+            .unwrap();
+        run.out
+            .until_ends_with("paste it on the device, then paste the device's code here.\n")
+            .await;
+        run.input.send("\n".to_string()).unwrap();
+        let other = generate_keypair().unwrap();
+        let (_, foreign) = device(&other.public, "s23");
+        run.input.send(format!("{foreign}\n")).unwrap();
+
+        let (keypair, code) = device(&server, "s23");
+        run.input.send(format!("{code}\n")).unwrap();
+        let words = pairing_words_text(&server, &offer, &keypair.public);
+        let text = run
+            .out
+            .until_ends_with(&format!(
+                "Pairing request from s23\nPairing words: {words}\n{PROMPT}"
+            ))
+            .await;
+        assert!(!text.contains("Confirmation code"), "{text}");
+        assert!(!has_key(&env, &keypair.public));
+
+        // While the code is held, a phone's request is busy.
+        let (_, busy) = request(&env, "t3", offer).await;
+        assert_eq!(ack(&busy), PairAck::Refused(PairRefusal::Busy));
+
+        run.input.send("yes\n".to_string()).unwrap();
+        let out = run.out.clone();
+        assert_eq!(exit_code(run).await, 0);
+        assert!(out.text().ends_with("Added s23 (harness)\n"));
+        assert!(has_key(&env, &keypair.public));
+        // The device connects with IK afterwards.
+        let _stream = first_connect(&env, &keypair).await;
+    }
+
+    #[tokio::test]
+    async fn a_substituted_device_code_shows_other_words_and_no_adds_nothing() {
+        let env = start().await;
+        let (keypair, _) = device(&env.link.public_key(), "s23");
+        // An attacker's key, in a code built for this daemon.
+        let (attacker, substituted) = device(&env.link.public_key(), "s23");
+        let options = flankr::pair::PairOptions {
+            code: Some(substituted),
+            ..Default::default()
+        };
+        let run = flankr_pair(&env, options).await;
+        let offer = run.payload.offer.unwrap();
+        let shown = pairing_words_text(&env.link.public_key(), &offer, &attacker.public);
+        let phone = pairing_words_text(&env.link.public_key(), &offer, &keypair.public);
+        assert_ne!(shown, phone);
+        run.out
+            .until_ends_with(&format!("Pairing words: {shown}\n{PROMPT}"))
+            .await;
+        run.input.send("no\n".to_string()).unwrap();
+        assert_eq!(exit_code(run).await, 1);
+        assert!(!env.auth_path().exists());
+    }
+}
