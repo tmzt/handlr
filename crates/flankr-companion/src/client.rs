@@ -1636,6 +1636,7 @@ impl State {
                         pane_id: session.clone(),
                         cols_hint,
                         rows_hint,
+                        cursor: false,
                     };
                     out.push(self.request(
                         methods::TERMINAL_OPEN,

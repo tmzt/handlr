@@ -765,7 +765,10 @@ mod tests {
 
     fn online(input: bool) -> Book {
         let mut b = Book::default();
-        b.set_info(Some(TerminalInfo { input }));
+        b.set_info(Some(TerminalInfo {
+            input,
+            mouse: false,
+        }));
         b
     }
 
@@ -785,6 +788,8 @@ mod tests {
                 terminal_id: id,
                 cols: 80,
                 rows: 24,
+                cursor: false,
+                source: Default::default(),
             },
         );
     }
@@ -832,7 +837,10 @@ mod tests {
         // Reconnect: reopened, and the new terminal's seq 1 shows.
         assert!(b.disconnected());
         assert_eq!(b.sessions["claude"].terminal_id, None);
-        let (acts, _) = b.set_info(Some(TerminalInfo { input: false }));
+        let (acts, _) = b.set_info(Some(TerminalInfo {
+            input: false,
+            mouse: false,
+        }));
         assert_eq!(acts.len(), 1);
         b.opened(
             "claude",
@@ -840,6 +848,8 @@ mod tests {
                 terminal_id: 9,
                 cols: 80,
                 rows: 24,
+                cursor: false,
+                source: Default::default(),
             },
         );
         // The old screen until the first frame.
@@ -863,6 +873,8 @@ mod tests {
                 terminal_id: 3,
                 cols: 5,
                 rows: 1,
+                cursor: false,
+                source: Default::default(),
             },
         );
         assert_eq!(
@@ -982,6 +994,13 @@ mod tests {
         assert_eq!(t.closed, Some(TerminalClosedReason::PaneClosed));
         // Not reopened on reconnect.
         b.disconnected();
-        assert_eq!(b.set_info(Some(TerminalInfo { input: false })).0, vec![]);
+        assert_eq!(
+            b.set_info(Some(TerminalInfo {
+                input: false,
+                mouse: false
+            }))
+            .0,
+            vec![]
+        );
     }
 }
