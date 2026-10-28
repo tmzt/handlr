@@ -4694,7 +4694,9 @@ impl AgentScreen {
             );
             self.term_asks.push(TermAsk::Arm);
         }
-        if out.tap {
+        // A click raises the keyboard too, so a mouse program can be typed
+        // into after tapping it (the owner, 2026-10-28).
+        if out.tap || out.click {
             self.term_asks.push(TermAsk::Keyboard);
         }
         self.term_lines = self.term_lines.saturating_add(out.lines);
@@ -6801,8 +6803,8 @@ mod tests {
         let (x, y) = (r.x + 5.0, r.y + 5.0);
         a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
         a.touch(1, TouchPhase::Ended, x, y, MS);
-        // Unarmed: the arm first, no keyboard, the click held.
-        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm]);
+        // Unarmed: the arm first and the keyboard, the click held.
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm, TermAsk::Keyboard]);
         a.set_terminal_state((2, true, true, Some(60)), attached_state(true, true));
         let asks = a.take_terminal_asks();
         let click = |kind| {
@@ -6820,10 +6822,12 @@ mod tests {
                 click(K::Up { button: Left })
             ]
         );
-        // Armed: at once.
+        // Armed: the click at once, and the keyboard.
         a.touch(2, TouchPhase::Started, x, y, Duration::from_secs(1));
         a.touch(2, TouchPhase::Ended, x, y, Duration::from_secs(1) + MS);
-        assert_eq!(a.take_terminal_asks().len(), 2);
+        let asks = a.take_terminal_asks();
+        assert_eq!(asks.len(), 3);
+        assert!(asks.contains(&TermAsk::Keyboard));
         // A program without mouse reports: the keyboard tap of before.
         a.set_terminal_state((3, true, true, Some(60)), attached_state(true, false));
         a.touch(3, TouchPhase::Started, x, y, Duration::from_secs(2));
@@ -6833,7 +6837,7 @@ mod tests {
         a.set_terminal_state((4, true, true, None), attached_state(false, true));
         a.touch(4, TouchPhase::Started, x, y, Duration::from_secs(3));
         a.touch(4, TouchPhase::Ended, x, y, Duration::from_secs(3) + MS);
-        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm]);
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm, TermAsk::Keyboard]);
         a.touch(5, TouchPhase::Started, x, y, Duration::from_secs(9));
         a.touch(5, TouchPhase::Cancelled, x, y, Duration::from_secs(9) + MS);
         a.set_terminal_state((5, true, true, Some(60)), attached_state(true, true));
