@@ -870,3 +870,37 @@ module, as the settings screen's rows are (settings/remote_row.rs:157-200,
 8. **The overview's cards** could use the same activity rule and spinner
    later; in this plan only the drawer changes. Wanted on the overview
    too?
+
+## Amendment — 2026-10-28 18:48 EDT: the open questions answered; approved; EditableLabel; flankr-companion 0.5.0
+
+The owner (2026-10-28), offered the lead's answer to each open question
+with "Approve the drawer plan with those answers and start it?": "let's
+approve and start the drawer, we can switch to EditableLabel as part of
+that plan (when it's ready)". Where this disagrees with the body, it wins.
+
+1. **The ≡ button** is on both the overview and the agent view; the agent
+   view's "‹" moves one slot right (open question 1).
+2. **No left-edge swipe** for now; the button only (open question 2).
+3. **Row text:** the tab label, " · ", the summary (open question 3).
+4. **A tap on the active remote's card** opens its details modal (the
+   settings plan's 2026-10-28 entry), rather than nothing (open question 4).
+5. **Same host and port:** the fingerprint's first group is appended to
+   tell the two apart (open question 5).
+6. **`Input` and `Event` become `#[non_exhaustive]`** in this release, so
+   later variants are patch bumps (open question 6).
+7. **The thresholds** stay (10 s, 10 min, 60 s) and idle rows show their
+   age ("4m") (open question 7).
+8. **The overview's cards** take the same activity rule and spinner later,
+   in their own change (open question 8).
+9. **Versions.** flankr-companion 0.4.0 shipped with the settings follow-up
+   (nicknames, `RemoteInfo`'s full fingerprint), so steps 3-4's release is
+   **0.5.0**; the nickname parts of step 3 already exist and are not
+   repeated.
+10. **EditableLabel.** The nickname field in the remote details modal moves
+    to libcontrols' new `EditableLabel` (a label with a pencil that turns
+    into a check and an optional X), being added to libcontrols as 0.10.2;
+    the app takes it in step 5 when 0.10.2 is published, else in a later
+    step of this plan.
+
+The plan is approved; the status becomes `In implementation` with its
+first code commit.
