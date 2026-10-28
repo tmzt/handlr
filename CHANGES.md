@@ -2893,3 +2893,38 @@ and the app (`90b94d8`).
 3. **The row** is 44 pt high, seven equal columns, arrows drawn as strokes.
    It sits directly on the keyboard and the bottom bar moves up by its
    height, so the terminal shrinks by exactly that much and the fit follows.
+
+## 2026-10-28 13:38 EDT — plan 20261028_01 steps 1-5's departures (several remotes)
+
+Plan: docs/design/20261028_01_MULTIPLE_REMOTES_PLAN.md. Steps 1 (`a9cfbcc`,
+tag `libflankr_proto-v0.4.3`; `90b20d1` for `flankr pair`), 2-4
+(`e93f76e`, tag `flankr-companion-v0.2.0`; `d964025`) and 5 (the commit
+before this one). Not yet tried on the S23.
+
+1. **Identity:** `link::fingerprint` returns the raw hash, as decision 2
+   names it; `remote_id` and `fingerprint_text` give the strings. The
+   confirmation code hashes `flankr.pair.confirm/1` and the key and takes
+   the first 20 bits modulo 1,000,000.
+2. **Pairing:** with no active remote, pairing also goes through the probe
+   (one extra handshake; `Paired` arrives before `Connected`); any
+   answered `hello` counts as accepted, since a completed `IK` handshake
+   means the daemon lists the key; a probe that gives up reports
+   `PairFailed`.
+3. **Events and inputs:** `Event::RemoteUpdated` is new (the "Already
+   paired" note); `Input::Unpair` and `Event::Unpaired` stay, meaning
+   "remove the active remote" and "the last remote is gone".
+   `CompanionConfig` gains `data_dir` and `pairing_window`;
+   `ServerRecord.signing_key` is a real field.
+4. **Tests** of step 4 use the in-test link server, its authorized keys
+   standing in for `auth.toml`.
+5. **No `flankr` command removes a paired device;** the offline copy names
+   the `[[client]]` entry in `~/.config/flankr/auth.toml`, which the
+   daemon re-reads.
+6. **The app:** the + and ⓘ are a small `RemotesTitle` control; the
+   pairing state and the Delete data order are in `src/remotes.rs`
+   (testable on the host); Cancel replaces the field on the pairing screen
+   in both modes; Delete data removes the active remote last; copy was
+   added beyond the plan's keys (removing, paired, the pairing screen's
+   confirmation code).
+7. **`apps/Cargo.lock`** took `libflankr_proto` 0.4.3 with a few
+   Windows-only and `tempfile` entries moved by cargo.
