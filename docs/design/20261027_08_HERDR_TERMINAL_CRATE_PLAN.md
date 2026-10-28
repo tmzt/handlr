@@ -835,3 +835,48 @@ body, it wins.
    terminal is open, or leave splits as they are.
 
 The plan stays `Draft`.
+
+## Amendment — 2026-10-27 23:32 EDT: one attachment kept open by the daemon; a change made on the desktop is not forced back
+
+The owner (2026-10-27): "the connection on the daemon should stay open but
+not force a pane or size change if one is detected"; asked what "one"
+refers to, "A change made on the desktop". Where this disagrees with the
+body or the earlier amendments, it wins.
+
+1. **One attachment, kept open** (replaces decision 4's one connection per
+   phone connection, and item 2 of the previous amendment's "opened only
+   while a phone has a terminal open"). While herdr is local and
+   `[terminal] attach` is on, the daemon holds one herdr client
+   connection for its whole run, reconnecting with backoff (1 s doubling
+   to 30 s) when herdr restarts. While no phone has a terminal open, the
+   attachment's surface is inactive (`client_shell.surface.set { active:
+   false }`, 2.1.6), so it claims no geometry and herdr sizes tabs to the
+   desktop as if flankr were not there. Opening a terminal makes it
+   active; closing the last one makes it inactive again. The terminal
+   frames of every phone come from this one attachment; with two phones,
+   the one that opened or touched its terminal last sets its pane and
+   size. It still carries only the terminal (the previous amendment's
+   item 2).
+2. **On open, flankr focuses and sizes once:** `pane.focus` for the
+   session's pane and `ClientShellResize` to the phone's fit (the previous
+   amendment's item 1).
+3. **A change made on the desktop is not forced back.** The daemon detects
+   one when, while the phone's terminal is open, herdr's snapshot or
+   surface shows a pane focused or a tab size other than the ones flankr
+   last asked for, without flankr having asked (the desktop focused another
+   pane or tab, or took the tab's size back by using it). From then on the
+   daemon sends no `pane.focus` and no `ClientShellResize` of its own: the
+   phone keeps streaming herdr's view as it now is (another pane's
+   surface is not shown; the session's pane, if still visible, at the
+   desktop's size, panned), and its frames carry the `stale` flag of
+   decision 8, which the app shows as "Desktop has the tab, touch to take
+   it back". The next touch on the phone's terminal (a tap, a key or a
+   drag) clears it: flankr sends `pane.focus` and `ClientShellResize`
+   again, then the input. A resize from the phone's own keyboard or
+   pinch while the flag is set waits for that touch. This answers open
+   question 2 with (a), detected rather than inferred from
+   `MouseCapture`.
+4. **No zoom** (open question 1): `pane.zoom` is never sent; a pane in a
+   split gets its share of the phone-sized tab.
+
+The plan stays `Draft`.
