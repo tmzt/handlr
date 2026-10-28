@@ -3000,3 +3000,36 @@ remote", and "it already says Pair another remote". `remote_add`'s text is
 now "Scan the QR code shown by flankr pair.", drawn under Tap to scan in
 both the add mode and the first run; the idle window shows no status line
 (`pairing_camera_why` is no longer drawn; the key stays in the copy file).
+
+## 2026-10-28 18:03 EDT — plan 20261028_02: pairing feedback, the words in a confirm modal, Details
+
+Plan: docs/design/20261028_02_PAIRING_QR_SCAN_PLAN.md. The owner, after
+trying it: "it should give more feedback after the scan succeeded, same when
+pairing is otherwise completed. currently it just closes and looks like it
+failed"; "if we're using the six words to confirm the connection,
+shouldn't we show them in a confirmation modal?"; "add the Details button
+to show the full fingerprint and hostname"; "it should be confirmed on the
+Mac only"; "monospace is available via a different atlas, but flankr pair
+should be in bold, such as using markdown". Commit `f4651b4`.
+
+1. An accepted scan shows "Code read" and "Connecting to <host>…" with a
+   check glyph and Cancel until the words arrive.
+2. The six words are in a confirm modal ("Confirm on your Mac": the words,
+   the line to type yes on the Mac, Details, Cancel); the phone has no
+   match button; a tap off the card does nothing; Back cancels.
+3. Details shows "<server> at <host:port>", the six fingerprint words and
+   the 64-hex BLAKE2s fingerprint in the mono face. The event carries no
+   key, so the app computes the hex from the link it read and shows it
+   only when the link's fingerprint words match the event's (TODO: add the
+   key or hex to `Event::PairingWords`).
+4. Pairing completes on "Paired with <name>" (or "Already paired with
+   <name>", with "Its addresses were updated." when the first address
+   changed) with Details and Done; it stays until Done.
+5. Failures stay in the window with the client's reason and Tap to scan
+   again; Cancel says "Pairing cancelled: nothing was added."
+6. Pairing copy that names the command writes **flankr pair** and is drawn
+   with the app's Markdown view; values inserted are escaped.
+7. Test isolation: test builds point the daemon socket at a path that
+   does not exist and give each scripted run its own key directory, since
+   the Mac's running daemon answered the tests; `data_dir` in tests is
+   still the host's.
