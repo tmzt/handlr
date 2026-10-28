@@ -869,3 +869,25 @@ camera, it should probably be a details or similar button".
    camera capture and QR plans of 2026-10-28); that redesign carries the
    Details button over. The Remotes row keeps the fingerprint as decision
    12 has it.
+
+## Amendment — 2026-10-28 14:06 EDT: the fingerprint also as three BIP-39 words
+
+The owner (2026-10-28): "pair should print it for user's that want to
+compare them, should probably print the readable form too (bip?)"; asked
+whether the readable form is three BIP-39 words, "yes".
+
+1. **`link::fingerprint_words(key) -> String`** in `libflankr_proto`: the
+   first 33 bits of `fingerprint(key)` (BLAKE2s-256 of the daemon's static
+   key), big-endian, as three 11-bit indexes into the BIP-39 English word
+   list (2048 words), joined by spaces. It expresses the same check as the
+   hex `fingerprint_text` (whose 32 bits are the same hash's first 32).
+   The list is the `bip39` crate's English list or a vendored copy with
+   its licence noted; it is used only for these words, never for keys.
+   Additive, in the 0.5.0 release of the previous amendment but one.
+2. **`flankr pair`** prints `Fingerprint: f34d 3ae3 (<word> <word>
+   <word>)` beside the per-offer confirmation code.
+3. **The phone** shows the same words with the hex: behind the pairing
+   screen's **Details** button and in a Remotes row's details.
+4. The step added by the per-offer amendment includes these; its **Done
+   when:** adds that `flankr pair` and the phone show the same three words
+   for a daemon, from fixed test vectors.
