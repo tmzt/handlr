@@ -2757,3 +2757,33 @@ Not yet tried on the S23.
    (at least 7 pt) at the bottom rows, at the left edge when wider. Every
    typed character is its own token, so a typed word is never read as a
    named key. libmorph's `Key` has no arrows, so arrows are not sent yet.
+
+## 2026-10-27 22:13 EDT — the terminal view's drag, tap and one-line Finished cards (plan 20261022_03 L3; departures from plan 20261027_07)
+
+Plan: docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md, the L3 amendment on
+the terminal view, which departs from frozen plan
+docs/design/20261027_07_TERMINAL_MODE_PLAN.md decisions 6 and 7 on the
+owner's instruction. `libflankr_proto` 0.4.1 (`bf70776`, tag
+`libflankr_proto-v0.4.1`), the daemon (`b785e53`), the client
+(`09e017e`) and the app (`d36e8c5`).
+
+1. **`terminal.scroll`** sets herdr's `pane.scroll` offset through
+   libherdr's `HerdrRequest::Custom`, so libherdr is unchanged. The offset
+   starts from the snapshot's `scroll` when given, else 0; `lines` is
+   clamped to ±1000; an accepted scroll extends the arm as keys do and
+   wakes the poller for a frame within the 8/s cap. No notice per scroll.
+2. **The client** sends one scroll at a time and sums the rest; it now
+   extends its own arm on each accepted key batch or scroll, as the daemon
+   does (before, the phone dropped the arm after 60 s while typing went
+   on). `Input::TerminalScroll` is a new variant of the public `Input`;
+   `flankr-companion` keeps 0.1.0.
+3. **The app:** the 1.5 s hold is gone; a tap arms and raises the keyboard
+   once the arm lands (given up after 5 s). Fit-to-width moved from a
+   one-finger to a two-finger double tap, since a tap now acts at once.
+   With input allowed, one finger no longer pans vertically (two fingers
+   do). The scroll offset shows as "N lines back". Only this session's
+   pinned Finished card needed folding; other sessions' were one line
+   already.
+4. **Config:** the owner's config now has `[terminal] input = true` and
+   `terminal_input = true` for claude, omp and agy; listing `[[agents]]`
+   replaces the built-in list, so all three are written out.
