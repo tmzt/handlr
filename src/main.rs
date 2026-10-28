@@ -16,6 +16,10 @@
 //!               [--config <file>] [--transport <name> | --remote <user@host> |
 //!                --socket <herdr.sock> | --mock]
 //! ```
+//!
+//! herdr's API socket is `--socket`, else `HERDR_SOCKET_PATH` (herdr's own
+//! override) unless `--transport` names a transport, else `config.toml`'s
+//! transport, else `~/.config/herdr/herdr.sock`.
 
 use std::path::{Path, PathBuf};
 
@@ -150,7 +154,11 @@ fn expand_tilde(p: impl AsRef<Path>) -> PathBuf {
     p.to_path_buf()
 }
 
-/// The herdr transport named by the flags, else by `config.toml`, else the
+/// herdr's own override of its API socket, honoured as herdr's CLI does.
+const HERDR_SOCKET_ENV: &str = "HERDR_SOCKET_PATH";
+
+/// The herdr transport named by the flags, else by `HERDR_SOCKET_PATH`
+/// (unless `--transport` names one), else by `config.toml`, else the
 /// default local socket.
 fn select_transport(args: &AppArgs, config: &flankr::config::AppConfig) -> HerdrTransport {
     if args.mock_mode {
@@ -164,6 +172,19 @@ fn select_transport(args: &AppArgs, config: &flankr::config::AppConfig) -> Herdr
     if let Some(ref socket_str) = args.socket {
         let socket_path = expand_tilde(socket_str);
         log::info!("Connecting via UNIX domain socket: {:?}", socket_path);
+        return HerdrTransport::local(socket_path);
+    }
+    if args.transport_name.is_none()
+        && let Some(socket_str) = std::env::var(HERDR_SOCKET_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+    {
+        let socket_path = expand_tilde(&socket_str);
+        log::info!(
+            "Connecting via UNIX domain socket (from {}): {:?}",
+            HERDR_SOCKET_ENV,
+            socket_path
+        );
         return HerdrTransport::local(socket_path);
     }
     let Some(t) = config.find_transport(args.transport_name.as_deref()) else {
@@ -400,7 +421,8 @@ flankr session tail [--listen <flankr.sock>] [--pane <id or name>] [--follow]
                     [--entries N] [--history N] [--outline] [--from N] [--to N]
 flankr prompt [--use general_agent] [--agent <name>] [--prompts <ADDITIONAL_PROMPTS.md>]
               [--config <file>] [--transport <name> | --remote <user@host> |
-               --socket <herdr.sock> | --mock]";
+               --socket <herdr.sock> | --mock]
+herdr's socket: --socket, else HERDR_SOCKET_PATH, else config.toml, else ~/.config/herdr/herdr.sock";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
