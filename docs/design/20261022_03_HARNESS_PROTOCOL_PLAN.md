@@ -1701,3 +1701,22 @@ what the drag scrolls, "Wheel events to the pane"; asked what a touch does,
 
 Plan 20261027_07 is frozen; these are recorded there as departures in
 CHANGES.md.
+
+## Amendment — 2026-10-28 00:47 EDT: shell panes, terminal only (living section L3)
+
+The owner (2026-10-28), while testing the terminal on a pane running htop:
+"shell/non-agent should be supported but only have terminal mode (no
+switch)".
+
+1. **A pane that runs no known agent** (its agent resolves to `shell`,
+   `agents.list`'s `AgentInfo.agent`) is a session the app lists and
+   opens, like an agent's.
+2. **It has only the terminal view.** Opening it shows the terminal at
+   once; there is no transcript, and the bottom bar's terminal/list glyph
+   (plan 20261027_07 decision 7) is not drawn for it. The prompt card,
+   message sends, suggestions and summaries do not apply to it.
+3. **Access is the `shell` entry's,** as for any agent: the terminal opens
+   only when `[[agents]]` has a `shell` entry the principal may reach,
+   and typing, scroll and mouse need its `terminal_input` as well as
+   `[terminal] input` and the arm. Without the entry the session is listed
+   but its terminal is refused with the daemon's message.
