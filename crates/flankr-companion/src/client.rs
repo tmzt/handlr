@@ -639,6 +639,9 @@ pub enum Output {
 
 /// Notices held at most, the oldest dropped beyond it (decision 4).
 pub const NOTICE_CAP: usize = 8;
+/// The daemon's notice kind for typing into a terminal, noted but never
+/// said.
+const TERMINAL_INPUT_NOTICE: &str = "terminal_input";
 
 /// How long a reply read aloud waits for its spoken summary before it is
 /// read as it is (plan 20261023_05, decision 5).
@@ -4564,6 +4567,13 @@ impl State {
             }
             wire::methods::NOTICE => {
                 if let Some(n) = parse_or_log::<wire::Notice>(note) {
+                    // Typing into a terminal is the owner's own doing: it is
+                    // noted, not said (the owner, 2026-10-28: "why is it
+                    // speaking the keys?").
+                    if n.kind == TERMINAL_INPUT_NOTICE {
+                        log::info!("notice: {}", n.text);
+                        return;
+                    }
                     self.notices.push_back(n.text);
                     while self.notices.len() > NOTICE_CAP {
                         self.notices.pop_front();
@@ -5473,6 +5483,17 @@ mod tests {
             events(&s.incoming(notice("Claude is done."))),
             vec![say("Claude is done.")]
         );
+    }
+
+    #[test]
+    fn typing_into_a_terminal_is_not_said() {
+        let mut s = online();
+        let typed = note(
+            "notice",
+            json!({"id": 2, "kind": "terminal_input", "pane_id": "p1",
+                   "text": "Typing into Shell's terminal."}),
+        );
+        assert!(events(&s.incoming(typed)).is_empty());
     }
 
     #[test]
