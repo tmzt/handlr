@@ -1107,7 +1107,7 @@ async fn attached_keys_reach_herdr_as_key_events() {
         notice["params"]["text"]
             .as_str()
             .unwrap()
-            .contains("3 keys")
+            .contains("Typing into")
     );
 
     // The refusals.

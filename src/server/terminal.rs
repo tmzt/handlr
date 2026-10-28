@@ -260,6 +260,9 @@ struct State {
     last_marked: bool,
     /// A mouse event's notice was sent since the last arm (decision 12).
     mouse_noticed: bool,
+    /// A key batch's notice was sent since the last arm: one per arm
+    /// window, not one per batch.
+    keys_noticed: bool,
 }
 
 impl State {
@@ -374,6 +377,7 @@ impl Terminals {
                 scroll_max: None,
                 last_marked: false,
                 mouse_noticed: false,
+                keys_noticed: false,
             }),
             poller: Mutex::new(None),
             poke: Notify::new(),
@@ -640,8 +644,10 @@ pub(super) fn input_arm(conn: &Conn, raw: Value) -> Result<Value, ErrorObject> {
     {
         let mut state = term.state.lock().unwrap();
         state.armed_until = Some(Instant::now() + arm_window());
-        // A new arm window: its first mouse event is noticed.
+        // A new arm window: its first mouse event and key batch are
+        // noticed.
         state.mouse_noticed = false;
+        state.keys_noticed = false;
     }
     // The tap that armed is a touch: it takes herdr's tab back from the
     // desktop (the 23:32 EDT amendment, item 3).
@@ -865,7 +871,11 @@ pub(super) async fn input(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorOb
             .await
             .map_err(herdr_unavailable)?;
     }
-    term.state.lock().unwrap().armed_until = Some(Instant::now() + arm_window());
+    let first = {
+        let mut state = term.state.lock().unwrap();
+        state.armed_until = Some(Instant::now() + arm_window());
+        !std::mem::replace(&mut state.keys_noticed, true)
+    };
     let count = keys.len();
     log::info!(
         "{} typed {count} key(s) into terminal {} on pane '{}' ({})",
@@ -874,11 +884,12 @@ pub(super) async fn input(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorOb
         term.pane_id,
         term.agent
     );
-    let plural = if count == 1 { "key" } else { "keys" };
-    notice(conn, &term, |name| {
-        format!("Typed {count} {plural} into {name}'s terminal.")
-    })
-    .await;
+    if first {
+        notice(conn, &term, |name| {
+            format!("Typing into {name}'s terminal.")
+        })
+        .await;
+    }
     ok(common::Empty {})
 }
 

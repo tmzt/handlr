@@ -465,7 +465,7 @@ async fn armed_input_reaches_send_keys_and_is_noticed_without_the_keys() {
     assert_eq!(notice["params"]["kind"], "terminal_input", "{notice}");
     assert_eq!(notice["params"]["pane_id"], "p1");
     let text = notice["params"]["text"].as_str().unwrap();
-    assert!(text.contains("3 keys"), "{text}");
+    assert!(text.contains("Typing into"), "{text}");
     assert!(!notice.to_string().contains("enter"), "{notice}");
 
     // Over 64 bytes, and a signal key without terminal_signals.
