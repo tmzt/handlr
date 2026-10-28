@@ -175,7 +175,13 @@ impl From<&PaneView<'_>> for Grid {
 /// text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyToken {
-    /// Text, sent as `TextCommit` (`space` is `" "`).
+    /// Text (`space` is `" "`), sent as one key per character: `Char(c)`
+    /// with no modifiers, pressed and released, so herdr encodes it for the
+    /// pane's keyboard protocol as it does a typed key (the owner's
+    /// "ime keyboard input should be translated to keys", departing from
+    /// decision 8's `TextCommit`, which herdr writes to the PTY as raw
+    /// bytes). An uppercase letter is its own `Char`: herdr's key builder
+    /// (`src/pane/input.rs`) takes it as Shift and the lowercase key.
     Text(String),
     /// `enter`, `escape`/`esc`, `tab`, `backspace` and the arrows, sent as
     /// a press and a release.
@@ -237,39 +243,36 @@ fn key(code: ClientKeyCode, modifiers: u8, kind: ClientKeyKind) -> ClientPaneInp
 }
 
 impl From<KeyToken> for Vec<ClientPaneInputEvent> {
-    /// A text token is one `TextCommit`; a named key or `ctrl+` combo is a
-    /// `Press` and then a `Release`, so herdr's held-key tracking ends
-    /// clean. (A `Vec`, not one event: decision 8 names two events per
-    /// key.)
+    /// Each key is a `Press` and then a `Release`, so herdr's held-key
+    /// tracking ends clean: a named key or `ctrl+` combo is one key, a text
+    /// token one key per character. No `TextCommit` is made (it stays in
+    /// herdr's types for a paste).
     fn from(token: KeyToken) -> Vec<ClientPaneInputEvent> {
-        let (code, modifiers) = match token {
-            KeyToken::Text(text) => return vec![ClientPaneInputEvent::TextCommit(text)],
-            KeyToken::Named(code) => (code, 0),
-            KeyToken::Ctrl(c) => (ClientKeyCode::Char(c), CTRL),
+        let press_release = |code: ClientKeyCode, modifiers: u8| {
+            [
+                key(code.clone(), modifiers, ClientKeyKind::Press),
+                key(code, modifiers, ClientKeyKind::Release),
+            ]
         };
-        vec![
-            key(code.clone(), modifiers, ClientKeyKind::Press),
-            key(code, modifiers, ClientKeyKind::Release),
-        ]
+        match token {
+            KeyToken::Text(text) => text
+                .chars()
+                .flat_map(|c| press_release(ClientKeyCode::Char(c), 0))
+                .collect(),
+            KeyToken::Named(code) => press_release(code, 0).to_vec(),
+            KeyToken::Ctrl(c) => press_release(ClientKeyCode::Char(c), CTRL).to_vec(),
+        }
     }
 }
 
-/// `parse_keys`' tokens as herdr input events, adjacent text merged into
-/// one `TextCommit`. A token [`KeyToken::parse`] refuses is the error.
+/// `parse_keys`' tokens as herdr input events, in order, every key a press
+/// and a release. A token [`KeyToken::parse`] refuses is the error.
 pub fn key_events<S: AsRef<str>>(tokens: &[S]) -> Result<Vec<ClientPaneInputEvent>, String> {
     let mut out: Vec<ClientPaneInputEvent> = Vec::new();
     for token in tokens {
         let token = token.as_ref();
         let parsed = KeyToken::parse(token).ok_or_else(|| token.to_owned())?;
-        for event in Vec::<ClientPaneInputEvent>::from(parsed) {
-            match (out.last_mut(), event) {
-                (
-                    Some(ClientPaneInputEvent::TextCommit(held)),
-                    ClientPaneInputEvent::TextCommit(t),
-                ) => held.push_str(&t),
-                (_, event) => out.push(event),
-            }
-        }
+        out.extend(Vec::<ClientPaneInputEvent>::from(parsed));
     }
     Ok(out)
 }

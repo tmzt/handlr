@@ -331,7 +331,7 @@ fn each_named_key_token() {
     }
     assert_eq!(
         Vec::<ClientPaneInputEvent>::from(KeyToken::parse("space").unwrap()),
-        vec![ClientPaneInputEvent::TextCommit(" ".into())]
+        press_release(ClientKeyCode::Char(' '), 0)
     );
     for (token, ch) in [
         ("ctrl+a", 'a'),
@@ -347,7 +347,19 @@ fn each_named_key_token() {
     }
     assert_eq!(
         Vec::<ClientPaneInputEvent>::from(KeyToken::parse("é").unwrap()),
-        vec![ClientPaneInputEvent::TextCommit("é".into())]
+        press_release(ClientKeyCode::Char('é'), 0)
+    );
+    // An uppercase letter is its own character, as herdr's key builder
+    // expects; a longer text token is one key per character.
+    assert_eq!(
+        Vec::<ClientPaneInputEvent>::from(KeyToken::parse("A").unwrap()),
+        press_release(ClientKeyCode::Char('A'), 0)
+    );
+    let mut ab = press_release(ClientKeyCode::Char('a'), 0);
+    ab.extend(press_release(ClientKeyCode::Char('B'), 0));
+    assert_eq!(
+        Vec::<ClientPaneInputEvent>::from(KeyToken::parse("aB").unwrap()),
+        ab
     );
     for bad in ["", "ctrl+1", "ctrl+enter", "\u{1b}"] {
         assert_eq!(KeyToken::parse(bad), None, "{bad:?}");
@@ -355,12 +367,21 @@ fn each_named_key_token() {
 }
 
 #[test]
-fn parse_keys_tokens_become_events_with_text_merged() {
+fn parse_keys_tokens_become_key_events() {
     // What the daemon's parse_keys makes of "git space status enter".
     let tokens = ["g", "i", "t", "space", "s", "t", "enter", "ctrl+c"];
-    let mut expected = vec![ClientPaneInputEvent::TextCommit("git st".into())];
+    let mut expected = Vec::new();
+    for c in "git st".chars() {
+        expected.extend(press_release(ClientKeyCode::Char(c), 0));
+    }
     expected.extend(press_release(ClientKeyCode::Enter, 0));
     expected.extend(press_release(ClientKeyCode::Char('c'), 2));
-    assert_eq!(key_events(&tokens).unwrap(), expected);
+    let events = key_events(&tokens).unwrap();
+    assert_eq!(events, expected);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, ClientPaneInputEvent::TextCommit(_)))
+    );
     assert_eq!(key_events(&["a", "ctrl+1"]), Err("ctrl+1".to_string()));
 }

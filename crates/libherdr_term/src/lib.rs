@@ -30,6 +30,10 @@ pub mod herdr {
 
 mod attach;
 pub mod convert;
+/// The in-process fake herdr server of this crate's tests, for other
+/// crates' tests (the `fake-server` feature).
+#[cfg(feature = "fake-server")]
+pub mod fake;
 mod surface;
 
 pub use attach::{

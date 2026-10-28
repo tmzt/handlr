@@ -12,6 +12,11 @@ description = "Attaching to the local herdr as one of herdr's own shell clients,
 test = false
 doctest = false
 
+[features]
+# `libherdr_term::fake`: the tests' in-process fake herdr server, for the
+# daemon's tests (src/fake.rs). Never on in a build that ships.
+fake-server = []
+
 [dependencies]
 libflankr_term = { path = "../libflankr_term" }
 libflankr_proto = { path = "../libflankr_proto" }
