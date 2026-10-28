@@ -1,7 +1,7 @@
 ---
 title: Pairing the phone with several flankr daemons, listed under Remotes in Settings
 date: 2026-10-28
-status: Draft
+status: In implementation
 covers:
   - "The phone can be paired with several flankr daemons (**remotes**), each
     identified by its link static public key, each with its own phone-side
@@ -807,3 +807,9 @@ storage". This replaces the 20-session part of the cap in the amendments of
 limit on the number of sessions, and is capped at 50 MB, evicting the least
 recently used sessions first when a write would pass it. The data plan's
 amendment, when either plan is built, says the same.
+
+## Amendment — 2026-10-28 13:09 EDT: implementation has started; the document is now immutable
+
+Implementation has started with step 1 (`libflankr_proto` 0.4.3). The
+status is `In implementation`, and the document is now immutable: it
+changes only on the owner's explicit instruction.

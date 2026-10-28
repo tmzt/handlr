@@ -32,6 +32,9 @@
 //! * [`PairingPayload`] is the pairing string, `flankr1…`, and its URL;
 //!   [`DeviceCode`] is the device's code, `flankrkey1…`. Neither holds a
 //!   secret.
+//! * [`fingerprint`], [`remote_id`], [`fingerprint_text`] and
+//!   [`confirmation_code`] name a daemon by its static public key (plan
+//!   20261028_01, decisions 1-2 and the 13:03 EDT amendment's item 7).
 //!
 //! The local static key is a [`StaticKey`], which does its own
 //! Diffie-Hellman, so a client's private key can stay in a key store and
@@ -41,6 +44,7 @@
 //! `tokio::time::timeout` as they see fit.
 
 mod handshake;
+mod identity;
 mod keys;
 mod pairing;
 mod resolver;
@@ -50,6 +54,10 @@ mod stream;
 mod tests;
 
 pub use handshake::{Accepted, accept, reconnect};
+pub use identity::{
+    CONFIRMATION_CONTEXT, REMOTE_ID_LEN, confirmation_code, fingerprint, fingerprint_text,
+    remote_id,
+};
 pub use keys::{StaticKey, StaticKeypair, generate_keypair, public_key};
 pub use pairing::{
     DEVICE_CODE_PREFIX, DEVICE_CODE_VERSION, DEVICE_NAME_MAX, DeviceCode, PAIRING_PREFIX,

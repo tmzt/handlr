@@ -433,3 +433,21 @@ strictly additive (plan 20261022_03's L3 amendment on the keys row):
 - **Breaking:** `convert::KeyToken` gains `Modified { code, modifiers }`
   (crossterm bits: Ctrl 2, Alt 4), for `alt+<char>`, `ctrl+alt+<a-z>` and
   `ctrl+`/`alt+` before the named keys; `KeyToken` is an exhaustive enum.
+
+## libflankr_proto 0.4.3 — 2026-10-28 (the commit tagged `libflankr_proto-v0.4.3`)
+
+Strictly additive (plan 20261028_01, step 1 and the 13:03 EDT amendment's
+item 7), behind the `link` feature:
+
+- **Added:** `link::fingerprint(key: &[u8; 32]) -> [u8; 32]`, BLAKE2s-256
+  over a link static public key.
+- **Added:** `link::remote_id(key) -> String`, the first 8 bytes of the
+  fingerprint as 16 lower-case hex digits; `link::REMOTE_ID_LEN` (8).
+- **Added:** `link::fingerprint_text(key) -> String`, the shown
+  fingerprint, the first 8 hex digits in two groups (`3f9a 12c4`).
+- **Added:** `link::confirmation_code(key) -> String`, six zero-padded
+  decimal digits: the first 20 bits of BLAKE2s-256 over
+  `link::CONFIRMATION_CONTEXT` (`b"flankr.pair.confirm/1"`) and the key,
+  modulo 1,000,000.
+
+`companion::VERSION` stays 1 and the link prologue `flankr.link/1`.
