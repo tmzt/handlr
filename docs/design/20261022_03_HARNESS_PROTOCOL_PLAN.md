@@ -1675,3 +1675,29 @@ This adds to the 13:21 and 13:24 EDT amendments:
    "draft" earlier in the same reply is used, so "Approve the draft?" after
    "I wrote plan 06 as a draft." names plan 06 and approve sends "Approve
    plan 06". With no id anywhere, it stays "the draft".
+
+## Amendment — 2026-10-27 21:58 EDT: the terminal view: drag scrolls the pane like a wheel, a tap arms typing and raises the keyboard, Finished cards one line (living section L3)
+
+The owner (2026-10-27), after trying plan 20261027_07's terminal view on
+the S23: "drag in terminal should work like mouse wheel, touching shoukd
+enable ime. finished cards should be reduce to one line in terminal"; asked
+what the drag scrolls, "Wheel events to the pane"; asked what a touch does,
+"Tap arms and raises IME".
+
+1. **A vertical drag on the terminal scrolls the pane,** as a mouse wheel
+   does: the app sends `terminal.scroll { terminal_id, lines }` (positive
+   back into the scrollback) and the daemon sets herdr's `pane.scroll`
+   offset, so the pane scrolls on the Mac too. It is input, gated as
+   `terminal.input` is (`[terminal] input`, the agent's
+   `terminal_input`, a device that may approve, and an arm); the drag arms
+   as a tap does. Without input allowed, a vertical drag pans the frame as
+   before. A horizontal drag still pans.
+2. **A tap on the terminal arms typing for 60 s and raises the soft
+   keyboard,** when input is allowed; this replaces plan 20261027_07
+   decision 6's 1.5 s hold. Without input allowed a tap does nothing new.
+3. **Finished cards are one line while the terminal is shown** (the reply's
+   first line), so they cover little of it; in the transcript they are as
+   before.
+
+Plan 20261027_07 is frozen; these are recorded there as departures in
+CHANGES.md.
