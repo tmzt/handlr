@@ -562,6 +562,16 @@ impl App {
         if text.is_empty() {
             return;
         }
+        // A pairing link while a remote is paired pairs another: the add
+        // mode's screen, with its confirmation code and Cancel, over
+        // whatever was shown.
+        if self.paired && !self.pairing.adding {
+            log::info!("remotes: a pairing link, pairing another");
+            self.pairing.open_add();
+            self.field.clear();
+            self.field_focused = false;
+            self.screen.invalidate();
+        }
         match &self.companion {
             Some(companion) => {
                 companion.send(Input::Pair(text.to_string()));
@@ -1854,7 +1864,9 @@ impl App {
         }
 
         if touch.phase == TouchPhase::Started {
-            let on_center = if let Some(agent) = &self.agent {
+            let on_center = if self.pairing.adding {
+                false
+            } else if let Some(agent) = &self.agent {
                 agent.hit(touch.x, touch.y) == Some(AgentHit::GeneralAgent)
             } else if !self.pairing() {
                 self.overview.hit(touch.x, touch.y) == Some(AgentHit::GeneralAgent)
@@ -1953,12 +1965,9 @@ impl App {
             Some(Hit::Field) => self.field_focused = true,
             Some(Hit::Pair) => self.pair(),
             Some(Hit::Cancel | Hit::Back) => self.cancel_pairing(),
-            None => {
-                self.field_focused = false;
-                if !self.pairing.adding {
-                    self.send(Input::Tap);
-                }
-            }
+            // No tap-to-listen here: the pairing screen is not the home
+            // screen, so a tap off its controls only leaves the field.
+            None => self.field_focused = false,
         }
     }
 
