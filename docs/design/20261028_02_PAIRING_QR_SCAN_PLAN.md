@@ -638,3 +638,9 @@ app also `--target aarch64-linux-android`) and `cargo test -p <crate>`.
 5. **The copy** of decision 21, in particular `pairing_camera_why`'s
    length and the Settings path wording on One UI ("Settings → Apps →
    flankr → Permissions → Camera").
+
+## Amendment — 2026-10-28 16:39 EDT: the corner-mark reticle stays
+
+The owner (2026-10-28), on open question 3, "keep them": the four quiet
+corner marks over the viewfinder stay, as the body has them. The other open
+questions are still open.
