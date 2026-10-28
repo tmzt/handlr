@@ -1040,3 +1040,27 @@ The previous amendment ("`flankr pair` just exits when the offer expires")
 cites "the 14:44 EDT amendment" and "the 14:48 EDT amendment"; they are the
 **14:40 EDT** amendment (the offer's 60 s default) and the **14:42 EDT**
 amendment (a quiet phone). Its content is unchanged.
+
+## Amendment — 2026-10-28 14:44 EDT: one attempt per `flankr pair` run
+
+The owner (2026-10-28), asked what "at most 3 requests per run" meant (it
+was the lead's choice, to allow a retry): "if a full sequence is started
+that counts as an attempt and pair exits if it fails". This replaces the
+14:33 EDT amendment's item 1.3 "at most 3 requests per run" and item 1.5's
+"A second request with another key in the same run shows its own words
+and needs its own yes".
+
+1. **One attempt per run.** A full sequence starts when the daemon accepts
+   a request with the run's current offer (it then holds the request and
+   both sides show the six words). That is the run's only attempt.
+2. **It ends the run either way.** On **yes** the key is added and
+   `flankr pair` exits successfully once the phone is told. On anything
+   else (a "no" or other answer, the offer expiring, the phone's Cancel, or
+   the phone's connection dropping before **yes**) nothing is added and
+   `flankr pair` exits with a non-zero status, as the 14:42 EDT amendment
+   has it for expiry. A new attempt is a new `flankr pair` run with a new
+   offer and link.
+3. **Requests that never start a sequence** (a wrong or expired offer, a
+   malformed request, a second request once one is held) are refused at
+   once and do not count; while a sequence is held, any other request is
+   refused.
