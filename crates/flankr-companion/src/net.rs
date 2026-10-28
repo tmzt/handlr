@@ -21,7 +21,19 @@
 //! active only if none was) and [`Event::Paired`] and [`Event::Remotes`]
 //! are given. Nothing is stored before then; a probe that gives up or is
 //! cancelled ([`Input::CancelPairing`]) deletes its key (plan 20261028_01,
-//! decisions 10-12).
+//! decisions 10-12). A link for the remote already being paired keeps the
+//! probe, its key and its code, and gives the same code again.
+//!
+//! A link for a remote already in the list (and whose key this phone has)
+//! starts an **address check** instead: one `IK` connection, with that
+//! remote's key, to the link's addresses, within [`CHECK_TIMEOUT`]. Only
+//! once its `hello` is answered are the link's name and addresses saved and
+//! [`Event::RemoteUpdated`] given; until then, and if it fails
+//! ([`Event::PairFailed`]), the old ones stay in use (plan 20261028_01, the
+//! 14:37 EDT amendment, item 4). A listed remote whose key was lost is
+//! paired again with a probe, its code given with `replace`: the daemon
+//! still lists this phone's old key under its name, so the code is pasted
+//! with `flankr pair --replace`.
 //!
 //! [`Input::RemoveRemote`] asks the remote's daemon to forget this phone:
 //! the state sends `link.unpair` over the open link for the active remote
@@ -85,6 +97,9 @@ pub const PAIRING_WINDOW: Duration = Duration::from_secs(10 * 60);
 /// How long asking a remote that is not active to forget this phone may
 /// take in all (plan 20261028_01, decision 22).
 pub const REVOKE_TIMEOUT: Duration = Duration::from_secs(15);
+/// How long checking a listed remote's new addresses from a link may take
+/// in all.
+pub const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Delays between reconnects: `initial`, doubling up to `max` (1, 2, 4 …
 /// 30 s by default), back to `initial` once a connection says hello.
@@ -149,6 +164,7 @@ pub(crate) fn run(
         server: None,
         remote_state: None,
         probe: None,
+        checks: Vec::new(),
         next_probe: 0,
         removing: Vec::new(),
         switch: false,
@@ -175,7 +191,9 @@ struct Net {
     remote_state: Option<RemoteState>,
     /// The pairing in progress.
     probe: Option<Probe>,
-    /// The token of the next probe.
+    /// The address checks in progress, at most one per remote.
+    checks: Vec<Check>,
+    /// The token of the next probe or check.
     next_probe: u64,
     /// Remotes whose removal has begun.
     removing: Vec<RemoteId>,
@@ -205,6 +223,19 @@ struct Probe {
     record: ServerRecord,
     /// Whether the record is already in the list.
     listed: bool,
+    /// The [`Event::PairingCode`] it gave, given again for a link to the
+    /// same remote.
+    shown: Event,
+    task: JoinHandle<()>,
+}
+
+/// A check of a listed remote's name and addresses from a link: saved only
+/// once a connection to them with that remote's key is answered.
+struct Check {
+    token: u64,
+    id: RemoteId,
+    name: String,
+    addresses: Vec<String>,
     task: JoinHandle<()>,
 }
 
@@ -214,6 +245,9 @@ enum Done {
     Paired { token: u64 },
     /// The pairing probe `token`'s window ended.
     GaveUp { token: u64 },
+    /// The address check `token` ended; `reached`: its `hello` was
+    /// answered.
+    Checked { token: u64, reached: bool },
     /// The revoke probe for `id` ended; `daemon`: the daemon answered
     /// `link.unpair`.
     Revoked { id: RemoteId, daemon: bool },
@@ -416,6 +450,9 @@ impl Net {
             }
             Input::CancelPairing => {
                 self.end_probe("cancelled");
+                for check in std::mem::take(&mut self.checks) {
+                    check.task.abort();
+                }
                 None
             }
             Input::Unpair => match self.remotes.active {
@@ -444,6 +481,7 @@ impl Net {
         if self.probe.as_ref().is_some_and(|p| p.record.id == id) {
             self.end_probe("its remote is being removed");
         }
+        self.end_check(id);
         if self.remotes.active == Some(id) {
             log::info!("remotes: removing {} (in use)", record.name);
             return Some(Input::RemoveRemote(id));
@@ -553,8 +591,61 @@ impl Net {
                     )));
                 }
             }
+            Done::Checked { token, reached } => self.checked(token, reached),
             Done::Revoked { id, daemon } => self.finish_remove(id, daemon),
         }
+    }
+
+    /// An address check ended: the link's name and addresses are saved if
+    /// they were reached; otherwise the old ones stay.
+    fn checked(&mut self, token: u64, reached: bool) {
+        let Some(at) = self.checks.iter().position(|c| c.token == token) else {
+            return;
+        };
+        let check = self.checks.remove(at);
+        if self.removing.contains(&check.id) {
+            return;
+        }
+        let Some(listed) = self.remotes.get_mut(check.id) else {
+            return;
+        };
+        if !reached {
+            let name = listed.name.clone();
+            log::info!("pairing: {name} was not reached at the link's addresses; unchanged");
+            self.emit(Event::PairFailed(format!(
+                "{name} was not reached at the addresses in the link, so its addresses \
+                 are unchanged"
+            )));
+            return;
+        }
+        listed.name = check.name.clone();
+        listed.addresses = check.addresses.clone();
+        if let Some(server) = self.server.as_mut().filter(|s| s.id == check.id) {
+            server.name = check.name.clone();
+            server.addresses = check.addresses;
+        }
+        if !self.write_remotes() {
+            return;
+        }
+        log::info!(
+            "pairing: already paired with {}; addresses updated",
+            check.name
+        );
+        self.emit(Event::RemoteUpdated {
+            id: check.id,
+            name: check.name,
+        });
+        self.show_remotes();
+    }
+
+    /// Ends the address check of `id`, if any.
+    fn end_check(&mut self, id: RemoteId) {
+        self.checks.retain(|c| {
+            if c.id == id {
+                c.task.abort();
+            }
+            c.id != id
+        });
     }
 
     /// The probe's `hello` was answered: the remote goes into the list,
@@ -746,55 +837,68 @@ impl Net {
         }
     }
 
-    /// Pairs with `p` beside the open connection (decisions 10-12): a
-    /// listed remote's name and addresses are refreshed; a new one (or a
-    /// listed one whose key is missing) gets its key, its device code and a
-    /// pairing probe. Nothing new is stored until the probe's `hello` is
-    /// answered.
+    /// Pairs with `p` beside the open connection (decisions 10-12). A
+    /// link for the remote being paired gives its code again, keeping the
+    /// probe and its key. A listed remote whose key this phone has gets an
+    /// address check ([`Net::check_addresses`]); a new one (or a listed one
+    /// whose key is missing) gets its key, its device code and a pairing
+    /// probe. Nothing new is stored until the probe's `hello` is answered.
     fn begin_pairing(&mut self, p: Pairing) {
         let server_key = p.payload.server_key;
         let id = RemoteId::of(&server_key);
+        if let Some(probe) = self
+            .probe
+            .as_ref()
+            .filter(|probe| probe.record.public_key == server_key)
+        {
+            log::info!(
+                "pairing: already pairing with {}; its code stays",
+                probe.record.name
+            );
+            let shown = probe.shown.clone();
+            self.emit(shown);
+            return;
+        }
         self.end_probe("replaced by a new pairing");
-        let mut record = ServerRecord::new(p.server.clone(), server_key, p.payload.addresses);
-        let listed = match self.remotes.get_mut(id) {
+        let offered = ServerRecord::new(p.server.clone(), server_key, p.payload.addresses);
+        let listed = match self.remotes.get(id) {
             Some(listed) if listed.public_key != server_key => {
                 self.emit(Event::PairFailed(
                     "a remote with the same id is already paired".to_string(),
                 ));
                 return;
             }
-            Some(listed) => {
-                listed.name = record.name.clone();
-                listed.addresses = record.addresses.clone();
-                record = listed.clone();
-                true
-            }
-            None => false,
+            Some(listed) => Some(listed.clone()),
+            None => None,
         };
-        if listed {
-            if !self.write_remotes() {
+        let record = match listed {
+            Some(listed) => {
+                match self.keys.static_key(&listed.key_name) {
+                    Ok(Some(key)) => {
+                        self.check_addresses(&listed, offered.name, offered.addresses, key);
+                        return;
+                    }
+                    Ok(None) => {
+                        log::info!("pairing: {}'s key is missing; pairing again", listed.name)
+                    }
+                    Err(e) => log::warn!("pairing: {}'s key: {e}; pairing again", listed.name),
+                }
+                // Saved with the link's name and addresses only once the
+                // probe reaches them.
+                self.end_check(id);
+                ServerRecord {
+                    name: offered.name,
+                    addresses: offered.addresses,
+                    ..listed
+                }
+            }
+            None if self.remotes.list.len() >= MAX_REMOTES => {
+                self.emit(Event::PairFailed(full_note()));
                 return;
             }
-            match self.keys.static_key(&record.key_name) {
-                Ok(Some(_)) => {
-                    log::info!(
-                        "pairing: already paired with {}; addresses updated",
-                        record.name
-                    );
-                    self.emit(Event::RemoteUpdated {
-                        id,
-                        name: record.name,
-                    });
-                    self.show_remotes();
-                    return;
-                }
-                Ok(None) => log::info!("pairing: {}'s key is missing; pairing again", record.name),
-                Err(e) => log::warn!("pairing: {}'s key: {e}; pairing again", record.name),
-            }
-        } else if self.remotes.list.len() >= MAX_REMOTES {
-            self.emit(Event::PairFailed(full_note()));
-            return;
-        }
+            None => offered,
+        };
+        let listed = self.remotes.get(id).is_some();
         let key = match self.keys.generate_static_key(&record.key_name) {
             Ok(key) => key,
             Err(e) => {
@@ -837,16 +941,63 @@ impl Net {
             };
             let _ = tasks.send(done);
         });
+        let shown = Event::PairingCode {
+            code,
+            server: p.server,
+            confirmation: link::confirmation_code(&server_key),
+            replace: listed,
+        };
         self.probe = Some(Probe {
             token,
             record,
             listed,
+            shown: shown.clone(),
             task,
         });
-        self.emit(Event::PairingCode {
-            code,
-            server: p.server,
-            confirmation: link::confirmation_code(&server_key),
+        self.emit(shown);
+    }
+
+    /// Checks `listed`'s `name` and `addresses` from a link with one `IK`
+    /// connection to them, with this phone's `key` for it, replacing any
+    /// check of it in progress. Nothing is saved until it is answered
+    /// ([`Net::checked`]); the same name and addresses need no check.
+    fn check_addresses(
+        &mut self,
+        listed: &ServerRecord,
+        name: String,
+        addresses: Vec<String>,
+        key: Arc<dyn StaticKey>,
+    ) {
+        let id = listed.id;
+        self.end_check(id);
+        if listed.name == name && listed.addresses == addresses {
+            log::info!("pairing: already paired with {name}; nothing changed");
+            self.emit(Event::RemoteUpdated { id, name });
+            self.show_remotes();
+            return;
+        }
+        log::info!(
+            "pairing: already paired with {}; checking the link's addresses",
+            listed.name
+        );
+        let token = self.next_probe;
+        self.next_probe += 1;
+        let hello = serde_json::to_vec(&self.state.hello_request()).unwrap_or_default();
+        let tasks = self.tasks_tx.clone();
+        let server_key = listed.public_key;
+        let targets = addresses.clone();
+        let task = tokio::spawn(async move {
+            let reached = timeout(CHECK_TIMEOUT, check(&targets, key, &server_key, &hello))
+                .await
+                .unwrap_or(false);
+            let _ = tasks.send(Done::Checked { token, reached });
+        });
+        self.checks.push(Check {
+            token,
+            id,
+            name,
+            addresses,
+            task,
         });
     }
 
@@ -1094,6 +1245,23 @@ async fn probe(
         }
         tokio::time::sleep(PAIRING_RETRY.min(until - now)).await;
     }
+}
+
+/// The address check: one `IK` connection to `addresses` with `key` and
+/// `hello`. Whether `hello` was answered without an error: the remote is
+/// there and still knows this phone.
+async fn check(
+    addresses: &[String],
+    key: Arc<dyn StaticKey>,
+    server_key: &[u8; 32],
+    hello: &[u8],
+) -> bool {
+    let Some(mut stream) = probe_connect(addresses, &key, server_key, hello).await else {
+        return false;
+    };
+    let answered = response_to(&mut stream, None, HANDSHAKE_TIMEOUT).await;
+    let _ = stream.shutdown().await;
+    answered.is_some_and(|r| r.error.is_none())
 }
 
 /// The revoke probe (decision 22): one `IK` connection to the remote with

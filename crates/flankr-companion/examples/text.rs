@@ -133,7 +133,11 @@ fn print_event(event: Event) {
             code,
             server,
             confirmation,
+            replace,
         } => {
+            if replace {
+                println!("* {server} lists this phone's lost key: use flankr pair --replace");
+            }
             println!("* paste this code into flankr pair on {server}:");
             println!("{code}");
             println!("* flankr pair should show the confirmation code {confirmation}");

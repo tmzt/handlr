@@ -8,12 +8,16 @@
 //! eviction and no session count (plan 20261028_01, the 13:06 EDT
 //! amendment); nothing else is written here until then.
 //!
+//! The directories are made 0700 and a new file 0600 as they are created,
+//! never loosened and then tightened (plan 20261028_01, the 14:37 EDT
+//! amendment, item 4).
+//!
 //! Only the active remote's file is open, held by the `net` thread for the
 //! life of its connection settings. It is closed (dropped) before its
 //! directory is deleted.
 
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::{self, DirBuilder, OpenOptions};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -64,11 +68,50 @@ fn now_secs() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Creates `dir` and its parents, `dir` itself with mode 0700.
+/// The prefix of a file left by an older build that moved another
+/// remote's `state.redb` aside; such a file is deleted.
+const MISMATCH_PREFIX: &str = "state.redb.mismatch-";
+
+/// Creates `dir` and any missing parents with mode 0700, as they are made
+/// (no window in which one is wider). One that exists is left as it is.
 fn private_dir(dir: &Path) -> Result<(), String> {
-    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
-    Ok(())
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))
+}
+
+/// Opens `path` for reading and writing, creating it with mode 0600 if it
+/// is missing: the file is never there with a wider mode.
+fn private_file(path: &Path) -> Result<fs::File, String> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| db_err(path, e))
+}
+
+/// Deletes the `state.redb.mismatch-*` files in `dir`. The names deleted.
+fn delete_mismatched(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut deleted = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(MISMATCH_PREFIX) {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => deleted.push(name),
+            Err(e) => log::warn!("state: deleting {}: {e}", entry.path().display()),
+        }
+    }
+    deleted
 }
 
 fn db_err(path: &Path, e: impl std::fmt::Display) -> String {
@@ -92,8 +135,8 @@ impl RemoteState {
     }
 
     /// Opens or creates `remote`'s database, writing `meta` into a new
-    /// one. A file whose `meta.remote` names another key is renamed aside,
-    /// `state.redb.mismatch-<unix time>`, and a fresh one made.
+    /// one. A file whose `meta.remote` names another key is deleted (it
+    /// holds another daemon's data) and a fresh one made.
     pub fn open(data_dir: &Path, remote: &ServerRecord) -> Result<RemoteState, String> {
         let dir = Self::dir(data_dir, remote.id);
         private_dir(&Self::remotes_dir(data_dir))?;
@@ -104,13 +147,8 @@ impl RemoteState {
             Some(meta) if meta.remote == remote.public_key => Ok(state),
             Some(_) => {
                 drop(state);
-                let aside = dir.join(format!("{STATE_FILE}.mismatch-{}", now_secs()));
-                log::warn!(
-                    "state: {} is another remote's; moved aside to {}",
-                    path.display(),
-                    aside.display()
-                );
-                fs::rename(&path, &aside).map_err(|e| db_err(&path, e))?;
+                log::warn!("state: {} is another remote's; deleted", path.display());
+                fs::remove_file(&path).map_err(|e| db_err(&path, e))?;
                 let state = Self::open_file(&path, remote)?;
                 state.write_meta(&remote.public_key)?;
                 Ok(state)
@@ -123,8 +161,10 @@ impl RemoteState {
     }
 
     fn open_file(path: &Path, remote: &ServerRecord) -> Result<RemoteState, String> {
-        let db = Database::create(path).map_err(|e| db_err(path, e))?;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        let file = private_file(path)?;
+        let db = Database::builder()
+            .create_file(file)
+            .map_err(|e| db_err(path, e))?;
         Ok(RemoteState {
             db,
             path: path.to_path_buf(),
@@ -189,8 +229,9 @@ impl RemoteState {
     }
 
     /// Deletes every directory under `<data dir>/remotes/` that has no
-    /// entry in `remotes` (decision 22: one left by a delete that failed).
-    /// Returns the ids deleted.
+    /// entry in `remotes` (decision 22: one left by a delete that failed),
+    /// and any `state.redb.mismatch-*` file an older build left in a
+    /// listed one. Returns the ids of the directories deleted.
     pub fn sweep(data_dir: &Path, remotes: &Remotes) -> Vec<String> {
         let root = Self::remotes_dir(data_dir);
         let Ok(entries) = fs::read_dir(&root) else {
@@ -202,7 +243,13 @@ impl RemoteState {
             let listed = name
                 .parse::<RemoteId>()
                 .is_ok_and(|id| remotes.get(id).is_some());
-            if listed || !entry.path().is_dir() {
+            if listed {
+                for file in delete_mismatched(&entry.path()) {
+                    log::info!("state: deleted remotes/{name}/{file}");
+                }
+                continue;
+            }
+            if !entry.path().is_dir() {
                 continue;
             }
             match fs::remove_dir_all(entry.path()) {
@@ -238,8 +285,10 @@ impl RemoteState {
         private_dir(&Self::remotes_dir(data_dir))?;
         private_dir(&dir)?;
         let new = dir.join(STATE_FILE);
+        // Narrowed before it moves, so `state.redb` is never wider.
+        fs::set_permissions(&old, fs::Permissions::from_mode(0o600))
+            .map_err(|e| db_err(&old, e))?;
         fs::rename(&old, &new).map_err(|e| db_err(&old, e))?;
-        let _ = fs::set_permissions(&new, fs::Permissions::from_mode(0o600));
         log::info!(
             "state: moved {SESSIONS_FILE} into remotes/{}/{STATE_FILE}",
             remote.id
@@ -312,7 +361,24 @@ mod tests {
     }
 
     #[test]
-    fn another_remotes_file_is_moved_aside() {
+    fn new_directories_and_files_are_private_from_the_start() {
+        let data = tempfile::tempdir().unwrap();
+        let r = remote(1);
+        let state = RemoteState::open(data.path(), &r).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&RemoteState::remotes_dir(data.path())), 0o700);
+        assert_eq!(mode(&RemoteState::dir(data.path(), r.id)), 0o700);
+        assert_eq!(mode(state.path()), 0o600);
+        // The file is opened with its mode, then handed to redb.
+        let fresh = data.path().join("fresh.redb");
+        let file = private_file(&fresh).unwrap();
+        assert_eq!(mode(&fresh), 0o600, "0600 as created");
+        drop(Database::builder().create_file(file).unwrap());
+        assert_eq!(mode(&fresh), 0o600);
+    }
+
+    #[test]
+    fn another_remotes_file_is_deleted() {
         let data = tempfile::tempdir().unwrap();
         let r = remote(1);
         let other = remote(2);
@@ -329,11 +395,28 @@ mod tests {
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
-        assert_eq!(names.len(), 2, "{names:?}");
-        assert!(
-            names.iter().any(|n| n.starts_with("state.redb.mismatch-")),
-            "{names:?}"
-        );
+        assert_eq!(names, ["state.redb"], "nothing kept aside");
+    }
+
+    #[test]
+    fn the_sweep_deletes_mismatch_files_left_in_listed_directories() {
+        let data = tempfile::tempdir().unwrap();
+        let kept = remote(1);
+        drop(RemoteState::open(data.path(), &kept).unwrap());
+        let dir = RemoteState::dir(data.path(), kept.id);
+        fs::write(dir.join("state.redb.mismatch-1793188800"), b"old").unwrap();
+        fs::write(dir.join("other"), b"kept").unwrap();
+        let remotes = Remotes {
+            active: Some(kept.id),
+            list: vec![kept.clone()],
+        };
+        assert!(RemoteState::sweep(data.path(), &remotes).is_empty());
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["other", "state.redb"]);
     }
 
     #[test]

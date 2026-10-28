@@ -44,7 +44,7 @@ pub use keys::{
     FileKeyStore, KeyStore, LEGACY_KEY_NAME, MAX_REMOTES, RemoteId, RemoteInfo, Remotes,
     ServerRecord,
 };
-pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW, REVOKE_TIMEOUT};
+pub use net::{Backoff, CHECK_TIMEOUT, PAIRING_RETRY, PAIRING_WINDOW, REVOKE_TIMEOUT};
 pub use remote_state::RemoteState;
 pub use terminal::{TerminalStatus, Terminals, key_batches};
 // What the app draws and reads of a terminal.

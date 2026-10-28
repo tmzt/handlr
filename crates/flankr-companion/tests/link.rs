@@ -293,13 +293,21 @@ fn assert_exact_hello(first: &Value) -> Value {
 /// The device code the companion shows, and the server it names; the
 /// confirmation code is the server key's.
 fn expect_code(c: &Companion, server: &Server) -> (String, String) {
+    expect_code_with(c, server, false)
+}
+
+/// As [`expect_code`], with `replace` as given: whether the code replaces
+/// a lost key the daemon still lists.
+fn expect_code_with(c: &Companion, server: &Server, replace: bool) -> (String, String) {
     match next_event(c) {
         Event::PairingCode {
             code,
             server: name,
             confirmation,
+            replace: replacing,
         } => {
             assert_eq!(confirmation, link::confirmation_code(&server.key.public));
+            assert_eq!(replacing, replace, "replace");
             (code, name)
         }
         e => panic!("expected the pairing code, got {e:?}"),
@@ -675,6 +683,131 @@ fn pairing_the_same_server_again_adds_no_row_and_updates_the_addresses() {
     assert_eq!(remotes.list[0].key_name, record.key_name);
     assert_eq!(remotes.list[0].paired_at, record.paired_at);
     assert_turn(&c);
+}
+
+// The review's changes (plan 20261028_01, the 14:37 EDT amendment, item 4).
+
+#[test]
+fn a_link_for_the_remote_being_paired_keeps_its_key_and_code() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let c = companion(&dir);
+    let name = RemoteId::of(&server.key.public).key_name();
+    c.send(Input::Pair(
+        server.pairing(vec![server.addr.clone()]).encode().unwrap(),
+    ));
+    let (code, _) = expect_code(&c, &server);
+    let key = FileKeyStore::new(keys_dir(&dir))
+        .static_key(&name)
+        .unwrap()
+        .unwrap()
+        .public();
+
+    // The same link again, and its URL form: the same code, the same key.
+    c.send(Input::Pair(
+        server.pairing(vec![server.addr.clone()]).encode().unwrap(),
+    ));
+    assert_eq!(expect_code(&c, &server).0, code);
+    c.send(Input::Pair(
+        server.pairing(vec![server.addr.clone()]).url().unwrap(),
+    ));
+    assert_eq!(expect_code(&c, &server).0, code);
+    let still = FileKeyStore::new(keys_dir(&dir))
+        .static_key(&name)
+        .unwrap()
+        .unwrap()
+        .public();
+    assert_eq!(still, key, "not regenerated");
+
+    // The code shown first still pairs.
+    server.add(&code);
+    expect_paired(&c);
+    assert_eq!(ids(&dir), [RemoteId::of(&server.key.public)]);
+}
+
+#[test]
+fn a_listed_remotes_new_addresses_are_saved_only_once_reached() {
+    let first = Server::start();
+    let other = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (c, record) = connected_to(&dir, &first);
+
+    // Nothing listens there: refused, the old address kept.
+    c.send(Input::Pair(
+        first.pairing(vec![closed_addr()]).url().unwrap(),
+    ));
+    match next_event(&c) {
+        Event::PairFailed(why) => assert!(why.contains("unchanged"), "{why}"),
+        e => panic!("{e:?}"),
+    }
+    assert_eq!(stored(&dir).list[0].addresses, record.addresses);
+    assert_eq!(stored(&dir).list[0].name, record.name);
+
+    // Another daemon answers there: its key is not this remote's, so the
+    // handshake fails and nothing is saved.
+    c.send(Input::Pair(
+        first.pairing(vec![other.addr.clone()]).url().unwrap(),
+    ));
+    assert!(matches!(next_event(&c), Event::PairFailed(_)));
+    assert_eq!(stored(&dir).list[0].addresses, record.addresses);
+    assert!(
+        other.seen.try_recv().is_err(),
+        "no handshake with the other"
+    );
+
+    // Reached at the second address: saved, with the link's name.
+    let addresses = vec![closed_addr(), first.addr.clone()];
+    c.send(Input::Pair(
+        first.pairing(addresses.clone()).encode().unwrap(),
+    ));
+    assert_eq!(
+        next_event(&c),
+        Event::RemoteUpdated {
+            id: record.id,
+            name: "127.0.0.1".into()
+        }
+    );
+    let remotes = stored(&dir);
+    assert_eq!(remotes.list[0].addresses, addresses);
+    assert_eq!(remotes.list[0].name, "127.0.0.1");
+    assert_eq!(remotes.list[0].key_name, record.key_name);
+    assert_turn(&c);
+}
+
+#[test]
+fn a_listed_remote_whose_key_was_lost_pairs_again_with_replace() {
+    let first = Server::start();
+    let second = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (c, active) = connected_to(&dir, &first);
+    // `second` is listed, but this phone's key for it is gone.
+    let mut keys = FileKeyStore::new(keys_dir(&dir));
+    let lost = remote(&mut keys, &second, vec![closed_addr()], Some(11), true);
+    keys.delete_static_key(&lost.key_name).unwrap();
+    drop(c);
+    keys.set_remotes(&Remotes {
+        active: Some(active.id),
+        list: vec![active.clone(), lost.clone()],
+    })
+    .unwrap();
+    let c = companion(&dir);
+    first.next_seen();
+    expect_connected(&c);
+
+    let addresses = vec![second.addr.clone()];
+    c.send(Input::Pair(
+        second.pairing(addresses.clone()).encode().unwrap(),
+    ));
+    let (code, _) = expect_code_with(&c, &second, true);
+    // Not saved yet: the old address stays until the probe is answered.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(stored(&dir).list[1].addresses, lost.addresses);
+    second.add(&code);
+    expect_paired(&c);
+    let remotes = stored(&dir);
+    assert_eq!(remotes.list.len(), 2);
+    assert_eq!(remotes.list[1].addresses, addresses);
+    assert_eq!(remotes.active, Some(active.id));
 }
 
 #[test]

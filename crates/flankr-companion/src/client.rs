@@ -479,10 +479,16 @@ pub enum Event {
     /// (`libflankr_proto::link::confirmation_code`), which `flankr pair`
     /// prints too: the owner checks they match (plan 20261028_01, the
     /// 13:03 EDT amendment, item 7).
+    ///
+    /// `replace`: the remote is already in the list and this phone's key
+    /// for it was lost, so this is a new key. The daemon still lists the
+    /// old one under this device's name, and adds this code only with
+    /// `flankr pair --replace` (the 14:37 EDT amendment, item 4).
     PairingCode {
         code: String,
         server: String,
         confirmation: String,
+        replace: bool,
     },
     /// The server answered `hello` with `paired: true`: the code was added.
     /// `name` is the name this device asked to be paired as.
@@ -630,7 +636,10 @@ pub enum Event {
     },
     /// A pairing named a remote already in the list: no row was added, and
     /// its name and addresses were refreshed from the pairing (decision
-    /// 11, *Already paired with m4: its addresses are updated*).
+    /// 11, *Already paired with m4: its addresses are updated*). Given
+    /// only once a connection to the new addresses with this phone's key
+    /// for it was answered; one that was not gives [`Event::PairFailed`]
+    /// and the old addresses stay (the 14:37 EDT amendment, item 4).
     RemoteUpdated {
         id: RemoteId,
         name: String,
