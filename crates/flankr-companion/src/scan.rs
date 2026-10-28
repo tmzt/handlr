@@ -138,6 +138,7 @@ mod tests {
         PairingPayload {
             server_key: generate_keypair().unwrap().public,
             addresses: addresses.iter().map(|a| a.to_string()).collect(),
+            offer: Some([5; libflankr_proto::link::OFFER_LEN]),
         }
     }
 

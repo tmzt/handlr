@@ -33,13 +33,18 @@ use crate::wire;
 pub enum Input {
     /// What `flankr pair` shows: the pairing URL, the bare `flankr1…`
     /// string, or the QR code's `data:image/png;base64,` URL. The `net`
-    /// thread makes this remote's key, gives [`Event::PairingCode`], and
-    /// tries the remote beside the open connection until it answers
-    /// `paired: true` (plan 20261028_01, decision 10); [`State`] itself
-    /// cannot, and gives [`Event::PairFailed`].
+    /// thread makes this remote's key and, for a link with an offer, sends
+    /// the daemon a pairing request beside the open connection, giving
+    /// [`Event::PairingWords`] once it is held; otherwise (or with the
+    /// daemon not reached) it gives the device-code fallback and tries the
+    /// remote until it answers `paired: true` (plan 20261028_01, decision
+    /// 10 and the 14:37 EDT amendment); [`State`] itself cannot, and gives
+    /// [`Event::PairFailed`].
     Pair(String),
-    /// Leaving the pairing screen: the pairing in progress, if any, ends,
-    /// and its new key is deleted (plan 20261028_01, decision 10).
+    /// Leaving the pairing screen: the pairing in progress, if any, ends
+    /// (a held request's connection is closed, which the daemon takes as a
+    /// refusal), and its new key is deleted (plan 20261028_01, decision 10
+    /// and the 14:37 EDT amendment).
     CancelPairing,
     /// A remote's X, confirmed (plan 20261028_01, decision 22): the daemon
     /// is asked to forget this phone (`link.unpair`: over the open link
@@ -459,6 +464,21 @@ impl Dictation {
     }
 }
 
+/// The device-code fallback of a pairing ([`Event::PairingWords`]): for a
+/// phone that cannot reach the daemon directly (plan 20261028_01, the
+/// 14:37 EDT amendment, item 2). The pairing screen keeps it in Details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceCodeFallback {
+    /// This phone's device code, `flankrkey1…`, to paste into
+    /// `flankr pair` (with a Copy button).
+    pub code: String,
+    /// The remote is already in the list and this phone's key for it was
+    /// lost, so this is a new key. The daemon still lists the old one under
+    /// this device's name, and adds this code only with
+    /// `flankr pair --replace` (the 14:37 EDT amendment, item 4).
+    pub replace: bool,
+}
+
 /// What the client tells the app.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
@@ -471,31 +491,50 @@ pub enum Event {
     Disconnected {
         retry_in_ms: u32,
     },
-    /// The device's code, `flankrkey1…`, for the user to paste into
-    /// `flankr pair` on `server` (show it with a Copy button). The client
-    /// keeps connecting until the server knows its key.
+    /// A pairing waits for the owner (plan 20261028_01, the 14:37 and
+    /// 14:42 EDT amendments). The pairing screen shows `words` large, with
+    /// one line saying to confirm on the Mac, and Cancel; everything else
+    /// is for its Details.
     ///
-    /// `confirmation` is the six-digit code derived from the server's key
-    /// (`libflankr_proto::link::confirmation_code`), which `flankr pair`
-    /// prints too: the owner checks they match (plan 20261028_01, the
-    /// 13:03 EDT amendment, item 7).
+    /// With `fallback` `None`, the daemon has accepted this phone's
+    /// pairing request and holds it: `flankr pair` prints the same six
+    /// words and asks for **yes**. [`Event::Paired`] or
+    /// [`Event::PairFailed`] follows.
     ///
-    /// `replace`: the remote is already in the list and this phone's key
-    /// for it was lost, so this is a new key. The daemon still lists the
-    /// old one under this device's name, and adds this code only with
-    /// `flankr pair --replace` (the 14:37 EDT amendment, item 4).
-    PairingCode {
-        code: String,
+    /// With `fallback` `Some`, the daemon could not be asked directly (it
+    /// was not reached, or the link is version 2, without an offer): the
+    /// device code is pasted into `flankr pair`, which then prints the
+    /// words for that code's key, and the client keeps trying the daemon
+    /// until it knows the key.
+    PairingWords {
+        /// The daemon's name, from the pairing link.
         server: String,
-        confirmation: String,
-        replace: bool,
+        /// The daemon's `host:port`: the one that answered the request, or
+        /// in the fallback the link's first.
+        address: String,
+        /// The six pairing words (BIP-39), from the daemon's key, the
+        /// link's offer and this phone's new key, as `flankr pair` prints
+        /// them. `None` only in the fallback for a link without an offer.
+        words: Option<String>,
+        /// The daemon's fingerprint as six words, for Details: a different
+        /// check from `words`, labelled "daemon fingerprint".
+        fingerprint: String,
+        /// The seconds the offer had left when the daemon accepted the
+        /// request; `None` in the fallback.
+        expires_in_secs: Option<u16>,
+        /// The device-code fallback, if this is it.
+        fallback: Option<DeviceCodeFallback>,
     },
-    /// The server answered `hello` with `paired: true`: the code was added.
-    /// `name` is the name this device asked to be paired as.
+    /// The daemon added this phone's key: the owner typed **yes** to a
+    /// pairing request, or (the fallback) `hello` was answered with
+    /// `paired: true`. `name` is the name this device asked to be paired
+    /// as.
     Paired {
         name: String,
     },
-    /// A pairing input was refused, such as a string with a bad checksum.
+    /// A pairing ended without adding the remote, and why: a string with a
+    /// bad checksum, a request the daemon refused, an offer that expired,
+    /// a connection that closed. Its new key is deleted.
     PairFailed(String),
     /// Speak this.
     Say(String),

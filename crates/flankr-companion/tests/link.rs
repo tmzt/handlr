@@ -9,6 +9,12 @@
 //! the active remote or another. The server's set of authorized keys
 //! stands in for the daemon's `auth.toml`; `link.unpair` removes the
 //! caller's key from it.
+//!
+//! The server also answers pairing requests (`link::accept_incoming`, with
+//! `PairIncoming`) while a test puts it in pair mode, standing in for a
+//! `flankr pair` run (plan 20261028_01, the 14:37, 14:42 and 14:44 EDT
+//! amendments): the test is handed each held request and answers it as
+//! the owner would on the Mac.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -21,7 +27,10 @@ use flankr_companion::{
     PAIRING_WINDOW, REVOKE_TIMEOUT, RemoteId, RemoteInfo, RemoteState, Remotes, ServerRecord,
     Speaker,
 };
-use libflankr_proto::link::{self, DeviceCode, PairingPayload, StaticKeypair};
+use libflankr_proto::link::{
+    self, DeviceCode, Incoming, OFFER_LEN, PairAck, PairRefusal, PairRequest, PairResult,
+    PairingPayload, StaticKeypair,
+};
 use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,6 +57,36 @@ struct Server {
     fresh: Arc<Mutex<HashSet<[u8; 32]>>>,
     /// Connections still to be closed right after answering `hello`.
     close_after_hello: Arc<AtomicUsize>,
+    /// The `flankr pair` run, if any: requests are dropped unanswered
+    /// without one.
+    pair_mode: Arc<Mutex<Option<PairMode>>>,
+    /// The requests held, one per accepted request.
+    held: mpsc::Receiver<Held>,
+}
+
+/// A `flankr pair` run on the test server.
+#[derive(Clone, Copy)]
+struct PairMode {
+    offer: [u8; OFFER_LEN],
+    expires_in_secs: u16,
+    /// Refuse every request at once with this, as for an expired offer.
+    refuse: Option<PairRefusal>,
+}
+
+/// A pairing request the test server holds: the test answers it as the
+/// owner would.
+struct Held {
+    request: PairRequest,
+    answer: tokio::sync::mpsc::UnboundedSender<PairResult>,
+    /// Signalled when the phone closes the connection before an answer.
+    closed: mpsc::Receiver<()>,
+}
+
+impl Held {
+    /// The owner's answer; `Added` adds the key to the server's set.
+    fn answer(&self, result: PairResult) {
+        self.answer.send(result).unwrap();
+    }
 }
 
 impl Server {
@@ -61,7 +100,11 @@ impl Server {
         let authorized = Arc::new(Mutex::new(HashSet::new()));
         let fresh = Arc::new(Mutex::new(HashSet::new()));
         let close_after_hello = Arc::new(AtomicUsize::new(0));
+        let pair_mode = Arc::new(Mutex::new(None));
+        let (held_tx, held) = mpsc::channel();
         let ctx = Ctx {
+            pair_mode: pair_mode.clone(),
+            held: held_tx,
             key: key.clone(),
             seen: seen_tx,
             accepts: accepts.clone(),
@@ -94,15 +137,42 @@ impl Server {
             authorized,
             fresh,
             close_after_hello,
+            pair_mode,
+            held,
         }
     }
 
-    /// The pairing string `flankr pair` would show for `addresses`.
+    /// The pairing string an older `flankr pair` would show for
+    /// `addresses`: version 2, without an offer.
     fn pairing(&self, addresses: Vec<String>) -> PairingPayload {
         PairingPayload {
             server_key: self.key.public,
             addresses,
+            offer: None,
         }
+    }
+
+    /// Puts the server in pair mode with a new offer, as `flankr pair`
+    /// does, and returns the link it shows for `addresses` (version 3).
+    fn pair_run(&self, addresses: Vec<String>) -> PairingPayload {
+        let offer = link::generate_offer().unwrap();
+        *self.pair_mode.lock().unwrap() = Some(PairMode {
+            offer,
+            expires_in_secs: 60,
+            refuse: None,
+        });
+        PairingPayload {
+            server_key: self.key.public,
+            addresses,
+            offer: Some(offer),
+        }
+    }
+
+    /// The next request the server holds.
+    fn next_held(&self) -> Held {
+        self.held
+            .recv_timeout(TIMEOUT)
+            .expect("a pairing request within 5 s")
     }
 
     /// `link.pair_add`: checks the code against this server's key and
@@ -129,17 +199,21 @@ struct Ctx {
     authorized: Arc<Mutex<HashSet<[u8; 32]>>>,
     fresh: Arc<Mutex<HashSet<[u8; 32]>>>,
     close_after_hello: Arc<AtomicUsize>,
+    pair_mode: Arc<Mutex<Option<PairMode>>>,
+    held: mpsc::Sender<Held>,
 }
 
 impl Ctx {
     async fn serve(self, stream: tokio::net::TcpStream) {
         let authorized = self.authorized.clone();
-        let accepted = link::accept(stream, &self.key, |key| {
+        let incoming = link::accept_incoming(stream, &self.key, |key| {
             authorized.lock().unwrap().contains(key)
         })
         .await;
-        let Ok(accepted) = accepted else {
-            return;
+        let accepted = match incoming {
+            Ok(Incoming::Link(accepted)) => accepted,
+            Ok(Incoming::Pair(pair)) => return self.pair(*pair).await,
+            Err(_) => return,
         };
         let paired = self.fresh.lock().unwrap().remove(&accepted.peer_key);
         let peer_key = accepted.peer_key;
@@ -194,6 +268,59 @@ impl Ctx {
                 .is_err()
             {
                 return;
+            }
+        }
+    }
+}
+
+impl Ctx {
+    /// A pairing request, as the daemon's pair mode answers it: dropped
+    /// with no run, refused for a wrong offer, else held until the test
+    /// answers or the phone closes the connection.
+    async fn pair(self, incoming: link::PairIncoming<tokio::net::TcpStream>) {
+        let Some(mode) = *self.pair_mode.lock().unwrap() else {
+            return;
+        };
+        let refusal = match &incoming.request {
+            Err(_) => Some(PairRefusal::Malformed),
+            Ok(_) if mode.refuse.is_some() => mode.refuse,
+            Ok(request) if request.offer != mode.offer => Some(PairRefusal::WrongOffer),
+            Ok(_) => None,
+        };
+        if let Some(reason) = refusal {
+            let _ = incoming.respond(PairAck::Refused(reason)).await;
+            return;
+        }
+        let request = incoming.request.clone().unwrap();
+        let Ok(mut stream) = incoming
+            .respond(PairAck::Accepted {
+                expires_in_secs: mode.expires_in_secs,
+            })
+            .await
+        else {
+            return;
+        };
+        let (answer, mut answers) = tokio::sync::mpsc::unbounded_channel();
+        let (closed_tx, closed) = mpsc::channel();
+        let device_key = request.device_key;
+        let _ = self.held.send(Held {
+            request,
+            answer,
+            closed,
+        });
+        tokio::select! {
+            result = answers.recv() => {
+                let Some(result) = result else { return };
+                if result == PairResult::Added {
+                    self.authorized.lock().unwrap().insert(device_key);
+                    self.fresh.lock().unwrap().insert(device_key);
+                }
+                let _ = link::send_pair_result(&mut stream, result).await;
+                // Until the phone closes it.
+                let _ = stream.recv_message().await;
+            }
+            _ = stream.recv_message() => {
+                let _ = closed_tx.send(());
             }
         }
     }
@@ -290,8 +417,9 @@ fn assert_exact_hello(first: &Value) -> Value {
     first["params"].clone()
 }
 
-/// The device code the companion shows, and the server it names; the
-/// confirmation code is the server key's.
+/// The device code the companion shows in the fallback for a version 2
+/// link, and the server it names: no pairing words (the link has no
+/// offer), the daemon's fingerprint words, no time left.
 fn expect_code(c: &Companion, server: &Server) -> (String, String) {
     expect_code_with(c, server, false)
 }
@@ -299,19 +427,82 @@ fn expect_code(c: &Companion, server: &Server) -> (String, String) {
 /// As [`expect_code`], with `replace` as given: whether the code replaces
 /// a lost key the daemon still lists.
 fn expect_code_with(c: &Companion, server: &Server, replace: bool) -> (String, String) {
+    let (code, name, replacing) = expect_fallback(c, server, None);
+    assert_eq!(replacing, replace, "replace");
+    (code, name)
+}
+
+/// The fallback's event for `server`, whose link had `offer`: the device
+/// code, and the pairing words for its key and the offer when there is
+/// one. Returns the code, the server's name and `replace`.
+fn expect_fallback(
+    c: &Companion,
+    server: &Server,
+    offer: Option<[u8; OFFER_LEN]>,
+) -> (String, String, bool) {
     match next_event(c) {
-        Event::PairingCode {
-            code,
+        Event::PairingWords {
             server: name,
-            confirmation,
-            replace: replacing,
+            address,
+            words,
+            fingerprint,
+            expires_in_secs,
+            fallback: Some(fallback),
         } => {
-            assert_eq!(confirmation, link::confirmation_code(&server.key.public));
-            assert_eq!(replacing, replace, "replace");
-            (code, name)
+            let device = DeviceCode::decode(&fallback.code, &server.key.public)
+                .expect("a code for this server");
+            assert_eq!(
+                words,
+                offer.map(|offer| link::pairing_words_text(
+                    &server.key.public,
+                    &offer,
+                    &device.key
+                ))
+            );
+            assert_eq!(
+                fingerprint,
+                link::fingerprint_words_text(&server.key.public)
+            );
+            assert_eq!(expires_in_secs, None);
+            assert!(!address.is_empty());
+            (fallback.code, name, fallback.replace)
         }
-        e => panic!("expected the pairing code, got {e:?}"),
+        e => panic!("expected the device-code fallback, got {e:?}"),
     }
+}
+
+/// The six words the companion shows once `server` holds its request, as
+/// the daemon computes them from the request it holds. Returns the held
+/// request.
+fn expect_words(c: &Companion, server: &Server) -> Held {
+    let held = server.next_held();
+    match next_event(c) {
+        Event::PairingWords {
+            server: _,
+            address,
+            words,
+            fingerprint,
+            expires_in_secs,
+            fallback: None,
+        } => {
+            let offer = server.pair_mode.lock().unwrap().unwrap().offer;
+            assert_eq!(held.request.offer, offer);
+            assert_eq!(held.request.name, DEVICE);
+            // What `flankr pair` prints for the request it holds.
+            let daemon =
+                link::pairing_words_text(&server.key.public, &offer, &held.request.device_key);
+            assert_eq!(words.as_deref(), Some(daemon.as_str()));
+            assert_eq!(words.unwrap().split(' ').count(), 6);
+            assert_eq!(
+                fingerprint,
+                link::fingerprint_words_text(&server.key.public)
+            );
+            assert_eq!(expires_in_secs, Some(60));
+            assert_eq!(address, server.addr);
+        }
+        e => panic!("expected the pairing words, got {e:?}"),
+    }
+    held
 }
 
 fn expect_paired(c: &Companion) {
@@ -1099,4 +1290,200 @@ fn todays_pairing_is_migrated_and_connected_to() {
     assert_eq!(remotes.active, Some(RemoteId::of(&server.key.public)));
     assert_eq!(remotes.list[0].key_name, LEGACY_KEY_NAME);
     assert!(!keys.join("server.toml").exists());
+}
+
+// The pairing request and its six words (plan 20261028_01, the 14:37,
+// 14:42 and 14:44 EDT amendments).
+
+/// The public key of the phone's key `key_name`, if stored.
+fn stored_key(dir: &tempfile::TempDir, key_name: &str) -> Option<[u8; 32]> {
+    FileKeyStore::new(keys_dir(dir))
+        .static_key(key_name)
+        .unwrap()
+        .map(|k| k.public())
+}
+
+#[test]
+fn pairing_by_request_shows_the_daemons_words_and_stores_only_once_added() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let c = companion(&dir);
+    let id = RemoteId::of(&server.key.public);
+    let link = server.pair_run(vec![server.addr.clone()]);
+    c.send(Input::Pair(link.url().unwrap()));
+
+    let held = expect_words(&c, &server);
+    // The request carries the key the phone keeps for this remote.
+    assert_eq!(
+        stored_key(&dir, &id.key_name()),
+        Some(held.request.device_key)
+    );
+    // Nothing is stored before the owner's yes: no record, no state.
+    assert_eq!(stored(&dir), Remotes::default());
+    assert!(!RemoteState::dir(&data_dir(&dir), id).exists());
+
+    // The same link again: the same words, the same request, no second.
+    c.send(Input::Pair(link.encode().unwrap()));
+    assert!(matches!(
+        next_event(&c),
+        Event::PairingWords { fallback: None, .. }
+    ));
+    assert!(
+        server
+            .held
+            .recv_timeout(Duration::from_millis(300))
+            .is_err()
+    );
+    assert_eq!(
+        stored_key(&dir, &id.key_name()),
+        Some(held.request.device_key)
+    );
+
+    // Yes on the Mac: added, stored, and connected with IK.
+    held.answer(PairResult::Added);
+    expect_paired(&c);
+    let seen = server.next_seen();
+    assert_eq!(seen.peer_key, held.request.device_key);
+    assert_exact_hello(&seen.first);
+    expect_connected(&c);
+    let remotes = stored(&dir);
+    assert_eq!(remotes.active, Some(id));
+    let record = remotes.active_record().unwrap();
+    assert_eq!(record.addresses, std::slice::from_ref(&server.addr));
+    assert_eq!(record.key_name, id.key_name());
+    assert!(record.paired_at.is_some());
+    assert!(RemoteState::file(&data_dir(&dir), id).exists());
+    assert_turn(&c);
+}
+
+#[test]
+fn a_refused_expired_or_cancelled_request_discards_the_key() {
+    let first = Server::start();
+    let second = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let (c, record) = connected_to(&dir, &first);
+    let name = RemoteId::of(&second.key.public).key_name();
+
+    // Not confirmed on the Mac.
+    c.send(Input::Pair(
+        second.pair_run(vec![second.addr.clone()]).url().unwrap(),
+    ));
+    let held = expect_words(&c, &second);
+    assert!(key_exists(&dir, &name));
+    held.answer(PairResult::Refused);
+    match next_event(&c) {
+        Event::PairFailed(why) => assert!(why.contains("not confirmed"), "{why}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(!key_exists(&dir, &name));
+    assert_eq!(ids(&dir), [record.id]);
+
+    // The offer expired before yes.
+    c.send(Input::Pair(
+        second.pair_run(vec![second.addr.clone()]).url().unwrap(),
+    ));
+    let held = expect_words(&c, &second);
+    held.answer(PairResult::Expired);
+    match next_event(&c) {
+        Event::PairFailed(why) => assert!(why.contains("expired"), "{why}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(!key_exists(&dir, &name));
+
+    // Cancel on the phone closes the request's connection.
+    c.send(Input::Pair(
+        second.pair_run(vec![second.addr.clone()]).url().unwrap(),
+    ));
+    let held = expect_words(&c, &second);
+    c.send(Input::CancelPairing);
+    held.closed
+        .recv_timeout(TIMEOUT)
+        .expect("the daemon sees the connection close");
+    assert!(!key_exists(&dir, &name));
+    // An answer now adds nothing here.
+    let _ = held.answer.send(PairResult::Added);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(ids(&dir), [record.id]);
+    assert!(second.seen.try_recv().is_err());
+
+    // A link from another run (a wrong offer): refused at once, with no
+    // fallback, and the key discarded.
+    let mut stale = second.pair_run(vec![second.addr.clone()]);
+    stale.offer = Some([7; OFFER_LEN]);
+    c.send(Input::Pair(stale.url().unwrap()));
+    match next_event(&c) {
+        Event::PairFailed(why) => assert!(why.contains("current flankr pair run"), "{why}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(!key_exists(&dir, &name));
+
+    // An expired run refuses at once too.
+    let link = second.pair_run(vec![second.addr.clone()]);
+    second.pair_mode.lock().unwrap().as_mut().unwrap().refuse = Some(PairRefusal::Expired);
+    c.send(Input::Pair(link.url().unwrap()));
+    match next_event(&c) {
+        Event::PairFailed(why) => assert!(why.contains("expired"), "{why}"),
+        e => panic!("{e:?}"),
+    }
+    assert!(!key_exists(&dir, &name));
+    assert_eq!(ids(&dir), [record.id]);
+    // The connection in use never dropped.
+    assert_eq!(first.accepts.load(Ordering::SeqCst), 1);
+    assert_turn(&c);
+}
+
+#[test]
+fn a_request_no_daemon_answers_falls_back_to_the_device_code_with_words() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let c = companion(&dir);
+    // A link with an offer, but the daemon is not in pair mode (an older
+    // daemon, or the phone cannot reach its pair mode): it drops the
+    // request, and nothing listens at the first address.
+    let offer = [3; OFFER_LEN];
+    let link = PairingPayload {
+        server_key: server.key.public,
+        addresses: vec![closed_addr(), server.addr.clone()],
+        offer: Some(offer),
+    };
+    c.send(Input::Pair(link.encode().unwrap()));
+    let (code, _, replace) = expect_fallback(&c, &server, Some(offer));
+    assert!(!replace);
+    assert!(server.held.try_recv().is_err());
+    assert_eq!(stored(&dir), Remotes::default());
+
+    // The code pasted into flankr pair (which shows the same words for it)
+    // pairs as before.
+    let added = server.add(&code);
+    expect_paired(&c);
+    assert_eq!(server.next_seen().peer_key, added.key);
+    expect_connected(&c);
+    assert_eq!(ids(&dir), [RemoteId::of(&server.key.public)]);
+}
+
+#[test]
+fn a_new_run_for_the_daemon_being_paired_keeps_the_key_and_asks_again() {
+    let server = Server::start();
+    let dir = tempfile::tempdir().unwrap();
+    let c = companion(&dir);
+    let name = RemoteId::of(&server.key.public).key_name();
+    c.send(Input::Pair(
+        server.pair_run(vec![server.addr.clone()]).url().unwrap(),
+    ));
+    let first = expect_words(&c, &server);
+    // A new run: a new offer, so new words, but the same key.
+    c.send(Input::Pair(
+        server.pair_run(vec![server.addr.clone()]).url().unwrap(),
+    ));
+    first
+        .closed
+        .recv_timeout(TIMEOUT)
+        .expect("the first request's connection closes");
+    let second = expect_words(&c, &server);
+    assert_eq!(second.request.device_key, first.request.device_key);
+    assert_ne!(second.request.offer, first.request.offer);
+    assert_eq!(stored_key(&dir, &name), Some(first.request.device_key));
+    second.answer(PairResult::Added);
+    expect_paired(&c);
+    assert_eq!(ids(&dir), [RemoteId::of(&server.key.public)]);
 }

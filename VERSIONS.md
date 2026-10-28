@@ -507,3 +507,29 @@ Plan 20261028_01, the six-word pairing step (amendments of 13:59, 14:37,
   `accept_incoming`, `send_pair_result`.
 - New dependency: `bip39` 3 (no default features, CC0-1.0), under the
   `link` feature.
+
+## flankr-companion 0.3.0 — 2026-10-28 (the commit tagged `flankr-companion-v0.3.0`)
+
+Plan 20261028_01, the six-word pairing step (the 14:37, 14:42 and 14:44 EDT
+amendments) and the review's changes (14:37 EDT, item 4). Not strictly
+additive:
+
+- **Breaking:** `libflankr_proto` 0.4.3 → 0.5.0.
+- **Breaking:** `Event::PairingCode { code, server, confirmation }` replaced
+  by `Event::PairingWords { server, address, words: Option<String>,
+  fingerprint, expires_in_secs: Option<u16>, fallback:
+  Option<DeviceCodeFallback> }`; the six-digit confirmation code is gone.
+  `DeviceCodeFallback { code, replace }` added; `replace` says the code must
+  be pasted with `flankr pair --replace`.
+- **Breaking (behaviour):** `Input::Pair` with a version 3 link sends the NK
+  pairing request; the remote, its key and `state.redb` are stored only
+  after the daemon's `Added`; a refusal, expiry, dropped connection or
+  `Input::CancelPairing` (which closes the request's connection) gives
+  `Event::PairFailed` and deletes the new key. A version 2 link, or a daemon
+  not reached, uses the device-code fallback.
+- **Breaking (behaviour):** a link for the remote being paired keeps the
+  pending key and request; a listed remote's new name and addresses are
+  saved only after a verified `IK` connection to them (`Event::RemoteUpdated`
+  only then, else `Event::PairFailed`); `state.redb` and its directory are
+  created 0600/0700, and `state.redb.mismatch-*` files are deleted.
+- **Added:** `CHECK_TIMEOUT` (30 s), `RESULT_GRACE` (10 s).

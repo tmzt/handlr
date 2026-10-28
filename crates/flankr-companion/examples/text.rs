@@ -129,18 +129,32 @@ fn print_event(event: Event) {
         Event::Disconnected { retry_in_ms } => {
             println!("* disconnected; retrying in {retry_in_ms} ms")
         }
-        Event::PairingCode {
-            code,
+        Event::PairingWords {
             server,
-            confirmation,
-            replace,
+            address,
+            words,
+            fingerprint,
+            expires_in_secs,
+            fallback,
         } => {
-            if replace {
-                println!("* {server} lists this phone's lost key: use flankr pair --replace");
+            if let Some(fallback) = &fallback {
+                if fallback.replace {
+                    println!("* {server} lists this phone's lost key: use flankr pair --replace");
+                }
+                println!("* {server} was not asked directly; paste this code into flankr pair:");
+                println!("{}", fallback.code);
             }
-            println!("* paste this code into flankr pair on {server}:");
-            println!("{code}");
-            println!("* flankr pair should show the confirmation code {confirmation}");
+            match words {
+                Some(words) => {
+                    println!("* pairing words: {words}");
+                    println!("* if flankr pair on {server} shows the same, type yes there");
+                }
+                None => println!("* the link has no offer: no pairing words to compare"),
+            }
+            let left = expires_in_secs
+                .map(|s| format!(", {s} s left"))
+                .unwrap_or_default();
+            println!("* {address}, daemon fingerprint {fingerprint}{left}");
         }
         Event::Paired { name } => println!("* paired as {name}"),
         Event::PairFailed(why) => println!("! pairing failed: {why}"),

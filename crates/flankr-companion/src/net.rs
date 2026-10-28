@@ -12,17 +12,31 @@
 //!
 //! [`Input::Pair`] takes the pairing URL, the bare string or the QR code's
 //! data URL (plan 20261022_06, step 5). The thread makes the new remote's
-//! key (`noise.static.<id>`), gives its device code as
-//! [`Event::PairingCode`] with the confirmation code, and starts a
-//! **pairing probe** beside the open connection: a task that tries `IK`
-//! with `hello` every [`PAIRING_RETRY`] for the pairing window while the
-//! server drops it, until the user pastes the code into `flankr pair`.
-//! Once `hello` is answered, the remote is added to the list (and made
+//! key (`noise.static.<id>`) and, beside the open connection, pairs it
+//! (plan 20261028_01, the 14:37, 14:42 and 14:44 EDT amendments):
+//!
+//! - a link with an offer (version 3) gets a **pairing request**: one `NK`
+//!   connection to the link's addresses in order, carrying the key, the
+//!   device name and the offer. Once the daemon holds it,
+//!   [`Event::PairingWords`] gives the six pairing words `flankr pair`
+//!   prints too, and the connection waits for the owner's answer there:
+//!   added, refused or expired. A refusal at once, a refusal or expiry
+//!   later, a dropped connection or Cancel ends the pairing with the key
+//!   deleted ([`Event::PairFailed`]).
+//! - a link without an offer (version 2), or a request no address answered,
+//!   gets the **device-code fallback**: [`Event::PairingWords`] with the
+//!   device code (and the six words for its key when the link has an
+//!   offer), and a **pairing probe**, a task that tries `IK` with `hello`
+//!   every [`PAIRING_RETRY`] for the pairing window while the server drops
+//!   it, until the code is pasted into `flankr pair`.
+//!
+//! Once the daemon adds the key, the remote is added to the list (and made
 //! active only if none was) and [`Event::Paired`] and [`Event::Remotes`]
-//! are given. Nothing is stored before then; a probe that gives up or is
-//! cancelled ([`Input::CancelPairing`]) deletes its key (plan 20261028_01,
-//! decisions 10-12). A link for the remote already being paired keeps the
-//! probe, its key and its code, and gives the same code again.
+//! are given. Nothing is stored before then; a pairing that ends otherwise
+//! or is cancelled ([`Input::CancelPairing`]) deletes its key (decisions
+//! 10-12). The same link again keeps the pairing and its key and gives the
+//! same words again; a new link (a new `flankr pair` run) for the daemon
+//! being paired keeps the key and asks again.
 //!
 //! A link for a remote already in the list (and whose key this phone has)
 //! starts an **address check** instead: one `IK` connection, with that
@@ -31,9 +45,9 @@
 //! [`Event::RemoteUpdated`] given; until then, and if it fails
 //! ([`Event::PairFailed`]), the old ones stay in use (plan 20261028_01, the
 //! 14:37 EDT amendment, item 4). A listed remote whose key was lost is
-//! paired again with a probe, its code given with `replace`: the daemon
-//! still lists this phone's old key under its name, so the code is pasted
-//! with `flankr pair --replace`.
+//! paired again as a new one; in the fallback its code is given with
+//! `replace`: the daemon still lists this phone's old key under its name,
+//! so the code is pasted with `flankr pair --replace`.
 //!
 //! [`Input::RemoveRemote`] asks the remote's daemon to forget this phone:
 //! the state sends `link.unpair` over the open link for the active remote
@@ -63,7 +77,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use libflankr_proto::link::{self, DeviceCode, LinkStream, LinkWriter, Message, StaticKey};
+use libflankr_proto::link::{
+    self, DeviceCode, LinkStream, LinkWriter, Message, OFFER_LEN, PairAck, PairRefusal,
+    PairRequest, PairResult, StaticKey,
+};
 use libflankr_proto::{Id, Incoming, Request, common, common::methods};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, WriteHalf};
 use tokio::net::unix::OwnedWriteHalf;
@@ -73,7 +90,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::CompanionConfig;
-use crate::client::{Event, Input, Output, State, TICK, UNPAIR_WAIT};
+use crate::client::{DeviceCodeFallback, Event, Input, Output, State, TICK, UNPAIR_WAIT};
 use crate::keys::{KeyStore, MAX_REMOTES, RemoteId, RemoteInfo, Remotes, ServerRecord};
 use crate::remote_state::RemoteState;
 use crate::scan::{self, Pairing};
@@ -89,7 +106,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long a link handshake may take (as the daemon's, CHANGES.md 18:24).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// While pairing, how often to try again while the server drops the
+/// In the device-code fallback, how often to try again while the server drops the
 /// connection (it does until the code is added).
 pub const PAIRING_RETRY: Duration = Duration::from_secs(2);
 /// How long a pairing tries at [`PAIRING_RETRY`] before it gives up.
@@ -100,6 +117,9 @@ pub const REVOKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long checking a listed remote's new addresses from a link may take
 /// in all.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long past the offer's time left a held pairing request waits for
+/// the daemon's answer before giving up.
+pub const RESULT_GRACE: Duration = Duration::from_secs(10);
 
 /// Delays between reconnects: `initial`, doubling up to `max` (1, 2, 4 …
 /// 30 s by default), back to `initial` once a connection says hello.
@@ -215,7 +235,9 @@ struct Net {
     tap: Tap,
 }
 
-/// A pairing in progress beside the open connection (decision 10).
+/// A pairing in progress beside the open connection (decision 10): a
+/// pairing request while it is sent and held, or the device-code fallback's
+/// probe (the 14:37 EDT amendment).
 struct Probe {
     token: u64,
     /// The remote it pairs: a new record, or the listed one whose key was
@@ -223,10 +245,27 @@ struct Probe {
     record: ServerRecord,
     /// Whether the record is already in the list.
     listed: bool,
-    /// The [`Event::PairingCode`] it gave, given again for a link to the
-    /// same remote.
-    shown: Event,
+    /// The phone's new key for the remote, stored as `record.key_name` and
+    /// deleted unless the pairing ends with the remote added.
+    key: Arc<dyn StaticKey>,
+    /// The link's offer; `None` for a version 2 link.
+    offer: Option<[u8; OFFER_LEN]>,
+    /// The [`Event::PairingWords`] it gave, given again for the same link;
+    /// `None` while the request is on its way.
+    shown: Option<Event>,
     task: JoinHandle<()>,
+}
+
+/// How a pairing request ended without the remote being added.
+enum Ended {
+    /// The daemon refused the request at once.
+    Refused(PairRefusal),
+    /// The daemon's answer once the owner answered, or the offer expired.
+    Result(PairResult),
+    /// The connection closed before the daemon's answer.
+    Dropped,
+    /// No answer came within the offer's time.
+    TimedOut,
 }
 
 /// A check of a listed remote's name and addresses from a link: saved only
@@ -245,6 +284,18 @@ enum Done {
     Paired { token: u64 },
     /// The pairing probe `token`'s window ended.
     GaveUp { token: u64 },
+    /// The pairing request `token` is held by the daemon at `address`,
+    /// whose offer has `expires_in_secs` left.
+    Asked {
+        token: u64,
+        address: String,
+        expires_in_secs: u16,
+    },
+    /// The pairing request `token` reached no daemon that answered it: the
+    /// device-code fallback follows.
+    Unreachable { token: u64 },
+    /// The pairing request `token` ended with nothing added.
+    Ended { token: u64, ended: Ended },
     /// The address check `token` ended; `reached`: its `hello` was
     /// answered.
     Checked { token: u64, reached: bool },
@@ -591,6 +642,20 @@ impl Net {
                     )));
                 }
             }
+            Done::Asked {
+                token,
+                address,
+                expires_in_secs,
+            } => self.asked(token, address, expires_in_secs),
+            Done::Unreachable { token } => self.unreachable(token),
+            Done::Ended { token, ended } => {
+                let Some(probe) = self.probe.as_ref().filter(|p| p.token == token) else {
+                    return;
+                };
+                let why = ended_note(&probe.record.name, &ended);
+                self.end_probe(&why);
+                self.emit(Event::PairFailed(why));
+            }
             Done::Checked { token, reached } => self.checked(token, reached),
             Done::Revoked { id, daemon } => self.finish_remove(id, daemon),
         }
@@ -837,32 +902,53 @@ impl Net {
         }
     }
 
-    /// Pairs with `p` beside the open connection (decisions 10-12). A
-    /// link for the remote being paired gives its code again, keeping the
-    /// probe and its key. A listed remote whose key this phone has gets an
-    /// address check ([`Net::check_addresses`]); a new one (or a listed one
-    /// whose key is missing) gets its key, its device code and a pairing
-    /// probe. Nothing new is stored until the probe's `hello` is answered.
+    /// Pairs with `p` beside the open connection (decisions 10-12 and the
+    /// 14:37 EDT amendment). The same link again gives what it showed
+    /// again, keeping the pairing and its key; a new link (a new offer) for
+    /// the daemon being paired keeps the key and starts the request over. A
+    /// listed remote whose key this phone has gets an address check
+    /// ([`Net::check_addresses`]); a new one (or a listed one whose key is
+    /// missing) gets its key and, for a link with an offer, a pairing
+    /// request ([`Net::request`]), else the device-code fallback
+    /// ([`Net::fallback`]). Nothing new is stored until the daemon adds the
+    /// key.
     fn begin_pairing(&mut self, p: Pairing) {
         let server_key = p.payload.server_key;
+        let offer = p.payload.offer;
         let id = RemoteId::of(&server_key);
-        if let Some(probe) = self
+        let kept = match self
             .probe
-            .as_ref()
-            .filter(|probe| probe.record.public_key == server_key)
+            .take_if(|probe| probe.record.public_key == server_key)
         {
-            log::info!(
-                "pairing: already pairing with {}; its code stays",
-                probe.record.name
-            );
-            let shown = probe.shown.clone();
-            self.emit(shown);
-            return;
-        }
-        self.end_probe("replaced by a new pairing");
+            Some(probe) if probe.offer == offer => {
+                log::info!(
+                    "pairing: already pairing with {}; it stays",
+                    probe.record.name
+                );
+                if let Some(shown) = probe.shown.clone() {
+                    self.emit(shown);
+                }
+                self.probe = Some(probe);
+                return;
+            }
+            Some(probe) => {
+                // A new `flankr pair` run's link: the key stays.
+                log::info!(
+                    "pairing: a new link for {}; asking again with the same key",
+                    probe.record.name
+                );
+                probe.task.abort();
+                Some((probe.record.key_name, probe.key))
+            }
+            None => {
+                self.end_probe("replaced by a new pairing");
+                None
+            }
+        };
         let offered = ServerRecord::new(p.server.clone(), server_key, p.payload.addresses);
         let listed = match self.remotes.get(id) {
             Some(listed) if listed.public_key != server_key => {
+                self.drop_kept(kept);
                 self.emit(Event::PairFailed(
                     "a remote with the same id is already paired".to_string(),
                 ));
@@ -873,18 +959,24 @@ impl Net {
         };
         let record = match listed {
             Some(listed) => {
-                match self.keys.static_key(&listed.key_name) {
-                    Ok(Some(key)) => {
-                        self.check_addresses(&listed, offered.name, offered.addresses, key);
-                        return;
+                // A kept key is the pairing's, under the listed name: the
+                // listed key itself was missing.
+                if kept.is_none() {
+                    match self.keys.static_key(&listed.key_name) {
+                        Ok(Some(key)) => {
+                            self.check_addresses(&listed, offered.name, offered.addresses, key);
+                            return;
+                        }
+                        Ok(None) => {
+                            log::info!("pairing: {}'s key is missing; pairing again", listed.name)
+                        }
+                        Err(e) => {
+                            log::warn!("pairing: {}'s key: {e}; pairing again", listed.name)
+                        }
                     }
-                    Ok(None) => {
-                        log::info!("pairing: {}'s key is missing; pairing again", listed.name)
-                    }
-                    Err(e) => log::warn!("pairing: {}'s key: {e}; pairing again", listed.name),
                 }
                 // Saved with the link's name and addresses only once the
-                // probe reaches them.
+                // daemon adds the key.
                 self.end_check(id);
                 ServerRecord {
                     name: offered.name,
@@ -893,67 +985,190 @@ impl Net {
                 }
             }
             None if self.remotes.list.len() >= MAX_REMOTES => {
+                self.drop_kept(kept);
                 self.emit(Event::PairFailed(full_note()));
                 return;
             }
             None => offered,
         };
+        if !DeviceCode::valid_name(&self.config.device_name) {
+            self.drop_kept(kept);
+            self.emit(Event::PairFailed(format!(
+                "the device name '{}': {}",
+                self.config.device_name,
+                link::PairingStringError::BadName
+            )));
+            return;
+        }
         let listed = self.remotes.get(id).is_some();
-        let key = match self.keys.generate_static_key(&record.key_name) {
-            Ok(key) => key,
-            Err(e) => {
-                self.emit(Event::PairFailed(format!("this client's key: {e}")));
-                return;
-            }
+        let key = match kept {
+            Some((_, key)) => key,
+            None => match self.keys.generate_static_key(&record.key_name) {
+                Ok(key) => key,
+                Err(e) => {
+                    self.emit(Event::PairFailed(format!("this client's key: {e}")));
+                    return;
+                }
+            },
         };
+        let token = self.next_probe;
+        self.next_probe += 1;
+        // Replaced by the request's task or the fallback's probe below.
+        let task = tokio::spawn(async {});
+        self.probe = Some(Probe {
+            token,
+            record,
+            listed,
+            key,
+            offer,
+            shown: None,
+            task,
+        });
+        match offer {
+            Some(offer) => self.request(offer),
+            None => self.fallback(),
+        }
+    }
+
+    /// Deletes the key a replaced pairing kept, when the new link is
+    /// refused after all.
+    fn drop_kept(&mut self, kept: Option<(String, Arc<dyn StaticKey>)>) {
+        if let Some((name, _)) = kept
+            && let Err(e) = self.keys.delete_static_key(&name)
+        {
+            log::warn!("pairing: deleting the pairing's key: {e}");
+        }
+    }
+
+    /// Sends the pairing request of the probe in progress to its link's
+    /// addresses, in order, over `NK` (the 14:37 EDT amendment, item 1):
+    /// [`Done::Asked`] once the daemon holds it, then [`Done::Paired`] or
+    /// [`Done::Ended`] with the owner's answer; [`Done::Unreachable`] if no
+    /// address answered it.
+    fn request(&mut self, offer: [u8; OFFER_LEN]) {
+        let Some(probe) = self.probe.as_mut() else {
+            return;
+        };
+        log::info!(
+            "pairing with {} ({}); sending the request",
+            probe.record.name,
+            probe.record.id.fingerprint()
+        );
+        let token = probe.token;
+        let request = PairRequest {
+            device_key: probe.key.public(),
+            name: self.config.device_name.clone(),
+            offer,
+        };
+        let addresses = probe.record.addresses.clone();
+        let server_key = probe.record.public_key;
+        let tasks = self.tasks_tx.clone();
+        probe.task = tokio::spawn(async move {
+            let done = pair_request(&addresses, &server_key, &request, token, &tasks).await;
+            let _ = tasks.send(done);
+        });
+    }
+
+    /// The daemon holds the probe `token`'s request: its six words are
+    /// shown.
+    fn asked(&mut self, token: u64, address: String, expires_in_secs: u16) {
+        let Some(probe) = self.probe.as_mut().filter(|p| p.token == token) else {
+            return;
+        };
+        let Some(offer) = probe.offer else {
+            return;
+        };
+        let server_key = probe.record.public_key;
+        log::info!(
+            "pairing: {} at {address} holds the request ({expires_in_secs} s left); \
+             waiting for yes on it",
+            probe.record.name
+        );
+        let shown = Event::PairingWords {
+            server: probe.record.name.clone(),
+            address,
+            words: Some(link::pairing_words_text(
+                &server_key,
+                &offer,
+                &probe.key.public(),
+            )),
+            fingerprint: link::fingerprint_words_text(&server_key),
+            expires_in_secs: Some(expires_in_secs),
+            fallback: None,
+        };
+        probe.shown = Some(shown.clone());
+        self.emit(shown);
+    }
+
+    /// No address answered the probe `token`'s request: the device-code
+    /// fallback.
+    fn unreachable(&mut self, token: u64) {
+        if self.probe.as_ref().is_some_and(|p| p.token == token) {
+            log::info!("pairing: the request reached no daemon; the device code instead");
+            self.fallback();
+        }
+    }
+
+    /// The device-code fallback of the probe in progress (the 14:37 EDT
+    /// amendment, item 2): its device code, the six words for its key and
+    /// the link's offer (none without an offer), and a probe that tries
+    /// `IK` until the daemon knows the key.
+    fn fallback(&mut self) {
+        let Some(probe) = self.probe.as_ref() else {
+            return;
+        };
+        let server_key = probe.record.public_key;
         let code = DeviceCode {
-            key: key.public(),
+            key: probe.key.public(),
             name: self.config.device_name.clone(),
         }
         .encode(&server_key);
         let code = match code {
             Ok(code) => code,
             Err(e) => {
-                let _ = self.keys.delete_static_key(&record.key_name);
-                self.emit(Event::PairFailed(format!(
-                    "the device name '{}': {e}",
-                    self.config.device_name
-                )));
+                let why = format!("the device name '{}': {e}", self.config.device_name);
+                self.end_probe(&why);
+                self.emit(Event::PairFailed(why));
                 return;
             }
         };
-        log::info!(
-            "pairing with {} ({}); waiting for the code to be added",
-            record.name,
-            id.fingerprint()
-        );
-        let token = self.next_probe;
-        self.next_probe += 1;
         let hello = serde_json::to_vec(&self.state.hello_request()).unwrap_or_default();
         let tasks = self.tasks_tx.clone();
         let window = self.config.pairing_window;
-        let addresses = record.addresses.clone();
-        let task = tokio::spawn(async move {
-            let done = if probe(&addresses, key, &server_key, &hello, window).await {
+        let Some(probe) = self.probe.as_mut() else {
+            return;
+        };
+        log::info!(
+            "pairing with {} ({}); waiting for the device code to be added",
+            probe.record.name,
+            probe.record.id.fingerprint()
+        );
+        let token = probe.token;
+        let addresses = probe.record.addresses.clone();
+        let key = Arc::clone(&probe.key);
+        probe.task = tokio::spawn(async move {
+            let done = if self::probe(&addresses, key, &server_key, &hello, window).await {
                 Done::Paired { token }
             } else {
                 Done::GaveUp { token }
             };
             let _ = tasks.send(done);
         });
-        let shown = Event::PairingCode {
-            code,
-            server: p.server,
-            confirmation: link::confirmation_code(&server_key),
-            replace: listed,
+        let device_key = probe.key.public();
+        let shown = Event::PairingWords {
+            server: probe.record.name.clone(),
+            address: probe.record.addresses.first().cloned().unwrap_or_default(),
+            words: probe
+                .offer
+                .map(|offer| link::pairing_words_text(&server_key, &offer, &device_key)),
+            fingerprint: link::fingerprint_words_text(&server_key),
+            expires_in_secs: None,
+            fallback: Some(DeviceCodeFallback {
+                code,
+                replace: probe.listed,
+            }),
         };
-        self.probe = Some(Probe {
-            token,
-            record,
-            listed,
-            shown: shown.clone(),
-            task,
-        });
+        probe.shown = Some(shown.clone());
         self.emit(shown);
     }
 
@@ -1244,6 +1459,100 @@ async fn probe(
             return false;
         }
         tokio::time::sleep(PAIRING_RETRY.min(until - now)).await;
+    }
+}
+
+/// The pairing request (the 14:37 EDT amendment, item 1): `request` over
+/// `NK` to each of `addresses` in order, each bounded by
+/// [`HANDSHAKE_TIMEOUT`], until a daemon with `server_key` answers it. A
+/// refusal ends it; an accepted request is reported as [`Done::Asked`] on
+/// `tasks`, and the daemon's [`PairResult`] is awaited for the offer's time
+/// left and [`RESULT_GRACE`]. Returns how it ended: [`Done::Paired`] once
+/// the key is added, [`Done::Unreachable`] if no address answered.
+/// Dropping the task (Cancel) closes the connection.
+async fn pair_request(
+    addresses: &[String],
+    server_key: &[u8; 32],
+    request: &PairRequest,
+    token: u64,
+    tasks: &UnboundedSender<Done>,
+) -> Done {
+    for addr in addresses {
+        let attempt = async {
+            let stream = tcp_connect(addr).await.map_err(|e| e.to_string())?;
+            link::request_pairing(stream, server_key, request)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let mut response = match timeout(HANDSHAKE_TIMEOUT, attempt).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => {
+                log::debug!("pairing request: {addr}: {e}");
+                continue;
+            }
+            Err(_) => {
+                log::debug!("pairing request: {addr}: timed out");
+                continue;
+            }
+        };
+        let expires_in_secs = match response.ack {
+            PairAck::Accepted { expires_in_secs } => expires_in_secs,
+            PairAck::Refused(reason) => {
+                return Done::Ended {
+                    token,
+                    ended: Ended::Refused(reason),
+                };
+            }
+        };
+        let _ = tasks.send(Done::Asked {
+            token,
+            address: addr.clone(),
+            expires_in_secs,
+        });
+        let wait = Duration::from_secs(u64::from(expires_in_secs)) + RESULT_GRACE;
+        let result = timeout(wait, link::recv_pair_result(&mut response.stream)).await;
+        let _ = response.stream.shutdown().await;
+        let ended = match result {
+            Ok(Ok(PairResult::Added)) => return Done::Paired { token },
+            Ok(Ok(result)) => Ended::Result(result),
+            Ok(Err(e)) => {
+                log::debug!("pairing request: {addr}: {e}");
+                Ended::Dropped
+            }
+            Err(_) => Ended::TimedOut,
+        };
+        return Done::Ended { token, ended };
+    }
+    Done::Unreachable { token }
+}
+
+/// What the phone says when a pairing request with `name` ended without
+/// adding it.
+fn ended_note(name: &str, ended: &Ended) -> String {
+    match ended {
+        Ended::Refused(PairRefusal::WrongOffer) => format!(
+            "{name} refused the request: the link is not from its current flankr pair run; \
+             run flankr pair again"
+        ),
+        Ended::Refused(PairRefusal::Expired) | Ended::Result(PairResult::Expired) => {
+            format!("the link from {name} expired; run flankr pair again")
+        }
+        Ended::Refused(PairRefusal::Busy) => {
+            format!("{name} is already pairing another phone; run flankr pair again")
+        }
+        Ended::Refused(PairRefusal::Malformed) => {
+            format!("{name} could not read the pairing request")
+        }
+        Ended::Refused(other) => format!("{name} refused the request ({other:?})"),
+        Ended::Result(PairResult::Refused) => {
+            format!("not confirmed on {name}: nothing was added")
+        }
+        Ended::Result(PairResult::Added) => format!("paired with {name}"),
+        Ended::Result(other) => format!("{name} ended the pairing ({other:?})"),
+        Ended::Dropped => {
+            format!("{name} closed the connection before the pairing was confirmed")
+        }
+        Ended::TimedOut => format!("{name} did not answer in time; run flankr pair again"),
     }
 }
 
