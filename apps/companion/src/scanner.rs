@@ -484,6 +484,11 @@ impl<Id: Copy + PartialEq> Scanner<Id> {
         };
         let text = |c: &copy::CopyText| flow(c.text);
         let why = |c: &copy::CopyText, why: &str| flow(&c.fill(None, &[("why", why)]));
+        // Idle with nothing to report shows no line: the placeholder's own
+        // text says what to do (the owner, 2026-10-28: the copy was too long).
+        if matches!(self.state, State::Idle) && self.retry.is_none() {
+            return None;
+        }
         Some(match &self.state {
             State::Starting(_) | State::Running(_) => match &self.note {
                 Some(Note::Ignored(until)) if now < *until => {
@@ -503,7 +508,7 @@ impl<Id: Copy + PartialEq> Scanner<Id> {
             State::Failed(error) => (why(&copy::PAIRING_CAMERA_FAILED, error), Role::Warn),
             State::Idle => match &self.retry {
                 Some(reason) => (why(&copy::PAIRING_RETRY, reason), Role::Warn),
-                None => (text(&copy::PAIRING_CAMERA_WHY), Role::Muted),
+                None => unreachable!("an idle scanner with no retry shows no line"),
             },
         })
     }
@@ -552,11 +557,7 @@ mod tests {
         assert_eq!(s.state, State::Idle);
         assert_eq!(s.prompt(), Some("Tap to scan"));
         assert!(!s.live() && !s.settings_button());
-        let (line, _) = s.line(now).unwrap();
-        assert!(
-            line.starts_with("Scan the QR code flankr pair shows."),
-            "{line}"
-        );
+        assert!(s.line(now).is_none(), "an idle window shows no status line");
         let mut s = running(now);
         assert_eq!(s.prompt(), None);
         assert!(s.line(now).unwrap().0.starts_with("Point at the QR code"));

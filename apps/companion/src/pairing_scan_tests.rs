@@ -72,7 +72,7 @@ fn camera(p: &Probe) -> Vec<&str> {
 fn the_window_waits_for_a_tap_then_ignores_other_codes() {
     let Some(first) = opened() else { return };
     assert!(first.shows("Tap to scan"), "{:?}", first.texts);
-    assert!(first.shows("Scan the QR code flankr pair shows."));
+    assert!(first.shows("Scan the QR code"), "{:?}", first.texts);
     assert!(first.shows("Paste a link"));
     assert!(!first.shows("paste a pairing URL"), "no field yet");
     assert!(!first.shows("not paired"), "no status lines");

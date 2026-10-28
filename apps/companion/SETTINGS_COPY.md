@@ -437,8 +437,7 @@ Details button.
 
 - title: Pair another remote
 - text: |
-    Run flankr pair on the machine whose daemon you're adding, then scan
-    its QR code. flankr stays connected to the remote in use meanwhile.
+    Scan the QR code shown by flankr pair.
 
 `remote_add_paste` is `remote_add`'s text where there is no camera (the
 desktop and the web, plan 20261028_02, decision 21): the link is pasted.

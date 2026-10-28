@@ -2387,7 +2387,9 @@ impl App {
             let camera = CameraView {
                 live: s.live(),
                 prompt: s.prompt().map(str::to_string),
-                detail: (self.pairing.adding && s.prompt().is_some())
+                detail: s
+                    .prompt()
+                    .is_some()
                     .then(|| settings::copy::REMOTE_ADD.text.trim().to_string()),
                 zoom: s.zoom_label(now),
                 paste: s.paste,
