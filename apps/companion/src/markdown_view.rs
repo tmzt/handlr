@@ -155,6 +155,11 @@ impl MarkdownView {
         self.rect
     }
 
+    /// Its type size, in pixels.
+    pub fn px(&self) -> f32 {
+        self.px
+    }
+
     /// The Markdown it shows.
     pub fn source(&self) -> &str {
         &self.source
@@ -184,6 +189,30 @@ impl MarkdownView {
         }
         self.rect.x = x;
         self.rect.y = y;
+    }
+
+    /// Centres each line in its width (the pairing area's lines under a
+    /// glyph).
+    pub fn center(&mut self) {
+        let mut i = 0;
+        while i < self.placed.len() {
+            let y = self.placed[i].y;
+            let end = self.placed[i..]
+                .iter()
+                .position(|p| p.y != y)
+                .map_or(self.placed.len(), |n| i + n);
+            let line = &self.placed[i..end];
+            let left = line.iter().map(|p| p.x).fold(f32::INFINITY, f32::min);
+            let right = line
+                .iter()
+                .map(|p| p.x + p.w)
+                .fold(f32::NEG_INFINITY, f32::max);
+            let dx = self.rect.x + (self.rect.w - (right - left)) / 2.0 - left;
+            for p in &mut self.placed[i..end] {
+                p.x += dx;
+            }
+            i = end;
+        }
     }
 
     /// A link run's tap area: a little taller than its line.

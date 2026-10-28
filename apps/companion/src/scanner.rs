@@ -34,7 +34,7 @@ use libmorph::camera::{
     ZoomSource,
 };
 
-use crate::remotes::is_pairing_link;
+use crate::remotes::{is_pairing_link, md_escape};
 use crate::settings::copy;
 use crate::theme::Role;
 
@@ -174,6 +174,12 @@ pub struct Scanner<Id = ScanId> {
     pub handed_over: bool,
     /// The camera answered `Unsupported`: the window is the paste screen.
     pub no_camera: bool,
+    /// The code handed over was scanned (not pasted): until the daemon
+    /// answers, the area shows a check, "Code read" and "Connecting to
+    /// <host>…".
+    pub read: bool,
+    /// A pairing was cancelled: the line says nothing was added.
+    pub cancelled: bool,
     note: Option<Note>,
     /// The touches down on the running viewfinder: `(id, x, y)`.
     touches: Vec<(u64, f32, f32)>,
@@ -192,6 +198,8 @@ impl<Id> Default for Scanner<Id> {
             retry: None,
             handed_over: false,
             no_camera: false,
+            read: false,
+            cancelled: false,
             note: None,
             touches: Vec::new(),
             pinch: None,
@@ -235,6 +243,7 @@ impl<Id: Copy + PartialEq> Scanner<Id> {
         }
         self.paste = false;
         self.retry = None;
+        self.cancelled = false;
         self.note = None;
         Some(Action::Start)
     }
@@ -277,6 +286,8 @@ impl<Id: Copy + PartialEq> Scanner<Id> {
     /// with the reason and *Tap to scan again*.
     pub fn pair_failed(&mut self, why: &str) {
         self.handed_over = false;
+        self.read = false;
+        self.cancelled = false;
         self.retry = Some(why.trim().trim_end_matches('.').to_string());
         if !self.live() {
             self.state = State::Idle;
@@ -354,7 +365,9 @@ impl<Id: Copy + PartialEq> Scanner<Id> {
                 log::info!("pairing: scanned a pairing link ({bytes} bytes)");
                 self.stop();
                 self.handed_over = true;
+                self.read = true;
                 self.retry = None;
+                self.cancelled = false;
                 vec![Action::Stop(scan), Action::Pair(text.trim().to_string())]
             }
         }
@@ -467,8 +480,8 @@ impl<Id: Copy + PartialEq> Scanner<Id> {
             }
     }
 
-    /// The line under the area at `now`, and its colour's role: what to do
-    /// or what happened (decision 3). None while a scanned code is being
+    /// The line under the area at `now`, as Markdown, and its colour's
+    /// role: what to do or what happened (decision 3). None while a scanned code is being
     /// paired (the app's "pairing…" note shows).
     pub fn line(&self, now: Instant) -> Option<(String, Role)> {
         if self.handed_over {
@@ -483,11 +496,13 @@ impl<Id: Copy + PartialEq> Scanner<Id> {
                 .replace('\u{2192}', ">")
         };
         let text = |c: &copy::CopyText| flow(c.text);
-        let why = |c: &copy::CopyText, why: &str| flow(&c.fill(None, &[("why", why)]));
+        let why = |c: &copy::CopyText, why: &str| flow(&c.fill(None, &[("why", &md_escape(why))]));
         // Idle with nothing to report shows no line: the placeholder's own
         // text says what to do (the owner, 2026-10-28: the copy was too long).
         if matches!(self.state, State::Idle) && self.retry.is_none() {
-            return None;
+            return self
+                .cancelled
+                .then(|| (text(&copy::PAIRING_CANCELLED), Role::Muted));
         }
         Some(match &self.state {
             State::Starting(_) | State::Running(_) => match &self.note {
@@ -634,10 +649,33 @@ mod tests {
         assert_eq!(s.prompt(), Some("Tap to scan again"));
         assert_eq!(
             s.line(now).unwrap().0,
-            "the link has expired. Run flankr pair again, then scan its new code."
+            "the link has expired. Run **flankr pair** again, then scan its new code."
         );
         assert_eq!(s.tap(), Some(Action::Start));
         assert_eq!(s.prompt(), Some("Tap to scan"));
+    }
+
+    #[test]
+    fn a_scanned_code_is_read_until_the_pairing_ends() {
+        let now = Instant::now();
+        let mut s = running(now);
+        assert!(!s.read);
+        s.on_event(qr(1, &link()), now);
+        assert!(s.read && s.handed_over, "the read state");
+        // A failure: the reason, and the read state goes.
+        s.pair_failed("not confirmed on m4: nothing was added");
+        assert!(!s.read && !s.handed_over);
+        // A cancelled pairing says so, until the next tap.
+        s.reset();
+        s.cancelled = true;
+        assert_eq!(
+            s.line(now),
+            Some(("Pairing cancelled: nothing was added.".into(), Role::Muted))
+        );
+        assert_eq!(s.prompt(), Some("Tap to scan"));
+        assert_eq!(s.tap(), Some(Action::Start));
+        assert!(!s.cancelled);
+        assert_eq!(s.line(now), None);
     }
 
     #[test]

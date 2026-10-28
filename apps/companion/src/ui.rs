@@ -17,23 +17,23 @@
 //! lines those cards show are built here.
 
 use flankr_companion::{Dictation, DictationPhase, PromptMode};
+use std::sync::Arc;
+
 use libcontrols::{Button, DrawContext, Edit, Label, NodeFlags, NodeId, Rect, Router, TextAlign};
 use libflankr_proto::common::FocusInfo;
 use libmsdf::drawlist::DrawList;
 
 use crate::agent::fill;
+use crate::markdown_view::{Faces, MarkdownView};
 use crate::prompt::PromptInput;
 use crate::settings::copy;
 use crate::theme::{theme, with_alpha};
 
-/// Lines of the pairing area (the words, or the Details with the device
-/// code, and the notes).
-const CODE_LINES: usize = 20;
 /// The add mode's back glyph: ASCII, as the pairing screen's face has no
 /// "‹".
 const BACK_GLYPH: &str = "<";
-/// Lines under the placeholder's label (the add mode's what to do).
-const DETAIL_LINES: usize = 6;
+/// The check glyph's disc, in points.
+const CHECK_PT: f32 = 44.0;
 /// The reticle (plan 20261028_02, decision 2): corner marks of this
 /// thickness and length, in points, framing a centred square of this share
 /// of the area's shorter side, in the text colour at these opacities.
@@ -55,8 +55,10 @@ struct CameraDraw {
     /// The reticle's square.
     reticle: Rect,
     live: bool,
-    /// The camera glyph over the placeholder's label: its centre.
-    glyph: Option<[f32; 2]>,
+    /// The corner marks are drawn (the camera's window, not a check).
+    marks: bool,
+    /// The glyph over the label, and its centre.
+    glyph: Option<(Glyph, [f32; 2])>,
     scale: f32,
 }
 
@@ -330,40 +332,68 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
 pub struct View {
     /// The connection and the audio, one line each.
     pub status: Vec<String>,
-    /// The pairing area above the field: the words or Details, and notes.
+    /// The pairing area above the bottom row, Markdown, one paragraph a
+    /// line; while a pairing waits, the modal's lines instead.
     pub code: Vec<Line>,
     /// The pairing field's text; the screen shows its tail.
     pub field: String,
     /// The field has the keyboard.
     pub field_focused: bool,
-    /// A pairing waits for the owner: the field and Pair are hidden, and
-    /// Details and Cancel show in their place. The pairing area shows above
-    /// them.
+    /// A pairing waits for the owner: its words, `code`, show in a modal
+    /// titled *Confirm on your Mac*, with Details and Cancel (the owner,
+    /// 2026-10-28). Nothing under it takes a tap.
     pub waiting: bool,
-    /// The pairing's Details are open: the Details button reads "Hide
-    /// details".
+    /// Details are open (the modal's or a finished pairing's): the Details
+    /// button reads "Hide details".
     pub details: bool,
     /// The add mode (**+** in Settings' Remotes): its title, and a "<"
     /// back to Settings.
     pub adding: bool,
-    /// The camera's window (plan 20261028_02), where there is a camera and
-    /// no pairing waits: the viewfinder area, and `code` is the line under
-    /// it. `None`: today's paste screen.
+    /// The area at the top (plan 20261028_02): the camera's window where
+    /// there is a camera, and the read and finished states everywhere;
+    /// `code` is under it. `None`: the paste screen.
     pub camera: Option<CameraView>,
 }
 
+/// What the area at the top shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Glyph {
+    /// The camera's window: the camera glyph over the placeholder, the
+    /// corner marks, and a tap on the area starts the scan.
+    #[default]
+    Camera,
+    /// A check, drawn from primitives as the camera glyph is: a code was
+    /// read, or the pairing is done. No marks, and the area takes no tap.
+    Check,
+}
+
+/// The bottom row under the area.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Row {
+    /// **Paste a link**, **Open Settings** after a refusal, and Cancel in
+    /// the add mode; or the field and Pair after Paste a link.
+    #[default]
+    Scan,
+    /// Cancel alone: a scanned code is being paired.
+    Cancel,
+    /// Details and **Done**: the pairing is done.
+    Done,
+}
+
 /// What the pairing window shows of the camera (plan 20261028_02,
-/// decisions 1-4, 12-14).
+/// decisions 1-4, 12-14), and of a read code and a finished pairing.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CameraView {
     /// The camera runs: the viewfinder under the area, the corner marks
     /// bright, no placeholder.
     pub live: bool,
-    /// The placeholder's label (*Tap to scan*, *Tap to scan again*), over
-    /// its camera glyph; `None` while the camera runs or a scanned code is
-    /// being paired.
+    /// The glyph over the label.
+    pub glyph: Glyph,
+    /// The label under the glyph (*Tap to scan*, *Code read*, *Paired
+    /// with m4*); `None` while the camera runs.
     pub prompt: Option<String>,
-    /// Under the label in the placeholder: the add mode's what to do.
+    /// Under the label, Markdown, centred: the add mode's what to do,
+    /// "Connecting to m4…", a finished pairing's address.
     pub detail: Option<String>,
     /// The zoom ratio at the top right of the area, after a pinch.
     pub zoom: Option<String>,
@@ -372,6 +402,8 @@ pub struct CameraView {
     /// **Open Settings** in the bottom row (a refusal only Settings can
     /// undo).
     pub settings: bool,
+    /// The bottom row.
+    pub row: Row,
 }
 
 /// A control a touch landed on.
@@ -379,9 +411,11 @@ pub struct CameraView {
 pub enum Hit {
     Field,
     Pair,
-    /// Cancel, while a pairing waits.
+    /// Cancel: in the pairing modal, while a scanned code is paired, or in
+    /// the add mode's camera row.
     Cancel,
-    /// Details, while a pairing waits: opens or closes them.
+    /// Details, in the pairing modal or on a finished pairing: opens or
+    /// closes them.
     Details,
     /// The add mode's "<": back to Settings.
     Back,
@@ -391,6 +425,8 @@ pub enum Hit {
     PasteLink,
     /// **Open Settings**, after a refusal only Settings can undo.
     OpenSettings,
+    /// **Done**, on a finished pairing.
+    Done,
 }
 
 /// Surface size, scale factor and safe area top and bottom.
@@ -404,7 +440,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    const PAD: f32 = 20.0;
+    pub(crate) const PAD: f32 = 20.0;
     /// The Pair button's width and the row's height, in points.
     const PAIR_W: f32 = 96.0;
     const ROW_H: f32 = 48.0;
@@ -423,8 +459,43 @@ impl Layout {
     }
 }
 
+/// The pairing modal, as the settings' confirming modal is drawn
+/// (`settings/confirm.rs`): a card at most this wide, in points, with this
+/// padding, corner radius and title size, centred over the screen dimmed
+/// by black at this opacity; opened and closed at once, never faded.
+const MODAL_MAX_W: f32 = 560.0;
+const MODAL_MARGIN: f32 = 12.0;
+const MODAL_PAD: f32 = 24.0;
+const MODAL_RADIUS: f32 = 14.0;
+const MODAL_TITLE_PT: f32 = 22.0;
+const MODAL_DIM: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
+
+/// The modal's card width and its content's width, in pixels.
+fn modal_widths(layout: &Layout) -> (f32, f32) {
+    let s = layout.scale;
+    let w = (layout.w - 2.0 * MODAL_MARGIN * s).min(MODAL_MAX_W * s);
+    (w, w - 2.0 * MODAL_PAD * s)
+}
+
+/// The layout the modal's lines are wrapped for: as wide as its content.
+pub fn modal_layout(layout: &Layout) -> Layout {
+    let (_, inner) = modal_widths(layout);
+    Layout {
+        w: inner + 2.0 * Layout::PAD * layout.scale,
+        ..*layout
+    }
+}
+
 /// The placeholder in the empty pairing field.
 const PLACEHOLDER: &str = "paste a pairing URL";
+
+/// The modal's card and the screen it dims, as last laid out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ModalDraw {
+    screen: Rect,
+    card: Rect,
+    radius: f32,
+}
 
 /// The persistent screen.
 pub struct Screen {
@@ -432,20 +503,32 @@ pub struct Screen {
     title: NodeId,
     back: NodeId,
     status: [NodeId; 2],
+    /// The pairing area's Markdown, one node a line, made at each change.
     code: Vec<NodeId>,
     field: NodeId,
     pair: NodeId,
     cancel: NodeId,
     details: NodeId,
-    /// The camera's window: the placeholder's label and the lines under
+    done: NodeId,
+    /// The camera's window: the placeholder's label and the Markdown under
     /// it, the zoom ratio, **Paste a link** and **Open Settings**.
     prompt: NodeId,
-    detail: Vec<NodeId>,
+    detail: Option<NodeId>,
     zoom: NodeId,
     paste_link: NodeId,
     open_settings: NodeId,
+    /// The pairing modal: drawn over the rest, from its own router.
+    modal: Router,
+    modal_title: NodeId,
+    modal_lines: Vec<NodeId>,
+    modal_details: NodeId,
+    modal_cancel: NodeId,
+    modal_draw: Option<ModalDraw>,
     /// The camera's area and what is drawn in it, as last laid out.
     camera: Option<CameraDraw>,
+    /// The faces the Markdown is drawn in (`None` in unit tests: the
+    /// context's font).
+    faces: Option<Arc<Faces>>,
     /// Where each visible control is, as last laid out.
     hits: Vec<(Hit, Rect)>,
     /// What the screen shows, as last laid out.
@@ -474,9 +557,6 @@ impl Screen {
             router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
             router.add(None, label("", 15.0, theme().muted, TextAlign::Center)),
         ];
-        let code = (0..CODE_LINES)
-            .map(|_| router.add(None, label("", 20.0, theme().code, TextAlign::Left)))
-            .collect();
         let field = router.add(
             None,
             Edit::new("", Rect::new(0.0, 0.0, 1.0, 1.0))
@@ -488,36 +568,64 @@ impl Screen {
         let pair = router.add(None, button("Pair", theme().message));
         let cancel = router.add(None, button(copy::CANCEL.text, theme().back));
         let details = router.add(None, button(copy::PAIRING_DETAILS.text, theme().back));
+        let done = router.add(None, button(copy::PAIRING_DONE.text, theme().message));
         let prompt = router.add(None, label("", 20.0, theme().text, TextAlign::Center));
-        let detail = (0..DETAIL_LINES)
-            .map(|_| router.add(None, label("", 15.0, theme().muted, TextAlign::Center)))
-            .collect();
         let zoom = router.add(None, label("", 18.0, theme().text, TextAlign::Right));
         let paste_link = router.add(None, button(copy::PAIRING_PASTE_LINK.text, theme().back));
         let open_settings = router.add(
             None,
             button(copy::PAIRING_OPEN_SETTINGS.text, theme().message),
         );
+        let mut modal = Router::new();
+        let modal_title = modal.add(
+            None,
+            label(
+                copy::PAIRING_CONFIRM_TITLE.text,
+                MODAL_TITLE_PT,
+                theme().text,
+                TextAlign::Left,
+            ),
+        );
+        let modal_details = modal.add(None, button(copy::PAIRING_DETAILS.text, theme().back));
+        let modal_cancel = modal.add(None, button(copy::CANCEL.text, theme().back));
+        for id in [modal_title, modal_details, modal_cancel] {
+            modal.set_flags(id, NodeFlags::HIDDEN, true);
+        }
         Self {
             router,
             title,
             back,
             status,
-            code,
+            code: Vec::new(),
             field,
             pair,
             cancel,
             details,
+            done,
             prompt,
-            detail,
+            detail: None,
             zoom,
             paste_link,
             open_settings,
+            modal,
+            modal_title,
+            modal_lines: Vec::new(),
+            modal_details,
+            modal_cancel,
+            modal_draw: None,
             camera: None,
+            faces: None,
             hits: Vec::new(),
             shown: None,
             dirty: true,
         }
+    }
+
+    /// The faces the pairing area's Markdown is drawn in.
+    pub fn with_faces(mut self, faces: Option<Arc<Faces>>) -> Self {
+        self.faces = faces;
+        self.shown = None;
+        self
     }
 
     /// The control at `(x, y)`, in surface pixels, if any.
@@ -526,6 +634,19 @@ impl Screen {
             .iter()
             .find(|(_, rect)| rect.contains([x, y]))
             .map(|&(hit, _)| hit)
+    }
+
+    /// `line` as Markdown, `width` wide at the layout's scale, at `(x, 0)`.
+    fn markdown(&self, line: &Line, x: f32, width: f32, s: f32) -> MarkdownView {
+        MarkdownView::new(
+            &line.text,
+            x,
+            0.0,
+            width,
+            line.size * s,
+            line.color,
+            self.faces.clone(),
+        )
     }
 
     /// Sets what the screen shows; nodes change only if it differs.
@@ -584,8 +705,7 @@ impl Screen {
                     .push((Hit::Back, Rect::new(0.0, layout.top, back_w + pad, h)));
             }
         }
-        // The camera's window, unless a pairing waits (its six words are
-        // today's quiet screen).
+        // The area, unless a pairing waits (its modal is over the window).
         let camera = view.camera.clone().filter(|_| !view.waiting);
         // The title's band over the camera's image, to just below it.
         let title_bottom = y + 8.0 * s;
@@ -610,9 +730,9 @@ impl Screen {
             );
         }
 
-        // The bottom: the field and Pair, or Details and Cancel while a
-        // pairing waits, or with the camera, Paste a link (and Open
-        // Settings, and Cancel in the add mode).
+        // The bottom: the field and Pair, or with the area its row:
+        // Paste a link (and Open Settings, and Cancel in the add mode),
+        // Cancel while a scanned code is paired, or Details and Done.
         let bottom = layout.h - layout.bottom - 24.0 * s;
         let row_h = Layout::ROW_H * s;
         let row_y = bottom - row_h;
@@ -641,23 +761,41 @@ impl Screen {
             edit.rect = field_rect;
             edit.state.set_active(view.field_focused && !view.waiting);
         }
-        // The field and Pair: today's screen, or the camera's window after
-        // Paste a link.
-        let field_shown = !view.waiting && camera.as_ref().is_none_or(|c| c.paste);
+        // The field and Pair: the paste screen, or the camera's window
+        // after Paste a link.
+        let field_shown = !view.waiting
+            && camera
+                .as_ref()
+                .is_none_or(|c| c.paste && c.row == Row::Scan);
         self.router
             .set_flags(self.field, NodeFlags::HIDDEN, !field_shown);
         self.place_button(self.pair, pair_rect, s, field_shown);
-        // The camera's row: its buttons side by side.
+        if field_shown {
+            self.hits.push((Hit::Field, field_rect));
+            self.hits.push((Hit::Pair, pair_rect));
+        }
+        // The area's row: its buttons side by side.
         let mut row: Vec<(Hit, NodeId)> = Vec::new();
-        if let Some(c) = camera.as_ref().filter(|c| !c.paste) {
-            row.push((Hit::PasteLink, self.paste_link));
-            if c.settings {
-                row.push((Hit::OpenSettings, self.open_settings));
-            }
-            if view.adding {
-                row.push((Hit::Cancel, self.cancel));
+        if let Some(c) = camera.as_ref() {
+            match c.row {
+                Row::Scan if !c.paste => {
+                    row.push((Hit::PasteLink, self.paste_link));
+                    if c.settings {
+                        row.push((Hit::OpenSettings, self.open_settings));
+                    }
+                    if view.adding {
+                        row.push((Hit::Cancel, self.cancel));
+                    }
+                }
+                Row::Scan => {}
+                Row::Cancel => row.push((Hit::Cancel, self.cancel)),
+                Row::Done => {
+                    row.push((Hit::Details, self.details));
+                    row.push((Hit::Done, self.done));
+                }
             }
         }
+        set_details_label(&mut self.router, self.details, view.details);
         let n = row.len().max(1) as f32;
         let each = (layout.w - 2.0 * pad - 12.0 * s * (n - 1.0)) / n;
         for (i, &(hit, id)) in row.iter().enumerate() {
@@ -665,71 +803,125 @@ impl Screen {
             self.place_button(id, rect, s, true);
             self.hits.push((hit, rect));
         }
-        for id in [self.paste_link, self.open_settings] {
+        for id in [
+            self.paste_link,
+            self.open_settings,
+            self.cancel,
+            self.details,
+            self.done,
+        ] {
             if !row.iter().any(|&(_, r)| r == id) {
                 self.router.set_flags(id, NodeFlags::HIDDEN, true);
             }
         }
-        let half = (layout.w - 2.0 * pad - 12.0 * s) / 2.0;
-        let details_rect = Rect::new(pad, row_y, half, row_h);
-        let cancel_rect = Rect::new(pad + half + 12.0 * s, row_y, half, row_h);
-        {
-            let label = if view.details {
-                copy::PAIRING_DETAILS_HIDE.text
-            } else {
-                copy::PAIRING_DETAILS.text
-            };
-            let button = self
-                .router
-                .get_mut::<Button>(self.details)
-                .expect("the details");
-            button.text = label.to_string();
-        }
-        self.place_button(self.details, details_rect, s, view.waiting);
-        let cancel_in_row = row.iter().any(|&(hit, _)| hit == Hit::Cancel);
-        if !cancel_in_row {
-            self.place_button(self.cancel, cancel_rect, s, view.waiting);
-        }
-        if view.waiting {
-            self.hits.push((Hit::Details, details_rect));
-            self.hits.push((Hit::Cancel, cancel_rect));
-        } else if field_shown {
-            self.hits.push((Hit::Field, field_rect));
-            self.hits.push((Hit::Pair, pair_rect));
-        }
 
-        // Above them, the pairing area, as many lines as fit.
-        let height = |line: &Line| (line.gap + line.size * 1.35) * s;
-        let code_lines = &view.code[..view.code.len().min(CODE_LINES)];
-        let code_h: f32 = code_lines.iter().map(height).sum();
+        // Above them, the pairing area, as many lines as fit; under the
+        // modal, nothing.
+        for id in std::mem::take(&mut self.code) {
+            self.router.remove(id);
+        }
+        let width = layout.w - 2.0 * pad;
+        let mut views: Vec<(f32, MarkdownView)> = Vec::new();
+        if !view.waiting {
+            for line in &view.code {
+                let md = self.markdown(line, pad, width, s);
+                views.push((line.gap * s, md));
+            }
+        }
+        let code_h: f32 = views.iter().map(|(gap, md)| gap + md.height()).sum();
         let code_top = (row_y - 12.0 * s - code_h).max(y);
         let mut code_y = code_top;
-        let mut code_lines = code_lines.iter();
-        for &id in &self.code {
-            match code_lines.next() {
-                Some(line) if code_y + height(line) <= row_y => {
-                    code_y += line.gap * s;
-                    let line_style = (line.size, line.color);
-                    place(
-                        &mut self.router,
-                        &mut code_y,
-                        id,
-                        Some(&line.text),
-                        line_style,
-                        pad,
-                    );
-                }
-                _ => self
-                    .router
-                    .get_mut::<Label>(id)
-                    .expect("a label node")
-                    .set_text(""),
+        for (gap, mut md) in views {
+            if code_y + gap + md.height() > row_y {
+                break;
             }
+            code_y += gap;
+            md.move_to(pad, code_y);
+            code_y += md.height();
+            self.code.push(self.router.add(None, md));
         }
 
         self.lay_out_camera(layout, camera.as_ref(), code_top, title_bottom);
+        self.lay_out_modal(layout, &view);
         self.shown = Some((view, layout));
         self.dirty = true;
+    }
+
+    /// The pairing modal while a pairing waits: its title, its lines
+    /// (`view.code`) and Details and Cancel, centred over the screen. Its
+    /// controls are then the only ones.
+    fn lay_out_modal(&mut self, layout: Layout, view: &View) {
+        for id in std::mem::take(&mut self.modal_lines) {
+            self.modal.remove(id);
+        }
+        let open = view.waiting;
+        for id in [self.modal_title, self.modal_details, self.modal_cancel] {
+            self.modal.set_flags(id, NodeFlags::HIDDEN, !open);
+        }
+        if !open {
+            self.modal_draw = None;
+            return;
+        }
+        self.hits.clear();
+        let s = layout.scale;
+        let (w, inner) = modal_widths(&layout);
+        let pad = MODAL_PAD * s;
+        let gap = 12.0 * s;
+        let button_h = Layout::ROW_H * s;
+        let title_h = MODAL_TITLE_PT * s * 1.35;
+        let room = layout.h - layout.top - layout.bottom - 2.0 * MODAL_MARGIN * s;
+        let fixed = pad + title_h + gap + 2.0 * gap + button_h + pad;
+        // The lines that fit, in order.
+        let mut lines: Vec<(f32, MarkdownView)> = Vec::new();
+        let mut lines_h = 0.0;
+        for line in &view.code {
+            let md = self.markdown(line, 0.0, inner, s);
+            let h = line.gap * s + md.height();
+            if fixed + lines_h + h > room {
+                break;
+            }
+            lines_h += h;
+            lines.push((line.gap * s, md));
+        }
+        let h = fixed + lines_h;
+        let viewport_mid = layout.top + (layout.h - layout.top - layout.bottom) / 2.0;
+        let card = Rect::new((layout.w - w) / 2.0, viewport_mid - h / 2.0, w, h);
+        let x = card.x + pad;
+        let mut y = card.y + pad;
+        {
+            let title = self
+                .modal
+                .get_mut::<Label>(self.modal_title)
+                .expect("the modal's title");
+            title.font_size = Some(MODAL_TITLE_PT * s);
+            title.color = Some(theme().text);
+            title.rect = Rect::new(x, y, inner, MODAL_TITLE_PT * s * 1.3);
+        }
+        y += title_h + gap;
+        for (line_gap, mut md) in lines {
+            y += line_gap;
+            md.move_to(x, y);
+            y += md.height();
+            self.modal_lines.push(self.modal.add(None, md));
+        }
+        let by = card.y + h - pad - button_h;
+        let bw = (inner - gap) / 2.0;
+        let details = Rect::new(x, by, bw, button_h);
+        let cancel = Rect::new(x + bw + gap, by, bw, button_h);
+        set_details_label(&mut self.modal, self.modal_details, view.details);
+        for (id, rect) in [(self.modal_details, details), (self.modal_cancel, cancel)] {
+            let button = self.modal.get_mut::<Button>(id).expect("a button node");
+            button.rect = rect;
+            button.font_size = Some(18.0 * s);
+            button.corner_radius = Some(10.0 * s);
+        }
+        self.hits.push((Hit::Details, details));
+        self.hits.push((Hit::Cancel, cancel));
+        self.modal_draw = Some(ModalDraw {
+            screen: Rect::new(0.0, 0.0, layout.w, layout.h),
+            card,
+            radius: MODAL_RADIUS * s,
+        });
     }
 
     /// The camera's area, from the top safe area to the line under it,
@@ -746,7 +938,7 @@ impl Screen {
         let s = layout.scale;
         let pad = Layout::PAD * s;
         let mut prompt = None;
-        let mut detail: Vec<String> = Vec::new();
+        let mut detail: Option<(String, f32, f32)> = None;
         let mut zoom = None;
         self.camera = camera.map(|c| {
             let top = layout.top;
@@ -755,11 +947,19 @@ impl Screen {
             let side = RETICLE_SHARE * area.w.min(area.h - (title_bottom - top));
             let (cx, cy) = (area.w / 2.0, (title_bottom + bottom) / 2.0);
             let reticle = Rect::new(cx - side / 2.0, cy - side / 2.0, side, side);
-            self.hits.push((Hit::Area, area));
+            if c.glyph == Glyph::Camera {
+                self.hits.push((Hit::Area, area));
+            }
             let glyph = c.prompt.as_ref().map(|text| {
                 prompt = Some((text.clone(), Rect::new(0.0, cy, layout.w, 20.0 * s * 1.3)));
                 if let Some(d) = &c.detail {
-                    detail = wrap(d, layout.columns_in(side, 15.0));
+                    // A finished pairing's lines may be wider than the
+                    // reticle: the screen's width, less its margins.
+                    let width = match c.glyph {
+                        Glyph::Camera => side,
+                        Glyph::Check => layout.w - 2.0 * pad,
+                    };
+                    detail = Some((d.clone(), width, cy + 34.0 * s));
                 }
                 [cx, cy - 36.0 * s]
             });
@@ -769,7 +969,8 @@ impl Screen {
                 title_band: Rect::new(0.0, top, layout.w, title_bottom - top),
                 reticle,
                 live: c.live,
-                glyph,
+                marks: c.glyph == Glyph::Camera,
+                glyph: glyph.map(|at| (c.glyph, at)),
                 scale: s,
             }
         });
@@ -783,14 +984,21 @@ impl Screen {
             Some((text, rect)) => label(&mut self.router, self.prompt, &text, rect, 20.0),
             None => label(&mut self.router, self.prompt, "", Rect::default(), 20.0),
         }
-        let mut detail_y = self
-            .camera
-            .map_or(0.0, |c| c.reticle.y + c.reticle.h / 2.0 + 34.0 * s);
-        for (i, &id) in self.detail.clone().iter().enumerate() {
-            let text = detail.get(i).map_or("", String::as_str);
-            let rect = Rect::new(pad, detail_y, layout.w - 2.0 * pad, 15.0 * s * 1.3);
-            label(&mut self.router, id, text, rect, 15.0);
-            detail_y += 15.0 * s * 1.35;
+        if let Some(id) = self.detail.take() {
+            self.router.remove(id);
+        }
+        if let Some((text, width, y)) = detail {
+            let mut md = MarkdownView::new(
+                &text,
+                (layout.w - width) / 2.0,
+                y,
+                width,
+                15.0 * s,
+                theme().muted,
+                self.faces.clone(),
+            );
+            md.center();
+            self.detail = Some(self.router.add(None, md));
         }
         let zoom_rect = Rect::new(
             layout.w - pad - 120.0 * s,
@@ -810,7 +1018,7 @@ impl Screen {
     /// The camera's area in surface pixels, while the camera's window
     /// shows: where the viewfinder is drawn.
     pub fn camera_area(&self) -> Option<Rect> {
-        self.camera.map(|c| c.area)
+        self.camera.filter(|c| c.marks).map(|c| c.area)
     }
 
     /// The controls shown, as last laid out, with where they are.
@@ -819,36 +1027,31 @@ impl Screen {
         &self.hits
     }
 
-    /// Every text shown, labels and buttons, in node order (tests).
+    /// Every text shown, labels, Markdown and buttons, the window's then
+    /// the modal's, in node order (tests).
     #[cfg(test)]
     pub(crate) fn shown_texts(&self) -> Vec<String> {
         let mut ids = vec![self.title, self.back];
         ids.extend(self.status);
         ids.extend(&self.code);
         ids.push(self.prompt);
-        ids.extend(&self.detail);
+        ids.extend(self.detail);
         ids.push(self.zoom);
         ids.extend([
             self.field,
             self.pair,
             self.cancel,
             self.details,
+            self.done,
             self.paste_link,
             self.open_settings,
         ]);
-        ids.into_iter()
-            .filter(|&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
-            .filter_map(|id| {
-                let text = if let Some(l) = self.router.get::<Label>(id) {
-                    l.text().to_string()
-                } else if let Some(e) = self.router.get::<Edit>(id) {
-                    e.text().to_string()
-                } else {
-                    self.router.get::<Button>(id)?.text.clone()
-                };
-                (!text.is_empty()).then_some(text)
-            })
-            .collect()
+        let mut out = texts_of(&self.router, &ids);
+        let mut modal = vec![self.modal_title];
+        modal.extend(&self.modal_lines);
+        modal.extend([self.modal_details, self.modal_cancel]);
+        out.extend(texts_of(&self.modal, &modal));
+        out
     }
 
     fn place_button(&mut self, id: NodeId, rect: Rect, s: f32, visible: bool) {
@@ -859,14 +1062,15 @@ impl Screen {
         self.router.set_flags(id, NodeFlags::HIDDEN, !visible);
     }
 
-    /// Marks the screen to be drawn again, as after another screen drew
-    /// over the list.
     /// The theme changed: the nodes, which hold their colours, are made
     /// again, and laid out at the next [`Screen::set`].
     pub fn restyle(&mut self) {
-        *self = Self::new();
+        let faces = self.faces.take();
+        *self = Self::new().with_faces(faces);
     }
 
+    /// Marks the screen to be drawn again, as after another screen drew
+    /// over the list.
     pub fn invalidate(&mut self) {
         self.dirty = true;
     }
@@ -882,15 +1086,51 @@ impl Screen {
             draw_camera(list, &c);
         }
         self.router.render(list, ctx);
+        if let Some(m) = self.modal_draw {
+            fill(list, m.screen, MODAL_DIM, 0.0);
+            fill(list, m.card, theme().card, m.radius);
+            self.modal.render(list, ctx);
+        }
         self.dirty = false;
         true
     }
 }
 
-/// What the camera's window draws under its labels and buttons: the
-/// placeholder's band and camera glyph (no viewfinder yet), the corner
-/// marks, and the title's band over the image. The viewfinder itself is
-/// drawn before the list, in its own pass (`App::render`).
+/// The Details button's label: "Hide details" while they are open.
+fn set_details_label(router: &mut Router, id: NodeId, open: bool) {
+    let label = if open {
+        copy::PAIRING_DETAILS_HIDE.text
+    } else {
+        copy::PAIRING_DETAILS.text
+    };
+    router.get_mut::<Button>(id).expect("the details").text = label.to_string();
+}
+
+/// The texts of the nodes `ids` of `router` that are shown (tests).
+#[cfg(test)]
+fn texts_of(router: &Router, ids: &[NodeId]) -> Vec<String> {
+    ids.iter()
+        .filter(|&&id| !router.flags(id).contains(NodeFlags::HIDDEN))
+        .filter_map(|&id| {
+            let text = if let Some(l) = router.get::<Label>(id) {
+                l.text().to_string()
+            } else if let Some(e) = router.get::<Edit>(id) {
+                e.text().to_string()
+            } else if let Some(md) = router.get::<MarkdownView>(id) {
+                // Its wrapped lines as one text.
+                md.text().replace('\n', " ")
+            } else {
+                router.get::<Button>(id)?.text.clone()
+            };
+            (!text.is_empty()).then_some(text)
+        })
+        .collect()
+}
+
+/// What the area draws under its labels and buttons: the placeholder's
+/// band and its glyph (no viewfinder yet), the corner marks, and the
+/// title's band over the image. The viewfinder itself is drawn before the
+/// list, in its own pass (`App::render`).
 fn draw_camera(list: &mut DrawList, c: &CameraDraw) {
     let s = c.scale;
     if !c.live {
@@ -905,48 +1145,68 @@ fn draw_camera(list: &mut DrawList, c: &CameraDraw) {
     let color = with_alpha(theme().text, alpha * theme().text[3]);
     let (t, l) = (MARK_PT * s, MARK_LEN_PT * s);
     let r = c.reticle;
-    for (x, y, dx, dy) in [
+    let corners = [
         (r.x, r.y, 1.0, 1.0),
         (r.x + r.w, r.y, -1.0, 1.0),
         (r.x, r.y + r.h, 1.0, -1.0),
         (r.x + r.w, r.y + r.h, -1.0, -1.0),
-    ] {
+    ];
+    for (x, y, dx, dy) in corners.into_iter().filter(|_| c.marks) {
         // Each arm from the corner inwards.
         let across = Rect::new(x.min(x + dx * l), y.min(y + dy * t), l, t);
         let down = Rect::new(x.min(x + dx * t), y.min(y + dy * l), t, l);
         fill(list, across, color, 0.0);
         fill(list, down, color, 0.0);
     }
-    // The camera glyph: a body, its top, and a lens, from the same boxes.
-    if let Some([cx, cy]) = c.glyph {
-        let glyph = with_alpha(theme().text, MARK_ALPHA_LIVE * theme().text[3]);
-        let (w, h) = (56.0 * s, 38.0 * s);
-        fill(
-            list,
-            Rect::new(cx - 12.0 * s, cy - h / 2.0 - 6.0 * s, 24.0 * s, 8.0 * s),
-            glyph,
-            2.0 * s,
-        );
-        fill(
-            list,
-            Rect::new(cx - w / 2.0, cy - h / 2.0, w, h),
-            glyph,
-            6.0 * s,
-        );
-        let lens = 22.0 * s;
-        fill(
-            list,
-            Rect::new(cx - lens / 2.0, cy - lens / 2.0, lens, lens),
-            theme().band,
-            lens / 2.0,
-        );
-        let inner = 12.0 * s;
-        fill(
-            list,
-            Rect::new(cx - inner / 2.0, cy - inner / 2.0, inner, inner),
-            glyph,
-            inner / 2.0,
-        );
+    let glyph = with_alpha(theme().text, MARK_ALPHA_LIVE * theme().text[3]);
+    match c.glyph {
+        // The camera glyph: a body, its top, and a lens, from the same
+        // boxes.
+        Some((Glyph::Camera, [cx, cy])) => {
+            let (w, h) = (56.0 * s, 38.0 * s);
+            fill(
+                list,
+                Rect::new(cx - 12.0 * s, cy - h / 2.0 - 6.0 * s, 24.0 * s, 8.0 * s),
+                glyph,
+                2.0 * s,
+            );
+            fill(
+                list,
+                Rect::new(cx - w / 2.0, cy - h / 2.0, w, h),
+                glyph,
+                6.0 * s,
+            );
+            let lens = 22.0 * s;
+            fill(
+                list,
+                Rect::new(cx - lens / 2.0, cy - lens / 2.0, lens, lens),
+                theme().band,
+                lens / 2.0,
+            );
+            let inner = 12.0 * s;
+            fill(
+                list,
+                Rect::new(cx - inner / 2.0, cy - inner / 2.0, inner, inner),
+                glyph,
+                inner / 2.0,
+            );
+        }
+        // The check: a disc, and two strokes through it in the band's
+        // colour.
+        Some((Glyph::Check, [cx, cy])) => {
+            let d = CHECK_PT * s;
+            fill(
+                list,
+                Rect::new(cx - d / 2.0, cy - d / 2.0, d, d),
+                glyph,
+                d / 2.0,
+            );
+            let at = |x: f32, y: f32| [cx + x * d, cy + y * d];
+            let thick = 0.09 * d;
+            list.push_line(at(-0.24, 0.0), at(-0.07, 0.17), thick, theme().band);
+            list.push_line(at(-0.07, 0.17), at(0.25, -0.16), thick, theme().band);
+        }
+        None => {}
     }
     if c.live {
         fill(
@@ -1031,51 +1291,44 @@ mod tests {
     }
 
     #[test]
-    fn the_pairing_row_is_cancel_while_a_pairing_waits() {
+    fn a_waiting_pairing_is_a_modal_with_details_and_cancel() {
         let mut screen = Screen::new();
         screen.set(PHONE, View::default());
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Field));
         assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Cancel));
+        assert!(screen.modal_draw.is_none());
         screen.set(
             PHONE,
             View {
                 waiting: true,
+                adding: true,
                 code: vec![line("flankrkey1abc")],
                 ..View::default()
             },
         );
-        assert!(
-            !screen
-                .hits
-                .iter()
-                .any(|(h, _)| matches!(h, Hit::Pair | Hit::Field))
-        );
-        let cancel = screen
-            .hits
-            .iter()
-            .find(|(h, _)| *h == Hit::Cancel)
-            .expect("a Cancel")
-            .1;
+        // The modal's Details and Cancel are the only controls: not the
+        // field, Pair or the add mode's "<" under it.
+        let hits: Vec<Hit> = screen.hits.iter().map(|&(h, _)| h).collect();
+        assert_eq!(hits, [Hit::Details, Hit::Cancel]);
+        let m = screen.modal_draw.expect("the modal");
+        let cancel = screen.hits[1].1;
+        assert!(m.card.contains([cancel.x + 1.0, cancel.y + 1.0]), "in it");
         assert_eq!(
             screen.hit(cancel.x + 1.0, cancel.y + 1.0),
             Some(Hit::Cancel)
         );
-        let label = screen.router.get::<Button>(screen.cancel).unwrap();
-        assert_eq!(label.text, "Cancel");
-        // Details beside it, which reads "Hide details" once open.
-        let details = screen
-            .hits
-            .iter()
-            .find(|(h, _)| *h == Hit::Details)
-            .expect("a Details")
-            .1;
-        assert_eq!(
-            screen.hit(details.x + 1.0, details.y + 1.0),
-            Some(Hit::Details)
+        // A tap off the card is nothing: a stray touch keeps the pairing.
+        assert_eq!(screen.hit(m.card.x - 2.0, m.card.y - 2.0), None);
+        let texts = screen.shown_texts();
+        assert!(
+            texts.contains(&"Confirm on your Mac".to_string()),
+            "{texts:?}"
         );
+        assert!(texts.contains(&"flankrkey1abc".to_string()), "{texts:?}");
+        let details = screen.hits[0].1;
         assert!(details.x + details.w < cancel.x, "side by side");
-        let text = |s: &Screen| s.router.get::<Button>(s.details).unwrap().text.clone();
+        let text = |s: &Screen| s.modal.get::<Button>(s.modal_details).unwrap().text.clone();
         assert_eq!(text(&screen), "Details");
         screen.set(
             PHONE,
@@ -1087,6 +1340,64 @@ mod tests {
             },
         );
         assert_eq!(text(&screen), "Hide details");
+        // It closes at once.
+        screen.set(PHONE, View::default());
+        assert!(screen.modal_draw.is_none());
+        assert!(
+            !screen
+                .shown_texts()
+                .contains(&"Confirm on your Mac".to_string())
+        );
+    }
+
+    #[test]
+    fn a_finished_pairing_shows_a_check_details_and_done() {
+        let mut screen = Screen::new();
+        let view = |details: bool| View {
+            adding: true,
+            details,
+            code: if details {
+                vec![line("m4 at m4.ts.net:7347")]
+            } else {
+                Vec::new()
+            },
+            camera: Some(CameraView {
+                glyph: Glyph::Check,
+                prompt: Some("Paired with m4".into()),
+                detail: Some("m4.ts.net:7347 · fingerprint 3f9a 12c4".into()),
+                row: Row::Done,
+                ..CameraView::default()
+            }),
+            ..View::default()
+        };
+        screen.set(PHONE, view(false));
+        let hits: Vec<Hit> = screen.hits.iter().map(|&(h, _)| h).collect();
+        assert_eq!(hits, [Hit::Back, Hit::Details, Hit::Done], "no Area");
+        let texts = screen.shown_texts();
+        for t in ["Paired with m4", "Done", "Details"] {
+            assert!(texts.contains(&t.to_string()), "{t} in {texts:?}");
+        }
+        assert!(texts.iter().any(|t| t.contains("fingerprint 3f9a 12c4")));
+        assert!(screen.camera_area().is_none(), "no viewfinder");
+        let c = screen.camera.unwrap();
+        assert!(!c.marks && matches!(c.glyph, Some((Glyph::Check, _))));
+        // The check is drawn: a disc and two strokes.
+        let mut list = DrawList::new();
+        screen.draw(&mut list, &DrawContext::default());
+        let lines = list
+            .instances
+            .iter()
+            .filter(|i| matches!(i.kind, libmsdf::drawlist::SdfKind::Line { .. }))
+            .count();
+        assert_eq!(lines, 2);
+        screen.set(PHONE, view(true));
+        assert!(
+            screen
+                .shown_texts()
+                .contains(&"m4 at m4.ts.net:7347".to_string())
+        );
+        let b = screen.router.get::<Button>(screen.details).unwrap();
+        assert_eq!(b.text, "Hide details");
     }
 
     #[test]
@@ -1113,7 +1424,7 @@ mod tests {
         let mut p = Pairing::default();
         p.open_add();
         let view = |p: &Pairing| View {
-            code: p.lines(&PHONE, None, now),
+            code: p.lines(&modal_layout(&PHONE), None, now),
             waiting: p.waiting(),
             details: p.details,
             adding: p.adding,
@@ -1125,8 +1436,8 @@ mod tests {
         assert_eq!(screen.hit(back.x + 1.0, back.y + 1.0), Some(Hit::Back));
         assert!(back.y >= PHONE.top && back.x == 0.0, "top left");
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
-        // The daemon holds the request: its words show, large, and Details
-        // and Cancel replace the field.
+        // The daemon holds the request: its words show, large, in the
+        // modal, with Details and Cancel.
         p.show(Waiting::new(
             "m4".into(),
             "m4.ts.net:7347".into(),
@@ -1141,41 +1452,48 @@ mod tests {
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Details));
         assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
         let shown = |s: &Screen| -> Vec<(String, f32)> {
-            s.code
+            s.modal_lines
                 .iter()
                 .map(|&id| {
-                    let l = s.router.get::<Label>(id).unwrap();
-                    (l.text().to_string(), l.font_size.unwrap_or(0.0))
+                    let md = s.modal.get::<MarkdownView>(id).unwrap();
+                    (md.text(), md.px())
                 })
-                .filter(|(t, _)| !t.is_empty())
                 .collect()
         };
         let quiet = shown(&screen);
         let words: Vec<&str> = quiet
             .iter()
-            .filter(|(_, size)| *size == WORDS_PT * PHONE.scale)
+            .filter(|(_, px)| *px == WORDS_PT * PHONE.scale)
             .map(|(t, _)| t.as_str())
             .collect();
         assert_eq!(words, ["abandon ability able", "about above absent"]);
+        let all = quiet
+            .iter()
+            .map(|(t, _)| t.replace('\n', " "))
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(
-            quiet
-                .iter()
-                .any(|(t, _)| t.starts_with("If flankr pair on m4")),
+            all.contains("If flankr pair on m4 shows these six words"),
             "{quiet:?}"
         );
-        assert!(!quiet.iter().any(|(t, _)| t.contains("zoo")), "{quiet:?}");
-        // Details: the fingerprint and the address, all of it drawn.
+        assert!(!all.contains("zoo"), "{quiet:?}");
+        // Inside the card.
+        let card = screen.modal_draw.unwrap().card;
+        for &id in &screen.modal_lines {
+            let r = screen.modal.get::<MarkdownView>(id).unwrap().rect();
+            assert!(r.x >= card.x && r.x + r.w <= card.x + card.w, "{r:?}");
+        }
+        // Details: the hostname and the fingerprint, all of it drawn.
         p.toggle_details();
         screen.set(PHONE, view(&p));
-        let details = shown(&screen);
-        assert!(details.iter().any(|(t, _)| t == "Daemon fingerprint"));
-        assert!(details.iter().any(|(t, _)| t == "zoo zone youth"));
-        assert!(details.iter().any(|(t, _)| t == "m4 at m4.ts.net:7347"));
+        let details: Vec<String> = shown(&screen).into_iter().map(|(t, _)| t).collect();
         assert!(
-            details
-                .iter()
-                .any(|(t, _)| t == "The link expires in 60 s.")
+            details.iter().any(|t| t == "Daemon fingerprint"),
+            "{details:?}"
         );
+        assert!(details.iter().any(|t| t == "zoo zone youth"));
+        assert!(details.iter().any(|t| t == "m4 at m4.ts.net:7347"));
+        assert!(details.iter().any(|t| t == "The link expires in 60 s."));
     }
 
     fn card(state: CardState) -> Card {

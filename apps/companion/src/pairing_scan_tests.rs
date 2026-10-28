@@ -22,9 +22,12 @@ use super::App;
 use super::probe::{self, Probe};
 use crate::ui::Hit;
 
-/// Runs `script` on a fresh app with `args`; `None` without a GPU.
+/// Runs `script` on a fresh app with `args`; `None` without a GPU. Its
+/// keys are files in a directory of its own (`--keys`), so the host's key
+/// store, and any remote paired there, is neither read nor changed.
 fn run(script: &str, args: &[&str]) -> Option<Probe> {
     let dir = tempfile::tempdir().unwrap();
+    let keys = dir.path().join("keys");
     let run = ScriptRun {
         spec: libmorph::libdevice::GALAXY_S24,
         out: OutDir::Exact(dir.path().join("out")),
@@ -32,6 +35,7 @@ fn run(script: &str, args: &[&str]) -> Option<Probe> {
         fallback_adapter: false,
         args: std::iter::once("companion")
             .chain(args.iter().copied())
+            .chain(["--keys", keys.to_str().unwrap()])
             .map(String::from)
             .collect(),
     };
@@ -89,16 +93,32 @@ fn the_window_waits_for_a_tap_then_ignores_other_codes() {
     assert!(!p.shows("Tap to scan"));
 }
 
+/// What the test daemon does with a pairing request once its words are
+/// out: holds it until the phone closes it (the owner has not typed yes),
+/// adds the phone (yes), or refuses it (no).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Answer {
+    Hold,
+    Add,
+    Refuse,
+}
+
 /// The test daemon in pair mode: a `flankr pair` run on 127.0.0.1, as
-/// flankr-companion's tests/link.rs builds one. It holds each pairing
-/// request and hands it to the test with the daemon's pairing words.
+/// flankr-companion's tests/link.rs builds one. It hands each pairing
+/// request's words to the test, then answers it as `answer` says.
 struct Daemon {
     url: String,
+    /// `127.0.0.1:<port>`.
+    addr: String,
     held: mpsc::Receiver<String>,
 }
 
 impl Daemon {
     fn start() -> Daemon {
+        Daemon::answering(Answer::Hold)
+    }
+
+    fn answering(answer: Answer) -> Daemon {
         let key = link::generate_keypair().unwrap();
         let offer = link::generate_offer().unwrap();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -106,7 +126,7 @@ impl Daemon {
         let addr = listener.local_addr().unwrap().to_string();
         let url = PairingPayload {
             server_key: key.public,
-            addresses: vec![addr],
+            addresses: vec![addr.clone()],
             offer: Some(offer),
         }
         .url()
@@ -121,11 +141,11 @@ impl Daemon {
                 let listener = tokio::net::TcpListener::from_std(listener).unwrap();
                 while let Ok((stream, _)) = listener.accept().await {
                     let (key, held) = (key.clone(), held_tx.clone());
-                    tokio::spawn(serve(stream, key, offer, held));
+                    tokio::spawn(serve(stream, key, offer, held, answer));
                 }
             });
         });
-        Daemon { url, held }
+        Daemon { url, addr, held }
     }
 }
 
@@ -137,6 +157,7 @@ async fn serve(
     key: StaticKeypair,
     offer: [u8; OFFER_LEN],
     held: mpsc::Sender<String>,
+    answer: Answer,
 ) {
     let Ok(Incoming::Pair(pair)) = link::accept_incoming(stream, &key, |_| false).await else {
         return;
@@ -155,13 +176,32 @@ async fn serve(
     };
     let words = link::pairing_words_text(&key.public, &offer, &request.device_key);
     let _ = held.send(words);
-    // Held, as the owner has not typed yes; until the phone closes it.
+    let result = match answer {
+        // Held, as the owner has not typed yes; until the phone closes it.
+        Answer::Hold => {
+            let _ = stream.recv_message().await;
+            PairResult::Refused
+        }
+        Answer::Add => PairResult::Added,
+        Answer::Refuse => PairResult::Refused,
+    };
+    let _ = link::send_pair_result(&mut stream, result).await;
+    // Kept open until the phone has read the result.
     let _ = stream.recv_message().await;
-    let _ = link::send_pair_result(&mut stream, PairResult::Refused).await;
+}
+
+/// Scans the daemon's code: a tap on the area, the code, and `frames`.
+fn scan(first: &Probe, daemon: &Daemon, frames: u32) -> String {
+    format!(
+        "frames 2\n{}frames 1\ncamera-qr {}\nframes {frames}\n",
+        tap(first.at(Hit::Area)),
+        daemon.url
+    )
 }
 
 /// Run 2: a real pairing URL from a daemon in pair mode, scanned: the scan
-/// stops, and the window shows the six words the daemon has.
+/// stops, the window says the code was read and where it connects, then
+/// the six words the daemon has show in a modal.
 #[test]
 fn a_scanned_pairing_url_stops_the_scan_and_shows_the_daemons_words() {
     let Some(first) = opened() else { return };
@@ -196,6 +236,122 @@ fn a_scanned_pairing_url_stops_the_scan_and_shows_the_daemons_words() {
     assert!(p.shows("Details") && p.shows("Cancel"));
     // The camera is not shown again during the pairing.
     assert!(!p.shows("Tap to scan") && !p.shows("Paste a link"));
+    // The words are in the modal, titled, with Details and Cancel only.
+    assert!(p.shows("Confirm on your Mac"), "{:?}", p.texts);
+    let hits: Vec<Hit> = p.hits.iter().map(|&(h, _)| h).collect();
+    assert_eq!(hits, [Hit::Details, Hit::Cancel]);
+
+    // Cancel in the modal: the pairing ends, and the window says so with
+    // Tap to scan.
+    let script = format!(
+        "frames 2\n{}frames 1\ncamera-qr {}\nframes 45\n{}frames 2\n",
+        tap(first.at(Hit::Area)),
+        daemon.url,
+        tap(p.at(Hit::Cancel))
+    );
+    let c = run(&script, &["--camera"]).unwrap();
+    assert!(
+        c.shows("Pairing cancelled: nothing was added."),
+        "{:?}",
+        c.texts
+    );
+    assert!(c.shows("Tap to scan") && !c.shows("Confirm on your Mac"));
+}
+
+/// A scanned code whose daemon has not answered yet (a port that takes
+/// the connection and says nothing): the camera stops and the window says
+/// the code was read and where it is connecting, with Cancel, which ends it.
+#[test]
+fn a_scanned_code_shows_read_and_connecting_until_the_daemon_answers() {
+    let Some(first) = opened() else { return };
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = PairingPayload {
+        server_key: link::generate_keypair().unwrap().public,
+        addresses: vec![silent.local_addr().unwrap().to_string()],
+        offer: Some(link::generate_offer().unwrap()),
+    }
+    .url()
+    .unwrap();
+    let script = format!(
+        "frames 2\n{}frames 1\ncamera-qr {url}\nframes 4\n",
+        tap(first.at(Hit::Area))
+    );
+    let p = run(&script, &["--camera"]).unwrap();
+    assert_eq!(p.state, "Idle", "the camera stopped");
+    assert!(p.shows("Code read"), "{:?}", p.texts);
+    assert!(p.shows("Connecting to 127.0.0.1\u{2026}"), "{:?}", p.texts);
+    assert!(!p.shows("pairing\u{2026}") && !p.shows("Tap to scan"));
+    let hits: Vec<Hit> = p.hits.iter().map(|&(h, _)| h).collect();
+    assert_eq!(hits, [Hit::Cancel], "no Tap to scan on the check");
+    let script = format!("{script}{}frames 2\n", tap(p.at(Hit::Cancel)));
+    let c = run(&script, &["--camera"]).unwrap();
+    assert!(
+        c.shows("Pairing cancelled: nothing was added."),
+        "{:?}",
+        c.texts
+    );
+    assert!(c.shows("Tap to scan"));
+    drop(silent);
+}
+
+/// The owner types yes: the modal closes, and the window says it is
+/// paired, with the address and the fingerprint, until Done, which goes on
+/// to the overview.
+#[test]
+fn a_confirmed_pairing_shows_paired_until_done() {
+    let Some(first) = opened() else { return };
+    let daemon = Daemon::answering(Answer::Add);
+    let p = run(&scan(&first, &daemon, 60), &["--camera"]).unwrap();
+    daemon
+        .held
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the daemon had a pairing request");
+    assert!(p.shows("Paired with 127.0.0.1"), "{:?}", p.texts);
+    let reached = format!("{} \u{b7} fingerprint ", daemon.addr);
+    assert!(p.shows(&reached), "{:?}", p.texts);
+    assert!(!p.shows("Confirm on your Mac"));
+    let hits: Vec<Hit> = p.hits.iter().map(|&(h, _)| h).collect();
+    assert_eq!(hits, [Hit::Details, Hit::Done], "no Tap to scan");
+    // Still there many frames later: it waits for Done.
+    let script = format!(
+        "{}{}frames 2\n",
+        scan(&first, &daemon, 60),
+        tap(p.at(Hit::Details))
+    );
+    let d = run(&script, &["--camera"]).unwrap();
+    assert!(d.shows("Paired with 127.0.0.1"), "{:?}", d.texts);
+    assert!(d.shows("Daemon fingerprint"), "{:?}", d.texts);
+    assert!(d.shows("BLAKE2s-256 fingerprint"), "{:?}", d.texts);
+    assert!(d.shows("Hide details"));
+    // Done: on to the overview.
+    let script = format!(
+        "{}{}frames 2\n",
+        scan(&first, &daemon, 60),
+        tap(p.at(Hit::Done))
+    );
+    let done = run(&script, &["--camera"]).unwrap();
+    assert!(
+        done.log.iter().any(|l| l == "pairing done, overview"),
+        "{:?}",
+        done.log
+    );
+}
+
+/// The owner types no: the modal closes and the window keeps the reason,
+/// with Tap to scan again.
+#[test]
+fn a_refused_pairing_keeps_the_window_with_its_reason() {
+    let Some(first) = opened() else { return };
+    let daemon = Daemon::answering(Answer::Refuse);
+    let p = run(&scan(&first, &daemon, 60), &["--camera"]).unwrap();
+    assert!(
+        p.shows("not confirmed on 127.0.0.1: nothing was added"),
+        "{:?}",
+        p.texts
+    );
+    assert!(p.shows("Tap to scan again"), "{:?}", p.texts);
+    assert!(!p.shows("Confirm on your Mac") && !p.shows("Paired with"));
+    assert!(p.hits.iter().any(|(h, _)| *h == Hit::Area));
 }
 
 /// Runs 3 and 4: refusals, with the reason, Open Settings only when

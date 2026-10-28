@@ -437,7 +437,7 @@ Details button.
 
 - title: Pair another remote
 - text: |
-    Scan the QR code shown by flankr pair.
+    Scan the QR code shown by **flankr pair**.
 
 `remote_add_paste` is `remote_add`'s text where there is no camera (the
 desktop and the web, plan 20261028_02, decision 21): the link is pasted.
@@ -445,7 +445,7 @@ desktop and the web, plan 20261028_02, decision 21): the link is pasted.
 # [Copy] remote_add_paste
 
 - text: |
-    Run flankr pair on the machine whose daemon you're adding and paste
+    Run **flankr pair** on the machine whose daemon you're adding and paste
     the pairing URL it prints below. flankr stays connected to the
     remote in use meanwhile.
 
@@ -453,7 +453,7 @@ desktop and the web, plan 20261028_02, decision 21): the link is pasted.
 
 - [abc] server: the daemon's name, from the pairing URL
 - text: |
-    If flankr pair on {{ [abc] server }} shows these six words, type yes
+    If **flankr pair** on {{ [abc] server }} shows these six words, type yes
     there.
 
 The device-code fallback (the 14:37 EDT amendment, item 2): the daemon
@@ -466,7 +466,7 @@ link from an older `flankr pair` has no offer, and so no words.
 - [abc] server: the daemon's name, from the pairing URL
 - text: |
     {{ [abc] server }} couldn't be asked directly: paste this phone's code
-    from Details into flankr pair there, then type yes if it shows these
+    from Details into **flankr pair** there, then type yes if it shows these
     words.
 
 # [Copy] pairing_fallback_no_words
@@ -474,13 +474,64 @@ link from an older `flankr pair` has no offer, and so no words.
 - [abc] server: the daemon's name, from the pairing URL
 - text: |
     {{ [abc] server }} couldn't be asked directly: paste this phone's code
-    below into flankr pair there.
+    below into **flankr pair** there.
+
+The pairing window's states around the six words (the owner,
+2026-10-28: "it should give more feedback after the scan succeeded, same
+when pairing is otherwise completed"): once a scanned code is accepted the
+camera stops and the area shows a check, `pairing_read` and
+`pairing_connecting` until the words come. The words show in a modal
+titled `pairing_confirm_title`, with Details and Cancel. Once paired, the
+window shows a check, `pairing_paired` (or `pairing_already`, with
+`pairing_addresses_updated` when they changed), `pairing_reached` dim
+under it, and Details and `pairing_done`; it stays until Done.
+
+# [Copy] pairing_read
+
+- text: Code read
+
+# [Copy] pairing_connecting
+
+- [abc] host: the host in the pairing link
+- text: |
+    Connecting to {{ [abc] host }}…
+
+# [Copy] pairing_confirm_title
+
+- text: Confirm on your Mac
 
 # [Copy] pairing_paired
 
 - [abc] name: the remote's name
 - text: |
-    Paired with {{ [abc] name }}.
+    Paired with {{ [abc] name }}
+
+# [Copy] pairing_already
+
+- [abc] name: the remote's name
+- text: |
+    Already paired with {{ [abc] name }}
+
+# [Copy] pairing_addresses_updated
+
+- text: |
+    Its addresses were updated.
+
+# [Copy] pairing_reached
+
+- [abc] address: the daemon's host:port
+- [abc] fingerprint: the remote's short fingerprint, `3f9a 12c4`
+- text: |
+    {{ [abc] address }} · fingerprint {{ [abc] fingerprint }}
+
+# [Copy] pairing_done
+
+- text: Done
+
+# [Copy] pairing_cancelled
+
+- text: |
+    Pairing cancelled: nothing was added.
 
 The Details button and what it shows: the daemon's fingerprint words, its
 `host:port`, the time the link has left, and the device-code fallback's
@@ -498,6 +549,13 @@ code.
 
 - text: Daemon fingerprint
 
+The whole fingerprint in Details: BLAKE2s-256 of the daemon's key, as 64
+hex digits in groups of four, under this label.
+
+# [Copy] pairing_fingerprint_full
+
+- text: BLAKE2s-256 fingerprint
+
 # [Copy] pairing_address
 
 - [abc] server: the daemon's name, from the pairing URL
@@ -514,19 +572,19 @@ code.
 # [Copy] pairing_expired
 
 - text: |
-    The link has expired: run flankr pair again.
+    The link has expired: run **flankr pair** again.
 
 # [Copy] pairing_no_words
 
 - text: |
-    This link is from an older flankr pair and has no offer, so there are
+    This link is from an older **flankr pair** and has no offer, so there are
     no pairing words to compare: check the daemon fingerprint instead.
 
 # [Copy] pairing_paste
 
 - [abc] server: the daemon's name, from the pairing URL
 - text: |
-    Paste this code into flankr pair on {{ [abc] server }}:
+    Paste this code into **flankr pair** on {{ [abc] server }}:
 
 `pairing_replace` is shown above `pairing_paste` when the remote is
 already listed and this phone's key for it was lost: the daemon still lists
@@ -540,7 +598,7 @@ item 4).
 - text: |
     This phone's key for {{ [abc] server }} was lost, and {{ [abc] server }}
     still lists the old one under this phone's name: run
-    flankr pair --replace there to paste this code over it.
+    **flankr pair --replace** there to paste this code over it.
 
 The pairing window's camera (docs/design/20261028_02_PAIRING_QR_SCAN_PLAN.md,
 decision 21; `src/scanner.rs`, Android only): the window opens on a
@@ -565,7 +623,7 @@ instead; `pairing_retry` is the line after a failed pairing.
 # [Copy] pairing_camera_why
 
 - text: |
-    Scan the QR code flankr pair shows. The camera opens only when you tap,
+    Scan the QR code **flankr pair** shows. The camera opens only when you tap,
     and Android asks for the Camera permission the first time. Frames are
     decoded on the phone, never saved or sent, and the camera closes when
     you leave this screen.
@@ -573,7 +631,7 @@ instead; `pairing_retry` is the line after a failed pairing.
 # [Copy] pairing_scan_hint
 
 - text: |
-    Point at the QR code flankr pair shows. Pinch to zoom.
+    Point at the QR code **flankr pair** shows. Pinch to zoom.
 
 # [Copy] pairing_scan_ignored
 
@@ -617,7 +675,7 @@ instead; `pairing_retry` is the line after a failed pairing.
 
 - [abc] why: why the pairing failed
 - text: |
-    {{ [abc] why }}. Run flankr pair again, then scan its new code.
+    {{ [abc] why }}. Run **flankr pair** again, then scan its new code.
 
 
 The foreground service's notification (CHANGES.md, 2026-10-24 12:59 EDT,

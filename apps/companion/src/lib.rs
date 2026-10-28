@@ -119,7 +119,7 @@ use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, Turned
 use crate::settings::build_info::BuildInfo;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::theme::{Role, theme};
-use crate::ui::{CameraView, Card, CardState, Hit, Layout, Screen, View, prompt_input};
+use crate::ui::{CameraView, Card, CardState, Glyph, Hit, Layout, Row, Screen, View, prompt_input};
 
 /// The frame rate: enough for text, and far less heat than the display's
 /// 120 Hz while STT listens.
@@ -604,6 +604,10 @@ impl App {
             self.field_focused = false;
             self.screen.invalidate();
         }
+        // What was read of it: the read state's host, and the full
+        // fingerprint for Details.
+        self.pairing.read(remotes::LinkRead::of(text));
+        self.scanner.read &= self.companion.is_some();
         match &self.companion {
             Some(companion) => {
                 companion.send(Input::Pair(text.to_string()));
@@ -706,22 +710,19 @@ impl App {
                 self.note = None;
                 self.screen.invalidate();
             }
+            // The modal closes and the window says so until Done (the
+            // owner, 2026-10-28: "currently it just closes and looks like
+            // it failed").
             Event::Paired { name } => {
                 log::info!("pairing: paired as {name}");
                 let stop = self.scanner.reset();
                 self.call_camera(stop);
-                let (server, adding) = self.pairing.paired();
-                if adding {
-                    // Back to Settings, where its row now shows.
-                    self.note = None;
+                let server = self.pairing.paired(&self.remotes);
+                self.note = None;
+                if self.pairing.adding {
+                    // For Settings, where its row shows after Done.
                     let note = remotes::paired_note(server.as_deref().unwrap_or_default());
                     self.set_remotes_note(Some(note));
-                } else {
-                    let note = match server {
-                        Some(server) => remotes::first_paired_note(&server),
-                        None => format!("paired as {name}"),
-                    };
-                    self.note = Some((note, Role::Muted));
                 }
                 self.screen.invalidate();
             }
@@ -734,6 +735,7 @@ impl App {
                     self.note = None;
                 } else {
                     self.scanner.handed_over = false;
+                    self.scanner.read = false;
                     self.note = Some((format!("pairing failed: {why}"), Role::Warn));
                 }
                 self.screen.invalidate();
@@ -864,6 +866,10 @@ impl App {
             Event::Remotes(rows) => {
                 log::debug!("remotes: {} paired", rows.len());
                 self.paired = !rows.is_empty();
+                self.pairing.remotes_changed(&rows);
+                if self.pairing.finished.is_some() {
+                    self.screen.invalidate();
+                }
                 self.remotes = rows;
                 if let Some(screen) = &mut self.settings_screen {
                     screen.set_remotes(self.remotes.clone());
@@ -877,20 +883,16 @@ impl App {
                 let note = remotes::removed_note(&name, daemon, &self.device);
                 self.set_remotes_note(Some(note));
             }
-            // A pairing named a remote already listed: nothing is pending,
-            // so the add mode closes, back to Settings.
-            Event::RemoteUpdated { name, .. } => {
-                let note = remotes::already_note(&name);
+            // A pairing named a remote already listed and its addresses
+            // were checked: the window says so until Done.
+            Event::RemoteUpdated { id, name } => {
+                log::info!("pairing: already paired with {name}");
                 let stop = self.scanner.reset();
                 self.call_camera(stop);
-                if std::mem::take(&mut self.pairing.adding) {
-                    self.pairing.failed();
-                    self.note = None;
-                    self.screen.invalidate();
-                } else {
-                    self.note = Some((note.trim().to_string(), Role::Muted));
-                }
-                self.set_remotes_note(Some(note));
+                self.pairing.remote_updated(id, &name, &self.remotes);
+                self.note = None;
+                self.screen.invalidate();
+                self.set_remotes_note(Some(remotes::already_note(&name)));
             }
             Event::Unpaired { daemon } => self.unpaired(daemon),
             Event::SessionCards(cards) => {
@@ -1340,13 +1342,52 @@ impl App {
     /// in progress ends, and the add mode returns to Settings.
     fn cancel_pairing(&mut self) {
         log::info!("pairing: cancelled");
+        let pending = self.pairing.waiting() || self.scanner.handed_over;
+        let adding = self.pairing.adding;
         let input = self.pairing.cancel();
         self.send(input);
         let stop = self.scanner.reset();
         self.call_camera(stop);
+        // A pairing in progress was cancelled: the window (first run) or
+        // Settings (the add mode) says nothing was added.
+        if pending {
+            if adding {
+                let note = settings::copy::PAIRING_CANCELLED.text.trim().to_string();
+                self.set_remotes_note(Some(note));
+            } else {
+                self.scanner.cancelled = true;
+            }
+        }
         self.field_focused = false;
         self.note = None;
         self.screen.invalidate();
+        if let Some(screen) = &mut self.settings_screen {
+            screen.invalidate();
+        }
+    }
+
+    /// **Done** on a finished pairing, or the system Back there: back to
+    /// Settings in the add mode, on to the overview on first run.
+    fn finish_pairing(&mut self) {
+        let adding = self.pairing.done();
+        #[cfg(test)]
+        probe::record(format!(
+            "pairing done, {}",
+            if adding { "settings" } else { "overview" }
+        ));
+        log::info!(
+            "pairing: done, {}",
+            if adding {
+                "back to Settings"
+            } else {
+                "the overview"
+            }
+        );
+        self.field.clear();
+        self.field_focused = false;
+        self.note = None;
+        self.screen.invalidate();
+        self.overview.invalidate();
         if let Some(screen) = &mut self.settings_screen {
             screen.invalidate();
         }
@@ -1907,7 +1948,10 @@ impl App {
     /// Whether the pairing screen shows: neither paired nor connected, or a
     /// pairing waiting.
     fn pairing(&self) -> bool {
-        self.pairing.adding || self.pairing.waiting() || (!self.paired && !self.online)
+        self.pairing.adding
+            || self.pairing.waiting()
+            || self.pairing.finished.is_some()
+            || (!self.paired && !self.online)
     }
 
     /// A touch on the screen shown: on the overview and in the agent view,
@@ -2060,6 +2104,7 @@ impl App {
             && !self.scanner.no_camera
             && self.pairing()
             && !self.pairing.waiting()
+            && self.pairing.finished.is_none()
             && (self.pairing.adding || (self.settings_screen.is_none() && self.agent.is_none()))
     }
 
@@ -2124,6 +2169,7 @@ impl App {
                 self.call_camera(stop);
             }
             Some(Hit::OpenSettings) => self.open_app_settings = true,
+            Some(Hit::Done) => self.finish_pairing(),
             // No tap-to-listen here: the pairing screen is not the home
             // screen, so a tap off its controls only leaves the field.
             None => self.field_focused = false,
@@ -2134,6 +2180,21 @@ impl App {
     /// into the focused field (desktop): Enter pairs, Escape clears.
     fn key(&mut self, key: Key) -> KeyStatus {
         let back = matches!(key, Key::Back | Key::Escape);
+        // Back on a finished pairing is Done.
+        if back && self.pairing.finished.is_some() {
+            self.finish_pairing();
+            return KeyStatus::Handled;
+        }
+        // Back over the pairing modal, or while a scanned code is paired,
+        // cancels the pairing.
+        if back
+            && !self.pairing.adding
+            && self.pairing()
+            && (self.pairing.waiting() || self.scanner.handed_over)
+        {
+            self.cancel_pairing();
+            return KeyStatus::Handled;
+        }
         // The system Back leaves the add mode's pairing screen, back to
         // Settings, ending its pairing.
         if back && self.pairing.adding {
@@ -2372,8 +2433,52 @@ impl App {
             .note
             .as_ref()
             .map(|(t, r)| (t.as_str(), theme().get(*r)));
+        let note = note.map(|(t, c)| (remotes::md_escape(t), c));
+        let note = note.as_ref().map(|(t, c)| (t.as_str(), *c));
         let now = Instant::now();
-        let (code, camera) = if self.camera_window() {
+        let (code, camera) = if let Some(f) = &self.pairing.finished {
+            // A finished pairing (the owner, 2026-10-28): a check, what was
+            // paired, and Details and Done, until Done.
+            let code = if self.pairing.details {
+                f.details(&layout)
+            } else {
+                Vec::new()
+            };
+            let camera = CameraView {
+                glyph: Glyph::Check,
+                prompt: Some(f.title()),
+                detail: Some(f.summary()).filter(|s| !s.is_empty()),
+                row: Row::Done,
+                ..CameraView::default()
+            };
+            (code, Some(camera))
+        } else if self.pairing.waiting() {
+            // The six words, in the modal over the window.
+            let modal = ui::modal_layout(&layout);
+            (self.pairing.lines(&modal, note, now), None)
+        } else if self.camera_window() && self.scanner.read && self.scanner.handed_over {
+            // A scanned code was accepted: a check, "Code read" and
+            // "Connecting to <host>…" until the words come, and Cancel.
+            let host = self
+                .pairing
+                .link
+                .as_ref()
+                .map(|l| remotes::host_of(&l.address).to_string())
+                .unwrap_or_default();
+            let camera = CameraView {
+                glyph: Glyph::Check,
+                prompt: Some(settings::copy::PAIRING_READ.text.trim().to_string()),
+                detail: Some(
+                    settings::copy::PAIRING_CONNECTING
+                        .fill(None, &[("host", &remotes::md_escape(&host))])
+                        .trim()
+                        .to_string(),
+                ),
+                row: Row::Cancel,
+                ..CameraView::default()
+            };
+            (Vec::new(), Some(camera))
+        } else if self.camera_window() {
             // The camera's window: one line under the area (decision 3),
             // and the app's note ("pairing…").
             let mut code = Vec::new();
@@ -2394,6 +2499,7 @@ impl App {
                 zoom: s.zoom_label(now),
                 paste: s.paste,
                 settings: s.settings_button(),
+                ..CameraView::default()
             };
             (code, Some(camera))
         } else {
@@ -2668,10 +2774,10 @@ impl MorphApp for App {
             symbols,
             shaper,
             terminal,
-            faces,
+            faces: std::sync::Arc::clone(&faces),
             sdf,
             list: DrawList::new(),
-            screen: Screen::new(),
+            screen: Screen::new().with_faces(Some(std::sync::Arc::clone(&faces))),
             overview,
             panel_shader,
             shown: None,
@@ -2752,6 +2858,14 @@ impl MorphApp for App {
                 config.voice = args.voice.clone();
                 // Each remote's state.redb (plan 20261028_01, decision 14).
                 config.data_dir = ctx.data_dir().map(std::path::Path::to_path_buf);
+                // Tests: unpaired, the client would connect to a daemon
+                // running on the host by its socket, and the pairing window
+                // would give way to the overview; no socket is there.
+                #[cfg(test)]
+                {
+                    config.socket =
+                        std::path::PathBuf::from("/nonexistent/flankr-companion-test.sock");
+                }
                 if let Some(silence) = dictation_silence(ctx, &args) {
                     config.dictation_silence = silence;
                 }
