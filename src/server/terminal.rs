@@ -159,7 +159,10 @@ pub fn offered(
     over_link: bool,
     input: bool,
 ) -> Option<companion::TerminalInfo> {
-    (over_link && herdr_is_local(transport)).then_some(companion::TerminalInfo { input })
+    (over_link && herdr_is_local(transport)).then_some(companion::TerminalInfo {
+        input,
+        mouse: false,
+    })
 }
 
 /// [`offered`] for `daemon`.
@@ -360,6 +363,8 @@ pub(super) async fn open(
         terminal_id: term.id,
         cols: first.cols,
         rows: first.rows,
+        cursor: false,
+        source: Default::default(),
     })
 }
 
@@ -956,11 +961,17 @@ mod tests {
         assert!(herdr_is_local(&local));
         assert_eq!(
             offered(&local, true, true),
-            Some(companion::TerminalInfo { input: true })
+            Some(companion::TerminalInfo {
+                input: true,
+                mouse: false
+            })
         );
         assert_eq!(
             offered(&HerdrTransport::mock(), true, false),
-            Some(companion::TerminalInfo { input: false })
+            Some(companion::TerminalInfo {
+                input: false,
+                mouse: false
+            })
         );
         // Not over the link: no terminal.
         assert_eq!(offered(&local, false, true), None);
