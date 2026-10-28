@@ -2466,6 +2466,22 @@ impl State {
         self.focus.clone().filter(|f| f.pane_id == pane_id)
     }
 
+    /// Whether the pane's session is terminal only, as `agents.list` gave
+    /// it ([`crate::cross::is_terminal_only`]).
+    fn terminal_only(&self, pane_id: &str) -> bool {
+        self.agents
+            .iter()
+            .any(|a| a.pane_id == pane_id && crate::cross::is_terminal_only(a))
+    }
+
+    /// Whether the open view is of a terminal-only session: it takes no
+    /// message, and has no transcript to subscribe to.
+    fn viewing_terminal_only(&self) -> bool {
+        self.view
+            .as_ref()
+            .is_some_and(|v| self.terminal_only(&v.pane_id))
+    }
+
     fn open_agent(&mut self, pane_id: String, out: &mut Vec<Output>) {
         self.interact(&pane_id);
         // Its own cards are seen.
@@ -2511,6 +2527,11 @@ impl State {
     /// holds any (a reconnect), so only what it missed comes.
     fn subscribe(&mut self, out: &mut Vec<Output>) {
         if !self.online() {
+            return;
+        }
+        // A shell has no transcript (plan 20261022_03, the 2026-10-28
+        // 00:47 EDT amendment).
+        if self.viewing_terminal_only() {
             return;
         }
         let Some(v) = self.view.as_mut() else {
@@ -3085,6 +3106,10 @@ impl State {
     }
 
     fn start_text_prompt(&mut self, out: &mut Vec<Output>) {
+        if self.viewing_terminal_only() {
+            log::info!("dictation: a shell takes no message");
+            return;
+        }
         if let Some(d) = &self.dictation
             && !d.general_agent
             && d.mode == PromptMode::Keyboard
@@ -3171,6 +3196,10 @@ impl State {
             return;
         }
         self.dictation = None;
+        if self.viewing_terminal_only() {
+            log::info!("dictation: a shell takes no message");
+            return;
+        }
         if !self.settings.microphone {
             log::info!("dictation: the microphone is off");
             return;
@@ -8820,6 +8849,44 @@ mod tests {
         let out = s.input(Input::Tick(secs(at)));
         let list = requests(&out, "agents.list")[0].id.clone();
         s.incoming(response(list, json!({"agents": agents})))
+    }
+
+    /// Plan 20261022_03, the 2026-10-28 00:47 EDT amendment: a shell is
+    /// listed as a session, terminal only; its view subscribes to no
+    /// transcript and takes no message, spoken or typed.
+    #[test]
+    fn a_shell_is_listed_and_its_view_is_terminal_only() {
+        let shell = json!({"pane_id": "w1:p3", "name": "Shell in src, tab 3",
+                           "agent": "shell", "cwd": "/Users/me/src",
+                           "status": "unknown", "focused": false});
+        let (mut s, out) = listed(json!([shell, agent_info("w2:pZ", "idle")]));
+        let agents = events(&out)
+            .into_iter()
+            .find_map(|e| match e {
+                Event::Agents(a) => Some(a),
+                _ => None,
+            })
+            .expect("the list");
+        assert_eq!(agents.len(), 2);
+        assert!(crate::is_terminal_only(&agents[0]));
+        assert!(!crate::is_terminal_only(&agents[1]));
+
+        let out = s.input(Input::OpenAgent("w1:p3".into()));
+        assert!(requests(&out, "session.subscribe").is_empty(), "{out:?}");
+        assert!(s.viewing_terminal_only());
+        s.input(Input::StartDictation);
+        assert!(s.dictation.is_none());
+        s.input(Input::StartTextPrompt);
+        assert!(s.dictation.is_none());
+        let out = s.input(Input::Tick(secs(30.0)));
+        assert!(requests(&out, "agents.send").is_empty(), "{out:?}");
+
+        // An agent's view still subscribes.
+        s.input(Input::CloseAgent);
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        assert_eq!(requests(&out, "session.subscribe").len(), 1, "{out:?}");
+        s.input(Input::StartTextPrompt);
+        assert!(s.dictation.is_some());
     }
 
     #[test]

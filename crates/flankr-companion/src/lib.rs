@@ -36,7 +36,7 @@ pub use client::{
     CACHED_VIEWS, DICTATION_SILENCE, Dictation, DictationPhase, Event, Input, Pressure, PromptMode,
     Settings, Speaker, Suggestion,
 };
-pub use cross::{SessionCard, SessionCardKind};
+pub use cross::{SessionCard, SessionCardKind, is_terminal_only};
 pub use keys::{FileKeyStore, KeyStore, ServerRecord};
 pub use net::{Backoff, PAIRING_RETRY, PAIRING_WINDOW};
 pub use terminal::{TerminalStatus, Terminals, key_batches};

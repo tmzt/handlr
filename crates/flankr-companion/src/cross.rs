@@ -80,6 +80,16 @@ pub fn colour_of(a: &AgentInfo) -> u8 {
     session_colour(&session_key(a))
 }
 
+/// The agent name the daemon gives a pane that runs no known agent.
+pub const SHELL: &str = "shell";
+
+/// Whether `a`'s session has only the terminal view (plan 20261022_03,
+/// the 2026-10-28 00:47 EDT amendment): a shell, which has no transcript,
+/// takes no messages and has no summaries or suggestions.
+pub fn is_terminal_only(a: &AgentInfo) -> bool {
+    a.agent == SHELL
+}
+
 /// The agent's shown name: its name, else its agent with a capital.
 pub fn shown_name(a: &AgentInfo) -> String {
     if let Some(name) = a.name.as_deref().filter(|n| !n.is_empty()) {
