@@ -21,15 +21,18 @@
 //!   (`NOT_PERMITTED`); an unknown pane is `UNKNOWN_AGENT`.
 //! * **Typing** (`terminal.input_arm`, `terminal.input`) needs `[terminal]
 //!   input`, the agent's `terminal_input`, a principal that may approve,
-//!   and an arm within the last 60 s (each accepted batch extends it to 60
-//!   s from that batch). Keys are herdr's `send_keys` syntax (see
-//!   [`parse_keys`]); `ctrl+c`, `ctrl+d`, `ctrl+z` and `ctrl+\` also need
-//!   the agent's `terminal_signals`. Each accepted batch is a `notice` of
-//!   kind `terminal_input` naming the agent and the key count, never the
-//!   keys. The confirmation gate is not used for keys.
+//!   and an arm. The arm has no expiry (the L3 amendment of 2026-10-28
+//!   10:42 EDT of docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md): once
+//!   `terminal.input_arm` succeeds the terminal stays armed until it is
+//!   closed or its connection ends, and `expires_in_s` is answered 0, no
+//!   expiry. Keys are herdr's `send_keys` syntax (see [`parse_keys`]);
+//!   `ctrl+c`, `ctrl+d`, `ctrl+z` and `ctrl+\` (with or without `alt+`)
+//!   also need the agent's `terminal_signals`. The first accepted batch
+//!   after each arm is a `notice` of kind `terminal_input` naming the
+//!   agent, never the keys. The confirmation gate is not used for keys.
 //! * **Scrolling** (`terminal.scroll`, the 2026-10-27 21:58 EDT amendment
 //!   of docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md) is input: the
-//!   same gates and arm as typing, and an accepted scroll extends the arm.
+//!   same gates and arm as typing.
 //!   It sets herdr's `pane.scroll` offset, so the pane scrolls on the Mac
 //!   too, and the poller reads a frame at once. No notice is sent.
 //! * **Ending:** `terminal.closed` is sent when the pane closes
@@ -64,8 +67,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use libflankr_proto::common::{
-    self, TERMINAL_INPUT_ARM_SECS, TERMINAL_INPUT_MAX, TerminalClosedReason, TerminalSource,
-    methods,
+    self, TERMINAL_INPUT_MAX, TerminalClosedReason, TerminalSource, methods,
 };
 use libflankr_proto::companion;
 use libflankr_proto::envelope::codes;
@@ -250,8 +252,10 @@ struct State {
     mirror: Mirror,
     /// The ANSI text last parsed: an unchanged read is not parsed again.
     last_text: Option<String>,
-    /// Input is let through until then (decision 6).
-    armed_until: Option<Instant>,
+    /// Input is let through (decision 6): set by `terminal.input_arm`, for
+    /// the terminal's life (no expiry since the L3 amendment of 2026-10-28
+    /// 10:42 EDT).
+    armed: bool,
     /// The pane's scroll offset, in rows above the bottom, as last known.
     scroll_offset: u64,
     /// The furthest back it can scroll, when herdr has said.
@@ -260,15 +264,9 @@ struct State {
     last_marked: bool,
     /// A mouse event's notice was sent since the last arm (decision 12).
     mouse_noticed: bool,
-    /// A key batch's notice was sent since the last arm: one per arm
-    /// window, not one per batch.
+    /// A key batch's notice was sent since the last arm: one per arm, not
+    /// one per batch.
     keys_noticed: bool,
-}
-
-impl State {
-    fn armed(&self) -> bool {
-        self.armed_until.is_some_and(|until| Instant::now() < until)
-    }
 }
 
 impl Terminal {
@@ -372,7 +370,7 @@ impl Terminals {
             state: Mutex::new(State {
                 mirror: Mirror::new(id),
                 last_text: None,
-                armed_until: None,
+                armed: false,
                 scroll_offset: 0,
                 scroll_max: None,
                 last_marked: false,
@@ -633,19 +631,14 @@ fn input_allowed(conn: &Conn, terminal_id: u32) -> Result<(Arc<Terminal>, bool),
     Ok((term, cfg.terminal_signals))
 }
 
-fn arm_window() -> Duration {
-    Duration::from_secs(TERMINAL_INPUT_ARM_SECS as u64)
-}
-
 /// `terminal.input_arm`.
 pub(super) fn input_arm(conn: &Conn, raw: Value) -> Result<Value, ErrorObject> {
     let p: common::TerminalInputArmParams = super::conn::params(raw)?;
     let (term, _) = input_allowed(conn, p.terminal_id)?;
     {
         let mut state = term.state.lock().unwrap();
-        state.armed_until = Some(Instant::now() + arm_window());
-        // A new arm window: its first mouse event and key batch are
-        // noticed.
+        state.armed = true;
+        // A new arm: its first mouse event and key batch are noticed.
         state.mouse_noticed = false;
         state.keys_noticed = false;
     }
@@ -662,13 +655,12 @@ pub(super) fn input_arm(conn: &Conn, raw: Value) -> Result<Value, ErrorObject> {
         term.pane_id,
         conn.principal().id
     );
-    ok(common::TerminalInputArmResult {
-        expires_in_s: TERMINAL_INPUT_ARM_SECS,
-    })
+    // 0: no expiry (the L3 amendment of 2026-10-28 10:42 EDT).
+    ok(common::TerminalInputArmResult { expires_in_s: 0 })
 }
 
 fn require_armed(term: &Terminal) -> Result<(), ErrorObject> {
-    if term.state.lock().unwrap().armed() {
+    if term.state.lock().unwrap().armed {
         Ok(())
     } else {
         Err(not_permitted(format!(
@@ -785,7 +777,6 @@ pub(super) async fn scroll(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorO
                     let mut state = term.state.lock().unwrap();
                     state.scroll_offset = offset;
                     state.scroll_max = max;
-                    state.armed_until = Some(Instant::now() + arm_window());
                 }
                 log::debug!(
                     "Terminal {} on pane '{}' got a wheel of {} row(s)",
@@ -824,7 +815,6 @@ pub(super) async fn scroll(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorO
         let mut state = term.state.lock().unwrap();
         state.scroll_offset = offset;
         state.scroll_max = max;
-        state.armed_until = Some(Instant::now() + arm_window());
     }
     term.poke.notify_one();
     log::debug!(
@@ -873,7 +863,6 @@ pub(super) async fn input(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorOb
     }
     let first = {
         let mut state = term.state.lock().unwrap();
-        state.armed_until = Some(Instant::now() + arm_window());
         !std::mem::replace(&mut state.keys_noticed, true)
     };
     let count = keys.len();
@@ -929,7 +918,7 @@ fn mouse_needs_attachment() -> ErrorObject {
 
 /// `terminal.mouse` (decisions 10 and 12): gated and armed as
 /// `terminal.input` is, over the attachment only. A kind herdr has no event
-/// for is answered `{}` and dropped. One notice per arm window.
+/// for is answered `{}` and dropped. One notice per arm.
 pub(super) async fn mouse(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
     let p: common::TerminalMouseParams = super::conn::params(raw)?;
     let (term, _) = input_allowed(conn, p.terminal_id)?;
@@ -949,7 +938,6 @@ pub(super) async fn mouse(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorOb
         })?;
     let first = {
         let mut state = term.state.lock().unwrap();
-        state.armed_until = Some(Instant::now() + arm_window());
         !std::mem::replace(&mut state.mouse_noticed, true)
     };
     if first {
@@ -1251,20 +1239,94 @@ const NAMED_KEYS: [&str; 10] = [
     "left",
     "right",
 ];
-/// The `ctrl+` keys that signal the pane's process (decision 6).
-const SIGNAL_KEYS: [&str; 4] = ["ctrl+c", "ctrl+d", "ctrl+z", "ctrl+\\"];
-/// Modifier prefixes refused: only `ctrl+` combos are sent.
-const OTHER_MODIFIERS: [&str; 6] = ["alt+", "shift+", "meta+", "super+", "cmd+", "option+"];
+/// The named keys a `ctrl+`/`alt+` combo may take (the L3 amendment of
+/// 2026-10-28 10:42 EDT): `ctrl+left`, `alt+backspace`, `ctrl+alt+tab` …
+const MODIFIABLE_KEYS: [&str; 9] = [
+    "enter",
+    "escape",
+    "esc",
+    "tab",
+    "backspace",
+    "up",
+    "down",
+    "left",
+    "right",
+];
+/// The `ctrl+` keys that signal the pane's process (decision 6), with or
+/// without `alt+`.
+const SIGNAL_CHARS: [char; 4] = ['c', 'd', 'z', '\\'];
+/// Modifier prefixes refused: only `ctrl+` and `alt+` combos are sent.
+const OTHER_MODIFIERS: [&str; 5] = ["shift+", "meta+", "super+", "cmd+", "option+"];
+
+/// A `ctrl+`/`alt+` combo token as herdr's `send_keys` spells it (its
+/// `parse_key_combo`: `+`-joined modifiers then the key), normalised to
+/// `ctrl+alt+<key>` order, or `None` when `token` does not start with a
+/// modifier. `Some(Err)` is a combo refused.
+fn parse_combo(token: &str, signals: bool) -> Option<Result<String, KeyError>> {
+    let invalid = || KeyError::Invalid(token.to_string());
+    let (mut ctrl, mut alt) = (false, false);
+    let mut rest = token;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        if lower.starts_with("ctrl+") && !ctrl {
+            ctrl = true;
+        } else if lower.starts_with("alt+") && !alt {
+            alt = true;
+        } else {
+            break;
+        }
+        rest = &rest[lower.find('+').unwrap() + 1..];
+    }
+    if !ctrl && !alt {
+        return None;
+    }
+    let prefix = match (ctrl, alt) {
+        (true, true) => "ctrl+alt+",
+        (true, false) => "ctrl+",
+        _ => "alt+",
+    };
+    let lower = rest.to_lowercase();
+    if MODIFIABLE_KEYS.contains(&lower.as_str()) {
+        return Some(Ok(format!("{prefix}{lower}")));
+    }
+    let mut chars = rest.chars();
+    let key = match (chars.next(), chars.next()) {
+        (Some(c), None) => c,
+        _ => return Some(Err(invalid())),
+    };
+    if ctrl {
+        // Ctrl takes a letter (or the signal `\`), lowercased.
+        let c = key.to_ascii_lowercase();
+        if !(c.is_ascii_lowercase() || c == '\\') {
+            return Some(Err(invalid()));
+        }
+        let combo = format!("{prefix}{c}");
+        if SIGNAL_CHARS.contains(&c) && !signals {
+            return Some(Err(KeyError::Signal(combo)));
+        }
+        return Some(Ok(combo));
+    }
+    // Alt alone takes any printable character, its case kept.
+    if key.is_control() || key.is_whitespace() {
+        return Some(Err(invalid()));
+    }
+    Some(Ok(format!("{prefix}{key}")))
+}
 
 /// `keys` as herdr's `send_keys` keys, one per element, joined with spaces
 /// when sent (libherdr splits them again on whitespace). The syntax is
 /// herdr's: whitespace-separated tokens, each a named key ([`NAMED_KEYS`],
-/// any case), `ctrl+<a-z>`, or printable text. herdr takes one character
-/// per text token, so a longer text token is sent as one key per character
-/// (`ls` is `l s`); a space is the `space` key. Control characters, other
-/// modifiers (`alt+`, `shift+` …), other named keys (`f1`, `home` …) and
-/// other `ctrl+` combos are [`KeyError::Invalid`]; [`SIGNAL_KEYS`] are
-/// [`KeyError::Signal`] unless `signals`.
+/// any case), a combo, or printable text. A combo is `ctrl+`, `alt+` or
+/// both (either order, normalised to `ctrl+alt+`) before the key:
+/// `ctrl+<a-z>`, `alt+<printable character>` (its case kept),
+/// `ctrl+alt+<a-z>`, or any of them before `enter`, `escape`/`esc`, `tab`,
+/// `backspace` or an arrow (`ctrl+left`, `alt+enter`). herdr takes one
+/// character per text token, so a longer text token is sent as one key per
+/// character (`ls` is `l s`); a space is the `space` key. Control
+/// characters, other modifiers (`shift+`, `meta+` …), other named keys
+/// (`f1`, `home` …) and other combos (`ctrl+1`, `alt+space`) are
+/// [`KeyError::Invalid`]; `ctrl+c`, `ctrl+d`, `ctrl+z` and `ctrl+\`, with or
+/// without `alt+`, are [`KeyError::Signal`] unless `signals`.
 pub fn parse_keys(keys: &str, signals: bool) -> Result<Vec<String>, KeyError> {
     if keys.len() > TERMINAL_INPUT_MAX {
         return Err(KeyError::TooLong(keys.len()));
@@ -1274,17 +1336,8 @@ pub fn parse_keys(keys: &str, signals: bool) -> Result<Vec<String>, KeyError> {
         let lower = token.to_lowercase();
         if NAMED_KEYS.contains(&lower.as_str()) {
             out.push(lower);
-        } else if SIGNAL_KEYS.contains(&lower.as_str()) {
-            if !signals {
-                return Err(KeyError::Signal(lower));
-            }
-            out.push(lower);
-        } else if let Some(rest) = lower.strip_prefix("ctrl+") {
-            let mut chars = rest.chars();
-            match (chars.next(), chars.next()) {
-                (Some(c), None) if c.is_ascii_lowercase() => out.push(lower),
-                _ => return Err(KeyError::Invalid(token.to_string())),
-            }
+        } else if let Some(combo) = parse_combo(token, signals) {
+            out.push(combo?);
         } else if OTHER_MODIFIERS.iter().any(|m| lower.starts_with(m)) {
             return Err(KeyError::Invalid(token.to_string()));
         } else if let Some(c) = token.chars().find(|c| c.is_control()) {
@@ -1325,14 +1378,63 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_and_alt_combos_are_accepted_and_normalised() {
+        // The L3 amendment of 2026-10-28 10:42 EDT: alt+<printable>,
+        // ctrl+alt+<a-z>, and either modifier before a modifiable named key.
+        assert_eq!(
+            keys("alt+x alt+X alt+. alt++ alt+é"),
+            ["alt+x", "alt+X", "alt+.", "alt++", "alt+é"]
+        );
+        assert_eq!(
+            keys("ctrl+alt+x alt+ctrl+Y CTRL+ALT+b"),
+            ["ctrl+alt+x", "ctrl+alt+y", "ctrl+alt+b"]
+        );
+        assert_eq!(
+            keys("ctrl+left alt+Right ctrl+up alt+down ctrl+alt+left"),
+            [
+                "ctrl+left",
+                "alt+right",
+                "ctrl+up",
+                "alt+down",
+                "ctrl+alt+left"
+            ]
+        );
+        assert_eq!(
+            keys("ctrl+tab alt+escape ctrl+esc"),
+            ["ctrl+tab", "alt+escape", "ctrl+esc"]
+        );
+        assert_eq!(
+            keys("ctrl+enter alt+backspace ctrl+backspace"),
+            ["ctrl+enter", "alt+backspace", "ctrl+backspace"]
+        );
+        // Each is spelled as herdr's `parse_key_combo` reads them:
+        // `+`-joined modifiers, then the key; `alt++` is the plus key.
+    }
+
+    #[test]
     fn control_characters_other_keys_and_modifiers_are_refused() {
         for bad in [
             "\u{1b}[A",
             "a\u{7f}",
             "ctrl+1",
-            "ctrl+enter",
-            "alt+x",
+            "ctrl+.",
+            "ctrl+alt+1",
+            "alt+",
+            "ctrl+alt+",
+            "alt+\u{1b}",
+            "alt+xy",
+            "alt+space",
+            "ctrl+space",
+            "ctrl+home",
+            "alt+f1",
+            "ctrl+ctrl+a",
+            "alt+alt+a",
+            "ctrl+shift+a",
             "shift+tab",
+            "meta+x",
+            "super+x",
+            "cmd+x",
+            "option+x",
             "ctrl+",
         ] {
             assert!(
@@ -1351,13 +1453,25 @@ mod tests {
 
     #[test]
     fn signal_keys_need_terminal_signals() {
-        for signal in ["ctrl+c", "CTRL+D", "ctrl+z", "ctrl+\\"] {
-            assert!(
-                matches!(parse_keys(signal, false), Err(KeyError::Signal(_))),
+        for (signal, sent) in [
+            ("ctrl+c", "ctrl+c"),
+            ("CTRL+D", "ctrl+d"),
+            ("ctrl+z", "ctrl+z"),
+            ("ctrl+\\", "ctrl+\\"),
+            ("ctrl+alt+c", "ctrl+alt+c"),
+            ("alt+ctrl+d", "ctrl+alt+d"),
+            ("ctrl+alt+Z", "ctrl+alt+z"),
+            ("alt+ctrl+\\", "ctrl+alt+\\"),
+        ] {
+            assert_eq!(
+                parse_keys(signal, false),
+                Err(KeyError::Signal(sent.to_string())),
                 "{signal}"
             );
-            assert_eq!(parse_keys(signal, true).unwrap(), [signal.to_lowercase()]);
+            assert_eq!(parse_keys(signal, true).unwrap(), [sent]);
         }
+        // Alt alone is not a signal.
+        assert_eq!(keys("alt+c alt+\\"), ["alt+c", "alt+\\"]);
     }
 
     #[test]

@@ -450,7 +450,7 @@ async fn armed_input_reaches_send_keys_and_is_noticed_without_the_keys() {
     let r = phone
         .call("terminal.input_arm", json!({"terminal_id": 1}))
         .await;
-    assert_eq!(r["result"], json!({"expires_in_s": 60}), "{r}");
+    assert_eq!(r["result"], json!({"expires_in_s": 0}), "{r}");
     let r = phone
         .call(
             "terminal.input",
@@ -488,6 +488,46 @@ async fn armed_input_reaches_send_keys_and_is_noticed_without_the_keys() {
         )
         .await;
     assert_eq!(code(&r), codes::INVALID_PARAMS, "{r}");
+    assert_eq!(env.mock(|m| m.keystroke_log.len()).await, 1);
+}
+
+/// The L3 amendment of 2026-10-28 10:42 EDT: ctrl/alt combos reach herdr's
+/// send_keys in its own spelling (`ctrl+alt+<key>`), with no arm timer.
+#[tokio::test]
+async fn polled_ctrl_and_alt_combos_reach_send_keys() {
+    let env = start(config(true, true, false)).await;
+    let mut phone = env.device("s23", None, true).await;
+    phone.open("p1").await;
+    let r = phone
+        .call("terminal.input_arm", json!({"terminal_id": 1}))
+        .await;
+    assert_eq!(r["result"], json!({"expires_in_s": 0}), "{r}");
+    let r = phone
+        .call(
+            "terminal.input",
+            json!({"terminal_id": 1, "keys": "alt+X alt+ctrl+b ctrl+left alt+enter alt++"}),
+        )
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    let keys = env.mock(|m| m.keystroke_log.clone()).await;
+    assert_eq!(
+        keys,
+        [(
+            "p1".to_string(),
+            "alt+X ctrl+alt+b ctrl+left alt+enter alt++".to_string()
+        )]
+    );
+    for (keys, want) in [
+        ("ctrl+alt+d", codes::NOT_PERMITTED),
+        ("alt+space", codes::INVALID_PARAMS),
+        ("ctrl+f1", codes::INVALID_PARAMS),
+        ("shift+left", codes::INVALID_PARAMS),
+    ] {
+        let r = phone
+            .call("terminal.input", json!({"terminal_id": 1, "keys": keys}))
+            .await;
+        assert_eq!(code(&r), want, "{keys:?}: {r}");
+    }
     assert_eq!(env.mock(|m| m.keystroke_log.len()).await, 1);
 }
 
@@ -807,7 +847,7 @@ async fn a_shell_types_only_with_its_entrys_terminal_input() {
     let r = phone
         .call("terminal.input_arm", json!({"terminal_id": 1}))
         .await;
-    assert_eq!(r["result"], json!({"expires_in_s": 60}), "{r}");
+    assert_eq!(r["result"], json!({"expires_in_s": 0}), "{r}");
     let r = phone
         .call("terminal.input", json!({"terminal_id": 1, "keys": "q"}))
         .await;

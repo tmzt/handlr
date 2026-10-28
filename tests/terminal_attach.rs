@@ -625,7 +625,7 @@ impl Client {
         let r = self
             .call("terminal.input_arm", json!({"terminal_id": terminal_id}))
             .await;
-        assert_eq!(r["result"]["expires_in_s"], 60, "{r}");
+        assert_eq!(r["result"]["expires_in_s"], 0, "{r}");
     }
 }
 
@@ -1115,7 +1115,12 @@ async fn attached_keys_reach_herdr_as_key_events() {
         ("ctrl+c", codes::NOT_PERMITTED),
         ("\u{1b}[A", codes::INVALID_PARAMS),
         (&*"a ".repeat(40), codes::INVALID_PARAMS),
-        ("alt+x", codes::INVALID_PARAMS),
+        ("shift+x", codes::INVALID_PARAMS),
+        ("ctrl+alt+c", codes::NOT_PERMITTED),
+        ("alt+space", codes::INVALID_PARAMS),
+        ("ctrl+home", codes::INVALID_PARAMS),
+        ("alt+f1", codes::INVALID_PARAMS),
+        ("meta+x", codes::INVALID_PARAMS),
     ] {
         let r = phone
             .call("terminal.input", json!({"terminal_id": 1, "keys": keys}))
@@ -1125,8 +1130,52 @@ async fn attached_keys_reach_herdr_as_key_events() {
     assert_eq!(env.herdr.inputs().len(), 1);
 }
 
+/// The L3 amendment of 2026-10-28 10:42 EDT: the keys row's modifiers reach
+/// herdr as key events with crossterm's bits (Ctrl 2, Alt 4).
+#[tokio::test]
+async fn attached_ctrl_and_alt_combos_carry_modifier_bits() {
+    let env = start(Kind::Full).await;
+    env.attached().await;
+    let mut phone = env.device("s23", true).await;
+    phone.open(json!({"pane_id": "p1", "cursor": true})).await;
+    phone.arm(1).await;
+    let r = phone
+        .call(
+            "terminal.input",
+            json!({"terminal_id": 1, "keys": "alt+x alt+ctrl+b ctrl+left alt+backspace ctrl+r"}),
+        )
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    until("the keys", || env.herdr.inputs().len() == 1).await;
+    let keys: Vec<(ClientKeyCode, ClientKeyKind, u8)> = env.herdr.inputs()[0]
+        .1
+        .iter()
+        .map(|e| match e {
+            ClientPaneInputEvent::Key {
+                code,
+                kind,
+                modifiers,
+                ..
+            } => (code.clone(), *kind, *modifiers),
+            other => panic!("not a key: {other:?}"),
+        })
+        .collect();
+    let mut want = Vec::new();
+    for (code, modifiers) in [
+        (ClientKeyCode::Char('x'), 4),
+        (ClientKeyCode::Char('b'), 6),
+        (ClientKeyCode::Left, 2),
+        (ClientKeyCode::Backspace, 4),
+        (ClientKeyCode::Char('r'), 2),
+    ] {
+        want.push((code.clone(), ClientKeyKind::Press, modifiers));
+        want.push((code, ClientKeyKind::Release, modifiers));
+    }
+    assert_eq!(keys, want);
+}
+
 /// An armed `terminal.mouse` reaches herdr with pane-local cells, once
-/// noticed per arm window; unarmed it is refused.
+/// noticed per arm; unarmed it is refused.
 #[tokio::test]
 async fn armed_mouse_reaches_herdr_with_pane_local_cells() {
     let env = start(Kind::Full).await;
@@ -1178,7 +1227,7 @@ async fn armed_mouse_reaches_herdr_with_pane_local_cells() {
             ..
         }]
     ));
-    // One notice for the arm window.
+    // One notice for the arm.
     phone.call("ping", json!({})).await;
     let notices: Vec<&Value> = phone
         .notes
