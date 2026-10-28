@@ -796,6 +796,7 @@ async fn call(
         methods::TERMINAL_CLOSE if conn.is_companion() => super::terminal::close(conn, raw),
         methods::TERMINAL_INPUT_ARM if conn.is_companion() => super::terminal::input_arm(conn, raw),
         methods::TERMINAL_INPUT if conn.is_companion() => super::terminal::input(conn, raw).await,
+        methods::TERMINAL_SCROLL if conn.is_companion() => super::terminal::scroll(conn, raw).await,
         methods::AGENTS_INTERRUPT => {
             let p: common::AgentsInterruptParams = params(raw)?;
             let snap = snapshot(conn).await?;

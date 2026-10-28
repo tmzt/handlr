@@ -27,6 +27,11 @@
 //!   the agent's `terminal_signals`. Each accepted batch is a `notice` of
 //!   kind `terminal_input` naming the agent and the key count, never the
 //!   keys. The confirmation gate is not used for keys.
+//! * **Scrolling** (`terminal.scroll`, the 2026-10-27 21:58 EDT amendment
+//!   of docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md) is input: the
+//!   same gates and arm as typing, and an accepted scroll extends the arm.
+//!   It sets herdr's `pane.scroll` offset, so the pane scrolls on the Mac
+//!   too, and the poller reads a frame at once. No notice is sent.
 //! * **Ending:** `terminal.closed` is sent when the pane closes
 //!   (`pane_closed`, or a read that fails on a pane no longer in herdr's
 //!   snapshot), when the pane's agent is no longer the one it was opened
@@ -45,10 +50,10 @@ use libflankr_proto::companion;
 use libflankr_proto::envelope::codes;
 use libflankr_proto::{ErrorObject, Id, Notification};
 use libflankr_term::{Frame, Mirror, parse_ansi};
-use libherdr::protocol::{ReadFormat, ReadSource};
+use libherdr::protocol::{HerdrRequest, ReadFormat, ReadSource};
 use libherdr::transport::HerdrTransport;
-use serde_json::Value;
-use tokio::sync::{broadcast, oneshot, watch};
+use serde_json::{Value, json};
+use tokio::sync::{Notify, broadcast, oneshot, watch};
 use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
@@ -68,6 +73,8 @@ pub const MIN_GAP: Duration = Duration::from_millis(125);
 const READ_LINES: usize = libflankr_term::MAX_ROWS;
 /// The `notice.kind` of an accepted input batch (decision 6).
 pub const NOTICE_TERMINAL_INPUT: &str = "terminal_input";
+/// The most rows one `terminal.scroll` moves, either way.
+pub const SCROLL_MAX_LINES: i32 = 1000;
 
 /// The panes of every open terminal on every connection, counted, for the
 /// herdr event subscription's `pane.scroll_changed` (decision 8). As with
@@ -169,6 +176,9 @@ struct Terminal {
     agent: String,
     state: Mutex<State>,
     poller: Mutex<Option<AbortHandle>>,
+    /// Wakes the poller for a read now (after a scroll), within
+    /// [`MIN_GAP`].
+    poke: Notify,
 }
 
 struct State {
@@ -177,6 +187,16 @@ struct State {
     last_text: Option<String>,
     /// Input is let through until then (decision 6).
     armed_until: Option<Instant>,
+    /// The pane's scroll offset, in rows above the bottom, as last known.
+    scroll_offset: u64,
+    /// The furthest back it can scroll, when herdr has said.
+    scroll_max: Option<u64>,
+}
+
+impl State {
+    fn armed(&self) -> bool {
+        self.armed_until.is_some_and(|until| Instant::now() < until)
+    }
 }
 
 impl Terminal {
@@ -218,8 +238,11 @@ impl Terminals {
                 mirror: Mirror::new(id),
                 last_text: None,
                 armed_until: None,
+                scroll_offset: 0,
+                scroll_max: None,
             }),
             poller: Mutex::new(None),
+            poke: Notify::new(),
         });
         open.insert(id, Arc::clone(&t));
         (t, true)
@@ -301,8 +324,10 @@ pub(super) async fn open(
         }
     };
     let grid = parse_ansi(&text);
+    let scroll = snapshot_scroll(&snap, &pane_id);
     let first = {
         let mut state = term.state.lock().unwrap();
+        (state.scroll_offset, state.scroll_max) = scroll.unwrap_or((0, None));
         // A second open: the phone starts again, so a full frame.
         state.mirror.reset();
         state.last_text = Some(text);
@@ -420,22 +445,121 @@ pub(super) fn input_arm(conn: &Conn, raw: Value) -> Result<Value, ErrorObject> {
     })
 }
 
+fn require_armed(term: &Terminal) -> Result<(), ErrorObject> {
+    if term.state.lock().unwrap().armed() {
+        Ok(())
+    } else {
+        Err(not_permitted(format!(
+            "terminal {} is not armed for input (terminal.input_arm)",
+            term.id
+        )))
+    }
+}
+
+/// herdr's `pane.scroll` for `pane_id`: libherdr has no request of its
+/// own for it, so a custom one.
+pub fn scroll_request(pane_id: &str, offset_from_bottom: u64) -> HerdrRequest {
+    HerdrRequest::Custom(json!({
+        "method": "pane.scroll",
+        "params": {"pane_id": pane_id, "offset_from_bottom": offset_from_bottom},
+    }))
+}
+
+/// The offset `lines` rows from `current` (positive back into the
+/// scrollback), `lines` held to [`SCROLL_MAX_LINES`] either way, kept
+/// between 0 and `max` when it is known.
+pub fn scroll_target(current: u64, max: Option<u64>, lines: i32) -> u64 {
+    let lines = lines.clamp(-SCROLL_MAX_LINES, SCROLL_MAX_LINES);
+    let target = if lines >= 0 {
+        current.saturating_add(lines as u64)
+    } else {
+        current.saturating_sub(lines.unsigned_abs() as u64)
+    };
+    max.map_or(target, |max| target.min(max))
+}
+
+/// A `scroll` object's offset and its max.
+fn scroll_info(scroll: &Value) -> Option<(u64, Option<u64>)> {
+    let offset = scroll.get("offset_from_bottom")?.as_u64()?;
+    let max = scroll.get("max_offset_from_bottom").and_then(Value::as_u64);
+    Some((offset, max))
+}
+
+/// The offset and max in herdr's answer to `pane.scroll`, read leniently:
+/// `pane.scroll` (herdr's `{ "pane": PaneInfo }`) or a bare `scroll`.
+pub fn scroll_from_response(result: &Value) -> Option<(u64, Option<u64>)> {
+    result
+        .get("pane")
+        .and_then(|pane| pane.get("scroll"))
+        .or_else(|| result.get("scroll"))
+        .and_then(scroll_info)
+}
+
+/// `pane_id`'s scroll offset and max in a `list_panes` snapshot, where
+/// herdr gives them.
+fn snapshot_scroll(snap: &Value, pane_id: &str) -> Option<(u64, Option<u64>)> {
+    agents::collect_panes(snap)
+        .into_iter()
+        .find(|pane| {
+            pane.get("pane_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| pane_ids_match(id, pane_id))
+        })
+        .and_then(|pane| pane.get("scroll"))
+        .and_then(scroll_info)
+}
+
+/// `terminal.scroll`: gated and armed as `terminal.input` is; `lines == 0`
+/// answers the offset without asking herdr.
+pub(super) async fn scroll(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
+    let p: common::TerminalScrollParams = super::conn::params(raw)?;
+    let (term, _) = input_allowed(conn, p.terminal_id)?;
+    require_armed(&term)?;
+    let (current, max) = {
+        let state = term.state.lock().unwrap();
+        (state.scroll_offset, state.scroll_max)
+    };
+    if p.lines == 0 {
+        return ok(common::TerminalScrollResult {
+            offset_from_bottom: current,
+            max_offset_from_bottom: max,
+        });
+    }
+    let target = scroll_target(current, max, p.lines);
+    let answer = conn
+        .daemon
+        .client
+        .send_request(&scroll_request(&term.pane_id, target))
+        .await
+        .map_err(herdr_unavailable)?;
+    let (offset, max) = match scroll_from_response(&answer) {
+        Some((offset, reported)) => (offset, reported.or(max)),
+        None => (target, max),
+    };
+    {
+        let mut state = term.state.lock().unwrap();
+        state.scroll_offset = offset;
+        state.scroll_max = max;
+        state.armed_until = Some(Instant::now() + arm_window());
+    }
+    term.poke.notify_one();
+    log::debug!(
+        "Terminal {} on pane '{}' scrolled {} row(s) to {offset} above the bottom",
+        term.id,
+        term.pane_id,
+        p.lines
+    );
+    ok(common::TerminalScrollResult {
+        offset_from_bottom: offset,
+        max_offset_from_bottom: max,
+    })
+}
+
 /// `terminal.input`.
 pub(super) async fn input(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
     let p: common::TerminalInputParams = super::conn::params(raw)?;
     let (term, signals) = input_allowed(conn, p.terminal_id)?;
-    let armed = term
-        .state
-        .lock()
-        .unwrap()
-        .armed_until
-        .is_some_and(|until| Instant::now() < until);
-    if !armed {
-        return Err(not_permitted(format!(
-            "terminal {} is not armed for input (terminal.input_arm)",
-            term.id
-        )));
-    }
+    require_armed(&term)?;
     let keys = parse_keys(&p.keys, signals).map_err(|e| match e {
         KeyError::Signal(_) => not_permitted(e.to_string()),
         _ => ErrorObject::new(codes::INVALID_PARAMS, e.to_string()),
@@ -554,6 +678,11 @@ async fn poll(conn: Arc<Conn>, term: Arc<Terminal>, ready: oneshot::Receiver<()>
     loop {
         let idle = tokio::select! {
             _ = tick.tick() => true,
+            _ = term.poke.notified() => {
+                // A scroll: the visible frame follows the offset.
+                tokio::time::sleep_until(last_read + MIN_GAP).await;
+                false
+            }
             event = events.recv() => {
                 let mut what = seen(&term, event);
                 if matches!(what, Seen::Changed | Seen::Updated) {
@@ -769,6 +898,36 @@ mod tests {
             );
             assert_eq!(parse_keys(signal, true).unwrap(), [signal.to_lowercase()]);
         }
+    }
+
+    #[test]
+    fn a_scroll_is_herdrs_pane_scroll_with_the_offset_clamped() {
+        let rpc = scroll_request("w1:p1", 12).to_jsonrpc();
+        assert_eq!(rpc.method, "pane.scroll");
+        assert_eq!(
+            rpc.params,
+            json!({"pane_id": "w1:p1", "offset_from_bottom": 12})
+        );
+
+        assert_eq!(scroll_target(0, None, 3), 3);
+        assert_eq!(scroll_target(5, None, -3), 2);
+        assert_eq!(scroll_target(2, None, -10), 0);
+        assert_eq!(scroll_target(0, Some(4), 10), 4);
+        assert_eq!(scroll_target(0, None, i32::MAX), 1000);
+        assert_eq!(scroll_target(5000, None, i32::MIN), 4000);
+    }
+
+    #[test]
+    fn herdrs_scroll_answer_is_read_leniently() {
+        let pane = json!({"type": "pane_info", "pane": {"pane_id": "w1:p1",
+            "scroll": {"offset_from_bottom": 7, "max_offset_from_bottom": 300, "viewport_rows": 40}}});
+        assert_eq!(scroll_from_response(&pane), Some((7, Some(300))));
+        let bare = json!({"scroll": {"offset_from_bottom": 2}});
+        assert_eq!(scroll_from_response(&bare), Some((2, None)));
+        // The mock's echo of the request: nothing to read.
+        let echo =
+            json!({"method": "pane.scroll", "params": {"pane_id": "p1", "offset_from_bottom": 3}});
+        assert_eq!(scroll_from_response(&echo), None);
     }
 
     #[test]

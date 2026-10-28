@@ -577,3 +577,116 @@ async fn a_terminal_frame_from_the_phone_closes_the_link() {
         .unwrap();
     assert!(end.is_err(), "{end:?}");
 }
+
+/// The 2026-10-27 21:58 EDT amendment of plan 20261022_03: a drag scrolls
+/// the pane, gated as typing is. The mock answers `pane.scroll` with an
+/// echo, so the offset is the daemon's clamped one.
+#[tokio::test]
+async fn an_armed_scroll_moves_the_pane_and_clamps_at_the_bottom() {
+    let env = start(config(true, true, false)).await;
+    let mut phone = env.device("s23", None, true).await;
+    phone.open("p1").await;
+    phone.frame().await;
+
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": 3}))
+        .await;
+    assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+
+    phone
+        .call("terminal.input_arm", json!({"terminal_id": 1}))
+        .await;
+    let reads = env.mock(|m| m.read_log.len()).await;
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": 3}))
+        .await;
+    assert_eq!(r["result"], json!({"offset_from_bottom": 3}), "{r}");
+    // The poller reads the pane again at once, not on the 2 s tick.
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while env.mock(|m| m.read_log.len()).await == reads {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a read after the scroll");
+
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": -10}))
+        .await;
+    assert_eq!(r["result"], json!({"offset_from_bottom": 0}), "{r}");
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": 5000}))
+        .await;
+    assert_eq!(r["result"], json!({"offset_from_bottom": 1000}), "{r}");
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": 0}))
+        .await;
+    assert_eq!(r["result"], json!({"offset_from_bottom": 1000}), "{r}");
+    // No notice for a scroll.
+    assert!(
+        phone.notes.iter().all(|n| n["method"] != "notice"),
+        "{:?}",
+        phone.notes
+    );
+}
+
+/// The pane's offset and max from herdr's snapshot are where a scroll
+/// starts and stops.
+#[tokio::test]
+async fn a_scroll_starts_from_the_snapshots_offset_and_stops_at_its_max() {
+    let env = start(config(true, true, false)).await;
+    env.mock(|m| {
+        m.snapshot.workspaces[0].tabs[0].panes[0].extra.insert(
+            "scroll".to_string(),
+            json!({"offset_from_bottom": 5, "max_offset_from_bottom": 8, "viewport_rows": 40}),
+        );
+    })
+    .await;
+    let mut phone = env.device("s23", None, true).await;
+    phone.open("p1").await;
+    phone
+        .call("terminal.input_arm", json!({"terminal_id": 1}))
+        .await;
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": 0}))
+        .await;
+    assert_eq!(
+        r["result"],
+        json!({"offset_from_bottom": 5, "max_offset_from_bottom": 8}),
+        "{r}"
+    );
+    let r = phone
+        .call("terminal.scroll", json!({"terminal_id": 1, "lines": 10}))
+        .await;
+    assert_eq!(
+        r["result"],
+        json!({"offset_from_bottom": 8, "max_offset_from_bottom": 8}),
+        "{r}"
+    );
+}
+
+/// Each switch that gates typing gates scrolling too.
+#[tokio::test]
+async fn scrolling_needs_every_switch() {
+    let scroll = json!({"terminal_id": 1, "lines": 3});
+    // [terminal] input off; the agent's terminal_input off.
+    for (input, agent_input) in [(false, true), (true, false)] {
+        let env = start(config(input, agent_input, false)).await;
+        let mut phone = env.device("s23", None, true).await;
+        phone.open("p1").await;
+        let r = phone.call("terminal.scroll", scroll.clone()).await;
+        assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+    }
+    // A device that may not approve.
+    let env = start(config(true, true, false)).await;
+    let mut phone = env.device("viewer", None, false).await;
+    phone.open("p1").await;
+    let r = phone.call("terminal.scroll", scroll.clone()).await;
+    assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+    // Not a terminal of this connection.
+    let mut other = env.device("s23", None, true).await;
+    let r = other
+        .call("terminal.scroll", json!({"terminal_id": 9, "lines": 3}))
+        .await;
+    assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+}
