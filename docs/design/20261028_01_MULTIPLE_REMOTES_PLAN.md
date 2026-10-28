@@ -788,3 +788,12 @@ wins.
    this plan's Remotes section and the removal of `Unpair this device`.
 
 The plan stays `Draft` until the owner approves it.
+
+## Amendment — 2026-10-28 13:04 EDT: the store's cap per remote; approved
+
+The owner (2026-10-28): "do per remote limit, apprive and implement in
+Claude worktree". The data plan's cap (20 sessions, 50 MB) applies to each
+remote's `state.redb` separately, as the previous amendment's item 3
+reads it. The plan is approved with its amendments and built in Claude
+Code worktrees; the status becomes `In implementation` with its first
+code commit.
