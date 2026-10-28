@@ -143,8 +143,18 @@ allow_arbitrary_commands = false
 # agents with `terminal_input = true`, after arming it in the app; an arm
 # lasts 60 s from the last key. Off unless set. Only for a herdr reached over
 # its local socket, not a remote (SSH) one.
+#
+# `attach = true` (the default, for testing) keeps the daemon attached to the
+# local herdr as one of herdr's own clients: an open terminal shows herdr's
+# own cells, the cursor and the pane at the phone's size, and takes mouse
+# input. While a phone's terminal is open, herdr's tab is sized to the phone
+# and herdr's focus moves to the session's pane; a change made on the
+# desktop is not forced back until the phone's terminal is touched again.
+# With no terminal open the attachment claims nothing. `attach = false`
+# reads terminals with herdr's `pane.read` poll only.
 # [terminal]
 # input = false
+# attach = true
 
 # Links from `docs/…` paths in the companion's agent view to their pages on
 # repowiki (`~/src/repowiki`). Each agent's site is its directory's parent

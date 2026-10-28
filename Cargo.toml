@@ -25,6 +25,9 @@ getrandom = "0.2"
 libflankr_proto = { path = "crates/libflankr_proto", features = ["link"] }
 # The terminal mode's frames and mirror (src/server/terminal.rs, plan 20261027_07).
 libflankr_term = { path = "crates/libflankr_term" }
+# The terminal read from herdr's attachment (src/server/herdr_attach.rs,
+# plan 20261027_08, steps 7 and 8).
+libherdr_term = { path = "crates/libherdr_term" }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = "0.3"
 libc = "0.2"
@@ -57,6 +60,9 @@ tempfile = "3"
 # tests/link.rs reads the pairing QR code back (plan 20261022_06, step 3).
 png = "0.18"
 rqrr = { version = "0.11", default-features = false }
+# tests/terminal_attach.rs: the attachment against an in-process fake herdr
+# (plan 20261027_08, steps 7 and 8).
+libherdr_term = { path = "crates/libherdr_term", features = ["fake-server"] }
 
 [workspace]
 members = [

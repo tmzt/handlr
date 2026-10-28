@@ -37,27 +37,51 @@
 //!   snapshot), when the pane's agent is no longer the one it was opened
 //!   on (`agent_changed`), and after `terminal.close` (`closed`). All of a
 //!   connection's terminals end with it, without a notification.
+//!
+//! **Attached terminals** (docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md,
+//! steps 7 and 8, and its amendments of 23:24, 23:32 and 23:42 EDT). With
+//! the daemon's herdr attachment ([`super::herdr_attach`]) a terminal may
+//! read from it instead of the poll, unless the phone's `tab_follows_focus`
+//! is off and the pane is not on herdr's active tab in the JSON snapshot
+//! (decision 5): that terminal polls, and `pane.focus` is never sent for
+//! it. While the attachment is up and its surface shows the pane, the
+//! pane's cells, cursor and modes go through the same `Mirror` and the
+//! same 8 frames a second (the 2 s re-read and the scroll wake-ups are not
+//! used); otherwise the terminal is read by the poll as above, without
+//! closing. Frames carry the cursor trailer only when the phone's
+//! `terminal.open` asked (`cursor: true`); while the desktop has the tab
+//! they carry `Cursor.stale`. On an attached terminal keys (after
+//! [`parse_keys`]' refusals), `terminal.scroll` (a wheel event) and
+//! `terminal.mouse` go over the attachment, gated as `terminal.input` is,
+//! and each is a touch that takes the tab back from the desktop. On a
+//! polled terminal `terminal.mouse` is `NOT_PERMITTED` and
+//! `terminal.resize` is answered `{}` and ignored, since the poll cannot
+//! size the pane.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use libflankr_proto::common::{
-    self, TERMINAL_INPUT_ARM_SECS, TERMINAL_INPUT_MAX, TerminalClosedReason, methods,
+    self, TERMINAL_INPUT_ARM_SECS, TERMINAL_INPUT_MAX, TerminalClosedReason, TerminalSource,
+    methods,
 };
 use libflankr_proto::companion;
 use libflankr_proto::envelope::codes;
 use libflankr_proto::{ErrorObject, Id, Notification};
-use libflankr_term::{Frame, Mirror, parse_ansi};
+use libflankr_term::{Cursor, Frame, Grid, Mirror, parse_ansi};
 use libherdr::protocol::{HerdrRequest, ReadFormat, ReadSource};
 use libherdr::transport::HerdrTransport;
+use libherdr_term::herdr::ClientPaneInputEvent;
+use libherdr_term::{AttachError, SurfaceView, key_events};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, broadcast, oneshot, watch};
 use tokio::task::AbortHandle;
 use tokio::time::Instant;
 
 use super::conn::{Conn, ok, resolve_target, snapshot};
+use super::herdr_attach::{HerdrAttach, Published, ViewerId};
 use super::{CoreEvent, Daemon};
 use crate::core::agents::{self, extract_agent_name_for_pane};
 use crate::core::policy;
@@ -75,6 +99,15 @@ const READ_LINES: usize = libflankr_term::MAX_ROWS;
 pub const NOTICE_TERMINAL_INPUT: &str = "terminal_input";
 /// The most rows one `terminal.scroll` moves, either way.
 pub const SCROLL_MAX_LINES: i32 = 1000;
+/// How long `terminal.open` waits for the attachment's first surface of
+/// the pane at the phone's size before it reads the pane by the poll.
+const FIRST_VIEW_WAIT: Duration = Duration::from_millis(1500);
+/// How long an attached `terminal.scroll` waits for the next surface's
+/// offsets.
+const SCROLL_ANSWER_WAIT: Duration = Duration::from_millis(500);
+/// The phone's size when `terminal.open` gives no hints (decision 6).
+const DEFAULT_COLS: u16 = 80;
+const DEFAULT_ROWS: u16 = 24;
 
 /// The panes of every open terminal on every connection, counted, for the
 /// herdr event subscription's `pane.scroll_changed` (decision 8). As with
@@ -158,25 +191,54 @@ pub fn offered(
     transport: &HerdrTransport,
     over_link: bool,
     input: bool,
+    mouse: bool,
 ) -> Option<companion::TerminalInfo> {
-    (over_link && herdr_is_local(transport)).then_some(companion::TerminalInfo {
-        input,
-        mouse: false,
-    })
+    (over_link && herdr_is_local(transport)).then_some(companion::TerminalInfo { input, mouse })
 }
 
-/// [`offered`] for `daemon`.
+/// [`offered`] for `daemon`: `mouse` while its herdr attachment is up.
 pub fn info(daemon: &Daemon, over_link: bool) -> Option<companion::TerminalInfo> {
-    offered(daemon.client.transport(), over_link, daemon.terminal_input)
+    let mouse = daemon.herdr_attach.as_ref().is_some_and(|a| a.usable());
+    offered(
+        daemon.client.transport(),
+        over_link,
+        daemon.terminal_input,
+        mouse,
+    )
+}
+
+/// Whether `pane_id` is on herdr's active tab in the JSON snapshot `snap`:
+/// it is the focused pane, or shares the focused pane's tab. Unknown tabs
+/// count as another tab.
+pub fn on_active_tab(snap: &Value, pane_id: &str) -> bool {
+    let Some(focused) = agents::focused_pane_id(snap) else {
+        return false;
+    };
+    if pane_ids_match(&focused, pane_id) {
+        return true;
+    }
+    let refs = agents::agents(snap);
+    let tab_of = |id: &str| {
+        refs.iter()
+            .find(|r| pane_ids_match(&r.pane_id, id))
+            .and_then(|r| r.tab_id.clone())
+    };
+    matches!((tab_of(pane_id), tab_of(&focused)), (Some(a), Some(b)) if a == b)
 }
 
 /// One open terminal.
 struct Terminal {
     id: u32,
+    /// Its viewer id on the daemon's herdr attachment.
+    viewer: ViewerId,
     pane_id: String,
     /// The pane's agent when it was opened (lowercased, as the policy has
     /// it).
     agent: String,
+    /// The phone reads the cursor trailer (`terminal.open`'s `cursor`).
+    cursor: AtomicBool,
+    /// The herdr attachment this terminal may read from, set at open.
+    attach: Mutex<Option<Arc<HerdrAttach>>>,
     state: Mutex<State>,
     poller: Mutex<Option<AbortHandle>>,
     /// Wakes the poller for a read now (after a scroll), within
@@ -194,6 +256,10 @@ struct State {
     scroll_offset: u64,
     /// The furthest back it can scroll, when herdr has said.
     scroll_max: Option<u64>,
+    /// The last polled frame was marked stale (see [`stale_mark`]).
+    last_marked: bool,
+    /// A mouse event's notice was sent since the last arm (decision 12).
+    mouse_noticed: bool,
 }
 
 impl State {
@@ -208,6 +274,66 @@ impl Terminal {
             task.abort();
         }
     }
+
+    fn cursor(&self) -> bool {
+        self.cursor.load(Ordering::Relaxed)
+    }
+
+    /// The attachment this terminal may use.
+    fn attach(&self) -> Option<Arc<HerdrAttach>> {
+        self.attach.lock().unwrap().clone()
+    }
+
+    /// The attachment, while it is up: input goes over it.
+    fn attached(&self) -> Option<Arc<HerdrAttach>> {
+        self.attach().filter(|a| a.usable())
+    }
+
+    /// Stop the poller and stop using the attachment; the terminal is out
+    /// of the table already.
+    fn release(&self, daemon: &Daemon) {
+        self.abort_poller();
+        daemon.terminal_panes.remove(&self.pane_id);
+        if let Some(attach) = self.attach.lock().unwrap().take() {
+            attach.leave(self.viewer);
+        }
+    }
+
+    /// One frame's bytes, with the cursor trailer when the phone asked.
+    fn encode(&self, frame: &Frame) -> Vec<u8> {
+        frame.encode_with(self.cursor())
+    }
+}
+
+/// The pane `pane_id` of `view` as a grid with its cursor, `stale` set: a
+/// pane whose cursor is outside it gets a hidden one, so the modes and the
+/// stale flag still reach the phone. `None` when the view does not show
+/// the pane.
+fn attached_grid(view: &SurfaceView, pane_id: &str, stale: bool) -> Option<Grid> {
+    let pane = view.pane(pane_id)?;
+    let hidden = Cursor {
+        visible: false,
+        mouse_reporting: pane.pane.mouse_reporting,
+        alternate_screen: pane.pane.alternate_screen_active,
+        ..Cursor::default()
+    };
+    let mut grid = Grid::from(pane);
+    grid.cursor.get_or_insert(hidden).stale = stale;
+    Some(grid)
+}
+
+/// `published`'s grid of `pane_id`, if it shows it.
+fn published_grid(published: &Published, pane_id: &str) -> Option<Grid> {
+    published
+        .view
+        .as_deref()
+        .and_then(|view| attached_grid(view, pane_id, published.stale))
+}
+
+/// Whether a polled frame of `term` carries a hidden, stale cursor: its
+/// attachment is up but the desktop has the tab (another tab is shown).
+fn stale_mark(term: &Terminal) -> bool {
+    term.attached().is_some_and(|a| a.stale())
 }
 
 /// A connection's terminals, by id. Ids start at 1 on each connection.
@@ -227,7 +353,7 @@ impl Terminals {
     }
 
     /// The terminal on `pane_id`, or a new one; `true` when it is new.
-    fn get_or_insert(&self, pane_id: &str, agent: &str) -> (Arc<Terminal>, bool) {
+    fn get_or_insert(&self, conn_id: u64, pane_id: &str, agent: &str) -> (Arc<Terminal>, bool) {
         let mut open = self.open.lock().unwrap();
         if let Some(t) = open.values().find(|t| t.pane_id == pane_id) {
             return (Arc::clone(t), false);
@@ -235,14 +361,19 @@ impl Terminals {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let t = Arc::new(Terminal {
             id,
+            viewer: (conn_id, id),
             pane_id: pane_id.to_string(),
             agent: agent.to_string(),
+            cursor: AtomicBool::new(false),
+            attach: Mutex::new(None),
             state: Mutex::new(State {
                 mirror: Mirror::new(id),
                 last_text: None,
                 armed_until: None,
                 scroll_offset: 0,
                 scroll_max: None,
+                last_marked: false,
+                mouse_noticed: false,
             }),
             poller: Mutex::new(None),
             poke: Notify::new(),
@@ -255,8 +386,7 @@ impl Terminals {
     pub(super) fn close_all(&self, daemon: &Daemon) {
         let all: Vec<Arc<Terminal>> = self.open.lock().unwrap().drain().map(|(_, t)| t).collect();
         for t in all {
-            t.abort_poller();
-            daemon.terminal_panes.remove(&t.pane_id);
+            t.release(daemon);
         }
     }
 }
@@ -316,24 +446,71 @@ pub(super) async fn open(
     policy::reach(conn.principal(), &daemon.agents, &agent, &pane_id)
         .map_err(|denied| not_permitted(denied.to_string()))?;
 
-    let (term, new) = conn.terminals.get_or_insert(&pane_id, &agent);
-    let text = match read_text(daemon, &pane_id).await {
-        Ok(text) => text,
-        Err(e) => {
-            if new {
-                conn.terminals.remove(term.id);
-            }
-            return Err(herdr_unavailable(e));
+    let (term, new) = conn.terminals.get_or_insert(conn.id(), &pane_id, &agent);
+    term.cursor.store(p.cursor, Ordering::Relaxed);
+
+    // The attachment, unless the phone's tab_follows_focus is off and the
+    // pane is on another tab than herdr's active one (decision 5).
+    let attach = daemon.herdr_attach.clone().filter(|_| {
+        let allowed = conn.tab_follows_focus() || on_active_tab(&snap, &pane_id);
+        if !allowed {
+            log::debug!(
+                "Terminal {} on pane '{pane_id}' is polled: it is not on herdr's active tab \
+                 and tab_follows_focus is off",
+                term.id
+            );
         }
+        allowed
+    });
+    let previous = std::mem::replace(&mut *term.attach.lock().unwrap(), attach.clone());
+    if let Some(previous) = previous
+        && attach.is_none()
+    {
+        previous.leave(term.viewer);
+    }
+    let attached = match &attach {
+        Some(a) => {
+            a.open(
+                term.viewer,
+                &pane_id,
+                p.cols_hint.unwrap_or(DEFAULT_COLS),
+                p.rows_hint.unwrap_or(DEFAULT_ROWS),
+            );
+            a.usable()
+        }
+        None => false,
     };
-    let grid = parse_ansi(&text);
+    let view = match &attach {
+        Some(a) if attached => a.first_view(&pane_id, FIRST_VIEW_WAIT).await,
+        _ => None,
+    };
+    let stale = attach.as_ref().is_some_and(|a| a.stale());
+    let (grid, text) = match view
+        .as_deref()
+        .and_then(|v| attached_grid(v, &pane_id, stale))
+    {
+        Some(grid) => (grid, None),
+        None => match read_text(daemon, &pane_id).await {
+            Ok(text) => (parse_ansi(&text), Some(text)),
+            Err(e) => {
+                if new {
+                    conn.terminals.remove(term.id);
+                    if let Some(a) = term.attach.lock().unwrap().take() {
+                        a.leave(term.viewer);
+                    }
+                }
+                return Err(herdr_unavailable(e));
+            }
+        },
+    };
     let scroll = snapshot_scroll(&snap, &pane_id);
     let first = {
         let mut state = term.state.lock().unwrap();
         (state.scroll_offset, state.scroll_max) = scroll.unwrap_or((0, None));
         // A second open: the phone starts again, so a full frame.
         state.mirror.reset();
-        state.last_text = Some(text);
+        state.last_text = text;
+        state.last_marked = false;
         state.mirror.update(grid)
     };
     let Some(first) = first else {
@@ -354,8 +531,13 @@ pub(super) async fn open(
         first.clone(),
     ));
     *term.poller.lock().unwrap() = Some(task.abort_handle());
+    let source = if attached {
+        TerminalSource::Attached
+    } else {
+        TerminalSource::Poll
+    };
     log::info!(
-        "Terminal {} open on pane '{pane_id}' ({agent}) for {}",
+        "Terminal {} open on pane '{pane_id}' ({agent}) for {}, {source:?}",
         term.id,
         conn.principal().id
     );
@@ -363,9 +545,27 @@ pub(super) async fn open(
         terminal_id: term.id,
         cols: first.cols,
         rows: first.rows,
-        cursor: false,
-        source: Default::default(),
+        cursor: p.cursor && attached,
+        source,
     })
+}
+
+/// `terminal.resize`: the phone's terminal area, sent to herdr for an
+/// attached terminal (the 23:24 EDT amendment, item 1). A polled terminal
+/// cannot be sized: answered `{}` and ignored.
+pub(super) fn resize(conn: &Conn, raw: Value) -> Result<Value, ErrorObject> {
+    served(conn)?;
+    let p: common::TerminalResizeParams = super::conn::params(raw)?;
+    let Some(term) = conn.terminals.get(p.terminal_id) else {
+        return Err(not_permitted(format!(
+            "no terminal {} is open on this connection",
+            p.terminal_id
+        )));
+    };
+    if let Some(attach) = term.attach() {
+        attach.resize(term.viewer, p.cols, p.rows);
+    }
+    ok(common::Empty {})
 }
 
 /// `terminal.close`: `{}`, also for a terminal already gone.
@@ -373,8 +573,7 @@ pub(super) fn close(conn: &Conn, raw: Value) -> Result<Value, ErrorObject> {
     served(conn)?;
     let p: common::TerminalCloseParams = super::conn::params(raw)?;
     if let Some(term) = conn.terminals.remove(p.terminal_id) {
-        term.abort_poller();
-        conn.daemon.terminal_panes.remove(&term.pane_id);
+        term.release(&conn.daemon);
         conn.send(&Notification::new(
             methods::TERMINAL_CLOSED,
             common::TerminalClosedParams {
@@ -438,7 +637,19 @@ fn arm_window() -> Duration {
 pub(super) fn input_arm(conn: &Conn, raw: Value) -> Result<Value, ErrorObject> {
     let p: common::TerminalInputArmParams = super::conn::params(raw)?;
     let (term, _) = input_allowed(conn, p.terminal_id)?;
-    term.state.lock().unwrap().armed_until = Some(Instant::now() + arm_window());
+    {
+        let mut state = term.state.lock().unwrap();
+        state.armed_until = Some(Instant::now() + arm_window());
+        // A new arm window: its first mouse event is noticed.
+        state.mouse_noticed = false;
+    }
+    // The tap that armed is a touch: it takes herdr's tab back from the
+    // desktop (the 23:32 EDT amendment, item 3).
+    if let Some(attach) = term.attached()
+        && let Err(e) = attach.claim(term.viewer)
+    {
+        log::debug!("Terminal {} armed without the attachment: {e}", term.id);
+    }
     log::info!(
         "Terminal {} on pane '{}' armed for input by {}",
         term.id,
@@ -524,6 +735,68 @@ pub(super) async fn scroll(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorO
         let state = term.state.lock().unwrap();
         (state.scroll_offset, state.scroll_max)
     };
+    if let Some(attach) = term.attached() {
+        let pane_scroll = |published: &Published| {
+            published
+                .view
+                .as_ref()
+                .and_then(|v| v.pane(&term.pane_id))
+                .and_then(|v| v.pane.scroll)
+                .map(|s| (s.offset_from_bottom, Some(s.max_offset_from_bottom)))
+        };
+        if p.lines == 0 {
+            let (offset, max) = pane_scroll(&attach.current()).unwrap_or((current, max));
+            return ok(common::TerminalScrollResult {
+                offset_from_bottom: offset,
+                max_offset_from_bottom: max,
+            });
+        }
+        // A wheel event (decision 10): herdr routes it by the pane's modes.
+        let mut surfaces = attach.subscribe();
+        let before = pane_scroll(&surfaces.borrow_and_update()).map(|(o, _)| o);
+        let sent = match attach.touch(term.viewer).await {
+            Ok(()) => attach.input(term.viewer, vec![ClientPaneInputEvent::from(p)]),
+            Err(e) => Err(e),
+        };
+        match sent {
+            Ok(()) => {
+                // The offsets from the next surface that shows the pane
+                // scrolled; surfaces drawn before herdr took the wheel
+                // still show the old offset, so without a change within
+                // the wait, the latest surface's.
+                let mut latest = None;
+                let until = Instant::now() + SCROLL_ANSWER_WAIT;
+                while let Ok(Ok(())) = tokio::time::timeout_at(until, surfaces.changed()).await {
+                    if let Some(s) = pane_scroll(&surfaces.borrow_and_update()) {
+                        latest = Some(s);
+                        if Some(s.0) != before {
+                            break;
+                        }
+                    }
+                }
+                let (offset, max) = latest.unwrap_or((current, max));
+                {
+                    let mut state = term.state.lock().unwrap();
+                    state.scroll_offset = offset;
+                    state.scroll_max = max;
+                    state.armed_until = Some(Instant::now() + arm_window());
+                }
+                log::debug!(
+                    "Terminal {} on pane '{}' got a wheel of {} row(s)",
+                    term.id,
+                    term.pane_id,
+                    p.lines
+                );
+                return ok(common::TerminalScrollResult {
+                    offset_from_bottom: offset,
+                    max_offset_from_bottom: max,
+                });
+            }
+            // The attachment went away: herdr's pane.scroll, as polled.
+            Err(AttachError::Closed) => {}
+            Err(e) => return Err(herdr_unavailable(e)),
+        }
+    }
     if p.lines == 0 {
         return ok(common::TerminalScrollResult {
             offset_from_bottom: current,
@@ -570,11 +843,28 @@ pub(super) async fn input(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorOb
         _ => ErrorObject::new(codes::INVALID_PARAMS, e.to_string()),
     })?;
     let daemon = &conn.daemon;
-    daemon
-        .client
-        .send_keys(&term.pane_id, &keys.join(" "))
-        .await
-        .map_err(herdr_unavailable)?;
+    let mut sent = false;
+    if let Some(attach) = term.attached() {
+        // herdr's own key events (decision 8), after parse_keys' refusals.
+        let events = key_events(&keys).map_err(|key| {
+            ErrorObject::new(
+                codes::INVALID_PARAMS,
+                format!("the key {key:?} is not sent to a terminal"),
+            )
+        })?;
+        match send_attached(&attach, &term, events).await {
+            Ok(()) => sent = true,
+            Err(AttachError::Closed) => {}
+            Err(e) => return Err(herdr_unavailable(e)),
+        }
+    }
+    if !sent {
+        daemon
+            .client
+            .send_keys(&term.pane_id, &keys.join(" "))
+            .await
+            .map_err(herdr_unavailable)?;
+    }
     term.state.lock().unwrap().armed_until = Some(Instant::now() + arm_window());
     let count = keys.len();
     log::info!(
@@ -584,25 +874,83 @@ pub(super) async fn input(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorOb
         term.pane_id,
         term.agent
     );
-    let names = daemon.names_for(&term.pane_id).await;
+    let plural = if count == 1 { "key" } else { "keys" };
+    notice(conn, &term, |name| {
+        format!("Typed {count} {plural} into {name}'s terminal.")
+    })
+    .await;
+    ok(common::Empty {})
+}
+
+/// A touch, then `events`, over the attachment.
+async fn send_attached(
+    attach: &Arc<HerdrAttach>,
+    term: &Terminal,
+    events: Vec<ClientPaneInputEvent>,
+) -> Result<(), AttachError> {
+    attach.touch(term.viewer).await?;
+    attach.input(term.viewer, events)
+}
+
+/// A `terminal_input` notice on `term`, its text from the agent's spoken
+/// name, capitalised.
+async fn notice(conn: &Arc<Conn>, term: &Terminal, text: impl FnOnce(&str) -> String) {
+    let names = conn.daemon.names_for(&term.pane_id).await;
     let spoken = names
         .as_ref()
         .map(|n| n.spoken.clone())
         .unwrap_or_else(|| crate::core::naming::capitalise(&term.agent));
-    let plural = if count == 1 { "key" } else { "keys" };
     let notice = companion::Notice {
         id: conn.next_notice.fetch_add(1, Ordering::Relaxed) + 1,
         kind: NOTICE_TERMINAL_INPUT.to_string(),
         pane_id: term.pane_id.clone(),
         name: names.map(|n| n.name),
-        text: format!(
-            "Typed {count} {plural} into {}'s terminal.",
-            crate::core::naming::capitalise(&spoken)
-        ),
+        text: text(&crate::core::naming::capitalise(&spoken)),
         spoken: Some(spoken),
     };
     conn.notices.lock().unwrap().queue(notice);
     super::companion::flush_notices(conn);
+}
+
+fn mouse_needs_attachment() -> ErrorObject {
+    not_permitted("mouse needs the attached terminal")
+}
+
+/// `terminal.mouse` (decisions 10 and 12): gated and armed as
+/// `terminal.input` is, over the attachment only. A kind herdr has no event
+/// for is answered `{}` and dropped. One notice per arm window.
+pub(super) async fn mouse(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
+    let p: common::TerminalMouseParams = super::conn::params(raw)?;
+    let (term, _) = input_allowed(conn, p.terminal_id)?;
+    require_armed(&term)?;
+    let Some(attach) = term.attached() else {
+        return Err(mouse_needs_attachment());
+    };
+    let Ok(event) = ClientPaneInputEvent::try_from(&p) else {
+        log::debug!("Ignoring a terminal.mouse of a kind herdr has no event for");
+        return ok(common::Empty {});
+    };
+    send_attached(&attach, &term, vec![event])
+        .await
+        .map_err(|e| match e {
+            AttachError::Closed => mouse_needs_attachment(),
+            e => herdr_unavailable(e),
+        })?;
+    let first = {
+        let mut state = term.state.lock().unwrap();
+        state.armed_until = Some(Instant::now() + arm_window());
+        !std::mem::replace(&mut state.mouse_noticed, true)
+    };
+    if first {
+        log::info!(
+            "{} used the mouse in terminal {} on pane '{}' ({})",
+            conn.principal().id,
+            term.id,
+            term.pane_id,
+            term.agent
+        );
+        notice(conn, &term, |name| format!("Clicked in {name}'s terminal.")).await;
+    }
     ok(common::Empty {})
 }
 
@@ -611,7 +959,11 @@ fn closed(conn: &Conn, term: &Terminal, reason: TerminalClosedReason) {
     if conn.terminals.remove(term.id).is_none() {
         return;
     }
+    // The poller's own task: not aborted, it returns after this.
     conn.daemon.terminal_panes.remove(&term.pane_id);
+    if let Some(attach) = term.attach.lock().unwrap().take() {
+        attach.leave(term.viewer);
+    }
     log::info!(
         "Terminal {} on pane '{}' ended: {reason:?}",
         term.id,
@@ -669,24 +1021,62 @@ fn seen(term: &Terminal, event: Result<CoreEvent, broadcast::error::RecvError>) 
     }
 }
 
+/// What a poller does next.
+enum Step {
+    /// Read the pane by `pane.read`; `idle` on the tick, which also resends
+    /// an unacknowledged frame.
+    Read { idle: bool },
+    /// The attachment published a surface.
+    Surface,
+    /// The tick while attached: resend an unacknowledged frame.
+    Retransmit,
+}
+
+/// The next surface, or `false` when the attachment's channel is gone;
+/// never without one.
+async fn next_surface(surfaces: &mut Option<watch::Receiver<Published>>) -> bool {
+    match surfaces {
+        Some(rx) => rx.changed().await.is_ok(),
+        None => std::future::pending().await,
+    }
+}
+
 /// One terminal's poller: the first frame once the open is answered, then
 /// a read on each `pane.scroll_changed` (coalesced, at most one per
 /// [`MIN_GAP`]) and each [`IDLE_TICK`], which also resends the newest
-/// frame while the phone has not acknowledged it.
+/// frame while the phone has not acknowledged it. While the attachment's
+/// surface shows the pane, its surfaces are the frames instead (at most
+/// one per [`MIN_GAP`]), and the tick only resends.
 async fn poll(conn: Arc<Conn>, term: Arc<Terminal>, ready: oneshot::Receiver<()>, first: Frame) {
     let mut events = conn.daemon.events.subscribe();
+    let mut surfaces = term.attach().map(|a| a.subscribe());
+    let mut shown = surfaces
+        .as_mut()
+        .is_some_and(|rx| rx.borrow_and_update().shows(&term.pane_id));
     let _ = ready.await;
-    conn.send_terminal(first.encode());
+    conn.send_terminal(term.encode(&first));
     let mut tick = tokio::time::interval_at(Instant::now() + IDLE_TICK, IDLE_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last_read = Instant::now();
     loop {
-        let idle = tokio::select! {
-            _ = tick.tick() => true,
+        let step = tokio::select! {
+            _ = tick.tick() => if shown { Step::Retransmit } else { Step::Read { idle: true } },
             _ = term.poke.notified() => {
                 // A scroll: the visible frame follows the offset.
                 tokio::time::sleep_until(last_read + MIN_GAP).await;
-                false
+                if shown {
+                    continue;
+                }
+                Step::Read { idle: false }
+            }
+            changed = next_surface(&mut surfaces) => {
+                if !changed {
+                    surfaces = None;
+                    shown = false;
+                    continue;
+                }
+                tokio::time::sleep_until(last_read + MIN_GAP).await;
+                Step::Surface
             }
             event = events.recv() => {
                 let mut what = seen(&term, event);
@@ -710,17 +1100,61 @@ async fn poll(conn: Arc<Conn>, term: Arc<Terminal>, ready: oneshot::Receiver<()>
                 }
                 match what {
                     Seen::Nothing => continue,
-                    Seen::Changed => false,
+                    Seen::Changed => {
+                        if shown {
+                            continue;
+                        }
+                        Step::Read { idle: false }
+                    }
                     Seen::Updated => {
                         if let Some(reason) = ended(&conn.daemon, &term).await {
                             return closed(&conn, &term, reason);
                         }
-                        false
+                        if shown {
+                            continue;
+                        }
+                        Step::Read { idle: false }
                     }
                     Seen::Closed => return closed(&conn, &term, TerminalClosedReason::PaneClosed),
                     Seen::Gone => return,
                 }
             }
+        };
+        let idle = match step {
+            Step::Retransmit => {
+                let frame = term.state.lock().unwrap().mirror.retransmit();
+                if let Some(frame) = frame {
+                    conn.send_terminal(term.encode(&frame));
+                }
+                continue;
+            }
+            Step::Surface => {
+                let grid = surfaces
+                    .as_mut()
+                    .and_then(|rx| published_grid(&rx.borrow_and_update(), &term.pane_id));
+                match grid {
+                    Some(grid) => {
+                        shown = true;
+                        last_read = Instant::now();
+                        let frame = term.state.lock().unwrap().mirror.update(grid);
+                        if let Some(frame) = frame {
+                            conn.send_terminal(term.encode(&frame));
+                        }
+                        continue;
+                    }
+                    // Still not shown: the poll goes on as it was.
+                    None if !shown => continue,
+                    // No longer shown (the attachment closed, or the
+                    // desktop moved to another tab): read it now.
+                    None => {
+                        shown = false;
+                        let mut state = term.state.lock().unwrap();
+                        state.last_text = None;
+                        false
+                    }
+                }
+            }
+            Step::Read { idle } => idle,
         };
         last_read = Instant::now();
         let text = match read_text(&conn.daemon, &term.pane_id).await {
@@ -733,13 +1167,23 @@ async fn poll(conn: Arc<Conn>, term: Arc<Terminal>, ready: oneshot::Receiver<()>
                 continue;
             }
         };
+        let marked = stale_mark(&term);
         let frame = {
             let mut state = term.state.lock().unwrap();
-            let frame = if state.last_text.as_deref() == Some(text.as_str()) {
+            let frame = if state.last_text.as_deref() == Some(text.as_str())
+                && state.last_marked == marked
+            {
                 None
             } else {
-                let grid = parse_ansi(&text);
+                let mut grid = parse_ansi(&text);
+                if marked {
+                    grid.cursor = Some(Cursor {
+                        stale: true,
+                        ..Cursor::default()
+                    });
+                }
                 state.last_text = Some(text);
+                state.last_marked = marked;
                 state.mirror.update(grid)
             };
             match frame {
@@ -749,7 +1193,7 @@ async fn poll(conn: Arc<Conn>, term: Arc<Terminal>, ready: oneshot::Receiver<()>
             }
         };
         if let Some(frame) = frame {
-            conn.send_terminal(frame.encode());
+            conn.send_terminal(term.encode(&frame));
         }
     }
 }
@@ -956,24 +1400,24 @@ mod tests {
         // Constructed only: nothing is run or connected.
         let remote = HerdrTransport::remote_ssh("nobody@nowhere.invalid");
         assert!(!herdr_is_local(&remote));
-        assert_eq!(offered(&remote, true, true), None);
+        assert_eq!(offered(&remote, true, true, false), None);
         let local = HerdrTransport::local("/nonexistent/herdr.sock");
         assert!(herdr_is_local(&local));
         assert_eq!(
-            offered(&local, true, true),
+            offered(&local, true, true, false),
             Some(companion::TerminalInfo {
                 input: true,
                 mouse: false
             })
         );
         assert_eq!(
-            offered(&HerdrTransport::mock(), true, false),
+            offered(&HerdrTransport::mock(), true, false, false),
             Some(companion::TerminalInfo {
                 input: false,
                 mouse: false
             })
         );
         // Not over the link: no terminal.
-        assert_eq!(offered(&local, false, true), None);
+        assert_eq!(offered(&local, false, true, true), None);
     }
 }

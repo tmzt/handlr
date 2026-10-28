@@ -150,6 +150,11 @@ impl Conn {
         }
     }
 
+    /// The connection's number, unique in the daemon's run.
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
     /// Whether the connection came over the link.
     pub(super) fn is_link(&self) -> bool {
         matches!(self.origin, Origin::Link { .. })
@@ -797,6 +802,9 @@ async fn call(
         methods::TERMINAL_INPUT_ARM if conn.is_companion() => super::terminal::input_arm(conn, raw),
         methods::TERMINAL_INPUT if conn.is_companion() => super::terminal::input(conn, raw).await,
         methods::TERMINAL_SCROLL if conn.is_companion() => super::terminal::scroll(conn, raw).await,
+        // Plan 20261027_08, steps 7 and 8.
+        methods::TERMINAL_MOUSE if conn.is_companion() => super::terminal::mouse(conn, raw).await,
+        methods::TERMINAL_RESIZE if conn.is_companion() => super::terminal::resize(conn, raw),
         methods::AGENTS_INTERRUPT => {
             let p: common::AgentsInterruptParams = params(raw)?;
             let snap = snapshot(conn).await?;

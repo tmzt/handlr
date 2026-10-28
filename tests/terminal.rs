@@ -49,7 +49,10 @@ fn config(input: bool, agent_input: bool, signals: bool) -> AppConfig {
             AgentConfig::new("omp", vec!["continue".to_string()], true),
         ],
         summary: Some(flankr::config::SummaryConfig { cards: false }),
-        terminal: TerminalConfig { input },
+        terminal: TerminalConfig {
+            input,
+            ..TerminalConfig::default()
+        },
         ..AppConfig::default()
     }
 }

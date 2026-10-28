@@ -51,13 +51,28 @@ pub struct AppConfig {
 }
 
 /// `[terminal]`: the companion's terminal mode (plan 20261027_07).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct TerminalConfig {
     /// Whether a paired device may type into a terminal at all
     /// (`terminal.input_arm`, `terminal.input`; decision 6). Off unless
     /// set; each agent's `terminal_input` must be on too.
     pub input: bool,
+    /// Whether the daemon attaches to a local herdr as one of its own
+    /// clients and reads terminals from it, with the cursor, the pane's
+    /// size and mouse input; false keeps the `pane.read` poll only
+    /// (docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md, decision 13
+    /// and the 23:42 EDT amendment). On unless set, for testing.
+    pub attach: bool,
+}
+
+impl Default for TerminalConfig {
+    fn default() -> Self {
+        TerminalConfig {
+            input: false,
+            attach: true,
+        }
+    }
 }
 
 /// `[llm]`: the daemon's own LLM use (plan 20261027_02). Nothing here is
@@ -721,6 +736,19 @@ terminal_signals = true
         let shipped: AppConfig = toml::from_str(&AppConfig::default_toml_template()).unwrap();
         assert!(!shipped.terminal.input);
         assert!(shipped.agents.iter().all(|a| !a.terminal_input));
+    }
+
+    #[test]
+    fn the_terminal_attaches_to_herdr_unless_told_not_to() {
+        // Plan 20261027_08, decision 13 and the 23:42 EDT amendment.
+        let cfg: AppConfig = toml::from_str("").unwrap();
+        assert!(cfg.terminal.attach);
+        let cfg: AppConfig = toml::from_str("[terminal]\ninput = true\n").unwrap();
+        assert!(cfg.terminal.attach && cfg.terminal.input);
+        let cfg: AppConfig = toml::from_str("[terminal]\nattach = false\n").unwrap();
+        assert!(!cfg.terminal.attach);
+        let shipped: AppConfig = toml::from_str(&AppConfig::default_toml_template()).unwrap();
+        assert!(shipped.terminal.attach);
     }
 
     #[test]

@@ -6,6 +6,7 @@
 
 pub mod companion;
 pub mod conn;
+pub mod herdr_attach;
 pub mod link;
 pub mod speech;
 mod subscriptions;
@@ -96,6 +97,11 @@ pub struct Daemon {
     pub terminal_input: bool,
     /// The panes of open terminals, for `pane.scroll_changed`.
     pub terminal_panes: Arc<terminal::TerminalPanes>,
+    /// The terminal's attachment to herdr as one of its clients (plan
+    /// 20261027_08): with `[terminal] attach` on and herdr local (or the
+    /// test hook `TurnOptions::herdr_attach`), else `None` and terminals
+    /// use the poll only. Started by [`run`].
+    pub herdr_attach: Option<Arc<herdr_attach::HerdrAttach>>,
 }
 
 impl Daemon {
@@ -150,6 +156,8 @@ impl Daemon {
         );
         let speech = speech::SpeechService::new(Arc::clone(&llm), turns.speech.clone());
         let hub = SessionHub::new(Arc::clone(&sessions), config.urls.repowiki_url.clone());
+        let herdr_attach =
+            attach_settings(&client, config, &turns).map(herdr_attach::HerdrAttach::new);
         let daemon = Arc::new(Daemon {
             sessions,
             hub,
@@ -170,6 +178,7 @@ impl Daemon {
             file_watcher: OnceLock::new(),
             terminal_input: config.terminal.input,
             terminal_panes: Arc::new(terminal::TerminalPanes::new()),
+            herdr_attach,
         });
         // `[llm.uses.card_summaries]`: each new Finished card summarised
         // once, while card summaries are available.
@@ -228,6 +237,28 @@ impl Daemon {
             project: named.agent.project.clone(),
             tab: named.tab.as_ref().map(|t| t.shown.clone()),
         })
+    }
+}
+
+/// Where the terminal's herdr attachment connects: the test hook, else the
+/// client socket beside a local herdr's API socket; `None` with
+/// `[terminal] attach = false`, a remote herdr or the mock.
+fn attach_settings(
+    client: &HerdrClient,
+    config: &AppConfig,
+    turns: &companion::TurnOptions,
+) -> Option<herdr_attach::AttachSettings> {
+    if !config.terminal.attach {
+        return None;
+    }
+    if let Some(settings) = &turns.herdr_attach {
+        return Some(settings.clone());
+    }
+    match client.transport() {
+        HerdrTransport::LocalSocket { socket_path } => Some(herdr_attach::AttachSettings::new(
+            libherdr_term::client_socket_for(socket_path),
+        )),
+        _ => None,
     }
 }
 
@@ -372,6 +403,11 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
         .sessions
         .suggestions
         .spawn_watch(daemon.file_watcher().as_ref());
+    // The terminal's herdr attachment, held for the daemon's run (plan
+    // 20261027_08, the 23:32 EDT amendment).
+    if let Some(attach) = &daemon.herdr_attach {
+        attach.spawn();
+    }
     if let Some(transport) = options.event_transport {
         tokio::spawn(watcher::run(
             transport,

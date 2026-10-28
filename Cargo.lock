@@ -1350,6 +1350,7 @@ dependencies = [
  "libflankr_proto",
  "libflankr_term",
  "libherdr",
+ "libherdr_term",
  "libinfer",
  "libinfer-gemini",
  "libtypedmd",

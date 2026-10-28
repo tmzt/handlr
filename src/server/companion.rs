@@ -87,6 +87,11 @@ pub struct TurnOptions {
     /// The user's `SUGGESTIONS.md`, merged over the rules when it exists
     /// (the 14:13 EDT amendment); `None` reads none.
     pub suggestions_user_file: Option<PathBuf>,
+    /// Where the terminal's herdr attachment connects, instead of the
+    /// client socket beside a local herdr's API socket (plan 20261027_08,
+    /// step 7): tests point it at a fake herdr, with short backoff. Only
+    /// used while `[terminal] attach` is on.
+    pub herdr_attach: Option<super::herdr_attach::AttachSettings>,
 }
 
 /// The engine, the session histories, and who is in a turn.
