@@ -644,3 +644,21 @@ app also `--target aarch64-linux-android`) and `cargo test -p <crate>`.
 The owner (2026-10-28), on open question 3, "keep them": the four quiet
 corner marks over the viewfinder stay, as the body has them. The other open
 questions are still open.
+
+## Amendment — 2026-10-28 16:40 EDT: the remaining open questions answered
+
+The owner (2026-10-28), asked open questions 1, 2, 4 and 5 with their
+recommendations: "Yes, you all", taken as yes to each as asked.
+
+1. **Tap to scan every time** (open question 1): the window waits for
+   **Tap to scan** on every opening, even once CAMERA is granted; the
+   camera never starts on its own.
+2. **`ScreenExposure::Auto`** (open question 2).
+3. **flankr-audio 0.1.0 → 0.2.0, Breaking** (open question 4), with its
+   `VERSIONS.md` entry naming libmorph's move to 0.5.0 (Rule 5.5), in the
+   step that moves the app to libmorph 0.5.0.
+4. **The copy as proposed** (open question 5), including
+   `pairing_camera_why` and the One UI Settings path.
+
+All open questions are answered; the plan stays `Draft` until the owner
+approves it.
