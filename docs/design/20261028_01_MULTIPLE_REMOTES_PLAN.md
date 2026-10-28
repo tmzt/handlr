@@ -1033,3 +1033,10 @@ offer's time is up, `flankr pair` exits with a non-zero status, adding
 nothing to `auth.toml` (a pending request, even mid-prompt, is dropped),
 with no message beyond ending its prompt line. The phone shows "expired"
 as the 14:48 EDT amendment has it.
+
+## Amendment — 2026-10-28 14:42 EDT: correction of two cited times
+
+The previous amendment ("`flankr pair` just exits when the offer expires")
+cites "the 14:44 EDT amendment" and "the 14:48 EDT amendment"; they are the
+**14:40 EDT** amendment (the offer's 60 s default) and the **14:42 EDT**
+amendment (a quiet phone). Its content is unchanged.
