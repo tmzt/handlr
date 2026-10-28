@@ -61,6 +61,7 @@ pub mod overview;
 pub mod prompt;
 pub mod session_cards;
 pub mod settings;
+pub mod terminal_keys;
 pub mod theme;
 pub mod ui;
 
@@ -89,12 +90,12 @@ use libmsdf::font::{
     TERMINAL_SYMBOLS_ATLAS, TerminalShaper, TextShaper,
 };
 
-use crate::agent::{AgentHit, AgentScreen, Terminal};
+use crate::agent::{AgentHit, AgentScreen, TermAsk, TermState, Terminal, TerminalSessions};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
 use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
-use crate::prompt::keyboard::{FocusedPrompt, Ime, KeyboardRoute, PromptScreen};
+use crate::prompt::keyboard::{FocusedPrompt, Ime, KeyboardRoute, PromptScreen, Typing};
 use crate::prompt::{MessagePrompt, PromptKind, Prompts, Sent};
 use crate::session_cards::{SessionCards, SessionHit, Touched};
 use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
@@ -313,6 +314,12 @@ pub struct App {
     /// The agent view's Gemini card was last left expanded (decision 5:
     /// per screen); the overview's card keeps its own.
     agent_gemini_expanded: bool,
+    /// The sessions last left showing the terminal (plan 20261027_07).
+    terminal_panes: TerminalSessions,
+    /// The soft keyboard's text while it types into the armed terminal:
+    /// each edit is sent as the keys that make it (plan 20261027_07,
+    /// step 6).
+    term_ime: Option<String>,
 }
 
 /// A session's message card, kept for the app's run: the session it is
@@ -772,7 +779,7 @@ impl App {
             .and_then(|a| a.name.clone())
             .unwrap_or_else(|| "the agent".to_string());
         self.agent_pane = Some(pane_id.clone());
-        self.send(Input::OpenAgent(pane_id));
+        self.send(Input::OpenAgent(pane_id.clone()));
         let mut agent = AgentScreen::new();
         agent.name = name;
         agent.set_scrollbar(self.settings.scrollbar);
@@ -794,6 +801,10 @@ impl App {
             p.gemini_mut().set_listening(listening);
             p.gemini_mut().set_expanded(expanded);
         });
+        // The terminal again, if the session was left showing it.
+        if self.terminal_panes.shown(&pane_id) {
+            agent.set_terminal_shown(true);
+        }
         self.agent = Some(agent);
         self.viewed = true;
     }
@@ -937,14 +948,14 @@ impl App {
     /// soft keyboard shows (plan 20261027_03, decision 6).
     fn focus_prompt(&mut self, kind: PromptKind) {
         let screen = self.prompt_screen();
-        self.keyboard.focus(FocusedPrompt { screen, kind });
+        self.keyboard.focus(FocusedPrompt::Card { screen, kind });
     }
 
     /// The one place the soft keyboard is shown or hidden, each frame: for
     /// the typed prompt open, unless it was dismissed or a physical
     /// keyboard types.
     fn sync_keyboard(&mut self, ctx: &mut MorphContext) {
-        let typing = self
+        let prompt = self
             .dictation
             .as_ref()
             .filter(|d| d.mode == PromptMode::Keyboard)
@@ -954,8 +965,13 @@ impl App {
                 } else {
                     PromptKind::Message
                 };
-                (kind, d.text.as_str())
+                (Typing::Prompt(kind), d.text.as_str())
             });
+        // The armed terminal, while the keyboard glyph gave it the keys.
+        let typing = match &self.term_ime {
+            Some(text) => Some((Typing::Terminal, text.as_str())),
+            None => prompt,
+        };
         let screen = self.prompt_screen();
         match self.keyboard.sync(typing, ctx.text_input_active(), screen) {
             Ime::Start(text) => {
@@ -1004,6 +1020,15 @@ impl App {
     /// Closes the agent view, back to the overview.
     fn close_agent(&mut self) {
         self.remember_prompts();
+        // Leaving the view closes its terminal; the session still shows it
+        // when opened again.
+        if let (Some(agent), Some(pane)) = (&self.agent, &self.agent_pane)
+            && agent.terminal_shown()
+            && let Some(companion) = &self.companion
+        {
+            companion.terminal_close(pane);
+        }
+        self.term_ime = None;
         self.agent_pane = None;
         if self.agent.take().is_some() {
             log::info!("agent view: closed");
@@ -1237,7 +1262,12 @@ impl App {
             // The keyboard glyph: a typed prompt, to Gemini while its card
             // is expanded, else a message. The keyboard route focuses it.
             AgentHit::Keyboard => {
-                if self.prompts().expanded() == Some(PromptKind::GeneralAgent) {
+                // While the terminal is armed, the keyboard types into it
+                // (plan 20261027_07, decision 7).
+                if self.agent.as_ref().is_some_and(AgentScreen::terminal_armed) {
+                    self.term_ime.get_or_insert_with(String::new);
+                    self.keyboard.focus(FocusedPrompt::Terminal);
+                } else if self.prompts().expanded() == Some(PromptKind::GeneralAgent) {
                     self.agent_hit(AgentHit::PromptText(PromptKind::GeneralAgent));
                 } else {
                     self.send(Input::StartTextPrompt);
@@ -1361,6 +1391,68 @@ impl App {
             AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars => {
                 self.remember_prompts();
             }
+            // The terminal/list glyph: the other view, for this session.
+            AgentHit::TerminalToggle => {
+                if let (Some(agent), Some(pane)) = (&mut self.agent, &self.agent_pane) {
+                    agent.toggle_terminal();
+                    self.terminal_panes.remember(pane, agent.terminal_shown());
+                    if !agent.terminal_shown() {
+                        self.term_ime = None;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The agent view's terminal, each frame (plan 20261027_07, step 5):
+    /// read again from the client when anything of it moved, and what the
+    /// view asks of it done. The soft keyboard leaves the terminal once it
+    /// is no longer armed.
+    fn sync_terminal(&mut self) {
+        let (Some(companion), Some(agent), Some(pane)) =
+            (&self.companion, &mut self.agent, &self.agent_pane)
+        else {
+            self.term_ime = None;
+            return;
+        };
+        let t = companion.terminals();
+        let shown = agent.terminal_shown();
+        let status = shown.then(|| t.status(pane)).flatten();
+        let secs = status
+            .as_ref()
+            .filter(|s| s.open)
+            .and_then(|s| s.armed_for)
+            .map(|d| d.as_millis().div_ceil(1000) as u64);
+        let stamp = (t.changes(), t.supported(), t.input_allowed(), secs);
+        if agent.terminal_stamp() != Some(stamp) {
+            let state = TermState {
+                supported: stamp.1,
+                input_allowed: stamp.2,
+                screen: shown.then(|| t.screen(pane)).flatten(),
+                status,
+            };
+            agent.set_terminal_state(stamp, state);
+        }
+        for ask in agent.take_terminal_asks() {
+            log::info!("terminal: {ask:?}");
+            match ask {
+                TermAsk::Open { cols, rows } => companion.terminal_open(pane, cols, rows),
+                TermAsk::Close => companion.terminal_close(pane),
+                TermAsk::Arm => companion.terminal_arm_input(pane),
+            }
+        }
+        if !agent.terminal_armed() && self.term_ime.take().is_some() {
+            log::info!("terminal: no longer armed; the keyboard leaves it");
+        }
+    }
+
+    /// Sends `keys` into the agent view's armed terminal.
+    fn send_terminal_keys(&self, keys: &str) {
+        if keys.is_empty() {
+            return;
+        }
+        if let (Some(companion), Some(pane)) = (&self.companion, &self.agent_pane) {
+            companion.terminal_send_keys(pane, keys);
         }
     }
 
@@ -2119,6 +2211,8 @@ impl MorphApp for App {
             gemini_turns: Vec::new(),
             sessions: HashMap::new(),
             agent_gemini_expanded: false,
+            terminal_panes: TerminalSessions::default(),
+            term_ime: None,
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
@@ -2261,6 +2355,7 @@ impl MorphApp for App {
             self.overview.tick(dt);
         }
         self.lay_out(ctx);
+        self.sync_terminal();
         // The view's flow came near its top: page in earlier sections
         // (plan 20261023_03, A7).
         if self.agent.as_mut().is_some_and(|a| a.take_load_earlier()) {
@@ -2310,6 +2405,18 @@ impl MorphApp for App {
             });
             return KeyStatus::Handled;
         }
+        // A physical keyboard types into the armed terminal directly (plan
+        // 20261027_07, decision 7); Escape goes to the pane, Back still
+        // closes the view.
+        if key != Key::Back
+            && self.dictation.is_none()
+            && self.agent.as_ref().is_some_and(AgentScreen::terminal_armed)
+            && let Some(token) = terminal_keys::key_token(key)
+        {
+            self.keyboard.typed_physically();
+            self.send_terminal_keys(&token);
+            return KeyStatus::Handled;
+        }
         // Back or Escape cancels an active prompt card / dictation.
         if back && self.dictation.is_some() {
             self.keyboard.close();
@@ -2356,6 +2463,20 @@ impl MorphApp for App {
 
     fn on_text_input(&mut self, _ctx: &mut MorphContext, event: &libmorph::TextInputEvent) {
         log::info!("companion: on_text_input: {event:?}");
+        // Into the armed terminal: each edit as the keys that make it.
+        if let Some(old) = &self.term_ime {
+            match event {
+                libmorph::TextInputEvent::Changed(text) => {
+                    let keys = terminal_keys::edit_keys(old, text);
+                    self.term_ime = Some(text.clone());
+                    self.send_terminal_keys(&keys);
+                }
+                libmorph::TextInputEvent::Action(_) => self.send_terminal_keys("enter"),
+                libmorph::TextInputEvent::Dismissed => self.keyboard.dismiss(),
+                _ => {}
+            }
+            return;
+        }
         match event {
             libmorph::TextInputEvent::Changed(text) => {
                 self.send(Input::SetText(text.clone()));

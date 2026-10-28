@@ -122,6 +122,63 @@ fn keyboard_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
     fill(list, bar, color, key * 0.25);
 }
 
+/// The glyphs' box in `rect`: the keyboard glyph's width, and its height.
+fn glyph_box(rect: Rect) -> Rect {
+    let w = rect.w * 0.62;
+    let h = w * 0.62;
+    Rect::new(
+        rect.x + (rect.w - w) * 0.5,
+        rect.y + (rect.h - h) * 0.5,
+        w,
+        h,
+    )
+}
+
+/// A terminal drawn as strokes in `rect`, with no background (plan
+/// 20261027_07, decision 7): a rounded frame with a prompt, `>_`. The
+/// faces have no terminal character.
+pub(crate) fn terminal_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
+    let b = glyph_box(rect);
+    let t = 1.8 * s;
+    let r = 3.0 * s;
+    // The frame: four sides, their corners cut by the radius, and the
+    // corners as short diagonals.
+    let (x0, y0, x1, y1) = (b.x, b.y, b.x + b.w, b.y + b.h);
+    for (a, c) in [
+        ([x0 + r, y0], [x1 - r, y0]),
+        ([x1, y0 + r], [x1, y1 - r]),
+        ([x1 - r, y1], [x0 + r, y1]),
+        ([x0, y1 - r], [x0, y0 + r]),
+        ([x1 - r, y0], [x1, y0 + r]),
+        ([x1, y1 - r], [x1 - r, y1]),
+        ([x0 + r, y1], [x0, y1 - r]),
+        ([x0, y0 + r], [x0 + r, y0]),
+    ] {
+        list.push_line(a, c, t, color);
+    }
+    // The chevron and the cursor.
+    let cx = x0 + b.w * 0.2;
+    let cy = y0 + b.h * 0.5;
+    let k = b.h * 0.2;
+    list.push_line([cx, cy - k], [cx + k, cy], t, color);
+    list.push_line([cx + k, cy], [cx, cy + k], t, color);
+    let uy = cy + k;
+    list.push_line([cx + 1.6 * k, uy], [cx + 3.2 * k, uy], t, color);
+}
+
+/// A list drawn as strokes in `rect`, with no background: three lines,
+/// each after a dot, for the transcript.
+pub(crate) fn list_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
+    let b = glyph_box(rect);
+    let t = 2.0 * s;
+    let d = 3.4 * s;
+    for i in 0..3 {
+        let y = b.y + b.h * (0.18 + 0.32 * i as f32);
+        fill(list, Rect::new(b.x, y - d * 0.5, d, d), color, d * 0.5);
+        list.push_line([b.x + d + 4.0 * s, y], [b.x + b.w, y], t, color);
+    }
+}
+
 /// Draws `b` at `rect`: the take-a-message button as a white record dot on
 /// blue, the play button as its glyph (bright when `read_aloud`), and the
 /// rest as labelled buttons. A button the settings turn off (plan
@@ -189,6 +246,12 @@ impl SquareButton {
         let px = 26.0 * s;
         match b.hit {
             AgentHit::Keyboard => keyboard_glyph(list, rect, s, theme().fg),
+            // The terminal glyph while the transcript shows; the list glyph
+            // (its label `LIST_LABEL`) while the terminal does.
+            AgentHit::TerminalToggle if b.label == crate::agent::LIST_LABEL => {
+                list_glyph(list, rect, s, theme().fg)
+            }
+            AgentHit::TerminalToggle => terminal_glyph(list, rect, s, theme().fg),
             AgentHit::Message | AgentHit::Reply => {
                 fill(list, rect, b.bg, 10.0 * s);
                 let d = DOT * s;

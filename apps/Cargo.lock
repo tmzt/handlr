@@ -544,6 +544,7 @@ dependencies = [
  "libc",
  "libcontrols",
  "libflankr_proto",
+ "libflankr_term",
  "libmorph",
  "libmorph-build",
  "libmsdf",
@@ -1115,6 +1116,7 @@ dependencies = [
  "flankr-speech",
  "libc",
  "libflankr_proto",
+ "libflankr_term",
  "log",
  "png",
  "rqrr",
@@ -1622,7 +1624,7 @@ dependencies = [
 
 [[package]]
 name = "libflankr_proto"
-version = "0.3.13"
+version = "0.4.0"
 dependencies = [
  "blake2",
  "bs58",
@@ -1630,6 +1632,13 @@ dependencies = [
  "serde_json",
  "snow",
  "tokio",
+]
+
+[[package]]
+name = "libflankr_term"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

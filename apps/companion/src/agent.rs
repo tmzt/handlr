@@ -56,7 +56,42 @@ use crate::ui::Layout;
 mod input_box;
 pub mod link_spans;
 mod notice_line;
+pub mod terminal_view;
 use input_box::InputBox;
+pub use terminal_view::{TermAsk, TermState, TermView};
+
+/// The fifth button's labels: which glyph it draws (plan 20261027_07,
+/// decision 7). The terminal glyph while the transcript shows, the list
+/// glyph while the terminal does.
+pub const TERMINAL_LABEL: &str = "terminal";
+pub const LIST_LABEL: &str = "list";
+
+/// What the app last gave the view of the terminal: the client's change
+/// counter, whether the mode is offered and input allowed, and the armed
+/// input's seconds left. The app reads the terminal again when it moves.
+pub type TermStamp = (u64, bool, bool, Option<u64>);
+
+/// The sessions, by pane, last left showing the terminal rather than the
+/// transcript: kept while the app runs, not saved (plan 20261027_07,
+/// decision 7 and the 20:44 EDT amendment, item 4).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TerminalSessions(HashSet<String>);
+
+impl TerminalSessions {
+    /// Whether `pane`'s view opens on the terminal.
+    pub fn shown(&self, pane: &str) -> bool {
+        self.0.contains(pane)
+    }
+
+    /// `pane`'s view was left on the terminal, or on the transcript.
+    pub fn remember(&mut self, pane: &str, terminal: bool) {
+        if terminal {
+            self.0.insert(pane.to_string());
+        } else {
+            self.0.remove(pane);
+        }
+    }
+}
 use link_spans::LinkSpan;
 use notice_line::NoticeLine;
 
@@ -243,6 +278,11 @@ pub enum AgentHit {
     /// The keyboard glyph left of record: type a message (plan
     /// 20261022_03, the L3 amendment on the keyboard glyph).
     Keyboard,
+    /// The fifth button, between play and the centre (plan 20261027_07,
+    /// decision 7 and the 20:44 EDT amendment): the terminal glyph while
+    /// the transcript shows, the list glyph while the terminal does; a tap
+    /// swaps the views for the session.
+    TerminalToggle,
     Approve(u64),
     Deny(u64),
     /// A suggested response, in the row above the buttons or a card.
@@ -2331,6 +2371,17 @@ pub struct AgentScreen {
     prompts_h: f32,
     /// Whether voice recognition is active for the general agent.
     general_agent_listening: bool,
+    /// The terminal shows in place of the transcript (plan 20261027_07,
+    /// step 5); the transcript keeps its place under it.
+    term_shown: bool,
+    term: TermView,
+    term_state: TermState,
+    term_stamp: Option<TermStamp>,
+    /// Asked of the client, taken each frame by the app.
+    term_asks: Vec<TermAsk>,
+    /// In terminal mode, a finger that started off the terminal: its id,
+    /// where it started and whether it moved, for a tap on the controls.
+    term_tap: Option<(u64, [f32; 2], bool)>,
     /// Blocks laid out, counted for the tests.
     #[cfg(test)]
     block_layouts: usize,
@@ -3243,7 +3294,7 @@ impl AgentScreen {
         let row_bottom = l.h - l.bottom - 16.0 * s;
         let dictating = self.dictating();
         let replying = self.replying();
-        let buttons = if replying.is_some() {
+        let mut buttons = if replying.is_some() {
             Vec::new()
         } else {
             ControlRow::lay_out(
@@ -3255,6 +3306,25 @@ impl AgentScreen {
                 self.general_agent_listening,
             )
         };
+        // The terminal/list glyph, wherever the keyboard glyph is: between
+        // play and the centre, mirroring the keyboard glyph's place right
+        // of it, with its hit box and no background (plan 20261027_07,
+        // decision 7).
+        if let Some(keys) = buttons.iter().find(|b| b.hit == AgentHit::Keyboard) {
+            let sq = BUTTON_H * s;
+            let rect = Rect::new(pad + sq + 12.0 * s, keys.rect.y, sq, sq);
+            buttons.push(FlowButton {
+                hit: AgentHit::TerminalToggle,
+                rect,
+                label: if self.term_shown {
+                    LIST_LABEL
+                } else {
+                    TERMINAL_LABEL
+                }
+                .into(),
+                bg: [0.0; 4],
+            });
+        }
         let back = Rect::new(0.0, l.top, BACK_W * s, HEADER_H * s);
         let mut above = if replying.is_some() {
             row_bottom
@@ -3407,7 +3477,8 @@ impl AgentScreen {
         // amendment, item 4).
         let jump_h = JUMP_H * s;
         let (view_bottom, full_bottom) = (view_bottom - jump_h, full_bottom - jump_h);
-        let jump = (!self.follow).then(|| {
+        // Not over the terminal, which takes the jump line's place too.
+        let jump = (!self.follow && !self.term_shown).then(|| {
             let px = TOOL_PT * s;
             let (text, color) = self.jump_line(columns(l.w - 2.0 * pad, px));
             JumpLine {
@@ -4009,6 +4080,10 @@ impl AgentScreen {
                 }
             }
         }
+        // The terminal covers the flow: none of its controls are live.
+        if self.term_shown {
+            return;
+        }
         let v = self.frame.viewport;
         for b in &self.flow.buttons {
             let rect = Rect::new(b.rect.x, v.y + b.rect.y - self.offset, b.rect.w, b.rect.h);
@@ -4142,6 +4217,9 @@ impl AgentScreen {
                     Some(hit)
                 }
             };
+        }
+        if self.term_shown {
+            return self.terminal_touch(id, phase, x, y, now);
         }
         let s = self.scale();
         match phase {
@@ -4312,7 +4390,7 @@ impl AgentScreen {
                 }
                 // A control the settings turn off takes no tap (plan
                 // 20261024_02, decision 4).
-                self.hit(x, y).filter(|&hit| crate::settings::allows(hit))
+                self.hit(x, y).filter(|&hit| self.live(hit))
             }
             TouchPhase::Cancelled => {
                 if self.pull > 0.0 && self.pull_state == PullState::Idle {
@@ -4330,9 +4408,161 @@ impl AgentScreen {
         }
     }
 
+    /// Whether a tap on `hit` acts: the settings allow it, and the
+    /// terminal/list glyph only while the daemon offers the terminal.
+    fn live(&self, hit: AgentHit) -> bool {
+        crate::settings::allows(hit)
+            && (hit != AgentHit::TerminalToggle || self.term_state.supported)
+    }
+
+    /// Whether the terminal shows in place of the transcript.
+    pub fn terminal_shown(&self) -> bool {
+        self.term_shown
+    }
+
+    /// Shows the terminal, or the transcript again, which kept its place.
+    /// Showing it asks the client to open it, hiding it to close it.
+    pub fn set_terminal_shown(&mut self, on: bool) {
+        if on == self.term_shown {
+            return;
+        }
+        log::info!("terminal: {}", if on { "shown" } else { "transcript" });
+        self.term_shown = on;
+        self.term_tap = None;
+        if on {
+            self.term = TermView::default();
+            self.term_asks.push(TermAsk::Open {
+                cols: None,
+                rows: None,
+            });
+        } else {
+            self.term_asks.push(TermAsk::Close);
+        }
+        self.settle();
+    }
+
+    /// The fifth button's tap: the other view.
+    pub fn toggle_terminal(&mut self) {
+        self.set_terminal_shown(!self.term_shown);
+    }
+
+    /// Where the terminal is drawn: below the header, down to what the
+    /// transcript's window and its jump line take.
+    pub fn terminal_rect(&self) -> Rect {
+        let v = self.frame.viewport;
+        Rect::new(v.x, v.y, v.w, v.h + JUMP_H * self.scale())
+    }
+
+    /// The terminal as last given, and the view's own part of it.
+    pub fn terminal_state(&self) -> &TermState {
+        &self.term_state
+    }
+
+    pub fn terminal_view(&self) -> &TermView {
+        &self.term
+    }
+
+    /// Keys may be typed into the terminal now: it shows, and is armed.
+    pub fn terminal_armed(&self) -> bool {
+        self.term_shown && self.term_state.armed()
+    }
+
+    /// What the view was last given, for the app to compare.
+    pub fn terminal_stamp(&self) -> Option<TermStamp> {
+        self.term_stamp
+    }
+
+    /// The terminal as the client has it now.
+    pub fn set_terminal_state(&mut self, stamp: TermStamp, state: TermState) {
+        self.term_stamp = Some(stamp);
+        self.term_state = state;
+        self.dirty = true;
+    }
+
+    /// What to ask of the client: an open with what fits at the starting
+    /// size, a close, an arm.
+    pub fn take_terminal_asks(&mut self) -> Vec<TermAsk> {
+        let (cols, rows) = TermView::hints(self.terminal_rect(), self.scale());
+        let mut asks = std::mem::take(&mut self.term_asks);
+        for ask in &mut asks {
+            if let TermAsk::Open { cols: c, rows: r } = ask {
+                *c = cols;
+                *r = rows;
+            }
+        }
+        asks
+    }
+
+    /// A touch while the terminal shows: on the terminal, its gestures;
+    /// elsewhere, a tap on the controls.
+    fn terminal_touch(
+        &mut self,
+        id: u64,
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+        now: Duration,
+    ) -> Option<AgentHit> {
+        let s = self.scale();
+        let rect = self.terminal_rect();
+        if let Some(tap) = self.term_tap.as_mut().filter(|t| t.0 == id) {
+            match phase {
+                TouchPhase::Started => {}
+                TouchPhase::Moved => {
+                    if (x - tap.1[0]).abs() > SLOP * s || (y - tap.1[1]).abs() > SLOP * s {
+                        tap.2 = true;
+                    }
+                    return None;
+                }
+                TouchPhase::Ended => {
+                    let moved = tap.2;
+                    self.term_tap = None;
+                    return (!moved)
+                        .then(|| self.hit(x, y))
+                        .flatten()
+                        .filter(|&hit| self.live(hit));
+                }
+                TouchPhase::Cancelled => {
+                    self.term_tap = None;
+                    return None;
+                }
+            }
+        }
+        let on_control = self.hits.iter().any(|(_, r)| r.contains([x, y]));
+        if phase == TouchPhase::Started
+            && !self.term.touching()
+            && (on_control || !rect.contains([x, y]))
+        {
+            self.term_tap = Some((id, [x, y], false));
+            return None;
+        }
+        let screen = self.term_state.screen.as_ref();
+        if self.term.touch(id, phase, x, y, now, screen, rect, s) {
+            self.dirty = true;
+        }
+        None
+    }
+
     /// Carries a fling, or the jump scroll, on by `dt`, and the
     /// scrollbar's showing and fading. Returns whether the view moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
+        // A finger resting 1.5 s on the terminal arms keyboard input, when
+        // the daemon allows it (plan 20261027_07, decision 6).
+        if self.term_shown && self.term.tick_hold(dt) {
+            if self.term_state.input_allowed && !self.term_state.armed() {
+                log::info!("terminal: held, arming input");
+                self.term_asks.push(TermAsk::Arm);
+            } else {
+                log::info!(
+                    "terminal: held; input {}",
+                    if self.term_state.armed() {
+                        "already armed"
+                    } else {
+                        "not allowed by the daemon"
+                    }
+                );
+            }
+        }
         let moved = self.step(dt);
         self.step_bar(dt);
         self.step_pull(dt);
@@ -4417,10 +4647,28 @@ impl AgentScreen {
         list.clear();
         let l = self.layout;
         let s = self.scale();
-        let recording = self.dictating();
         fill(list, Rect::new(0.0, 0.0, l.w, l.h), theme().bg, 0.0);
 
-        // The flow, in its window, pulled up by a pull to refresh.
+        if self.term_shown {
+            // The terminal in place of the flow (plan 20261027_07, step 5).
+            let rect = self.terminal_rect();
+            self.term.follow(self.term_state.screen.as_ref(), rect, s);
+            self.term
+                .draw(list, ctx, term, &self.term_state, rect, s, &self.name);
+        } else {
+            self.draw_flow(list, ctx, term);
+        }
+        self.draw_chrome(list, ctx, term);
+        self.dirty = false;
+        true
+    }
+
+    /// The flow, in its window, pulled up by a pull to refresh, with its
+    /// scrollbar and section labels.
+    fn draw_flow(&mut self, list: &mut DrawList, ctx: &DrawContext, term: Option<&Terminal>) {
+        let l = self.layout;
+        let s = self.scale();
+        let recording = self.dictating();
         let v = self.frame.viewport;
         list.push_clip(v.pos(), v.size());
         let dy = v.y - self.offset - self.pull;
@@ -4515,7 +4763,14 @@ impl AgentScreen {
             }
         }
         list.push_clip_end();
+    }
 
+    /// The header, the cards and prompts over the flow or the terminal,
+    /// and the bottom row.
+    fn draw_chrome(&mut self, list: &mut DrawList, ctx: &DrawContext, term: Option<&Terminal>) {
+        let l = self.layout;
+        let s = self.scale();
+        let recording = self.dictating();
         // The header: the agent and its status, over a band in its
         // session's colour.
         fill(list, self.frame.header, theme().header, 0.0);
@@ -4621,7 +4876,8 @@ impl AgentScreen {
         // An expanded prompt card's overlay, over all but the bottom row.
         self.prompts.draw_overlay(list, ctx, l.w);
         for b in &self.frame.buttons {
-            SquareButton::draw(
+            // The terminal/list glyph is dim without the daemon's terminal.
+            SquareButton::draw_enabled(
                 list,
                 ctx,
                 term,
@@ -4631,10 +4887,9 @@ impl AgentScreen {
                 self.read_aloud,
                 self.speaking,
                 recording,
+                self.live(b.hit),
             );
         }
-        self.dirty = false;
-        true
     }
 
     /// Marks the screen to be drawn again.
@@ -5808,7 +6063,8 @@ mod tests {
             a.hit(f.back.x + 10.0, f.back.y + 10.0),
             Some(AgentHit::Back)
         );
-        assert_eq!(f.buttons.len(), 4);
+        assert_eq!(f.buttons.len(), 5);
+        assert_eq!(f.buttons[4].hit, AgentHit::TerminalToggle);
         // Play at the bottom left, general agent in the centre, the message
         // button at the bottom right, the keyboard glyph just left of it.
         let play = f.buttons[0].rect;
@@ -5880,6 +6136,229 @@ mod tests {
         assert!(a.suggestions().is_empty());
         assert_eq!(suggestion_colour(Suggestion::Yes), theme().green);
         assert_eq!(suggestion_colour(Suggestion::No), theme().red);
+    }
+
+    fn tap(a: &mut AgentScreen, id: u64, r: Rect, t: Duration) -> Option<AgentHit> {
+        let (x, y) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        a.touch(id, TouchPhase::Started, x, y, t);
+        a.touch(id, TouchPhase::Ended, x, y, t + MS)
+    }
+
+    fn offered(input: bool) -> TermState {
+        TermState {
+            supported: true,
+            input_allowed: input,
+            ..Default::default()
+        }
+    }
+
+    fn toggle_of(a: &AgentScreen) -> FlowButton {
+        a.frame()
+            .buttons
+            .iter()
+            .find(|b| b.hit == AgentHit::TerminalToggle)
+            .cloned()
+            .expect("the fifth button")
+    }
+
+    #[test]
+    fn the_terminal_glyph_sits_between_play_and_the_centre_and_swaps() {
+        let mut a = screen(conversation(3), vec![], None);
+        let f = a.frame().clone();
+        let play = f.buttons[0].rect;
+        let centre = f.buttons[1].rect;
+        let keys = f.buttons[2].rect;
+        let b = toggle_of(&a);
+        assert!(b.rect.x > play.x + play.w && b.rect.x + b.rect.w < centre.x);
+        assert_eq!((b.rect.w, b.rect.h, b.rect.y), (keys.w, keys.h, keys.y));
+        assert_eq!(b.bg[3], 0.0, "no background");
+        // Mirrors the keyboard glyph: as far from play as it is from record.
+        let mic = f.buttons[3].rect;
+        assert!(((b.rect.x - (play.x + play.w)) - (mic.x - (keys.x + keys.w))).abs() < 0.5);
+        assert_eq!(b.label, TERMINAL_LABEL);
+        assert_eq!(
+            a.hit(b.rect.x + 4.0, b.rect.y + 4.0),
+            Some(AgentHit::TerminalToggle)
+        );
+        // Without the daemon's terminal, dim and untappable.
+        assert!(!a.live(AgentHit::TerminalToggle));
+        assert_eq!(tap(&mut a, 1, b.rect, Duration::ZERO), None);
+        a.set_terminal_state((1, true, false, None), offered(false));
+        assert!(a.live(AgentHit::TerminalToggle));
+        assert_eq!(
+            tap(&mut a, 2, b.rect, Duration::from_secs(1)),
+            Some(AgentHit::TerminalToggle)
+        );
+        // Tapped: the terminal shows, the glyph is the list, and the client
+        // is asked to open it with what fits.
+        a.toggle_terminal();
+        assert!(a.terminal_shown());
+        assert_eq!(toggle_of(&a).label, LIST_LABEL);
+        let asks = a.take_terminal_asks();
+        let [TermAsk::Open { cols, rows }] = asks.as_slice() else {
+            panic!("{asks:?}");
+        };
+        let r = a.terminal_rect();
+        assert_eq!(
+            (*cols, *rows),
+            TermView::hints(r, PHONE.scale),
+            "what fits at 11 pt"
+        );
+        assert!(cols.unwrap() > 40);
+        // The terminal takes the window and the jump line's place.
+        assert_eq!(r.y, a.frame().viewport.y);
+        assert!(a.frame().jump.is_none());
+        // Still tappable from the terminal view; back to the transcript.
+        let rect = toggle_of(&a).rect;
+        assert_eq!(
+            tap(&mut a, 3, rect, Duration::from_secs(2)),
+            Some(AgentHit::TerminalToggle)
+        );
+        a.toggle_terminal();
+        assert!(!a.terminal_shown());
+        assert_eq!(toggle_of(&a).label, TERMINAL_LABEL);
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Close]);
+        // While a message is taken there is no keyboard glyph, nor this.
+        a.set_dictation(Some(crate::prompt::MessagePrompt {
+            target: Some(("Claude".into(), theme().session(2))),
+            ..PromptInput::said("go on").into()
+        }));
+        assert!(
+            a.frame()
+                .buttons
+                .iter()
+                .all(|b| b.hit != AgentHit::TerminalToggle)
+        );
+    }
+
+    #[test]
+    fn each_session_keeps_its_choice_while_the_app_runs() {
+        let mut s = TerminalSessions::default();
+        assert!(!s.shown("w1:p1"));
+        s.remember("w1:p1", true);
+        s.remember("w1:p2", false);
+        assert!(s.shown("w1:p1"));
+        assert!(!s.shown("w1:p2"));
+        s.remember("w1:p1", false);
+        assert!(!s.shown("w1:p1"));
+        // A view opened on the terminal asks for it at once.
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_shown(true);
+        assert!(matches!(
+            a.take_terminal_asks().as_slice(),
+            [TermAsk::Open { .. }]
+        ));
+        a.set_terminal_shown(true);
+        assert!(a.take_terminal_asks().is_empty(), "once");
+        // Opened on the terminal before its first layout (the app's
+        // `open_agent`): the hints are what fits once it is laid out.
+        let mut b = AgentScreen::new();
+        b.set_terminal_shown(true);
+        b.set_layout(PHONE);
+        let asks = b.take_terminal_asks();
+        let [TermAsk::Open { cols, rows }] = asks.as_slice() else {
+            panic!("{asks:?}");
+        };
+        assert!(cols.is_some() && rows.is_some());
+    }
+
+    #[test]
+    fn the_transcript_keeps_its_place_under_the_terminal() {
+        let mut a = screen(conversation(30), vec![], None);
+        a.set_terminal_state((1, true, false, None), offered(false));
+        let t = drag(&mut a, 600.0, 1400.0, 20, Duration::ZERO);
+        a.touch(
+            1,
+            TouchPhase::Ended,
+            540.0,
+            1400.0,
+            t + Duration::from_millis(300),
+        );
+        while a.tick(Duration::from_millis(16)) {}
+        let (offset, follow) = (a.offset(), a.following());
+        assert!(!follow);
+        a.toggle_terminal();
+        // A drag on the terminal pans it, not the transcript.
+        let r = a.terminal_rect();
+        let mut t = Duration::from_secs(5);
+        a.touch(7, TouchPhase::Started, 540.0, r.y + 300.0, t);
+        for i in 1..20 {
+            t += MS;
+            a.touch(
+                7,
+                TouchPhase::Moved,
+                540.0,
+                r.y + 300.0 + 30.0 * i as f32,
+                t,
+            );
+        }
+        a.touch(7, TouchPhase::Ended, 540.0, r.y + 870.0, t + MS);
+        a.tick(Duration::from_millis(16));
+        a.toggle_terminal();
+        assert_eq!((a.offset(), a.following()), (offset, follow));
+    }
+
+    #[test]
+    fn a_hold_on_the_terminal_arms_input_only_when_allowed() {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_state((1, true, false, None), offered(false));
+        a.toggle_terminal();
+        a.take_terminal_asks();
+        let r = a.terminal_rect();
+        let (x, y) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        let hold = |a: &mut AgentScreen, id: u64| {
+            a.touch(id, TouchPhase::Started, x, y, Duration::ZERO);
+            for _ in 0..100 {
+                a.tick(Duration::from_millis(20));
+            }
+            a.touch(id, TouchPhase::Ended, x, y, Duration::from_secs(2))
+        };
+        // Not allowed by the daemon: nothing is asked.
+        assert_eq!(hold(&mut a, 1), None);
+        assert!(a.take_terminal_asks().is_empty());
+        // Allowed: one arm, and the hold is not a tap.
+        a.set_terminal_state((2, true, true, None), offered(true));
+        assert_eq!(hold(&mut a, 2), None);
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm]);
+        // A tap is not a hold.
+        a.touch(3, TouchPhase::Started, x, y, Duration::ZERO);
+        a.tick(Duration::from_millis(200));
+        a.touch(3, TouchPhase::Ended, x, y, Duration::from_millis(200));
+        a.tick(Duration::from_secs(2));
+        assert!(a.take_terminal_asks().is_empty());
+        assert!(!a.terminal_armed());
+    }
+
+    #[test]
+    fn the_terminal_draws_its_runs_and_the_armed_frame() {
+        use libflankr_term::{Frame as TermFrame, parse_ansi};
+        let mut a = screen(conversation(3), vec![], None);
+        a.toggle_terminal();
+        let mut list = DrawList::new();
+        let ctx = DrawContext::default();
+        let mut state = offered(true);
+        let mut sc = flankr_companion::Screen::default();
+        let grid = parse_ansi("\u{1b}[41mred bg\u{1b}[0m plain\n\u{1b}[4munder\u{1b}[0m");
+        assert!(sc.apply(&TermFrame::full(1, 1, &grid)));
+        state.screen = Some(sc);
+        state.status = Some(flankr_companion::TerminalStatus {
+            open: true,
+            opening: false,
+            cols: 12,
+            rows: 2,
+            closed: None,
+            error: None,
+            armed_for: Some(Duration::from_secs(60)),
+            keys_pending: 0,
+        });
+        a.set_terminal_state((3, true, true, Some(60)), state);
+        assert!(a.terminal_armed());
+        assert!(a.draw(&mut list, &ctx, None));
+        let colours: Vec<[f32; 4]> = list.instances.iter().map(|i| i.color).collect();
+        let red = terminal_view::palette_colour(1, terminal_view::dark_theme());
+        assert!(colours.contains(&red), "the red background is filled");
+        assert!(colours.contains(&theme().warn), "the armed frame");
+        assert!(!a.draw(&mut list, &ctx, None), "only on change");
     }
 
     #[test]
@@ -6070,7 +6549,8 @@ mod tests {
                 AgentHit::ReadAloud,
                 AgentHit::GeneralAgent,
                 AgentHit::Keyboard,
-                AgentHit::Message
+                AgentHit::Message,
+                AgentHit::TerminalToggle
             ]
         );
     }

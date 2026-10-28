@@ -20,11 +20,33 @@ pub enum PromptScreen {
     Agent,
 }
 
-/// The prompt the keyboard types into: its screen and its card's mode.
+/// What the keyboard types into: a prompt card (its screen and its
+/// card's mode), or the agent view's armed terminal (plan 20261027_07,
+/// decision 7: keys go to the pane, not into a card).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FocusedPrompt {
-    pub screen: PromptScreen,
-    pub kind: PromptKind,
+pub enum FocusedPrompt {
+    Card {
+        screen: PromptScreen,
+        kind: PromptKind,
+    },
+    Terminal,
+}
+
+/// What is typed into, as the app sees it each frame: a typed prompt of a
+/// card's mode, or the armed terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Typing {
+    Prompt(PromptKind),
+    Terminal,
+}
+
+impl Typing {
+    fn focus(self, screen: PromptScreen) -> FocusedPrompt {
+        match self {
+            Typing::Prompt(kind) => FocusedPrompt::Card { screen, kind },
+            Typing::Terminal => FocusedPrompt::Terminal,
+        }
+    }
 }
 
 /// What the app is to do with the soft keyboard.
@@ -48,8 +70,8 @@ pub struct KeyboardRoute {
     physical: bool,
     /// A tap asked for the soft keyboard again.
     reshow: bool,
-    /// The typed prompt open at the last sync, if any.
-    open: Option<PromptKind>,
+    /// The typed prompt (or the terminal) open at the last sync, if any.
+    open: Option<Typing>,
 }
 
 impl KeyboardRoute {
@@ -97,9 +119,15 @@ impl KeyboardRoute {
     /// The screen shown changed: the focus follows to its card, which
     /// shows the same prompt.
     pub fn shown(&mut self, screen: PromptScreen) {
-        if let Some(f) = &mut self.focused {
-            f.screen = screen;
+        if let Some(FocusedPrompt::Card { screen: s, .. }) = &mut self.focused {
+            *s = screen;
         }
+    }
+
+    /// A physical key typed into the terminal: the soft keyboard stays
+    /// hidden from now on, as for a card.
+    pub fn typed_physically(&mut self) {
+        self.physical = true;
     }
 
     /// A physical key while `text` is being typed: the new text, and the
@@ -120,12 +148,13 @@ impl KeyboardRoute {
     }
 
     /// The one decision, each frame: `typing` is the typed prompt open (its
-    /// card's mode and text), `active` whether the soft keyboard is up, and
+    /// card's mode and text) or the armed terminal (the soft keyboard's
+    /// text for it), `active` whether the soft keyboard is up, and
     /// `screen` the screen shown. A typed prompt with nothing focused is
     /// focused on it.
     pub fn sync(
         &mut self,
-        typing: Option<(PromptKind, &str)>,
+        typing: Option<(Typing, &str)>,
         active: bool,
         screen: PromptScreen,
     ) -> Ime {
@@ -137,7 +166,7 @@ impl KeyboardRoute {
         // A typed prompt just opened (or another in its place): focused.
         if self.open != Some(kind) {
             self.open = Some(kind);
-            self.focused = Some(FocusedPrompt { screen, kind });
+            self.focused = Some(kind.focus(screen));
             self.dismissed = false;
             self.reshow = true;
         }
@@ -168,28 +197,37 @@ mod tests {
             assert_eq!(k.sync(None, false, OVERVIEW), Ime::Keep);
             // A typed prompt opens: focused, and the keyboard shows.
             assert_eq!(
-                k.sync(Some((kind, "")), false, OVERVIEW),
+                k.sync(Some((Typing::Prompt(kind), "")), false, OVERVIEW),
                 Ime::Start(String::new())
             );
             assert_eq!(
                 k.focused(),
-                Some(FocusedPrompt {
+                Some(FocusedPrompt::Card {
                     screen: OVERVIEW,
                     kind
                 })
             );
             // Up: nothing more.
-            assert_eq!(k.sync(Some((kind, "hel")), true, OVERVIEW), Ime::Keep);
+            assert_eq!(
+                k.sync(Some((Typing::Prompt(kind), "hel")), true, OVERVIEW),
+                Ime::Keep
+            );
             // Sent: it goes at once, and does not come back while the
             // prompt is still on its way out.
             k.close();
-            assert_eq!(k.sync(Some((kind, "hel")), true, OVERVIEW), Ime::Stop);
-            assert_eq!(k.sync(Some((kind, "hel")), false, OVERVIEW), Ime::Keep);
+            assert_eq!(
+                k.sync(Some((Typing::Prompt(kind), "hel")), true, OVERVIEW),
+                Ime::Stop
+            );
+            assert_eq!(
+                k.sync(Some((Typing::Prompt(kind), "hel")), false, OVERVIEW),
+                Ime::Keep
+            );
             assert_eq!(k.sync(None, false, OVERVIEW), Ime::Keep);
             assert_eq!(k.focused(), None);
             // Opened again: shown again.
             assert_eq!(
-                k.sync(Some((kind, "")), false, OVERVIEW),
+                k.sync(Some((Typing::Prompt(kind), "")), false, OVERVIEW),
                 Ime::Start(String::new())
             );
             assert_eq!(k.sync(None, true, OVERVIEW), Ime::Stop);
@@ -199,20 +237,20 @@ mod tests {
     #[test]
     fn dismissed_it_stays_hidden_until_a_tap() {
         let mut k = KeyboardRoute::new(false);
-        let typing = Some((PromptKind::Message, "draft"));
+        let typing = Some((Typing::Prompt(PromptKind::Message), "draft"));
         k.sync(typing, false, OVERVIEW);
         k.dismiss();
         // The card and its text stay; the keyboard does not come back.
         assert_eq!(k.sync(typing, false, OVERVIEW), Ime::Keep);
         assert_eq!(k.sync(typing, false, OVERVIEW), Ime::Keep);
         // A tap on the text area shows it again, with the text.
-        k.focus(FocusedPrompt {
+        k.focus(FocusedPrompt::Card {
             screen: OVERVIEW,
             kind: PromptKind::Message,
         });
         assert_eq!(k.sync(typing, false, OVERVIEW), Ime::Start("draft".into()));
         // A tap while it is up asks for it again (its cursor moved).
-        k.focus(FocusedPrompt {
+        k.focus(FocusedPrompt::Card {
             screen: OVERVIEW,
             kind: PromptKind::Message,
         });
@@ -223,19 +261,23 @@ mod tests {
     #[test]
     fn a_physical_keyboard_types_without_the_soft_keyboard() {
         let mut k = KeyboardRoute::new(false);
-        let typing = Some((PromptKind::GeneralAgent, "hi"));
+        let typing = Some((Typing::Prompt(PromptKind::GeneralAgent), "hi"));
         k.sync(typing, false, OVERVIEW);
         assert_eq!(k.key("hi", Key::Character('!')), Some("hi!".into()));
         assert!(k.physical());
         assert_eq!(
-            k.sync(Some((PromptKind::GeneralAgent, "hi!")), true, OVERVIEW),
+            k.sync(
+                Some((Typing::Prompt(PromptKind::GeneralAgent), "hi!")),
+                true,
+                OVERVIEW
+            ),
             Ime::Stop
         );
         assert_eq!(k.key("hi!", Key::Character('\u{8}')), Some("hi".into()));
         assert_eq!(k.key("hi", Key::Character('\r')), Some("hi\n".into()));
         assert_eq!(k.key("hi", Key::Back), None);
         // A tap does not bring the soft keyboard over it.
-        k.focus(FocusedPrompt {
+        k.focus(FocusedPrompt::Card {
             screen: OVERVIEW,
             kind: PromptKind::GeneralAgent,
         });
@@ -248,18 +290,66 @@ mod tests {
     #[test]
     fn the_focus_follows_the_screen_shown_and_the_mode_typed() {
         let mut k = KeyboardRoute::new(false);
-        k.sync(Some((PromptKind::Message, "")), false, OVERVIEW);
-        k.sync(Some((PromptKind::Message, "")), true, PromptScreen::Agent);
-        assert_eq!(k.focused().unwrap().screen, PromptScreen::Agent);
+        k.sync(
+            Some((Typing::Prompt(PromptKind::Message), "")),
+            false,
+            OVERVIEW,
+        );
+        k.sync(
+            Some((Typing::Prompt(PromptKind::Message), "")),
+            true,
+            PromptScreen::Agent,
+        );
+        assert!(matches!(
+            k.focused(),
+            Some(FocusedPrompt::Card {
+                screen: PromptScreen::Agent,
+                ..
+            })
+        ));
         // Gemini's typed prompt in its place: focused on it, shown.
         assert_eq!(
             k.sync(
-                Some((PromptKind::GeneralAgent, "")),
+                Some((Typing::Prompt(PromptKind::GeneralAgent), "")),
                 true,
                 PromptScreen::Agent
             ),
             Ime::Start(String::new())
         );
-        assert_eq!(k.focused().unwrap().kind, PromptKind::GeneralAgent);
+        assert!(matches!(
+            k.focused(),
+            Some(FocusedPrompt::Card {
+                kind: PromptKind::GeneralAgent,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_armed_terminal_takes_the_keyboard_and_gives_it_back() {
+        let mut k = KeyboardRoute::new(false);
+        // The keyboard glyph while armed: the terminal is focused, and the
+        // soft keyboard shows on an empty text.
+        k.focus(FocusedPrompt::Terminal);
+        let typing = Some((Typing::Terminal, ""));
+        assert_eq!(
+            k.sync(typing, false, PromptScreen::Agent),
+            Ime::Start(String::new())
+        );
+        assert_eq!(k.focused(), Some(FocusedPrompt::Terminal));
+        assert_eq!(
+            k.sync(Some((Typing::Terminal, "ls")), true, PromptScreen::Agent),
+            Ime::Keep
+        );
+        // The arm runs out: the keyboard goes.
+        assert_eq!(k.sync(None, true, PromptScreen::Agent), Ime::Stop);
+        assert_eq!(k.focused(), None);
+        // A physical key into the terminal keeps the soft keyboard hidden.
+        k.typed_physically();
+        k.focus(FocusedPrompt::Terminal);
+        assert_eq!(
+            k.sync(Some((Typing::Terminal, "")), false, PromptScreen::Agent),
+            Ime::Keep
+        );
     }
 }

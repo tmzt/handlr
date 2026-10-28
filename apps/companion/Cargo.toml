@@ -18,6 +18,9 @@ path = "src/main.rs"
 
 [dependencies]
 flankr-companion = { path = "../../crates/flankr-companion" }
+# The terminal mode's grid: its runs, colours and attribute flags (plan
+# 20261027_07, step 5).
+libflankr_term = { path = "../../crates/libflankr_term" }
 flankr-audio = { path = "../../crates/flankr-audio" }
 # `StaticKey`, which the key store's Noise key implements.
 libflankr_proto = { path = "../../crates/libflankr_proto", features = ["link"] }
