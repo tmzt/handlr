@@ -426,7 +426,12 @@ command that removes a paired device: a daemon forgets one by
 
 The pairing screen (`src/ui.rs`, laid out by `src/remotes.rs`): its lines
 are drawn as plain text, not Markdown. In add mode (**+** in Remotes) its
-title is `remote_add`'s.
+title is `remote_add`'s. It is quiet (plan 20261028_01, the 14:42 EDT
+amendment): while a pairing waits it shows only the six pairing words,
+large, one line from `pairing_confirm` (or, in the device-code fallback,
+`pairing_fallback` or `pairing_fallback_no_words`), and Cancel; then
+`pairing_paired` or the reason it was not. Everything else is behind its
+Details button.
 
 # [Copy] remote_add
 
@@ -435,6 +440,79 @@ title is `remote_add`'s.
     Run flankr pair on the machine whose daemon you're adding and paste
     the pairing URL it prints below. flankr stays connected to the
     remote in use meanwhile.
+
+# [Copy] pairing_confirm
+
+- [abc] server: the daemon's name, from the pairing URL
+- text: |
+    If flankr pair on {{ [abc] server }} shows these six words, type yes
+    there.
+
+The device-code fallback (the 14:37 EDT amendment, item 2): the daemon
+could not be asked directly, so this phone's code is pasted into
+`flankr pair`, which then prints the words for it and asks for yes. A
+link from an older `flankr pair` has no offer, and so no words.
+
+# [Copy] pairing_fallback
+
+- [abc] server: the daemon's name, from the pairing URL
+- text: |
+    {{ [abc] server }} couldn't be asked directly: paste this phone's code
+    from Details into flankr pair there, then type yes if it shows these
+    words.
+
+# [Copy] pairing_fallback_no_words
+
+- [abc] server: the daemon's name, from the pairing URL
+- text: |
+    {{ [abc] server }} couldn't be asked directly: paste this phone's code
+    below into flankr pair there.
+
+# [Copy] pairing_paired
+
+- [abc] name: the remote's name
+- text: |
+    Paired with {{ [abc] name }}.
+
+The Details button and what it shows: the daemon's fingerprint words, its
+`host:port`, the time the link has left, and the device-code fallback's
+code.
+
+# [Copy] pairing_details
+
+- text: Details
+
+# [Copy] pairing_details_hide
+
+- text: Hide details
+
+# [Copy] pairing_fingerprint
+
+- text: Daemon fingerprint
+
+# [Copy] pairing_address
+
+- [abc] server: the daemon's name, from the pairing URL
+- [abc] address: the daemon's host:port
+- text: |
+    {{ [abc] server }} at {{ [abc] address }}
+
+# [Copy] pairing_expires
+
+- [#] seconds: the seconds the link has left
+- text: |
+    The link expires in {{ [#] seconds }} s.
+
+# [Copy] pairing_expired
+
+- text: |
+    The link has expired: run flankr pair again.
+
+# [Copy] pairing_no_words
+
+- text: |
+    This link is from an older flankr pair and has no offer, so there are
+    no pairing words to compare: check the daemon fingerprint instead.
 
 # [Copy] pairing_paste
 
@@ -456,17 +534,6 @@ item 4).
     still lists the old one under this phone's name: run
     flankr pair --replace there to paste this code over it.
 
-# [Copy] pairing_confirmation
-
-- text: Confirmation code
-
-# [Copy] pairing_confirmation_check
-
-- [abc] server: the daemon's name, from the pairing URL
-- text: |
-    Check that it matches the confirmation code flankr pair printed on
-    {{ [abc] server }}. Both come from the daemon's static key; if they
-    differ, the URL names another daemon: tap Cancel.
 
 The foreground service's notification (CHANGES.md, 2026-10-24 12:59 EDT,
 item 3), filled in `src/notify.rs` and shown with libmorph's

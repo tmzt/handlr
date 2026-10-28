@@ -4,11 +4,12 @@
 //! the nodes; the draw list is rebuilt only when something changed.
 //!
 //! From the top: the title and two status lines. From the bottom: the
-//! pairing field and its Pair button, and above them the device code, its
-//! confirmation code and any pairing note. While a pairing waits for its
-//! code to be added, a Cancel button takes the field's place. It shows
-//! while the phone is not paired and not connected, or shows its device
-//! code, or is in its **add** mode, opened by the **+** in Settings'
+//! pairing field and its Pair button, and above them the pairing area (the
+//! six pairing words and one line, or their Details) and any pairing note.
+//! While a pairing waits for the owner, Details and Cancel take the
+//! field's place (plan 20261028_01, the 14:42 EDT amendment). It shows
+//! while the phone is not paired and not connected, or a pairing waits,
+//! or is in its **add** mode, opened by the **+** in Settings'
 //! Remotes (plan 20261028_01, decision 9): titled *Pair another remote*,
 //! with a "<" at the top left back to Settings. Otherwise the overview is
 //! the home screen (plan 20261023_04), and the conversation, the
@@ -24,9 +25,9 @@ use crate::prompt::PromptInput;
 use crate::settings::copy;
 use crate::theme::theme;
 
-/// Lines of the pairing area (the code, its confirmation code and the
-/// notes).
-const CODE_LINES: usize = 16;
+/// Lines of the pairing area (the words, or the Details with the device
+/// code, and the notes).
+const CODE_LINES: usize = 20;
 /// The add mode's back glyph: ASCII, as the pairing screen's face has no
 /// "‹".
 const BACK_GLYPH: &str = "<";
@@ -301,16 +302,19 @@ pub fn dictation_lines(d: &Dictation) -> Vec<Line> {
 pub struct View {
     /// The connection and the audio, one line each.
     pub status: Vec<String>,
-    /// The pairing area above the field: the device code and notes.
+    /// The pairing area above the field: the words or Details, and notes.
     pub code: Vec<Line>,
     /// The pairing field's text; the screen shows its tail.
     pub field: String,
     /// The field has the keyboard.
     pub field_focused: bool,
-    /// A pairing waits for its code to be added: the field and Pair are
-    /// hidden, and Cancel shows in their place. The pairing area (the
-    /// device code, the confirmation code, notes) shows above it.
+    /// A pairing waits for the owner: the field and Pair are hidden, and
+    /// Details and Cancel show in their place. The pairing area shows above
+    /// them.
     pub waiting: bool,
+    /// The pairing's Details are open: the Details button reads "Hide
+    /// details".
+    pub details: bool,
     /// The add mode (**+** in Settings' Remotes): its title, and a "<"
     /// back to Settings.
     pub adding: bool,
@@ -323,6 +327,8 @@ pub enum Hit {
     Pair,
     /// Cancel, while a pairing waits.
     Cancel,
+    /// Details, while a pairing waits: opens or closes them.
+    Details,
     /// The add mode's "<": back to Settings.
     Back,
 }
@@ -370,6 +376,7 @@ pub struct Screen {
     field: NodeId,
     pair: NodeId,
     cancel: NodeId,
+    details: NodeId,
     /// Where each visible control is, as last laid out.
     hits: Vec<(Hit, Rect)>,
     /// What the screen shows, as last laid out.
@@ -411,6 +418,7 @@ impl Screen {
         );
         let pair = router.add(None, button("Pair", theme().message));
         let cancel = router.add(None, button(copy::CANCEL.text, theme().back));
+        let details = router.add(None, button(copy::PAIRING_DETAILS.text, theme().back));
         Self {
             router,
             title,
@@ -420,6 +428,7 @@ impl Screen {
             field,
             pair,
             cancel,
+            details,
             hits: Vec::new(),
             shown: None,
             dirty: true,
@@ -502,7 +511,8 @@ impl Screen {
             );
         }
 
-        // The bottom: the field and Pair, or Cancel while a pairing waits.
+        // The bottom: the field and Pair, or Details and Cancel while a
+        // pairing waits.
         let bottom = layout.h - layout.bottom - 24.0 * s;
         let row_h = Layout::ROW_H * s;
         let row_y = bottom - row_h;
@@ -534,9 +544,25 @@ impl Screen {
         self.router
             .set_flags(self.field, NodeFlags::HIDDEN, view.waiting);
         self.place_button(self.pair, pair_rect, s, !view.waiting);
-        let cancel_rect = Rect::new(pad, row_y, layout.w - 2.0 * pad, row_h);
+        let half = (layout.w - 2.0 * pad - 12.0 * s) / 2.0;
+        let details_rect = Rect::new(pad, row_y, half, row_h);
+        let cancel_rect = Rect::new(pad + half + 12.0 * s, row_y, half, row_h);
+        {
+            let label = if view.details {
+                copy::PAIRING_DETAILS_HIDE.text
+            } else {
+                copy::PAIRING_DETAILS.text
+            };
+            let button = self
+                .router
+                .get_mut::<Button>(self.details)
+                .expect("the details");
+            button.text = label.to_string();
+        }
+        self.place_button(self.details, details_rect, s, view.waiting);
         self.place_button(self.cancel, cancel_rect, s, view.waiting);
         if view.waiting {
+            self.hits.push((Hit::Details, details_rect));
             self.hits.push((Hit::Cancel, cancel_rect));
         } else {
             self.hits.push((Hit::Field, field_rect));
@@ -713,6 +739,30 @@ mod tests {
         );
         let label = screen.router.get::<Button>(screen.cancel).unwrap();
         assert_eq!(label.text, "Cancel");
+        // Details beside it, which reads "Hide details" once open.
+        let details = screen
+            .hits
+            .iter()
+            .find(|(h, _)| *h == Hit::Details)
+            .expect("a Details")
+            .1;
+        assert_eq!(
+            screen.hit(details.x + 1.0, details.y + 1.0),
+            Some(Hit::Details)
+        );
+        assert!(details.x + details.w < cancel.x, "side by side");
+        let text = |s: &Screen| s.router.get::<Button>(s.details).unwrap().text.clone();
+        assert_eq!(text(&screen), "Details");
+        screen.set(
+            PHONE,
+            View {
+                waiting: true,
+                details: true,
+                code: vec![line("flankrkey1abc")],
+                ..View::default()
+            },
+        );
+        assert_eq!(text(&screen), "Hide details");
     }
 
     #[test]
@@ -726,8 +776,10 @@ mod tests {
     }
 
     #[test]
-    fn the_add_mode_has_its_title_a_back_and_the_confirmation_code() {
-        use crate::remotes::{CONFIRMATION_PT, Code, Pairing};
+    fn the_add_mode_has_its_title_a_back_and_the_six_words_large() {
+        use crate::remotes::{Pairing, WORDS_PT, Waiting};
+        use std::time::Instant;
+        let now = Instant::now();
         let mut screen = Screen::new();
         screen.set(PHONE, View::default());
         let title = |s: &Screen| s.router.get::<Label>(s.title).unwrap().text().to_string();
@@ -737,8 +789,9 @@ mod tests {
         let mut p = Pairing::default();
         p.open_add();
         let view = |p: &Pairing| View {
-            code: p.lines(&PHONE, None),
+            code: p.lines(&PHONE, None, now),
             waiting: p.waiting(),
+            details: p.details,
             adding: p.adding,
             ..View::default()
         };
@@ -748,36 +801,56 @@ mod tests {
         assert_eq!(screen.hit(back.x + 1.0, back.y + 1.0), Some(Hit::Back));
         assert!(back.y >= PHONE.top && back.x == 0.0, "top left");
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
-        // A pairing waits: its codes show, and Cancel replaces the field.
-        p.show(Code {
-            code: "flankrkey1".to_string() + &"Ab3".repeat(20),
-            server: "m4".into(),
-            confirmation: "543268".into(),
-            replace: false,
-        });
+        // The daemon holds the request: its words show, large, and Details
+        // and Cancel replace the field.
+        p.show(Waiting::new(
+            "m4".into(),
+            "m4.ts.net:7347".into(),
+            Some("abandon ability able about above absent".into()),
+            "zoo zone youth wrist wrong yellow".into(),
+            Some(60),
+            None,
+            now,
+        ));
         screen.set(PHONE, view(&p));
         assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Cancel));
+        assert!(screen.hits.iter().any(|(h, _)| *h == Hit::Details));
         assert!(!screen.hits.iter().any(|(h, _)| *h == Hit::Pair));
-        let shown: Vec<(String, f32)> = screen
-            .code
-            .iter()
-            .map(|&id| {
-                let l = screen.router.get::<Label>(id).unwrap();
-                (l.text().to_string(), l.font_size.unwrap_or(0.0))
-            })
-            .filter(|(t, _)| !t.is_empty())
-            .collect();
-        let digits = shown
-            .iter()
-            .find(|(t, _)| t == "543268")
-            .expect("the confirmation code is drawn");
-        assert_eq!(digits.1, CONFIRMATION_PT * PHONE.scale, "large");
-        assert!(shown.iter().any(|(t, _)| t == "Confirmation code"));
-        assert!(
-            shown
+        let shown = |s: &Screen| -> Vec<(String, f32)> {
+            s.code
                 .iter()
-                .any(|(t, _)| t.starts_with("Check that it matches")),
-            "{shown:?}"
+                .map(|&id| {
+                    let l = s.router.get::<Label>(id).unwrap();
+                    (l.text().to_string(), l.font_size.unwrap_or(0.0))
+                })
+                .filter(|(t, _)| !t.is_empty())
+                .collect()
+        };
+        let quiet = shown(&screen);
+        let words: Vec<&str> = quiet
+            .iter()
+            .filter(|(_, size)| *size == WORDS_PT * PHONE.scale)
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert_eq!(words, ["abandon ability able", "about above absent"]);
+        assert!(
+            quiet
+                .iter()
+                .any(|(t, _)| t.starts_with("If flankr pair on m4")),
+            "{quiet:?}"
+        );
+        assert!(!quiet.iter().any(|(t, _)| t.contains("zoo")), "{quiet:?}");
+        // Details: the fingerprint and the address, all of it drawn.
+        p.toggle_details();
+        screen.set(PHONE, view(&p));
+        let details = shown(&screen);
+        assert!(details.iter().any(|(t, _)| t == "Daemon fingerprint"));
+        assert!(details.iter().any(|(t, _)| t == "zoo zone youth"));
+        assert!(details.iter().any(|(t, _)| t == "m4 at m4.ts.net:7347"));
+        assert!(
+            details
+                .iter()
+                .any(|(t, _)| t == "The link expires in 60 s.")
         );
     }
 

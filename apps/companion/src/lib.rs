@@ -54,8 +54,10 @@
 //! leaves a note there saying whether its daemon was told. The **+** opens
 //! the pairing screen in its add mode, over Settings; Cancel, its "<" or
 //! the system Back send [`Input::CancelPairing`] and return. While a
-//! pairing waits, the pairing screen shows the device code and the
-//! six-digit confirmation code to check against `flankr pair`'s. Once
+//! pairing waits ([`Event::PairingWords`]), the pairing screen shows the
+//! six pairing words, large, to compare with `flankr pair`'s before typing
+//! yes there, with Details for the daemon's fingerprint words, its
+//! address, the time left, and the device-code fallback's code. Once
 //! [`Event::Unpaired`] comes (the last remote gone) the app is back on the
 //! pairing screen; *Delete data* removes every remote first, then
 //! everything in the data directory but the voice models.
@@ -563,8 +565,8 @@ impl App {
             return;
         }
         // A pairing link while a remote is paired pairs another: the add
-        // mode's screen, with its confirmation code and Cancel, over
-        // whatever was shown.
+        // mode's screen, with its pairing words and Cancel, over whatever
+        // was shown.
         if self.paired && !self.pairing.adding {
             log::info!("remotes: a pairing link, pairing another");
             self.pairing.open_add();
@@ -636,28 +638,41 @@ impl App {
                     "not paired \u{b7} paste a pairing URL below".into()
                 };
             }
-            Event::PairingCode {
-                code,
+            Event::PairingWords {
                 server,
-                confirmation,
-                replace,
+                address,
+                words,
+                fingerprint,
+                expires_in_secs,
+                fallback,
             } => {
-                // Public: a public key and digits from the daemon's, safe
-                // to log, and readable over adb.
-                log::info!(
-                    "pairing: device code {code}, confirmation code {confirmation}{}",
-                    if replace {
-                        ", for flankr pair --replace"
-                    } else {
-                        ""
-                    }
-                );
-                self.pairing.show(remotes::Code {
-                    code,
+                // Public: words from public keys and the link's offer, and
+                // a public key's code; safe to log, and readable over adb.
+                match &fallback {
+                    None => log::info!(
+                        "pairing: {server} at {address} holds the request; pairing words {}",
+                        words.as_deref().unwrap_or("-")
+                    ),
+                    Some(f) => log::info!(
+                        "pairing: fallback, device code {}, pairing words {}{}",
+                        f.code,
+                        words.as_deref().unwrap_or("- (no offer)"),
+                        if f.replace {
+                            ", for flankr pair --replace"
+                        } else {
+                            ""
+                        }
+                    ),
+                }
+                self.pairing.show(remotes::Waiting::new(
                     server,
-                    confirmation,
-                    replace,
-                });
+                    address,
+                    words,
+                    fingerprint,
+                    expires_in_secs,
+                    fallback,
+                    Instant::now(),
+                ));
                 self.note = None;
                 self.screen.invalidate();
             }
@@ -670,7 +685,11 @@ impl App {
                     let note = remotes::paired_note(server.as_deref().unwrap_or_default());
                     self.set_remotes_note(Some(note));
                 } else {
-                    self.note = Some((format!("paired as {name}"), Role::Muted));
+                    let note = match server {
+                        Some(server) => remotes::first_paired_note(&server),
+                        None => format!("paired as {name}"),
+                    };
+                    self.note = Some((note, Role::Muted));
                 }
                 self.screen.invalidate();
             }
@@ -1841,7 +1860,7 @@ impl App {
     }
 
     /// Whether the pairing screen shows: neither paired nor connected, or a
-    /// device code to paste.
+    /// pairing waiting.
     fn pairing(&self) -> bool {
         self.pairing.adding || self.pairing.waiting() || (!self.paired && !self.online)
     }
@@ -1974,6 +1993,10 @@ impl App {
             Some(Hit::Field) => self.field_focused = true,
             Some(Hit::Pair) => self.pair(),
             Some(Hit::Cancel | Hit::Back) => self.cancel_pairing(),
+            Some(Hit::Details) => {
+                self.pairing.toggle_details();
+                self.screen.invalidate();
+            }
             // No tap-to-listen here: the pairing screen is not the home
             // screen, so a tap off its controls only leaves the field.
             None => self.field_focused = false,
@@ -2131,10 +2154,11 @@ impl App {
             .map(|(t, r)| (t.as_str(), theme().get(*r)));
         let view = View {
             status: vec![self.link.clone(), sound],
-            code: self.pairing.lines(&layout, note),
+            code: self.pairing.lines(&layout, note, Instant::now()),
             field: self.field.clone(),
             field_focused: self.field_focused,
             waiting: self.pairing.waiting(),
+            details: self.pairing.details,
             adding: self.pairing.adding,
         };
         self.screen.set(layout, view);
