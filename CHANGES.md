@@ -3033,3 +3033,30 @@ should be in bold, such as using markdown". Commit `f4651b4`.
    does not exist and give each scripted run its own key directory, since
    the Mac's running daemon answered the tests; `data_dir` in tests is
    still the host's.
+
+## 2026-10-28 18:28 EDT — the settings follow-up: remote details, standard rows, the copy folder
+
+Plan: docs/design/20261024_02_SETTINGS_SCREEN_PLAN.md (the living
+section's 2026-10-28 entries). flankr-companion 0.4.0 (tag
+`flankr-companion-v0.4.0`) and the app commit after it. The app's copy is
+now in `apps/companion/copy/` (`SETTINGS_COPY.md`, `PAIRING_COPY.md`),
+all files read by `build.rs` into one generated module that fails the build
+on a key defined twice, a missing key or a bad slot.
+
+1. Cancelling an add-mode pairing no longer leaves a note under Remotes
+   (the note is gone); the first-run window still says it.
+2. Remove in the details modal closes the details and opens the X's
+   confirm modal; a draft nickname is not saved on Remove. The confirm
+   modal stays open on Remove ("Removing <name>…"), closing when the daemon
+   answers, else showing "removed on this phone only" with OK.
+3. `Confirm::new` gained `action_closes`; `Confirm::notice` is new.
+4. A nickname is trimmed, its control characters dropped, at most 40
+   characters; empty means the default. Closing the details by Close, Back
+   or a tap outside saves a changed nickname.
+5. The default-name placeholder for a remote that has a nickname is the
+   bare base hostname (no conflict port).
+6. Tests take a temporary `--data` directory; the old settings migration is
+   compiled out of test builds. The soft-keyboard path for the nickname has
+   no host or device test yet.
+7. `Event::PairingWords.fingerprint_hex` replaces the app's workaround of
+   recomputing the hex from the scanned link.
