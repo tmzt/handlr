@@ -2869,3 +2869,27 @@ with the countdown? that wasn't asked for", then "just remove the pill,
 that was missed in reviewing plan 07". The armed terminal now shows the
 coloured frame only, and the app no longer redraws each second for the
 countdown.
+
+## 2026-10-28 11:02 EDT — the keys row, no arm timer or frame (plan 20261022_03 L3; plan 20261027_07, decision 6)
+
+Plan: docs/design/20261022_03_HARNESS_PROTOCOL_PLAN.md, the L3 amendment on
+the keys row, which replaces frozen plan
+docs/design/20261027_07_TERMINAL_MODE_PLAN.md decision 6's 60 s arm window
+on the owner's instruction. libherdr_term 0.2.0 (`b2bf0e2`, tag
+`libherdr_term-v0.2.0`), the daemon (`184e678`), the client (`0aa0883`)
+and the app (`90b94d8`).
+
+1. **The arm** is a flag held until the terminal is dropped;
+   `terminal.input_arm` answers `expires_in_s: 0`. `libflankr_proto`'s
+   `TERMINAL_INPUT_ARM_SECS` (60) is now unused, and its doc and
+   `expires_in_s`'s are out of date; the proto crate is unchanged. One
+   `terminal_input` notice per arm.
+2. **Keys:** herdr's `parse_key_combo` spelling. Accepted: `ctrl+<a-z>`,
+   `alt+<printable>`, `ctrl+alt+<a-z>` (`alt+ctrl+` normalised), and
+   `ctrl+`/`alt+` before the named keys. Still refused: `alt+space`,
+   `ctrl+<non-letter>`, other modifiers, other named keys. A latched
+   modifier on a key the daemon would refuse is dropped and the key sent
+   plain.
+3. **The row** is 44 pt high, seven equal columns, arrows drawn as strokes.
+   It sits directly on the keyboard and the bottom bar moves up by its
+   height, so the terminal shrinks by exactly that much and the fit follows.
