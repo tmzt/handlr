@@ -1720,3 +1720,38 @@ switch)".
    and typing, scroll and mouse need its `terminal_input` as well as
    `[terminal] input` and the arm. Without the entry the session is listed
    but its terminal is refused with the daemon's message.
+
+## Amendment — 2026-10-28 10:42 EDT: the terminal's arm without a timer or frame; a keys row above the keyboard (living section L3)
+
+The owner (2026-10-28): "remove the keyboard timer and frame. add a new keys
+row just above the ime inset with ESC TAB CTRL ALT and collapsed dpad with
+up arrow above left down right like 101 keyboard, the CTRL and ALT as
+modifiers for ime button press".
+
+1. **No timer.** Typing, once armed by a tap or a drag (the L3 amendment of
+   2026-10-27 21:58 EDT), stays armed until the terminal is closed (the
+   view is left, the session switched, the terminal closed by the daemon)
+   or the link drops; it no longer ends after 60 s without a key. This
+   replaces plan 20261027_07 decision 6's "it drops after 60 s without a
+   key" and the daemon's 60 s window: the daemon holds the arm for the
+   terminal's life on that connection. `terminal.input_arm`'s
+   `expires_in_s` is answered as 0, meaning no expiry. The gates are
+   unchanged: `[terminal] input`, the agent's `terminal_input`, a device
+   that may approve, and the arm.
+2. **No frame.** The armed terminal draws no coloured frame (and, as
+   already removed, no pill).
+3. **A keys row just above the soft keyboard,** shown while the keyboard
+   is raised into the terminal, the full width of the view, one row high:
+   **ESC**, **TAB**, **CTRL**, **ALT**, then a collapsed d-pad laid out
+   like a 101-key keyboard's arrow block: **↑** above, **← ↓ →** below,
+   the two rows sharing the row's height. ESC, TAB and the arrows send
+   their keys at once (`escape`, `tab`, `up`, `down`, `left`,
+   `right`).
+4. **CTRL and ALT are modifiers** for the next key from the soft keyboard:
+   tapping one latches it (drawn highlighted); the next character typed
+   is sent with it (`ctrl+<key>`, `alt+<key>`, or both), and the latch
+   clears. Tapping a latched modifier again clears it. A modifier also
+   applies to the row's own keys (ctrl+arrow). The daemon accepts
+   `alt+<printable>` and `ctrl+alt+<key>` as well as today's
+   `ctrl+<a-z>`; `ctrl+c`, `ctrl+d`, `ctrl+z` and `ctrl+\` still need
+   the agent's `terminal_signals`.
