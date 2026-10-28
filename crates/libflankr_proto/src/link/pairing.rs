@@ -1,12 +1,19 @@
 //! The pairing string and the device code (plan 02, amendment of
 //! 23:07 EDT: pairing by public keys, with no shared secret).
 //!
-//! The pairing string's payload, as bytes: version (1 byte, `2`), the
-//! server's public key (32), addresses (1-byte count, then each a 1-byte
-//! length and `host:port` in UTF-8), and a checksum: the first 4 bytes of
-//! BLAKE2s-256 over every field before it. The text form is `flankr1`
-//! followed by the payload in base58 with the Bitcoin alphabet. It holds no
-//! secret, so it may be shown, logged or kept freely.
+//! The pairing string's payload, as bytes: version (1 byte, `3`, or `2`
+//! without an offer), the server's public key (32), addresses (1-byte
+//! count, then each a 1-byte length and `host:port` in UTF-8), in version
+//! 3 the offer (16 bytes; plan 20261028_01, the 13:59 and 14:37 EDT
+//! amendments), and a checksum: the first 4 bytes of BLAKE2s-256 over
+//! every field before it. The text form is `flankr1` followed by the
+//! payload in base58 with the Bitcoin alphabet. It holds no secret, so it
+//! may be shown, logged or kept freely: the offer only names one
+//! `flankr pair` run, and the six pairing words bind it.
+//!
+//! A payload with an offer is written as version 3, one without as version
+//! 2; both are read. A decoder older than version 3 refuses a version 3
+//! payload as unknown, so the phone is updated before the daemon.
 //!
 //! The pairing URL (plan 20261022_06, decision 1, as amended at 23:07 EDT)
 //! is `flankr://<host>:<port>/pair#<pairing string>`: the address a phone
@@ -33,8 +40,14 @@ pub const PAIRING_URL_SCHEME: &str = "flankr";
 /// The pairing URL's path.
 const PAIRING_URL_PATH: &str = "/pair";
 
-/// The pairing payload version this crate writes and reads.
-pub const PAIRING_VERSION: u8 = 2;
+/// The pairing payload version this crate writes for a payload with an
+/// offer, and reads.
+pub const PAIRING_VERSION: u8 = 3;
+/// The pairing payload version without an offer, which this crate writes
+/// for a payload whose `offer` is `None`, and reads.
+pub const PAIRING_VERSION_NO_OFFER: u8 = 2;
+/// The length of a pairing offer.
+pub const OFFER_LEN: usize = 16;
 
 /// The device code's prefix.
 pub const DEVICE_CODE_PREFIX: &str = "flankrkey1";
@@ -52,6 +65,9 @@ pub struct PairingPayload {
     pub server_key: [u8; KEY_LEN],
     /// The server's addresses, `host:port`, in order of preference.
     pub addresses: Vec<String>,
+    /// The `flankr pair` run's random offer, which a pairing request must
+    /// carry; `None` in a version 2 payload.
+    pub offer: Option<[u8; OFFER_LEN]>,
 }
 
 /// What a device code carries: the device's key and the name it chose.
@@ -121,8 +137,11 @@ impl std::error::Error for PairingStringError {}
 impl PairingPayload {
     /// The binary payload, with its checksum.
     pub fn to_bytes(&self) -> Result<Vec<u8>, PairingStringError> {
-        let mut out = Vec::with_capacity(1 + KEY_LEN + 64);
-        out.push(PAIRING_VERSION);
+        let mut out = Vec::with_capacity(1 + KEY_LEN + 64 + OFFER_LEN);
+        out.push(match self.offer {
+            Some(_) => PAIRING_VERSION,
+            None => PAIRING_VERSION_NO_OFFER,
+        });
         out.extend_from_slice(&self.server_key);
         let count =
             u8::try_from(self.addresses.len()).map_err(|_| PairingStringError::TooManyAddresses)?;
@@ -132,17 +151,22 @@ impl PairingPayload {
             out.push(len);
             out.extend_from_slice(addr.as_bytes());
         }
+        if let Some(offer) = &self.offer {
+            out.extend_from_slice(offer);
+        }
         let sum = blake2s_prefix(&[&out]);
         out.extend_from_slice(&sum);
         Ok(out)
     }
 
     /// Reads a binary payload: checksum first, then version, then fields.
-    /// A version 1 payload (with a secret) is [`PairingStringError::UnknownVersion`].
+    /// Version 3 has an offer, version 2 none (`offer` is `None`); any other
+    /// version, such as 1 (with a secret), is
+    /// [`PairingStringError::UnknownVersion`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, PairingStringError> {
         let mut r = Reader(checked(bytes, &[])?);
         let version = r.u8()?;
-        if version != PAIRING_VERSION {
+        if version != PAIRING_VERSION && version != PAIRING_VERSION_NO_OFFER {
             return Err(PairingStringError::UnknownVersion(version));
         }
         let server_key = r.array()?;
@@ -150,10 +174,16 @@ impl PairingPayload {
         let addresses = (0..count)
             .map(|_| r.string())
             .collect::<Result<Vec<_>, _>>()?;
+        let offer = if version == PAIRING_VERSION {
+            Some(r.array()?)
+        } else {
+            None
+        };
         r.end()?;
         Ok(PairingPayload {
             server_key,
             addresses,
+            offer,
         })
     }
 
@@ -348,6 +378,113 @@ impl Reader<'_> {
             Ok(())
         } else {
             Err(PairingStringError::Malformed)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn payload(offer: Option<[u8; OFFER_LEN]>) -> PairingPayload {
+        PairingPayload {
+            server_key: [7; KEY_LEN],
+            addresses: vec!["box.tail1234.ts.net:7347".into(), "127.0.0.1:7347".into()],
+            offer,
+        }
+    }
+
+    /// The decoder of 0.4.3 and before, which read version 2 only: kept
+    /// here to show what an older app does with a version 3 link.
+    fn decode_v2_only(bytes: &[u8]) -> Result<PairingPayload, PairingStringError> {
+        let mut r = Reader(checked(bytes, &[])?);
+        let version = r.u8()?;
+        if version != 2 {
+            return Err(PairingStringError::UnknownVersion(version));
+        }
+        let server_key = r.array()?;
+        let count = r.u8()?;
+        let addresses = (0..count)
+            .map(|_| r.string())
+            .collect::<Result<Vec<_>, _>>()?;
+        r.end()?;
+        Ok(PairingPayload {
+            server_key,
+            addresses,
+            offer: None,
+        })
+    }
+
+    #[test]
+    fn an_offer_is_written_as_version_3_and_read_back() {
+        let p = payload(Some(std::array::from_fn(|i| i as u8)));
+        let bytes = p.to_bytes().unwrap();
+        assert_eq!(bytes[0], PAIRING_VERSION);
+        assert_eq!(PAIRING_VERSION, 3);
+        // version, key, count, two addresses, offer, checksum
+        assert_eq!(
+            bytes.len(),
+            1 + KEY_LEN + 1 + 25 + 15 + OFFER_LEN + CHECKSUM_LEN
+        );
+        assert_eq!(PairingPayload::from_bytes(&bytes).unwrap(), p);
+        assert_eq!(PairingPayload::decode(&p.url().unwrap()).unwrap(), p);
+    }
+
+    #[test]
+    fn no_offer_is_written_as_version_2_and_read_back() {
+        let p = payload(None);
+        let bytes = p.to_bytes().unwrap();
+        assert_eq!(bytes[0], PAIRING_VERSION_NO_OFFER);
+        assert_eq!(PairingPayload::from_bytes(&bytes).unwrap(), p);
+        // The old decoder reads it too.
+        assert_eq!(decode_v2_only(&bytes).unwrap(), p);
+    }
+
+    #[test]
+    fn a_version_2_decoder_refuses_version_3_as_unknown() {
+        let bytes = payload(Some([9; OFFER_LEN])).to_bytes().unwrap();
+        assert_eq!(
+            decode_v2_only(&bytes),
+            Err(PairingStringError::UnknownVersion(3))
+        );
+    }
+
+    #[test]
+    fn a_version_3_payload_without_its_offer_is_malformed() {
+        // A version 2 body relabelled as version 3, with a fresh checksum.
+        let mut body = payload(None).to_bytes().unwrap();
+        body.truncate(body.len() - CHECKSUM_LEN);
+        body[0] = PAIRING_VERSION;
+        let sum = blake2s_prefix(&[&body]);
+        body.extend_from_slice(&sum);
+        assert_eq!(
+            PairingPayload::from_bytes(&body),
+            Err(PairingStringError::Malformed)
+        );
+        // And a version 2 payload with 16 trailing bytes is malformed too.
+        let mut body = payload(Some([1; OFFER_LEN])).to_bytes().unwrap();
+        body.truncate(body.len() - CHECKSUM_LEN);
+        body[0] = PAIRING_VERSION_NO_OFFER;
+        let sum = blake2s_prefix(&[&body]);
+        body.extend_from_slice(&sum);
+        assert_eq!(
+            PairingPayload::from_bytes(&body),
+            Err(PairingStringError::Malformed)
+        );
+    }
+
+    #[test]
+    fn other_versions_are_unknown() {
+        for v in [0u8, 1, 4, 255] {
+            let mut body = payload(None).to_bytes().unwrap();
+            body.truncate(body.len() - CHECKSUM_LEN);
+            body[0] = v;
+            let sum = blake2s_prefix(&[&body]);
+            body.extend_from_slice(&sum);
+            assert_eq!(
+                PairingPayload::from_bytes(&body),
+                Err(PairingStringError::UnknownVersion(v))
+            );
         }
     }
 }

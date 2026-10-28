@@ -1,5 +1,6 @@
 //! The handshake, `IK`, client and server (plan 02, amendment of 23:07
-//! EDT: one handshake).
+//! EDT: one handshake). The pairing request's `NK` handshake, which shares
+//! the framing and the prologue, is in `pair_mode`.
 
 use snow::{Builder, HandshakeState};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -79,6 +80,20 @@ where
     if mode != MODE_RECONNECT {
         return Err(LinkError::UnknownMode(mode));
     }
+    accept_after_mode(io, local, authorize).await
+}
+
+/// [`accept`] once the mode byte `0x02` has been read.
+pub(super) async fn accept_after_mode<S, K, A>(
+    mut io: S,
+    local: &K,
+    authorize: A,
+) -> Result<Accepted<S>, LinkError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    K: StaticKey + Clone,
+    A: FnOnce(&[u8; KEY_LEN]) -> bool,
+{
     let mut buf = vec![0u8; MAX_FRAME];
     let prologue = prologue(MODE_RECONNECT);
     let mut hs = builder(RECONNECT_PATTERN, local)?
@@ -107,12 +122,15 @@ where
 
 /// A builder for `pattern` whose local static key is `local`, through
 /// [`KeyResolver`]: snow is given a marker, not the private key.
-fn builder<'a, K: StaticKey + Clone>(pattern: &str, local: &K) -> Result<Builder<'a>, LinkError> {
+pub(super) fn builder<'a, K: StaticKey + Clone>(
+    pattern: &str,
+    local: &K,
+) -> Result<Builder<'a>, LinkError> {
     let resolver = Box::new(KeyResolver::new(local));
     Ok(Builder::with_resolver(pattern.parse()?, resolver).local_private_key(STATIC_MARKER)?)
 }
 
-fn prologue(mode: u8) -> Vec<u8> {
+pub(super) fn prologue(mode: u8) -> Vec<u8> {
     let mut p = PROLOGUE_PREFIX.to_vec();
     p.push(mode);
     p
@@ -132,14 +150,17 @@ fn remote_static(hs: &HandshakeState) -> Result<[u8; KEY_LEN], LinkError> {
     ))?)
 }
 
-async fn read_frame<R: AsyncRead + Unpin>(io: &mut R) -> Result<Vec<u8>, LinkError> {
+pub(super) async fn read_frame<R: AsyncRead + Unpin>(io: &mut R) -> Result<Vec<u8>, LinkError> {
     let len = usize::from(io.read_u16().await?);
     let mut msg = vec![0u8; len];
     io.read_exact(&mut msg).await?;
     Ok(msg)
 }
 
-async fn write_frame<W: AsyncWrite + Unpin>(io: &mut W, msg: &[u8]) -> Result<(), LinkError> {
+pub(super) async fn write_frame<W: AsyncWrite + Unpin>(
+    io: &mut W,
+    msg: &[u8],
+) -> Result<(), LinkError> {
     let mut frame = Vec::with_capacity(2 + msg.len());
     frame.extend_from_slice(&(msg.len() as u16).to_be_bytes());
     frame.extend_from_slice(msg);

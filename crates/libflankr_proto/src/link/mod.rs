@@ -7,9 +7,9 @@
 //!   static key (from the pairing string), opens with the mode byte `0x02`,
 //!   and may carry its first message in the handshake. The server learns
 //!   the client's key from the device code pasted into `flankr pair`, and
-//!   drops a key it does not know with no reply. Any other mode byte,
-//!   `0x01` (the pairing handshake that was removed) included, closes the
-//!   connection.
+//!   drops a key it does not know with no reply. Any other mode byte but
+//!   the pairing request's `0x03` (below), `0x01` (the pairing handshake
+//!   that was removed) included, closes the connection.
 //! * The prologue is `b"flankr.link/1"` followed by the mode byte.
 //! * Every Noise message is a frame: a 2-byte big-endian length, then the
 //!   message (at most 65535 bytes). After the handshake each frame's
@@ -33,8 +33,14 @@
 //!   [`DeviceCode`] is the device's code, `flankrkey1…`. Neither holds a
 //!   secret.
 //! * [`fingerprint`], [`remote_id`], [`fingerprint_text`] and
-//!   [`confirmation_code`] name a daemon by its static public key (plan
-//!   20261028_01, decisions 1-2 and the 13:03 EDT amendment's item 7).
+//!   [`fingerprint_words`] name a daemon by its static public key (plan
+//!   20261028_01, decisions 1-2, the 13:03 EDT amendment's item 7 and the
+//!   14:37 EDT amendment's item 3).
+//! * A pairing request (plan 20261028_01, the 14:37 EDT amendment's
+//!   item 1) is `Noise_NK_25519_ChaChaPoly_BLAKE2s` with the mode byte
+//!   [`MODE_PAIR`] (`0x03`): [`request_pairing`] on the phone,
+//!   [`accept_pair`] or [`accept_incoming`] on the daemon, and the six
+//!   [`pairing_words`] both sides show. See the `pair_mode` module.
 //!
 //! The local static key is a [`StaticKey`], which does its own
 //! Diffie-Hellman, so a client's private key can stay in a key store and
@@ -46,24 +52,34 @@
 mod handshake;
 mod identity;
 mod keys;
+mod pair_mode;
 mod pairing;
 mod resolver;
 mod stream;
+mod words;
 
 #[cfg(test)]
 mod tests;
 
 pub use handshake::{Accepted, accept, reconnect};
-pub use identity::{
-    CONFIRMATION_CONTEXT, REMOTE_ID_LEN, confirmation_code, fingerprint, fingerprint_text,
-    remote_id,
-};
+pub use identity::{REMOTE_ID_LEN, fingerprint, fingerprint_text, remote_id};
 pub use keys::{StaticKey, StaticKeypair, generate_keypair, public_key};
+pub use pair_mode::{
+    Incoming, MODE_PAIR, PAIR_MESSAGE_VERSION, PAIR_PATTERN, PAIR_TIMEOUT_DEFAULT_SECS,
+    PAIR_TIMEOUT_MAX_SECS, PairAck, PairIncoming, PairMessageError, PairRefusal, PairRequest,
+    PairResponse, PairResult, accept_incoming, accept_pair, generate_offer, recv_pair_result,
+    request_pairing, send_pair_result,
+};
 pub use pairing::{
-    DEVICE_CODE_PREFIX, DEVICE_CODE_VERSION, DEVICE_NAME_MAX, DeviceCode, PAIRING_PREFIX,
-    PAIRING_URL_SCHEME, PAIRING_VERSION, PairingPayload, PairingStringError,
+    DEVICE_CODE_PREFIX, DEVICE_CODE_VERSION, DEVICE_NAME_MAX, DeviceCode, OFFER_LEN,
+    PAIRING_PREFIX, PAIRING_URL_SCHEME, PAIRING_VERSION, PAIRING_VERSION_NO_OFFER, PairingPayload,
+    PairingStringError,
 };
 pub use stream::{Kind, LinkReader, LinkStream, LinkWriter, Message};
+pub use words::{
+    PAIRING_WORDS_CONTEXT, WORD_COUNT, fingerprint_words, fingerprint_words_text, pairing_words,
+    pairing_words_text,
+};
 
 use std::fmt;
 
@@ -75,7 +91,8 @@ pub const RECONNECT_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
 /// The prologue, before the mode byte.
 pub const PROLOGUE_PREFIX: &[u8] = b"flankr.link/1";
 
-/// The client's first byte: `IK`.
+/// The client's first byte: `IK`. The pairing request's is
+/// [`MODE_PAIR`].
 pub const MODE_RECONNECT: u8 = 0x02;
 
 /// The largest Noise message, and so the largest frame body.
@@ -135,6 +152,8 @@ pub enum LinkError {
     /// or a kind that changed mid-message. For `recv_message` that is any
     /// flag byte but `0x00`/`0x01`, as before.
     BadFrame,
+    /// A pairing request's message could not be read or written.
+    Pairing(PairMessageError),
 }
 
 /// A Noise failure, kept opaque so `snow`'s types are not part of this
@@ -165,6 +184,7 @@ impl fmt::Display for LinkError {
                 write!(f, "first message larger than {MAX_FIRST_MESSAGE} bytes")
             }
             LinkError::BadFrame => f.write_str("malformed link frame"),
+            LinkError::Pairing(e) => e.fmt(f),
         }
     }
 }
@@ -174,6 +194,7 @@ impl std::error::Error for LinkError {
         match self {
             LinkError::Io(e) => Some(e),
             LinkError::Noise(e) => Some(e),
+            LinkError::Pairing(e) => Some(e),
             _ => None,
         }
     }
@@ -186,6 +207,12 @@ impl From<std::io::Error> for LinkError {
         } else {
             LinkError::Io(e)
         }
+    }
+}
+
+impl From<PairMessageError> for LinkError {
+    fn from(e: PairMessageError) -> Self {
+        LinkError::Pairing(e)
     }
 }
 

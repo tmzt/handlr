@@ -13,6 +13,7 @@ fn payload(server: &StaticKeypair) -> PairingPayload {
     PairingPayload {
         server_key: server.public,
         addresses: vec!["box.tail1234.ts.net:7347".into(), "127.0.0.1:7347".into()],
+        offer: None,
     }
 }
 
@@ -426,10 +427,10 @@ fn an_unknown_version_is_refused() {
     let server = generate_keypair().unwrap();
     let mut bytes = payload(&server).to_bytes().unwrap();
     bytes.truncate(bytes.len() - 4);
-    bytes[0] = 3;
+    bytes[0] = 4;
     assert_eq!(
         PairingPayload::decode(&with_checksum(bytes)),
-        Err(PairingStringError::UnknownVersion(3))
+        Err(PairingStringError::UnknownVersion(4))
     );
 
     // A version 1 string, with its secret, expiry and name, is refused.
@@ -647,4 +648,358 @@ fn a_bad_device_name_is_refused() {
         DeviceCode::decode(&code, &server.public),
         Err(PairingStringError::BadName)
     );
+}
+
+// The pairing request over NK (plan 20261028_01, the 14:37 EDT
+// amendment's item 1).
+
+fn pair_request(offer: [u8; OFFER_LEN]) -> PairRequest {
+    PairRequest {
+        device_key: generate_keypair().unwrap().public,
+        name: "pixel-9".into(),
+        offer,
+    }
+}
+
+#[tokio::test]
+async fn a_pairing_request_round_trips_over_nk() {
+    let server = generate_keypair().unwrap();
+    let offer = generate_offer().unwrap();
+    let request = pair_request(offer);
+    let (c, s) = duplex(PIPE);
+    let daemon = async {
+        let incoming = accept_pair(s, &server).await.unwrap();
+        let got = incoming.request.clone().unwrap();
+        let mut stream = incoming
+            .respond(PairAck::Accepted {
+                expires_in_secs: 42,
+            })
+            .await
+            .unwrap();
+        assert_eq!(stream.peer_key(), &[0u8; KEY_LEN]);
+        send_pair_result(&mut stream, PairResult::Added)
+            .await
+            .unwrap();
+        got
+    };
+    let phone = async {
+        let mut response = request_pairing(c, &server.public, &request).await.unwrap();
+        assert_eq!(
+            response.ack,
+            PairAck::Accepted {
+                expires_in_secs: 42
+            }
+        );
+        assert_eq!(response.stream.peer_key(), &server.public);
+        recv_pair_result(&mut response.stream).await.unwrap()
+    };
+    let (got, result) = tokio::join!(daemon, phone);
+    assert_eq!(got, request);
+    assert_eq!(result, PairResult::Added);
+    // Both sides compute the same words from what they hold.
+    assert_eq!(
+        pairing_words(&server.public, &got.offer, &got.device_key),
+        pairing_words(&server.public, &offer, &request.device_key)
+    );
+}
+
+#[tokio::test]
+async fn a_refused_pairing_request_carries_its_reason() {
+    let server = generate_keypair().unwrap();
+    for reason in [
+        PairRefusal::WrongOffer,
+        PairRefusal::Expired,
+        PairRefusal::Busy,
+        PairRefusal::Malformed,
+    ] {
+        let (c, s) = duplex(PIPE);
+        let request = pair_request([5; OFFER_LEN]);
+        let daemon = async {
+            let incoming = accept_pair(s, &server).await.unwrap();
+            drop(incoming.respond(PairAck::Refused(reason)).await.unwrap());
+        };
+        let phone = request_pairing(c, &server.public, &request);
+        let ((), response) = tokio::join!(daemon, phone);
+        let mut response = response.unwrap();
+        assert_eq!(response.ack, PairAck::Refused(reason));
+        // The daemon closed the session.
+        assert!(matches!(
+            recv_pair_result(&mut response.stream).await,
+            Err(LinkError::Closed)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn a_pairing_request_to_the_wrong_server_key_fails() {
+    let server = generate_keypair().unwrap();
+    let other = generate_keypair().unwrap();
+    let (c, s) = duplex(PIPE);
+    let request = pair_request([1; OFFER_LEN]);
+    let daemon = async {
+        let r = accept_pair(s, &server).await;
+        // Dropping the daemon's end closes the phone's connection.
+        r.map(|_| ())
+    };
+    let (daemon, phone) = tokio::join!(daemon, request_pairing(c, &other.public, &request));
+    // The daemon cannot decrypt the request; the phone's connection closes.
+    assert!(matches!(daemon, Err(LinkError::Noise(_))));
+    assert!(matches!(phone, Err(LinkError::Closed)));
+}
+
+#[tokio::test]
+async fn a_daemon_not_in_pair_mode_drops_the_request_unanswered() {
+    let server = generate_keypair().unwrap();
+    let (c, s) = duplex(PIPE);
+    let request = pair_request([1; OFFER_LEN]);
+    let daemon = async { drop(accept_pair(s, &server).await.unwrap()) };
+    let ((), phone) = tokio::join!(daemon, request_pairing(c, &server.public, &request));
+    assert!(matches!(phone, Err(LinkError::Closed)));
+}
+
+#[tokio::test]
+async fn the_phone_closing_is_seen_by_the_daemon() {
+    let server = generate_keypair().unwrap();
+    let (c, s) = duplex(PIPE);
+    let request = pair_request([1; OFFER_LEN]);
+    let daemon = async {
+        let incoming = accept_pair(s, &server).await.unwrap();
+        incoming
+            .respond(PairAck::Accepted {
+                expires_in_secs: 60,
+            })
+            .await
+            .unwrap()
+    };
+    let (mut stream, phone) = tokio::join!(daemon, request_pairing(c, &server.public, &request));
+    // Cancel on the phone: it drops the session.
+    drop(phone.unwrap());
+    assert!(matches!(
+        stream.recv_message().await,
+        Err(LinkError::Closed)
+    ));
+}
+
+#[tokio::test]
+async fn a_malformed_request_is_read_as_an_error_and_can_be_refused() {
+    let server = generate_keypair().unwrap();
+    // A raw NK initiator whose request has a bad name.
+    let (mut c, s) = duplex(PIPE);
+    let mut body = pair_request([1; OFFER_LEN]);
+    body.name = "ok".into();
+    let mut bytes = body.to_bytes().unwrap();
+    bytes[1 + KEY_LEN + 1] = b'/';
+    let phone = async {
+        let mut prologue = PROLOGUE_PREFIX.to_vec();
+        prologue.push(MODE_PAIR);
+        let mut hs = snow::Builder::new(PAIR_PATTERN.parse().unwrap())
+            .remote_public_key(&server.public)
+            .unwrap()
+            .prologue(&prologue)
+            .unwrap()
+            .build_initiator()
+            .unwrap();
+        let mut buf = vec![0u8; MAX_FRAME];
+        let n = hs.write_message(&bytes, &mut buf).unwrap();
+        c.write_u8(MODE_PAIR).await.unwrap();
+        c.write_u16(n as u16).await.unwrap();
+        c.write_all(&buf[..n]).await.unwrap();
+        let len = usize::from(c.read_u16().await.unwrap());
+        let mut msg = vec![0u8; len];
+        c.read_exact(&mut msg).await.unwrap();
+        let n = hs.read_message(&msg, &mut buf).unwrap();
+        PairAck::from_bytes(&buf[..n]).unwrap()
+    };
+    let daemon = async {
+        let incoming = accept_pair(s, &server).await.unwrap();
+        assert_eq!(incoming.request, Err(PairMessageError::BadName));
+        incoming
+            .respond(PairAck::Refused(PairRefusal::Malformed))
+            .await
+            .unwrap()
+    };
+    let (ack, _stream) = tokio::join!(phone, daemon);
+    assert_eq!(ack, PairAck::Refused(PairRefusal::Malformed));
+}
+
+#[tokio::test]
+async fn accept_incoming_takes_both_modes_and_accept_refuses_the_pairing_mode() {
+    let server = generate_keypair().unwrap();
+    let client = generate_keypair().unwrap();
+
+    let (c, s) = duplex(PIPE);
+    let (cr, sr) = tokio::join!(
+        reconnect(c, &client, &server.public, Some(b"hello")),
+        accept_incoming(s, &server, |key| key == &client.public),
+    );
+    cr.unwrap();
+    match sr.unwrap() {
+        Incoming::Link(acc) => assert_eq!(acc.peer_key, client.public),
+        Incoming::Pair(_) => panic!("an IK connection read as a pairing request"),
+    }
+
+    let (c, s) = duplex(PIPE);
+    let request = pair_request([3; OFFER_LEN]);
+    let daemon = async {
+        match accept_incoming(s, &server, |_| false).await.unwrap() {
+            Incoming::Pair(p) => {
+                assert_eq!(p.request.clone().unwrap(), request);
+                p.respond(PairAck::Refused(PairRefusal::Busy))
+                    .await
+                    .unwrap()
+            }
+            Incoming::Link(_) => panic!("a pairing request read as IK"),
+        }
+    };
+    let (_s, phone) = tokio::join!(daemon, request_pairing(c, &server.public, &request));
+    assert_eq!(phone.unwrap().ack, PairAck::Refused(PairRefusal::Busy));
+
+    // The IK-only accept refuses the pairing mode byte, as any unknown one.
+    let (mut c, s) = duplex(PIPE);
+    c.write_u8(MODE_PAIR).await.unwrap();
+    assert!(matches!(
+        accept(s, &server, |_| true).await,
+        Err(LinkError::UnknownMode(MODE_PAIR))
+    ));
+    // And the pairing accept refuses the IK one.
+    let (mut c, s) = duplex(PIPE);
+    c.write_u8(MODE_RECONNECT).await.unwrap();
+    assert!(matches!(
+        accept_pair(s, &server).await,
+        Err(LinkError::UnknownMode(MODE_RECONNECT))
+    ));
+    let (mut c, s) = duplex(PIPE);
+    c.write_u8(0x01).await.unwrap();
+    assert!(matches!(
+        accept_incoming(s, &server, |_| true).await,
+        Err(LinkError::UnknownMode(0x01))
+    ));
+}
+
+#[test]
+fn pairing_messages_round_trip() {
+    let request = PairRequest {
+        device_key: [7; KEY_LEN],
+        name: "s23.ultra_1".into(),
+        offer: std::array::from_fn(|i| i as u8),
+    };
+    let bytes = request.to_bytes().unwrap();
+    assert_eq!(bytes[0], PAIR_MESSAGE_VERSION);
+    assert_eq!(bytes.len(), 1 + KEY_LEN + 1 + 11 + OFFER_LEN);
+    assert_eq!(PairRequest::from_bytes(&bytes).unwrap(), request);
+
+    for ack in [
+        PairAck::Accepted { expires_in_secs: 0 },
+        PairAck::Accepted {
+            expires_in_secs: PAIR_TIMEOUT_MAX_SECS,
+        },
+        PairAck::Accepted {
+            expires_in_secs: u16::MAX,
+        },
+        PairAck::Refused(PairRefusal::WrongOffer),
+        PairAck::Refused(PairRefusal::Expired),
+        PairAck::Refused(PairRefusal::Busy),
+        PairAck::Refused(PairRefusal::Malformed),
+    ] {
+        assert_eq!(PairAck::from_bytes(&ack.to_bytes()).unwrap(), ack);
+    }
+    assert_eq!(
+        PairAck::Accepted {
+            expires_in_secs: 300
+        }
+        .to_bytes(),
+        [1, 0, 0x01, 0x2C]
+    );
+    assert_eq!(PairAck::Refused(PairRefusal::Busy).to_bytes(), [1, 1, 3]);
+
+    for result in [PairResult::Added, PairResult::Refused, PairResult::Expired] {
+        assert_eq!(PairResult::from_bytes(&result.to_bytes()).unwrap(), result);
+    }
+    assert_eq!(PairResult::Expired.to_bytes(), [1, 2]);
+}
+
+#[test]
+fn bad_pairing_messages_are_refused() {
+    let good = PairRequest {
+        device_key: [7; KEY_LEN],
+        name: "phone".into(),
+        offer: [1; OFFER_LEN],
+    };
+    let bytes = good.to_bytes().unwrap();
+    // Short, long, another version.
+    assert_eq!(
+        PairRequest::from_bytes(&bytes[..bytes.len() - 1]),
+        Err(PairMessageError::Malformed)
+    );
+    let mut long = bytes.clone();
+    long.push(0);
+    assert_eq!(
+        PairRequest::from_bytes(&long),
+        Err(PairMessageError::Malformed)
+    );
+    let mut v2 = bytes.clone();
+    v2[0] = 2;
+    assert_eq!(
+        PairRequest::from_bytes(&v2),
+        Err(PairMessageError::UnknownVersion(2))
+    );
+    assert_eq!(
+        PairRequest::from_bytes(&[]),
+        Err(PairMessageError::Malformed)
+    );
+    // Names: empty, a bad character, too long; both ways.
+    for name in ["", "a/b", &"x".repeat(DEVICE_NAME_MAX + 1)] {
+        let bad = PairRequest {
+            name: name.to_string(),
+            ..good.clone()
+        };
+        assert_eq!(bad.to_bytes(), Err(PairMessageError::BadName));
+    }
+    let mut empty_name = vec![PAIR_MESSAGE_VERSION];
+    empty_name.extend_from_slice(&[7; KEY_LEN]);
+    empty_name.push(0);
+    empty_name.extend_from_slice(&[1; OFFER_LEN]);
+    assert_eq!(
+        PairRequest::from_bytes(&empty_name),
+        Err(PairMessageError::BadName)
+    );
+
+    assert_eq!(
+        PairAck::from_bytes(&[1, 1, 9]),
+        Err(PairMessageError::UnknownCode(9))
+    );
+    assert_eq!(
+        PairAck::from_bytes(&[1, 7, 0]),
+        Err(PairMessageError::UnknownCode(7))
+    );
+    assert_eq!(
+        PairAck::from_bytes(&[1, 0, 1]),
+        Err(PairMessageError::Malformed)
+    );
+    assert_eq!(
+        PairAck::from_bytes(&[2, 0, 0, 0]),
+        Err(PairMessageError::UnknownVersion(2))
+    );
+    assert_eq!(PairAck::from_bytes(&[]), Err(PairMessageError::Malformed));
+    assert_eq!(
+        PairResult::from_bytes(&[1, 3]),
+        Err(PairMessageError::UnknownCode(3))
+    );
+    assert_eq!(
+        PairResult::from_bytes(&[1]),
+        Err(PairMessageError::Malformed)
+    );
+    assert_eq!(
+        PairResult::from_bytes(&[1, 0, 0]),
+        Err(PairMessageError::Malformed)
+    );
+    assert_eq!(
+        PairResult::from_bytes(&[0, 0]),
+        Err(PairMessageError::UnknownVersion(0))
+    );
+}
+
+#[test]
+fn offers_are_random() {
+    assert_ne!(generate_offer().unwrap(), generate_offer().unwrap());
 }

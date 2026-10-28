@@ -1,12 +1,12 @@
 [package]
 name = "libflankr_proto"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2024"
 description = "Wire types for flankr's protocols: flankr.harness, flankr.companion and flankr link"
 
 [features]
 # The encrypted link layer (docs/design/20261022_02_LINK_AND_COMPANION_PLAN.md).
-link = ["dep:snow", "dep:tokio", "dep:bs58", "dep:blake2"]
+link = ["dep:snow", "dep:tokio", "dep:bs58", "dep:blake2", "dep:bip39"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -17,6 +17,9 @@ tokio = { version = "1", default-features = false, features = ["io-util"], optio
 # The pairing string: base58 (Bitcoin alphabet) and a BLAKE2s-256 checksum.
 bs58 = { version = "0.5", optional = true }
 blake2 = { version = "0.10", optional = true }
+# The BIP-39 English word list (CC0-1.0), for the pairing and fingerprint
+# words only; never for keys. No default features: just the lists.
+bip39 = { version = "3", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["io-util", "macros", "rt"] }

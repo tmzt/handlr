@@ -481,3 +481,29 @@ The crate's first entry; 0.1.0 had none. Several paired remotes (plan
   4.4.0, a `meta` table per remote), `LEGACY_KEY_NAME`, `MAX_REMOTES`,
   `REVOKE_TIMEOUT`, `State::hello_request`, `keys::{encode_remotes,
   decode_remotes, decode_legacy_server, migrated}`.
+
+## libflankr_proto 0.5.0 — 2026-10-28 (the commit tagged `libflankr_proto-v0.5.0`)
+
+Plan 20261028_01, the six-word pairing step (amendments of 13:59, 14:37,
+14:40 and 14:44 EDT).
+
+- **Breaking:** `link::confirmation_code` and `link::CONFIRMATION_CONTEXT`
+  removed (the six-digit code is dropped).
+- **Breaking:** `PairingPayload` gains `offer: Option<[u8; 16]>`;
+  `PAIRING_VERSION` is now 3, written when `offer` is `Some` (version 2 is
+  still written without one, and both are read). Decoders of 0.4.3 and
+  earlier refuse a version 3 payload as unknown.
+- **Added:** `LinkError::Pairing(PairMessageError)` (`LinkError` is
+  non-exhaustive).
+- **Added:** `OFFER_LEN`, `PAIRING_VERSION_NO_OFFER`, `generate_offer`.
+- **Added:** `pairing_words`, `pairing_words_text`, `fingerprint_words`,
+  `fingerprint_words_text`, `PAIRING_WORDS_CONTEXT`, `WORD_COUNT` (six
+  BIP-39 English words from 66 bits of BLAKE2s-256).
+- **Added:** the NK pairing request: `PAIR_PATTERN`, `MODE_PAIR` (0x03),
+  `PAIR_MESSAGE_VERSION`, `PAIR_TIMEOUT_DEFAULT_SECS`,
+  `PAIR_TIMEOUT_MAX_SECS`, `PairRequest`, `PairAck`, `PairRefusal`,
+  `PairResult`, `PairMessageError`, `PairResponse`, `PairIncoming`,
+  `Incoming`, `request_pairing`, `recv_pair_result`, `accept_pair`,
+  `accept_incoming`, `send_pair_result`.
+- New dependency: `bip39` 3 (no default features, CC0-1.0), under the
+  `link` feature.
