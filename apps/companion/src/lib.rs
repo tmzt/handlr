@@ -1439,12 +1439,14 @@ impl App {
         let t = companion.terminals();
         let shown = agent.terminal_shown();
         let status = shown.then(|| t.status(pane)).flatten();
-        let secs = status
+        // Armed or not, not the seconds left: no countdown is shown (the
+        // owner, 2026-10-28), and the client's changes() moves at expiry.
+        let armed = status
             .as_ref()
             .filter(|s| s.open)
             .and_then(|s| s.armed_for)
-            .map(|d| d.as_millis().div_ceil(1000) as u64);
-        let stamp = (t.changes(), t.supported(), t.input_allowed(), secs);
+            .map(|_| 0);
+        let stamp = (t.changes(), t.supported(), t.input_allowed(), armed);
         if agent.terminal_stamp() != Some(stamp) {
             let state = TermState {
                 supported: stamp.1,

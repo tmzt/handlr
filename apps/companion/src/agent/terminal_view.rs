@@ -141,15 +141,6 @@ impl TermState {
     pub fn mouse_mode(&self) -> bool {
         self.input_allowed && self.mouse_allowed && self.cursor().is_some_and(|c| c.mouse_reporting)
     }
-
-    /// The armed input's seconds left, rounded up.
-    pub fn armed_secs(&self) -> Option<u64> {
-        self.status
-            .as_ref()
-            .filter(|s| s.open)
-            .and_then(|s| s.armed_for)
-            .map(|d| d.as_millis().div_ceil(1000) as u64)
-    }
 }
 
 /// What the view asks of the client, taken each frame by the app.
@@ -850,7 +841,6 @@ impl TermView {
         state: &TermState,
         rect: Rect,
         s: f32,
-        agent: &str,
     ) {
         list.push_clip(rect.pos(), rect.size());
         let px = self.pt * s;
@@ -983,8 +973,9 @@ impl TermView {
                 );
             }
         }
-        // Armed: a coloured frame, and what the keys go into.
-        if let Some(secs) = state.armed_secs() {
+        // Armed: a coloured frame, nothing over the terminal (the owner,
+        // 2026-10-28: the "Typing into" pill is removed).
+        if state.armed() {
             let c = theme().warn;
             let e = ARMED_EDGE * s;
             for r in [
@@ -995,19 +986,6 @@ impl TermView {
             ] {
                 fill(list, r, c, 0.0);
             }
-            let px = ARMED_PT * s;
-            let label = format!("Typing into {agent} \u{00B7} {secs} s");
-            let w = label.chars().count() as f32 * px * 0.5 + 16.0 * s;
-            let h = line_h(px) + 6.0 * s;
-            let pill = Rect::new(rect.x + rect.w - w - 8.0 * s, rect.y + 8.0 * s, w, h);
-            fill(list, pill, with_alpha(c, 0.92), h * 0.5);
-            ctx.draw_text(
-                list,
-                &label,
-                [pill.x + 8.0 * s, pill.y + 3.0 * s],
-                px,
-                theme().bg,
-            );
         }
         // Scrolled back: how far, at the top left.
         if let Some(label) = scroll_label(state) {
@@ -1176,17 +1154,15 @@ mod tests {
     }
 
     #[test]
-    fn armed_seconds_round_up_and_need_an_open_terminal() {
+    fn armed_needs_an_open_terminal() {
         let mut st = TermState::default();
         let mut s = status(true);
         s.armed_for = Some(Duration::from_millis(41_200));
         st.status = Some(s.clone());
         assert!(st.armed());
-        assert_eq!(st.armed_secs(), Some(42));
         s.open = false;
         st.status = Some(s);
         assert!(!st.armed());
-        assert_eq!(st.armed_secs(), None);
     }
 
     /// One finger down at `from`, moved to `to` in `steps`, and lifted.
@@ -1773,15 +1749,7 @@ mod tests {
             };
             v.follow(state.screen.as_ref(), rect, s, true);
             let mut list = DrawList::new();
-            v.draw(
-                &mut list,
-                &DrawContext::default(),
-                None,
-                &state,
-                rect,
-                s,
-                "x",
-            );
+            v.draw(&mut list, &DrawContext::default(), None, &state, rect, s);
             let px = v.pt() * s;
             let mark = cursor_mark(
                 c,
@@ -1852,15 +1820,7 @@ mod tests {
         let mut v = TermView::default();
         v.follow(st.screen.as_ref(), rect, 2.0, true);
         let mut list = DrawList::new();
-        v.draw(
-            &mut list,
-            &DrawContext::default(),
-            None,
-            &st,
-            rect,
-            2.0,
-            "x",
-        );
+        v.draw(&mut list, &DrawContext::default(), None, &st, rect, 2.0);
         let warn = with_alpha(theme().warn, 0.92);
         assert!(list.instances.iter().any(|i| i.color == warn));
         // Without a cursor (the poll): never stale.

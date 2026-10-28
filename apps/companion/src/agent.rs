@@ -4804,8 +4804,7 @@ impl AgentScreen {
             let attached = self.term_state.attached();
             self.term
                 .follow(self.term_state.screen.as_ref(), rect, s, attached);
-            self.term
-                .draw(list, ctx, term, &self.term_state, rect, s, &self.name);
+            self.term.draw(list, ctx, term, &self.term_state, rect, s);
         } else {
             self.draw_flow(list, ctx, term);
         }
