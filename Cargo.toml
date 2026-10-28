@@ -70,6 +70,9 @@ members = [
     "crates/libherdr",
     "crates/qrcodeurl"
 ]
+# herdr's own source, read by libherdr_term's build.rs; never built here
+# (docs/design/20261027_08_HERDR_TERMINAL_CRATE_PLAN.md, decision 14).
+exclude = ["vendor/herdr"]
 # flankr-audio is built with -p only: it compiles libvoicexn's ML stack
 # (docs/design/20261022_04_COMPANION_APP_PLAN.md, 18:10 EDT amendment).
 default-members = [

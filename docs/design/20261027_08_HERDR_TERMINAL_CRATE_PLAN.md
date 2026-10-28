@@ -1,7 +1,7 @@
 ---
 title: libherdr_term, attaching to herdr as a client from herdr's own protocol types
 date: 2026-10-27
-status: Draft
+status: In implementation
 covers:
   - A new crate, `crates/libherdr_term`, that attaches to the local herdr
     server as one of herdr's own clients (the stable endpoint contract,
@@ -927,3 +927,10 @@ The owner (2026-10-27): "approve and impl". The plan is approved with its
 amendments of 23:24, 23:32 and 23:42 EDT, and is built on the branch
 `main-terminal`. The status becomes `In implementation` with step 1's
 commit.
+
+## Amendment — 2026-10-27 23:46 EDT: implementation has started; the document is now immutable
+
+Implementation has started with step 1 (the `vendor/herdr` submodule,
+pinned at `2713feb`, `PROTOCOL_VERSION = 22`). The status is `In
+implementation`, and the document is now immutable: it changes only on the
+owner's explicit instruction.
