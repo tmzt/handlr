@@ -320,7 +320,16 @@ pub struct App {
     /// each edit is sent as the keys that make it (plan 20261027_07,
     /// step 6).
     term_ime: Option<String>,
+    /// A tap on the terminal asked for the soft keyboard at this time: it
+    /// is raised once the tap's arm lands, or forgotten after
+    /// [`TERM_KEYBOARD_WAIT`] (plan 20261022_03, the L3 amendment of
+    /// 2026-10-27 21:58 EDT, item 2).
+    term_keyboard_at: Option<Instant>,
 }
+
+/// How long a tap on the terminal waits for its arm before the soft
+/// keyboard it asked for is forgotten.
+const TERM_KEYBOARD_WAIT: Duration = Duration::from_secs(5);
 
 /// A session's message card, kept for the app's run: the session it is
 /// for, the messages sent, and whether it was last left expanded.
@@ -1029,6 +1038,7 @@ impl App {
             companion.terminal_close(pane);
         }
         self.term_ime = None;
+        self.term_keyboard_at = None;
         self.agent_pane = None;
         if self.agent.take().is_some() {
             log::info!("agent view: closed");
@@ -1398,6 +1408,7 @@ impl App {
                     self.terminal_panes.remember(pane, agent.terminal_shown());
                     if !agent.terminal_shown() {
                         self.term_ime = None;
+                        self.term_keyboard_at = None;
                     }
                 }
             }
@@ -1406,13 +1417,14 @@ impl App {
 
     /// The agent view's terminal, each frame (plan 20261027_07, step 5):
     /// read again from the client when anything of it moved, and what the
-    /// view asks of it done. The soft keyboard leaves the terminal once it
-    /// is no longer armed.
+    /// view asks of it done. A tap's soft keyboard is raised once its arm
+    /// lands; the keyboard leaves the terminal once it is no longer armed.
     fn sync_terminal(&mut self) {
         let (Some(companion), Some(agent), Some(pane)) =
             (&self.companion, &mut self.agent, &self.agent_pane)
         else {
             self.term_ime = None;
+            self.term_keyboard_at = None;
             return;
         };
         let t = companion.terminals();
@@ -1439,6 +1451,21 @@ impl App {
                 TermAsk::Open { cols, rows } => companion.terminal_open(pane, cols, rows),
                 TermAsk::Close => companion.terminal_close(pane),
                 TermAsk::Arm => companion.terminal_arm_input(pane),
+                TermAsk::Scroll(lines) => companion.terminal_scroll(pane, lines),
+                // Raised once armed, below: before, keys would have nowhere
+                // to go, and the keyboard would leave at once.
+                TermAsk::Keyboard => self.term_keyboard_at = Some(Instant::now()),
+            }
+        }
+        if let Some(at) = self.term_keyboard_at {
+            if agent.terminal_armed() {
+                log::info!("terminal: armed; the soft keyboard types into it");
+                self.term_keyboard_at = None;
+                self.term_ime.get_or_insert_with(String::new);
+                self.keyboard.focus(FocusedPrompt::Terminal);
+            } else if !agent.terminal_shown() || at.elapsed() >= TERM_KEYBOARD_WAIT {
+                log::info!("terminal: the tap's arm did not come; no keyboard");
+                self.term_keyboard_at = None;
             }
         }
         if !agent.terminal_armed() && self.term_ime.take().is_some() {
@@ -2213,6 +2240,7 @@ impl MorphApp for App {
             agent_gemini_expanded: false,
             terminal_panes: TerminalSessions::default(),
             term_ime: None,
+            term_keyboard_at: None,
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);

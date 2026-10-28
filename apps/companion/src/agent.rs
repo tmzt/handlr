@@ -604,6 +604,22 @@ pub(crate) fn one_line(text: &str, cols: usize) -> String {
     format!("{kept}\u{2026}")
 }
 
+/// A Finished card's one line over the terminal: its title and the first
+/// line of the reply it closes (`context`, else its own text).
+pub fn finished_line(card: &AgentCard, context: Option<&str>) -> String {
+    let first = context
+        .unwrap_or(&card.text)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        card.title.clone()
+    } else {
+        format!("{}: {first}", card.title)
+    }
+}
+
 /// How an answer's style is drawn (plan 20261027_06, decision 3): its
 /// theme colour, and whether it is plain coloured text rather than a
 /// button. `approve` and `deny` are buttons, as Yes and No; a style this
@@ -2379,6 +2395,10 @@ pub struct AgentScreen {
     term_stamp: Option<TermStamp>,
     /// Asked of the client, taken each frame by the app.
     term_asks: Vec<TermAsk>,
+    /// Lines from vertical drags not yet asked for: held until the
+    /// terminal is armed (the drag's own arm on its way), then asked for
+    /// once a frame.
+    term_lines: i32,
     /// In terminal mode, a finger that started off the terminal: its id,
     /// where it started and whether it moved, for a tap on the controls.
     term_tap: Option<(u64, [f32; 2], bool)>,
@@ -3227,7 +3247,18 @@ impl AgentScreen {
     pub fn compact(&self) -> bool {
         // A finger moving at the bottom (a pull to refresh) leaves it whole
         // (owner, 2026-10-24): it folds once the view leaves the bottom.
-        !self.pin_expanded && (!self.follow || self.thumb.is_some())
+        !self.pin_expanded
+            && (!self.follow || self.thumb.is_some() || self.finished_over_terminal())
+    }
+
+    /// The pinned card is a Finished card and the terminal shows: it is one
+    /// line, so it covers little of the terminal (plan 20261022_03, the L3
+    /// amendment of 2026-10-27 21:58 EDT, item 3); a tap shows it whole.
+    fn finished_over_terminal(&self) -> bool {
+        self.term_shown
+            && self
+                .pinned_card()
+                .is_some_and(|c| c.kind == CardKind::Finished)
     }
 
     /// Clamps the offset, follows the bottom when following, and places
@@ -3419,7 +3450,11 @@ impl AgentScreen {
                     radius: 3.0 * s,
                 });
                 let px = TITLE_PT * s;
-                let text = format!("{}: {}", card.title, card.text.replace('\n', " "));
+                let text = if self.finished_over_terminal() {
+                    finished_line(card, context.as_deref())
+                } else {
+                    format!("{}: {}", card.title, card.text.replace('\n', " "))
+                };
                 flow.rows.push(Row {
                     text: one_line(&text, columns(bar.w - 2.0 * pad - EDGE * s, px)),
                     x: bar.x + EDGE * s + pad,
@@ -4064,7 +4099,11 @@ impl AgentScreen {
             self.hits.push((AgentHit::JumpToEnd, j.rect));
         }
         if let Some(p) = &self.frame.pin {
-            if p.compact {
+            if p.compact && self.finished_over_terminal() {
+                // Over the terminal there is no transcript to jump to: a
+                // tap shows the card whole, and a tap on it folds it again.
+                self.hits.push((AgentHit::Expand, p.rect));
+            } else if p.compact {
                 self.hits.push((AgentHit::Pin, p.rect));
             } else {
                 for b in &p.flow.buttons {
@@ -4429,6 +4468,7 @@ impl AgentScreen {
         log::info!("terminal: {}", if on { "shown" } else { "transcript" });
         self.term_shown = on;
         self.term_tap = None;
+        self.term_lines = 0;
         if on {
             self.term = TermView::default();
             self.term_asks.push(TermAsk::Open {
@@ -4490,6 +4530,11 @@ impl AgentScreen {
                 *r = rows;
             }
         }
+        // The drags' lines, once armed (the client sums them while one is
+        // in flight).
+        if self.term_lines != 0 && self.terminal_armed() {
+            asks.push(TermAsk::Scroll(std::mem::take(&mut self.term_lines)));
+        }
         asks
     }
 
@@ -4537,32 +4582,37 @@ impl AgentScreen {
             return None;
         }
         let screen = self.term_state.screen.as_ref();
-        if self.term.touch(id, phase, x, y, now, screen, rect, s) {
+        let input = self.term_state.input_allowed;
+        let armed = self.term_state.armed();
+        if phase == TouchPhase::Started && !self.term.touching() && !armed {
+            // An earlier drag's lines whose arm never came are dropped.
+            self.term_lines = 0;
+        }
+        let out = self
+            .term
+            .touch(id, phase, x, y, now, screen, rect, s, input);
+        if out.moved {
             self.dirty = true;
         }
+        // A tap arms and raises the keyboard; a vertical drag arms and
+        // scrolls the pane (the L3 amendment of 2026-10-27 21:58 EDT).
+        if (out.tap || out.drag) && !armed {
+            log::info!(
+                "terminal: {}, arming input",
+                if out.tap { "tapped" } else { "dragged" }
+            );
+            self.term_asks.push(TermAsk::Arm);
+        }
+        if out.tap {
+            self.term_asks.push(TermAsk::Keyboard);
+        }
+        self.term_lines = self.term_lines.saturating_add(out.lines);
         None
     }
 
     /// Carries a fling, or the jump scroll, on by `dt`, and the
     /// scrollbar's showing and fading. Returns whether the view moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
-        // A finger resting 1.5 s on the terminal arms keyboard input, when
-        // the daemon allows it (plan 20261027_07, decision 6).
-        if self.term_shown && self.term.tick_hold(dt) {
-            if self.term_state.input_allowed && !self.term_state.armed() {
-                log::info!("terminal: held, arming input");
-                self.term_asks.push(TermAsk::Arm);
-            } else {
-                log::info!(
-                    "terminal: held; input {}",
-                    if self.term_state.armed() {
-                        "already armed"
-                    } else {
-                        "not allowed by the daemon"
-                    }
-                );
-            }
-        }
         let moved = self.step(dt);
         self.step_bar(dt);
         self.step_pull(dt);
@@ -6298,35 +6348,207 @@ mod tests {
         assert_eq!((a.offset(), a.following()), (offset, follow));
     }
 
+    /// `offered(input)`, open, armed or not.
+    fn open_state(input: bool, armed: bool) -> TermState {
+        let mut st = offered(input);
+        let mut sc = flankr_companion::Screen::default();
+        let rows: String = (0..30).map(|i| format!("row {i}\n")).collect();
+        let grid = libflankr_term::parse_ansi(&rows);
+        assert!(sc.apply(&libflankr_term::Frame::full(1, 1, &grid)));
+        st.screen = Some(sc);
+        st.status = Some(flankr_companion::TerminalStatus {
+            open: true,
+            opening: false,
+            cols: 8,
+            rows: 30,
+            closed: None,
+            error: None,
+            armed_for: armed.then(|| Duration::from_secs(60)),
+            keys_pending: 0,
+            scroll_offset: None,
+            scroll_max: None,
+        });
+        st
+    }
+
     #[test]
-    fn a_hold_on_the_terminal_arms_input_only_when_allowed() {
+    fn a_tap_on_the_terminal_arms_and_raises_the_keyboard_only_when_allowed() {
         let mut a = screen(conversation(3), vec![], None);
-        a.set_terminal_state((1, true, false, None), offered(false));
+        a.set_terminal_state((1, true, false, None), open_state(false, false));
         a.toggle_terminal();
         a.take_terminal_asks();
         let r = a.terminal_rect();
         let (x, y) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
-        let hold = |a: &mut AgentScreen, id: u64| {
-            a.touch(id, TouchPhase::Started, x, y, Duration::ZERO);
-            for _ in 0..100 {
-                a.tick(Duration::from_millis(20));
-            }
-            a.touch(id, TouchPhase::Ended, x, y, Duration::from_secs(2))
+        let tap = |a: &mut AgentScreen, id: u64, t: Duration| {
+            a.touch(id, TouchPhase::Started, x, y, t);
+            a.touch(id, TouchPhase::Ended, x, y, t + MS)
         };
         // Not allowed by the daemon: nothing is asked.
-        assert_eq!(hold(&mut a, 1), None);
+        assert_eq!(tap(&mut a, 1, Duration::ZERO), None);
         assert!(a.take_terminal_asks().is_empty());
-        // Allowed: one arm, and the hold is not a tap.
-        a.set_terminal_state((2, true, true, None), offered(true));
-        assert_eq!(hold(&mut a, 2), None);
+        // Allowed: an arm and the keyboard, at once.
+        a.set_terminal_state((2, true, true, None), open_state(true, false));
+        assert_eq!(tap(&mut a, 2, Duration::from_secs(1)), None);
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm, TermAsk::Keyboard]);
+        // Armed: only the keyboard (again, if it was dismissed).
+        a.set_terminal_state((3, true, true, Some(60)), open_state(true, true));
+        assert!(a.terminal_armed());
+        tap(&mut a, 3, Duration::from_secs(2));
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Keyboard]);
+        // A finger resting is not a hold any more: nothing after 2 s.
+        a.touch(4, TouchPhase::Started, x, y, Duration::from_secs(3));
+        for _ in 0..100 {
+            a.tick(Duration::from_millis(20));
+        }
+        assert!(a.take_terminal_asks().is_empty());
+        // A tap on a control over the terminal is the control's, not the
+        // terminal's.
+        a.touch(4, TouchPhase::Cancelled, x, y, Duration::from_secs(5));
+        let toggle = toggle_of(&a).rect;
+        tap(&mut a, 5, Duration::from_secs(6));
+        let hit = {
+            let (x, y) = (toggle.x + toggle.w * 0.5, toggle.y + toggle.h * 0.5);
+            a.touch(6, TouchPhase::Started, x, y, Duration::from_secs(7));
+            a.touch(6, TouchPhase::Ended, x, y, Duration::from_secs(7) + MS)
+        };
+        assert_eq!(hit, Some(AgentHit::TerminalToggle));
+        assert_eq!(
+            a.take_terminal_asks(),
+            [TermAsk::Keyboard],
+            "the tap at 6 s only"
+        );
+    }
+
+    #[test]
+    fn a_vertical_drag_arms_then_scrolls_the_pane_in_lines() {
+        let mut a = screen(conversation(3), vec![], None);
+        a.set_terminal_state((1, true, true, None), open_state(true, false));
+        a.toggle_terminal();
+        a.take_terminal_asks();
+        let r = a.terminal_rect();
+        let pan = a.terminal_view().pan();
+        let pitch = term_h(a.terminal_view().pt() * PHONE.scale);
+        let (x, y) = (r.x + r.w * 0.5, r.y + 100.0);
+        let slop = SLOP * PHONE.scale + 1.0;
+        // Down past the slop, then 5 rows more in one move.
+        a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
+        a.touch(1, TouchPhase::Moved, x, y + slop, MS);
+        a.touch(1, TouchPhase::Moved, x, y + slop + 5.0 * pitch, MS * 2);
+        // The arm first; the lines wait for it.
         assert_eq!(a.take_terminal_asks(), [TermAsk::Arm]);
-        // A tap is not a hold.
-        a.touch(3, TouchPhase::Started, x, y, Duration::ZERO);
-        a.tick(Duration::from_millis(200));
-        a.touch(3, TouchPhase::Ended, x, y, Duration::from_millis(200));
-        a.tick(Duration::from_secs(2));
+        a.set_terminal_state((2, true, true, Some(60)), open_state(true, true));
+        // The slop's own pixels count once the drag is the wheel's: 5 rows
+        // and those few make 5 lines.
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Scroll(5)]);
+        // Up two and a half rows from there (the slop's pixels were the
+        // remainder): negative, and no second arm.
+        a.touch(1, TouchPhase::Moved, x, y + 2.5 * pitch, MS * 3);
+        a.touch(1, TouchPhase::Ended, x, y + 2.5 * pitch, MS * 4);
+        assert_eq!(a.take_terminal_asks(), [TermAsk::Scroll(-2)]);
+        assert_eq!(a.terminal_view().pan(), pan, "the frame stays");
+        // A drag is not a tap: no keyboard.
         assert!(a.take_terminal_asks().is_empty());
-        assert!(!a.terminal_armed());
+    }
+
+    #[test]
+    fn without_input_a_vertical_drag_pans_the_frame() {
+        let mut a = screen(conversation(3), vec![], None);
+        // A pane taller than the view, so the frame can pan.
+        let mut st = offered(false);
+        let mut sc = flankr_companion::Screen::default();
+        let rows: String = (0..200).map(|i| format!("row {i}\n")).collect();
+        assert!(sc.apply(&libflankr_term::Frame::full(
+            1,
+            1,
+            &libflankr_term::parse_ansi(&rows)
+        )));
+        st.screen = Some(sc);
+        a.set_terminal_state((1, true, false, None), st);
+        a.toggle_terminal();
+        a.take_terminal_asks();
+        let mut list = DrawList::new();
+        a.draw(&mut list, &DrawContext::default(), None);
+        let r = a.terminal_rect();
+        let before = a.terminal_view().pan();
+        assert!(before[1] > 0.0, "at the bottom rows");
+        let (x, y) = (r.x + r.w * 0.5, r.y + 100.0);
+        a.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
+        a.touch(1, TouchPhase::Moved, x, y + 300.0, MS);
+        a.touch(1, TouchPhase::Ended, x, y + 300.0, MS * 2);
+        assert_eq!(a.terminal_view().pan()[1], before[1] - 300.0);
+        assert!(a.take_terminal_asks().is_empty(), "no arm, no scroll");
+    }
+
+    #[test]
+    fn a_finished_card_is_one_line_over_the_terminal_and_whole_in_the_transcript() {
+        let entries = conversation(20);
+        let n = entries.len();
+        let finished = AgentCard {
+            title: "Finished".into(),
+            text: "Landed the settings screen.\nThen pushed it.\nAnd more.\nAnd more.".into(),
+            ..card(CardKind::Finished, n, true)
+        };
+        let mut a = screen(entries, vec![finished], Some(0));
+        a.set_terminal_state((1, true, false, None), offered(false));
+        let full = a.frame().pin.clone().expect("pinned");
+        assert!(!full.compact, "whole in the transcript, at the bottom");
+        a.toggle_terminal();
+        let bar = a.frame().pin.clone().expect("pinned");
+        assert!(bar.compact, "one line over the terminal");
+        assert!(bar.rect.h < full.rect.h);
+        assert_eq!(bar.flow.rows.len(), 1);
+        assert!(
+            bar.flow.rows[0]
+                .text
+                .starts_with("Finished: Landed the settings"),
+            "{:?}",
+            bar.flow.rows[0].text
+        );
+        assert!(!bar.flow.rows[0].text.contains("Then pushed"));
+        // The terminal has the room the card gave up.
+        assert!(a.terminal_rect().y + a.terminal_rect().h <= bar.rect.y);
+        assert!(a.terminal_rect().h > full.rect.y - a.terminal_rect().y - 1.0);
+        // A tap shows it whole; another folds it to the line again.
+        let tap_bar =
+            |a: &mut AgentScreen, id: u64, r: Rect| tap(a, id, r, Duration::from_secs(id));
+        assert_eq!(tap_bar(&mut a, 1, bar.rect), Some(AgentHit::Expand));
+        a.toggle_expand();
+        let open = a.frame().pin.clone().unwrap();
+        assert!(!open.compact);
+        assert_eq!(tap_bar(&mut a, 2, open.rect), Some(AgentHit::Expand));
+        a.toggle_expand();
+        assert!(a.frame().pin.as_ref().unwrap().compact);
+        // Back in the transcript: whole again.
+        a.toggle_terminal();
+        assert!(!a.frame().pin.as_ref().unwrap().compact);
+        // Other cards are not folded over the terminal.
+        let mut b = screen(
+            conversation(20),
+            vec![card(CardKind::Approval, n, true)],
+            Some(0),
+        );
+        b.set_terminal_state((1, true, false, None), offered(false));
+        b.toggle_terminal();
+        assert!(!b.frame().pin.as_ref().unwrap().compact);
+    }
+
+    #[test]
+    fn a_finished_line_is_the_title_and_the_replys_first_line() {
+        let c = AgentCard {
+            title: "Finished".into(),
+            text: "\n  First line.  \nSecond.".into(),
+            ..card(CardKind::Finished, 0, true)
+        };
+        assert_eq!(finished_line(&c, None), "Finished: First line.");
+        assert_eq!(
+            finished_line(&c, Some("The reply.\nMore.")),
+            "Finished: The reply."
+        );
+        let empty = AgentCard {
+            text: String::new(),
+            ..c
+        };
+        assert_eq!(finished_line(&empty, None), "Finished");
     }
 
     #[test]
@@ -6350,6 +6572,8 @@ mod tests {
             error: None,
             armed_for: Some(Duration::from_secs(60)),
             keys_pending: 0,
+            scroll_offset: None,
+            scroll_max: None,
         });
         a.set_terminal_state((3, true, true, Some(60)), state);
         assert!(a.terminal_armed());

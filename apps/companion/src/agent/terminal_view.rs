@@ -11,11 +11,19 @@
 //!   xterm 6x6x6 cube and 232-255 its greys; 24-bit colours as they are.
 //!   Bold is the bold cut and, on palette 0-7, the bright colour; dim is
 //!   mixed toward the background; inverse swaps.
-//! - **Gestures.** One finger pans in both axes, clamped to the frame; two
-//!   pinch the type between 7 and 16 pt about their midpoint; a double tap
-//!   toggles fit-to-width; a 1.5 s hold arms keyboard input when the daemon
-//!   allows it. The first frame lands at the fit-width size (clamped to
-//!   7 pt), scrolled to its bottom rows (plan risk 3).
+//! - **Gestures** (plan 20261022_03, the L3 amendment of 2026-10-27
+//!   21:58 EDT, in place of plan 20261027_07 decision 6's hold). When the
+//!   daemon allows input, a tap arms it and raises the soft keyboard, and a
+//!   drag is locked to its first direction: vertical scrolls the pane as a
+//!   mouse wheel does (drag down goes back into the scrollback, one line
+//!   per row pitch, and arms first), horizontal pans the frame across.
+//!   Without input, one finger pans in both axes and a tap does nothing.
+//!   Pans are clamped to the frame; two fingers pinch the type between 7
+//!   and 16 pt about their midpoint, and their mean movement pans; a
+//!   two-finger double tap toggles fit-to-width (a one-finger tap now
+//!   acts at once, so it cannot wait to tell a double tap). The first
+//!   frame lands at the fit-width size (clamped to 7 pt), scrolled to its
+//!   bottom rows (plan risk 3).
 
 use std::time::Duration;
 
@@ -33,11 +41,8 @@ use crate::theme::{luminance, theme, with_alpha};
 pub const START_PT: f32 = 11.0;
 pub const MIN_PT: f32 = 7.0;
 pub const MAX_PT: f32 = 16.0;
-/// How long a finger rests on the terminal to arm keyboard input.
-pub const ARM_HOLD: Duration = Duration::from_millis(1500);
-/// Two taps this close in time, and in place, are a double tap.
-const DOUBLE_TAP: Duration = Duration::from_millis(350);
-const DOUBLE_TAP_SLOP: f32 = 40.0;
+/// Two two-finger taps this close in time are a double tap.
+const DOUBLE_TAP: Duration = Duration::from_millis(400);
 /// The status line's type size, in points.
 const STATUS_PT: f32 = 14.0;
 /// The armed frame's width and its label's type size, in points.
@@ -85,8 +90,13 @@ pub enum TermAsk {
     },
     /// `terminal_close`.
     Close,
-    /// `terminal_arm_input`: a hold on the terminal.
+    /// `terminal_arm_input`: a tap or a vertical drag on the terminal.
     Arm,
+    /// Raise the soft keyboard into the terminal once it is armed: a tap.
+    Keyboard,
+    /// `terminal_scroll`: lines from vertical drags, positive back into the
+    /// scrollback.
+    Scroll(i32),
 }
 
 /// The status line for `state`, when there is one to show instead of (or
@@ -210,6 +220,30 @@ pub fn run_colours(run: &Run, dark: bool) -> ([f32; 4], Option<[f32; 4]>) {
     (fg, bg)
 }
 
+/// What a touch on the terminal did, beyond panning and zooming the view.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Touched {
+    /// The view moved (a pan or a zoom): draw again.
+    pub moved: bool,
+    /// A tap, with input allowed: arm, and raise the soft keyboard.
+    pub tap: bool,
+    /// A vertical drag began, with input allowed: arm (no keyboard).
+    pub drag: bool,
+    /// Lines to scroll the pane by, positive back into the scrollback.
+    pub lines: i32,
+}
+
+/// The axis a one-finger drag is locked to, from its first direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Axis {
+    /// Without input: the frame pans both ways.
+    Free,
+    /// Across: the frame pans horizontally.
+    Across,
+    /// Up and down: the pane scrolls.
+    Wheel,
+}
+
 /// One finger on the terminal.
 #[derive(Clone, Copy, Debug)]
 struct Finger {
@@ -223,6 +257,19 @@ struct Finger {
 struct Pinch {
     dist: f32,
     pt: f32,
+}
+
+/// The whole lines in a wheel drag's `distance` (pixels, down positive) at
+/// row `pitch`, taken out of it; the rest stays for the next move. Down,
+/// the content follows the finger back into the scrollback: positive, as
+/// a mouse wheel turned up.
+pub fn wheel_lines(distance: &mut f32, pitch: f32) -> i32 {
+    if pitch <= 0.0 {
+        return 0;
+    }
+    let lines = (*distance / pitch).trunc();
+    *distance -= lines * pitch;
+    lines as i32
 }
 
 /// One row's shaped runs, kept until the row changes.
@@ -245,13 +292,15 @@ pub struct TermView {
     placed: bool,
     fingers: Vec<Finger>,
     moved: bool,
-    /// Two fingers were down during this touch: no tap, no hold.
+    /// Two fingers were down during this touch: not a one-finger tap.
     multi: bool,
     pinch: Option<Pinch>,
-    /// How long the one finger has rested, and whether the hold fired.
-    held: Duration,
-    hold_fired: bool,
-    last_tap: Option<(Duration, [f32; 2])>,
+    /// The one-finger drag's axis, once it moved.
+    axis: Option<Axis>,
+    /// A wheel drag's distance not yet a whole line, in pixels.
+    wheel: f32,
+    /// When the last two-finger tap ended, for the double tap.
+    last_tap: Option<Duration>,
     cache: Vec<Option<RowCache>>,
 }
 
@@ -267,8 +316,8 @@ impl Default for TermView {
             moved: false,
             multi: false,
             pinch: None,
-            held: Duration::ZERO,
-            hold_fired: false,
+            axis: None,
+            wheel: 0.0,
             last_tap: None,
             cache: Vec::new(),
         }
@@ -354,7 +403,8 @@ impl TermView {
         self.pt = pt;
     }
 
-    /// The double tap: to the fit-width size, or back to the size before.
+    /// The two-finger double tap: to the fit-width size, or back to the
+    /// size before.
     pub fn toggle_fit(&mut self, screen: Option<&Screen>, rect: Rect, s: f32, at: [f32; 2]) {
         let cols = screen.map_or(0, Screen::cols);
         if self.fit {
@@ -371,8 +421,9 @@ impl TermView {
         self.clamp(screen, rect, s);
     }
 
-    /// A finger on the terminal at `now` (the touch's clock). Returns
-    /// whether the view moved.
+    /// A finger on the terminal at `now` (the touch's clock); `input`: the
+    /// daemon allows typing, so a tap arms and a vertical drag scrolls the
+    /// pane. Returns what it did.
     #[allow(clippy::too_many_arguments)]
     pub fn touch(
         &mut self,
@@ -384,7 +435,9 @@ impl TermView {
         screen: Option<&Screen>,
         rect: Rect,
         s: f32,
-    ) -> bool {
+        input: bool,
+    ) -> Touched {
+        let mut out = Touched::default();
         match phase {
             TouchPhase::Started => {
                 if self.fingers.iter().any(|f| f.id == id) {
@@ -394,8 +447,8 @@ impl TermView {
                 if self.fingers.is_empty() {
                     self.moved = false;
                     self.multi = false;
-                    self.held = Duration::ZERO;
-                    self.hold_fired = false;
+                    self.axis = None;
+                    self.wheel = 0.0;
                 }
                 self.fingers.push(Finger {
                     id,
@@ -409,22 +462,20 @@ impl TermView {
                         pt: self.pt,
                     });
                 }
-                false
             }
             TouchPhase::Moved => {
                 let Some(i) = self.fingers.iter().position(|f| f.id == id) else {
-                    return false;
+                    return out;
                 };
                 let was = self.fingers[i].at;
                 self.fingers[i].at = [x, y];
                 let start = self.fingers[i].start;
-                if !self.moved
-                    && ((x - start[0]).abs() > SLOP * s || (y - start[1]).abs() > SLOP * s)
-                {
+                let (dx, dy) = (x - start[0], y - start[1]);
+                if !self.moved && (dx.abs() > SLOP * s || dy.abs() > SLOP * s) {
                     self.moved = true;
                 }
                 if !self.moved {
-                    return false;
+                    return out;
                 }
                 let before = (self.pt, self.pan);
                 if let (Some(p), true) = (self.pinch, self.fingers.len() >= 2) {
@@ -437,43 +488,64 @@ impl TermView {
                     self.zoom_to(pt, mid, rect);
                     self.fit = false;
                 } else if self.fingers.len() == 1 && !self.multi {
-                    self.pan[0] -= x - was[0];
-                    self.pan[1] -= y - was[1];
+                    let first = self.axis.is_none();
+                    let axis = *self.axis.get_or_insert_with(|| {
+                        if !input {
+                            Axis::Free
+                        } else if dy.abs() > dx.abs() {
+                            Axis::Wheel
+                        } else {
+                            Axis::Across
+                        }
+                    });
+                    // The wheel's first move: its arm.
+                    out.drag = first && axis == Axis::Wheel;
+                    match axis {
+                        Axis::Free => {
+                            self.pan[0] -= x - was[0];
+                            self.pan[1] -= y - was[1];
+                        }
+                        Axis::Across => self.pan[0] -= x - was[0],
+                        Axis::Wheel => {
+                            self.wheel += y - was[1];
+                            out.lines = wheel_lines(&mut self.wheel, term_h(self.pt * s));
+                        }
+                    }
                 }
                 self.clamp(screen, rect, s);
-                before != (self.pt, self.pan)
+                out.moved = before != (self.pt, self.pan);
             }
             TouchPhase::Ended | TouchPhase::Cancelled => {
                 let Some(i) = self.fingers.iter().position(|f| f.id == id) else {
-                    return false;
+                    return out;
                 };
                 self.fingers.remove(i);
                 if self.fingers.len() < 2 {
                     self.pinch = None;
                 }
-                let tap = phase == TouchPhase::Ended
-                    && self.fingers.is_empty()
-                    && !self.moved
-                    && !self.multi
-                    && !self.hold_fired;
+                let tap = phase == TouchPhase::Ended && self.fingers.is_empty() && !self.moved;
                 if !tap {
-                    return false;
+                    return out;
                 }
-                let double = self.last_tap.is_some_and(|(t, at)| {
-                    now.saturating_sub(t) <= DOUBLE_TAP
-                        && (at[0] - x).abs() <= DOUBLE_TAP_SLOP * s
-                        && (at[1] - y).abs() <= DOUBLE_TAP_SLOP * s
-                });
-                if double {
+                if !self.multi {
+                    out.tap = input;
+                    return out;
+                }
+                // Two fingers, lifted without moving: twice is the double
+                // tap.
+                if self
+                    .last_tap
+                    .is_some_and(|t| now.saturating_sub(t) <= DOUBLE_TAP)
+                {
                     self.last_tap = None;
                     self.toggle_fit(screen, rect, s, [x, y]);
-                    true
+                    out.moved = true;
                 } else {
-                    self.last_tap = Some((now, [x, y]));
-                    false
+                    self.last_tap = Some(now);
                 }
             }
         }
+        out
     }
 
     fn spread(&self) -> f32 {
@@ -496,17 +568,9 @@ impl TermView {
         !self.fingers.is_empty()
     }
 
-    /// Times a resting finger; true once, when it has rested `ARM_HOLD`.
-    pub fn tick_hold(&mut self, dt: Duration) -> bool {
-        if self.fingers.len() != 1 || self.moved || self.multi || self.hold_fired {
-            return false;
-        }
-        self.held += dt;
-        if self.held >= ARM_HOLD {
-            self.hold_fired = true;
-            return true;
-        }
-        false
+    /// The axis the drag under way is locked to, once it moved.
+    pub fn axis(&self) -> Option<Axis> {
+        self.axis
     }
 
     /// Draws the grid in `rect`, clipped to it.
@@ -637,7 +701,38 @@ impl TermView {
                 theme().bg,
             );
         }
+        // Scrolled back: how far, at the top left.
+        if let Some(label) = scroll_label(state) {
+            let px = ARMED_PT * s;
+            let w = label.chars().count() as f32 * px * 0.5 + 16.0 * s;
+            let h = line_h(px) + 6.0 * s;
+            let pill = Rect::new(rect.x + 8.0 * s, rect.y + 8.0 * s, w, h);
+            fill(list, pill, with_alpha(theme().card, 0.92), h * 0.5);
+            ctx.draw_text(
+                list,
+                &label,
+                [pill.x + 8.0 * s, pill.y + 3.0 * s],
+                px,
+                theme().fg,
+            );
+        }
     }
+}
+
+/// The pill's words while the pane is scrolled back, as the last
+/// `terminal.scroll` answer put it.
+pub fn scroll_label(state: &TermState) -> Option<String> {
+    let offset = state
+        .status
+        .as_ref()
+        .filter(|s| s.open)
+        .and_then(|s| s.scroll_offset)
+        .filter(|&o| o > 0)?;
+    Some(if offset == 1 {
+        "1 line back".to_string()
+    } else {
+        format!("{offset} lines back")
+    })
 }
 
 #[cfg(test)]
@@ -661,6 +756,8 @@ mod tests {
             error: None,
             armed_for: None,
             keys_pending: 0,
+            scroll_offset: None,
+            scroll_max: None,
         }
     }
 
@@ -762,14 +859,99 @@ mod tests {
         assert_eq!(st.armed_secs(), None);
     }
 
+    /// One finger down at `from`, moved to `to` in `steps`, and lifted.
+    #[allow(clippy::too_many_arguments)]
+    fn drag(
+        v: &mut TermView,
+        id: u64,
+        from: [f32; 2],
+        to: [f32; 2],
+        steps: usize,
+        screen: Option<&Screen>,
+        rect: Rect,
+        s: f32,
+        input: bool,
+    ) -> Vec<Touched> {
+        let t = Duration::ZERO;
+        let mut out = vec![v.touch(
+            id,
+            TouchPhase::Started,
+            from[0],
+            from[1],
+            t,
+            screen,
+            rect,
+            s,
+            input,
+        )];
+        for i in 1..=steps {
+            let k = i as f32 / steps as f32;
+            let at = [
+                from[0] + (to[0] - from[0]) * k,
+                from[1] + (to[1] - from[1]) * k,
+            ];
+            out.push(v.touch(
+                id,
+                TouchPhase::Moved,
+                at[0],
+                at[1],
+                t,
+                screen,
+                rect,
+                s,
+                input,
+            ));
+        }
+        out.push(v.touch(
+            id,
+            TouchPhase::Ended,
+            to[0],
+            to[1],
+            t,
+            screen,
+            rect,
+            s,
+            input,
+        ));
+        out
+    }
+
+    /// Two fingers down and up at once, without moving, at `at`.
+    fn two_finger_tap(v: &mut TermView, at: Duration, sc: &Screen, rect: Rect, s: f32) -> bool {
+        let mut moved = false;
+        for (id, x) in [(10, 300.0), (11, 400.0)] {
+            v.touch(
+                id,
+                TouchPhase::Started,
+                x,
+                300.0,
+                at,
+                Some(sc),
+                rect,
+                s,
+                true,
+            );
+        }
+        for (id, x) in [(10, 300.0), (11, 400.0)] {
+            let t = v.touch(id, TouchPhase::Ended, x, 300.0, at, Some(sc), rect, s, true);
+            assert!(!t.tap, "two fingers are not a tap");
+            moved |= t.moved;
+        }
+        moved
+    }
+
+    fn tall() -> Screen {
+        let rows: String = (0..60)
+            .map(|i| format!("{i:>3} {}\n", "x".repeat(96)))
+            .collect();
+        screen_of(&rows)
+    }
+
     #[test]
     fn the_first_frame_lands_at_the_fit_width_bottom_and_pans_clamp() {
         let rect = Rect::new(0.0, 100.0, 800.0, 600.0);
         let s = 2.0;
-        let rows: String = (0..60)
-            .map(|i| format!("{i:>3} {}\n", "x".repeat(96)))
-            .collect();
-        let sc = screen_of(&rows);
+        let sc = tall();
         assert_eq!(sc.cols(), 100);
         let mut v = TermView::default();
         assert_eq!(v.pt(), START_PT);
@@ -779,53 +961,303 @@ mod tests {
         assert!(v.fit());
         let m = v.max_pan(Some(&sc), rect, s);
         assert_eq!(v.pan(), [v.pan()[0], m[1]], "at the bottom rows");
-        // A drag right past the left edge stops there.
-        v.touch(
+        // Without input, a drag right past the left edge and down pans
+        // both ways, stopping at the edge.
+        let out = drag(
+            &mut v,
             1,
+            [400.0, 400.0],
+            [600.0, 900.0],
+            1,
+            Some(&sc),
+            rect,
+            s,
+            false,
+        );
+        assert_eq!(v.pan(), [0.0, (m[1] - 500.0).max(0.0)]);
+        assert_eq!(v.axis(), Some(Axis::Free));
+        assert!(out.iter().all(|t| !t.tap && !t.drag && t.lines == 0));
+        // The two-finger double tap goes back to the size before, and
+        // again to fit.
+        let t = Duration::from_secs(1);
+        assert!(!two_finger_tap(&mut v, t, &sc, rect, s));
+        assert!(two_finger_tap(
+            &mut v,
+            t + Duration::from_millis(150),
+            &sc,
+            rect,
+            s
+        ));
+        assert!(!v.fit());
+        assert_eq!(v.pt(), START_PT);
+        let t = t + Duration::from_secs(1);
+        two_finger_tap(&mut v, t, &sc, rect, s);
+        // Too slow: not a double tap.
+        assert!(!two_finger_tap(
+            &mut v,
+            t + Duration::from_millis(900),
+            &sc,
+            rect,
+            s
+        ));
+        assert!(two_finger_tap(
+            &mut v,
+            t + Duration::from_millis(1000),
+            &sc,
+            rect,
+            s
+        ));
+        assert!(v.fit());
+        assert_eq!(v.pan()[0], 0.0);
+    }
+
+    #[test]
+    fn a_tap_arms_and_raises_the_keyboard_only_with_input() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 1200.0);
+        let sc = tall();
+        let mut v = TermView::default();
+        v.follow(Some(&sc), rect, 2.0);
+        let tap = |v: &mut TermView, id: u64, input: bool, at: Duration| {
+            v.touch(
+                id,
+                TouchPhase::Started,
+                300.0,
+                300.0,
+                at,
+                Some(&sc),
+                rect,
+                2.0,
+                input,
+            );
+            v.touch(
+                id,
+                TouchPhase::Ended,
+                302.0,
+                301.0,
+                at,
+                Some(&sc),
+                rect,
+                2.0,
+                input,
+            )
+        };
+        assert!(tap(&mut v, 1, true, Duration::ZERO).tap);
+        // At once, again: each tap acts, no double tap waits.
+        assert!(tap(&mut v, 2, true, Duration::from_millis(100)).tap);
+        assert!(v.fit(), "a one-finger double tap no longer toggles fit");
+        assert_eq!(
+            tap(&mut v, 3, false, Duration::from_secs(1)),
+            Touched::default()
+        );
+        // A cancelled touch is no tap.
+        v.touch(
+            4,
+            TouchPhase::Started,
+            300.0,
+            300.0,
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            2.0,
+            true,
+        );
+        let t = v.touch(
+            4,
+            TouchPhase::Cancelled,
+            300.0,
+            300.0,
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            2.0,
+            true,
+        );
+        assert!(!t.tap);
+    }
+
+    #[test]
+    fn a_vertical_drag_is_the_wheel_in_lines_of_the_row_pitch() {
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let s = 2.0;
+        let sc = tall();
+        let mut v = TermView::default();
+        v.follow(Some(&sc), rect, s);
+        let pan = v.pan();
+        let pitch = term_h(v.pt() * s);
+        // Down 10.5 rows (past the slop first): content follows the finger
+        // back into the scrollback, positive.
+        let from = [400.0, 100.0];
+        let slop = SLOP * s + 1.0;
+        let out = drag(
+            &mut v,
+            1,
+            from,
+            [from[0] + 3.0, from[1] + slop + 10.5 * pitch],
+            40,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert_eq!(v.axis(), Some(Axis::Wheel));
+        assert_eq!(out.iter().filter(|t| t.drag).count(), 1, "arms once");
+        let lines: i32 = out.iter().map(|t| t.lines).sum();
+        // The slop's own distance is not scrolled: 10 whole rows.
+        assert_eq!(lines, 10);
+        assert_eq!(v.pan(), pan, "the frame does not move");
+        assert!(out.iter().all(|t| !t.tap));
+        // Up: negative, towards the bottom.
+        let out = drag(
+            &mut v,
+            2,
+            [400.0, 500.0],
+            [400.0, 500.0 - slop - 4.0 * pitch],
+            8,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert_eq!(out.iter().map(|t| t.lines).sum::<i32>(), -4);
+        // A remainder is not carried into the next drag.
+        v.touch(
+            3,
             TouchPhase::Started,
             400.0,
-            400.0,
+            100.0,
             Duration::ZERO,
             Some(&sc),
             rect,
             s,
+            true,
         );
-        v.touch(
+        assert_eq!(v.wheel, 0.0);
+        assert_eq!(v.axis(), None);
+    }
+
+    #[test]
+    fn the_axis_locks_to_the_first_direction() {
+        let rect = Rect::new(0.0, 0.0, 400.0, 600.0);
+        let s = 2.0;
+        let sc = tall();
+        let mut v = TermView::default();
+        v.follow(Some(&sc), rect, s);
+        // Zoomed in, so the frame is wider than the view.
+        v.pt = MAX_PT;
+        v.pan = [100.0, 100.0];
+        let pitch = term_h(v.pt() * s);
+        // Across first, then down: only across, and no lines.
+        let z = Duration::ZERO;
+        let mut out = vec![v.touch(
+            1,
+            TouchPhase::Started,
+            300.0,
+            300.0,
+            z,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        )];
+        out.push(v.touch(
             1,
             TouchPhase::Moved,
-            600.0,
-            900.0,
-            Duration::from_millis(16),
+            270.0,
+            300.0,
+            z,
             Some(&sc),
             rect,
             s,
-        );
-        assert_eq!(v.pan(), [0.0, (m[1] - 500.0).max(0.0)]);
-        v.touch(
+            true,
+        ));
+        out.push(v.touch(
+            1,
+            TouchPhase::Moved,
+            200.0,
+            300.0 + 6.0 * pitch,
+            z,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        ));
+        out.push(v.touch(
             1,
             TouchPhase::Ended,
-            600.0,
-            900.0,
-            Duration::from_millis(32),
+            200.0,
+            300.0 + 6.0 * pitch,
+            z,
             Some(&sc),
             rect,
             s,
+            true,
+        ));
+        assert_eq!(v.axis(), Some(Axis::Across));
+        assert!(out.iter().all(|t| t.lines == 0 && !t.drag && !t.tap));
+        assert_eq!(v.pan(), [200.0, 100.0]);
+        // Down first, then across: lines, and the frame stays.
+        let pan = v.pan();
+        let out = drag(
+            &mut v,
+            2,
+            [300.0, 300.0],
+            [300.0, 300.0 + 30.0],
+            1,
+            Some(&sc),
+            rect,
+            s,
+            true,
         );
-        // The double tap goes back to the size before, and again to fit.
-        let t = Duration::from_secs(1);
-        for (n, at) in [(2, t), (3, t + Duration::from_millis(100))] {
-            v.touch(n, TouchPhase::Started, 300.0, 300.0, at, Some(&sc), rect, s);
-            v.touch(n, TouchPhase::Ended, 300.0, 300.0, at, Some(&sc), rect, s);
-        }
-        assert!(!v.fit());
-        assert_eq!(v.pt(), START_PT);
-        let t = t + Duration::from_secs(1);
-        for (n, at) in [(4, t), (5, t + Duration::from_millis(100))] {
-            v.touch(n, TouchPhase::Started, 300.0, 300.0, at, Some(&sc), rect, s);
-            v.touch(n, TouchPhase::Ended, 300.0, 300.0, at, Some(&sc), rect, s);
-        }
-        assert!(v.fit());
-        assert_eq!(v.pan()[0], 0.0);
+        assert_eq!(v.axis(), Some(Axis::Wheel));
+        assert!(out.iter().any(|t| t.drag));
+        let t = v.touch(
+            2,
+            TouchPhase::Started,
+            300.0,
+            300.0,
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert_eq!(t, Touched::default());
+        let t = v.touch(
+            2,
+            TouchPhase::Moved,
+            300.0,
+            330.0,
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert!(t.drag);
+        let t = v.touch(
+            2,
+            TouchPhase::Moved,
+            100.0,
+            330.0 + 2.0 * pitch,
+            Duration::ZERO,
+            Some(&sc),
+            rect,
+            s,
+            true,
+        );
+        assert_eq!(t.lines, 2);
+        assert_eq!(v.pan(), pan, "still the wheel");
+    }
+
+    #[test]
+    fn wheel_lines_keep_the_remainder_and_the_sign() {
+        let mut d = 25.0;
+        assert_eq!(wheel_lines(&mut d, 10.0), 2);
+        assert!((d - 5.0).abs() < 1e-4);
+        d -= 31.0;
+        assert_eq!(wheel_lines(&mut d, 10.0), -2);
+        assert!((d + 6.0).abs() < 1e-4);
+        assert_eq!(wheel_lines(&mut d, 0.0), 0);
     }
 
     #[test]
@@ -835,87 +1267,48 @@ mod tests {
         let mut v = TermView::default();
         v.follow(Some(&sc), rect, 2.0);
         let t = Duration::ZERO;
-        v.touch(
-            1,
-            TouchPhase::Started,
-            300.0,
-            500.0,
-            t,
-            Some(&sc),
-            rect,
-            2.0,
-        );
-        v.touch(
-            2,
-            TouchPhase::Started,
-            500.0,
-            500.0,
-            t,
-            Some(&sc),
-            rect,
-            2.0,
-        );
+        let touch = |v: &mut TermView, id: u64, phase: TouchPhase, x: f32| {
+            v.touch(id, phase, x, 500.0, t, Some(&sc), rect, 2.0, true)
+        };
+        touch(&mut v, 1, TouchPhase::Started, 300.0);
+        touch(&mut v, 2, TouchPhase::Started, 500.0);
         // Spread to five times: capped at 16 pt.
-        v.touch(2, TouchPhase::Moved, 1300.0, 500.0, t, Some(&sc), rect, 2.0);
+        touch(&mut v, 2, TouchPhase::Moved, 1300.0);
         assert_eq!(v.pt(), MAX_PT);
         assert!(!v.fit());
         // Pinched in: down to 7 pt.
-        v.touch(2, TouchPhase::Moved, 301.0, 500.0, t, Some(&sc), rect, 2.0);
+        let out = touch(&mut v, 2, TouchPhase::Moved, 301.0);
         assert_eq!(v.pt(), MIN_PT);
-        v.touch(2, TouchPhase::Ended, 301.0, 500.0, t, Some(&sc), rect, 2.0);
-        v.touch(1, TouchPhase::Ended, 300.0, 500.0, t, Some(&sc), rect, 2.0);
-        // Not a tap, and not a hold.
-        assert!(!v.tick_hold(ARM_HOLD));
+        assert_eq!(out.lines, 0, "a pinch never scrolls the pane");
+        // Not a tap, nor a two-finger tap.
+        assert_eq!(
+            touch(&mut v, 2, TouchPhase::Ended, 301.0),
+            Touched::default()
+        );
+        assert_eq!(
+            touch(&mut v, 1, TouchPhase::Ended, 300.0),
+            Touched::default()
+        );
+        assert_eq!(v.last_tap, None);
     }
 
     #[test]
-    fn a_resting_finger_holds_once_and_a_moving_one_never() {
-        let rect = Rect::new(0.0, 0.0, 800.0, 1200.0);
-        let mut v = TermView::default();
-        v.touch(
-            1,
-            TouchPhase::Started,
-            10.0,
-            10.0,
-            Duration::ZERO,
-            None,
-            rect,
-            2.0,
-        );
-        assert!(!v.tick_hold(Duration::from_millis(1000)));
-        assert!(v.tick_hold(Duration::from_millis(600)));
-        assert!(!v.tick_hold(Duration::from_millis(600)), "once");
-        v.touch(
-            1,
-            TouchPhase::Ended,
-            10.0,
-            10.0,
-            Duration::from_secs(2),
-            None,
-            rect,
-            2.0,
-        );
-        v.touch(
-            2,
-            TouchPhase::Started,
-            10.0,
-            10.0,
-            Duration::from_secs(3),
-            None,
-            rect,
-            2.0,
-        );
-        v.touch(
-            2,
-            TouchPhase::Moved,
-            90.0,
-            10.0,
-            Duration::from_secs(3),
-            None,
-            rect,
-            2.0,
-        );
-        assert!(!v.tick_hold(ARM_HOLD));
+    fn the_scroll_pill_shows_only_while_scrolled_back() {
+        let mut st = TermState::default();
+        assert_eq!(scroll_label(&st), None);
+        let mut s = status(true);
+        s.scroll_offset = Some(0);
+        st.status = Some(s.clone());
+        assert_eq!(scroll_label(&st), None);
+        s.scroll_offset = Some(12);
+        st.status = Some(s.clone());
+        assert_eq!(scroll_label(&st).as_deref(), Some("12 lines back"));
+        s.scroll_offset = Some(1);
+        st.status = Some(s.clone());
+        assert_eq!(scroll_label(&st).as_deref(), Some("1 line back"));
+        s.open = false;
+        st.status = Some(s);
+        assert_eq!(scroll_label(&st), None);
     }
 
     #[test]
