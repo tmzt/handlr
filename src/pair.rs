@@ -6,6 +6,11 @@
 //!
 //! Only public keys move: the URL holds the server's key and addresses,
 //! and the device code the device's key and name.
+//!
+//! Beside the URL and the QR code it prints the daemon's fingerprint and
+//! six-digit confirmation code, both from its link static public key, so
+//! the owner can check them against the phone (plan 20261028_01, the 13:03
+//! EDT amendment's item 7). The pairing itself is unchanged.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -17,7 +22,9 @@ use libflankr_proto::common::{
     HelloParams, LinkPairAddParams, LinkPairAddResult, LinkPairBeginParams, LinkPairBeginResult,
     LinkPairDone, methods, protocols,
 };
-use libflankr_proto::link::{PAIRING_PREFIX, PAIRING_URL_SCHEME, PairingPayload};
+use libflankr_proto::link::{
+    PAIRING_PREFIX, PAIRING_URL_SCHEME, PairingPayload, confirmation_code, fingerprint_text,
+};
 use libflankr_proto::{ErrorObject, Id, Incoming, Notification, Request};
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -43,6 +50,10 @@ pub struct Shown {
     pub png: Vec<u8>,
     /// Whether some address can be reached from another machine.
     pub remote: bool,
+    /// The daemon's fingerprint, `3f9a 12c4`.
+    pub fingerprint: String,
+    /// The six-digit confirmation code the phone shows while pairing.
+    pub confirmation: String,
 }
 
 impl Shown {
@@ -54,7 +65,17 @@ impl Shown {
             url,
             png,
             remote: payload.has_remote_address(),
+            fingerprint: fingerprint_text(&payload.server_key),
+            confirmation: confirmation_code(&payload.server_key),
         })
+    }
+
+    /// The lines naming the daemon, printed after the QR code.
+    pub fn identity(&self) -> String {
+        format!(
+            "Fingerprint: {}\nConfirmation code: {} (the phone shows the same code while pairing)",
+            self.fingerprint, self.confirmation
+        )
     }
 
     /// The QR code as `data:image/png;base64,…`.
@@ -323,6 +344,8 @@ fn show(result: &LinkPairBeginResult, qr_png: Option<&Path>) -> Result<(), Strin
     println!();
     println!("{}", shown.data_url());
     println!();
+    println!("{}", shown.identity());
+    println!();
     if let Some(path) = qr_png {
         write_png(path, &shown.png)?;
         println!("Wrote {}", path.display());
@@ -374,6 +397,25 @@ mod tests {
         assert_eq!(
             PairingPayload::decode(&shown.url).unwrap(),
             PairingPayload::decode(&pairing).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_and_confirmation_code_come_from_the_server_key() {
+        let pairing = PairingPayload {
+            server_key: [0u8; 32],
+            addresses: vec!["m4.tail1a2b3c.ts.net:7347".to_string()],
+        }
+        .encode()
+        .unwrap();
+        let shown = Shown::new(&pairing).unwrap();
+        // libflankr_proto's fixed vectors for the all-zero key.
+        assert_eq!(shown.fingerprint, "320b 5ea9");
+        assert_eq!(shown.confirmation, "543268");
+        assert_eq!(
+            shown.identity(),
+            "Fingerprint: 320b 5ea9\n\
+             Confirmation code: 543268 (the phone shows the same code while pairing)"
         );
     }
 
