@@ -1,6 +1,6 @@
 [package]
 name = "flankr-audio"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Audio for the companion front ends: libvoicexn speech in and out, joined to flankr-companion"
 
@@ -17,9 +17,9 @@ log = "0.4"
 # libmobile use.
 cpal = { version = "0.18.2", optional = true }
 # `morph`: libmorph's Sink and Source types, at the companion app's
-# revision (libmorph 0.4.1). The adapters are in src/morph.rs, so
+# revision (libmorph 0.5.0, tag v0.5.0). The adapters are in src/morph.rs, so
 # libvoicexn's own `morph` feature, and its older libmorph, stay off.
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "0b288e8d1096c0b7441bc953ce745a44a9632be8", default-features = false, optional = true }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c9b432d80178536576c559d1af616b1f83cabea6", default-features = false, optional = true }
 
 [features]
 default = []

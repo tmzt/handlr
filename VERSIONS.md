@@ -533,3 +533,10 @@ additive:
   only then, else `Event::PairFailed`); `state.redb` and its directory are
   created 0600/0700, and `state.redb.mismatch-*` files are deleted.
 - **Added:** `CHECK_TIMEOUT` (30 s), `RESULT_GRACE` (10 s).
+
+## flankr-audio 0.2.0 — 2026-10-28 (the commit tagged `flankr-audio-v0.2.0`)
+
+- **Breaking**: libmorph 0.4.2 (rev 0b288e8) → 0.5.0 (tag v0.5.0, c9b432d).
+  `AudioSession::spawn_morph` (feature `morph`) takes `libmorph::CaptureFormat`
+  and returns `libmorph::Sink` and `libmorph::Source` from libmorph 0.5.0,
+  which is not semver-compatible with 0.4 (Rule 5.5). No other API change.
