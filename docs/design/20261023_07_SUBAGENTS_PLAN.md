@@ -317,3 +317,24 @@ steps 1 to 4 on `main-terminal`: `status` is `In implementation`, and
 the body above, with its amendments, is frozen (AGENTS.md Rule 1.5).
 Steps 1 to 4 are built now; step 5 (the app) follows the plan-table app
 work. Departures are recorded in `CHANGES.md`.
+
+## Amendment — 2026-10-29 03:11 EDT: running first and short; the rest under "All agents…"
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "show active
+subagents first or move All agents to modal"; then "yes" to the lead's
+wording. This replaces the 20:51 EDT amendment's item 3 on the menu's
+contents (main, every running one, every finished one); its radio marks,
+no colour and minutes stand.
+
+1. **The menu, short:** **main**; a **Running** heading and every running
+   subagent, newest first, with its minutes past 5; a **Finished** heading
+   and at most the 3 newest finished ones; then a separator and
+   **All agents…**. A heading with nothing under it is left out.
+2. **All agents…** opens a modal with the full list: Running, then
+   Finished, newest first; each row its short name, its description dim
+   beneath, and its minutes or "finished"; the session viewed marked with
+   the filled radio dot ⦿, the others ⊙; a tap on a row opens it as the
+   menu's items do (`Input::OpenChild`, or `CloseChild` for main, which
+   is the modal's first row). A tap outside, ✕ or Back closes it.
+3. **When everything fits** (no finished subagents beyond the 3 shown),
+   **All agents…** is not offered and the menu is the whole list.
