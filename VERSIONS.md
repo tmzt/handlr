@@ -594,3 +594,19 @@ Plan 20261028_03 (the session drawer), steps 3 and 4, with the 18:48 and
   `State::trade_terminals`; `Remotes::info_with`; `Cross::shown`.
 - libflankr_proto 0.5.0 → 0.5.1 (semver-compatible; `AgentInfo`'s
   `idle_ms`, `subagents_running`, `summary`).
+
+## libflankr_proto 0.5.2 — 2026-10-28 (the commit tagged `libflankr_proto-v0.5.2`)
+
+Plan 20261028_04 (plugins), step 1. Strictly additive:
+
+- **Added:** `companion::methods::{PLUGIN_CALL, PLUGIN_RESULT, PLUGIN_NOTIFY,
+  PLUGIN_SET_ENABLED}` (`plugin.call`, `plugin.result`, `plugin.notify`,
+  `plugin.set_enabled`); `PluginCall`, `PluginAccepted`, `PluginResult`,
+  `PluginNotify`, `PluginInfo`, `PluginMenuItem`, `PluginSetEnabledParams`,
+  `PluginSetEnabledResult`; `PLUGIN_MAX_BYTES` (256 KiB),
+  `PLUGIN_NS_MAX_BYTES`, `PLUGIN_METHOD_MAX_BYTES`, `is_plugin_ns()` and
+  `is_plugin_method()`; `envelope::codes::{PLUGIN_UNKNOWN (-32030),
+  PLUGIN_DISABLED (-32031), PLUGIN_TOO_LARGE (-32032)}`.
+- **Added:** `HelloResult::plugins` and `ServerCapabilities::plugins`
+  (`Option<Vec<PluginInfo>>`), appended, defaulted when absent and left off
+  the wire when `None`, so an older daemon's objects still read (no plugins).

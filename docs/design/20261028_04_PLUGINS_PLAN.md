@@ -1,7 +1,7 @@
 ---
 title: Built-in plugins, with a namespaced message flow, a title-bar menu and the planning plugin
 date: 2026-10-28
-status: Draft
+status: In implementation
 covers:
   - "A plugin model for flankr: plugins are built-in Rust, each in two
     halves (daemon and device) under one reverse-DNS package name that is
@@ -950,3 +950,10 @@ in the worktree `.claude/worktrees/main-plugins` on the branch
 `Draft` until the first code commit (step 1, libflankr_proto 0.5.2), which
 sets it to `In implementation` and appends the amendment saying the
 document is now immutable.
+
+## Amendment — 2026-10-28 20:11 EDT: implementation started; the document is now immutable
+
+Implementation starts with this amendment, in the commit of step 1
+(libflankr_proto 0.5.2) on `main-plugins`: `status` is `In implementation`,
+and the body above is frozen (AGENTS.md Rule 1.5). Departures are recorded
+in `CHANGES.md`.

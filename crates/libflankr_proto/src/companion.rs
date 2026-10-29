@@ -27,6 +27,22 @@ pub mod methods {
     /// [`ServerCapabilities`](super::ServerCapabilities) whenever it does
     /// (plan 20261027_02, decision 7).
     pub const SERVER_CAPABILITIES: &str = "server.capabilities";
+    /// Phone → daemon: a call to a plugin's own method, answered at once
+    /// with [`PluginAccepted`](super::PluginAccepted) or an error; the
+    /// plugin's answer follows as `plugin.result` when the call has an `id`
+    /// (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.2). Added in
+    /// libflankr_proto 0.5.2.
+    pub const PLUGIN_CALL: &str = "plugin.call";
+    /// Daemon → phone, a notification: a plugin's answer to a `plugin.call`
+    /// ([`PluginResult`](super::PluginResult)).
+    pub const PLUGIN_RESULT: &str = "plugin.result";
+    /// Daemon → phone, a notification from a plugin during a call
+    /// ([`PluginNotify`](super::PluginNotify)).
+    pub const PLUGIN_NOTIFY: &str = "plugin.notify";
+    /// Phone → daemon: switch a plugin on or off in the daemon's config
+    /// ([`PluginSetEnabledParams`](super::PluginSetEnabledParams)); only a
+    /// principal that may approve.
+    pub const PLUGIN_SET_ENABLED: &str = "plugin.set_enabled";
 }
 
 /// `notice.kind` values.
@@ -81,6 +97,11 @@ pub struct HelloResult {
     /// that reaches herdr remotely, means no `terminal.*` methods.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<TerminalInfo>,
+    /// The daemon's built-in plugins, enabled or not (plan 20261028_04,
+    /// decision 3.2, item 5). `None`, from an older daemon, means no
+    /// plugins. Added in libflankr_proto 0.5.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Vec<PluginInfo>>,
 }
 
 /// The terminal mode a daemon offers (plan 20261027_07, decision 4).
@@ -137,6 +158,148 @@ pub struct ServerCapabilities {
     /// As [`HelloResult::terminal`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal: Option<TerminalInfo>,
+    /// As [`HelloResult::plugins`]; sent when the list changes (a toggle,
+    /// a config reload). Added in libflankr_proto 0.5.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<Vec<PluginInfo>>,
+}
+
+/// The largest `params`, `result` or notification `params` of a plugin
+/// message, serialised: 256 KiB (plan 20261028_04, decision 3.2, item 2).
+pub const PLUGIN_MAX_BYTES: usize = 262_144;
+
+/// The longest plugin namespace, in bytes (decision 3.1, item 1).
+pub const PLUGIN_NS_MAX_BYTES: usize = 128;
+
+/// The longest plugin-local method name, in bytes (decision 3.2, item 2).
+pub const PLUGIN_METHOD_MAX_BYTES: usize = 64;
+
+/// Whether `ns` is a well-formed plugin package name: lowercase ASCII
+/// segments `[a-z][a-z0-9_]*` joined by `.`, at least three segments, at
+/// most [`PLUGIN_NS_MAX_BYTES`] bytes (decision 3.1, item 1). Which
+/// namespaces a daemon accepts beyond this is its own rule.
+pub fn is_plugin_ns(ns: &str) -> bool {
+    if ns.is_empty() || ns.len() > PLUGIN_NS_MAX_BYTES {
+        return false;
+    }
+    let mut segments = 0;
+    for segment in ns.split('.') {
+        let mut bytes = segment.bytes();
+        match bytes.next() {
+            Some(b'a'..=b'z') => {}
+            _ => return false,
+        }
+        if !bytes.all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_')) {
+            return false;
+        }
+        segments += 1;
+    }
+    segments >= 3
+}
+
+/// Whether `method` is a well-formed plugin-local method name:
+/// `[a-z][a-z0-9_.]*`, at most [`PLUGIN_METHOD_MAX_BYTES`] bytes
+/// (decision 3.2, item 2).
+pub fn is_plugin_method(method: &str) -> bool {
+    let mut bytes = method.bytes();
+    method.len() <= PLUGIN_METHOD_MAX_BYTES
+        && matches!(bytes.next(), Some(b'a'..=b'z'))
+        && bytes.all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.'))
+}
+
+/// `plugin.call`'s params (decision 3.2, item 1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginCall {
+    /// The plugin's package name.
+    pub ns: String,
+    /// The device's id for the call, unique within the connection and the
+    /// namespace. With it, `plugin.result` follows; without it, the call is
+    /// a notification to the plugin and nothing follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    /// The plugin-local method, see [`is_plugin_method`].
+    pub method: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// The pane id of the agent view the phone has open, if any: the
+    /// call's focused project (decision 3.3, item 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+}
+
+/// `plugin.call`'s result: the call was handed to the plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PluginAccepted {}
+
+/// `plugin.result`: a plugin's answer to the call with this `id`; exactly
+/// one of `result` and `error`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PluginResult {
+    pub ns: String,
+    pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::envelope::ErrorObject>,
+}
+
+/// `plugin.notify`: a plugin's notification, sent during a call on the
+/// connection that called.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginNotify {
+    pub ns: String,
+    pub method: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// A built-in plugin, as listed in `hello` and `server.capabilities`
+/// (decision 3.2, item 5).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub ns: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// `0.1.0`, or `g1a2b3c4` before a release; without `ns@`.
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub menu: Vec<PluginMenuItem>,
+    /// Why it can't be used now, e.g. "No project is open".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One action a plugin adds to the ⋮ menu.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMenuItem {
+    /// Unique within the plugin.
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    /// `"modal"` or `"card"`.
+    #[serde(default)]
+    pub opens: String,
+    /// `"overview"`, `"agent"` or `"both"`.
+    #[serde(default)]
+    pub screens: String,
+}
+
+/// `plugin.set_enabled`'s params.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSetEnabledParams {
+    pub ns: String,
+    pub enabled: bool,
+}
+
+/// `plugin.set_enabled`'s result, sent once the config is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginSetEnabledResult {
+    pub enabled: bool,
 }
 
 /// `turn.start`. `turn_id` is chosen by the client, unique within the
@@ -296,6 +459,25 @@ mod tests {
     use serde::de::DeserializeOwned;
     use serde_json::json;
 
+    fn planning_info() -> PluginInfo {
+        PluginInfo {
+            ns: "dev.flankr.plugins.planning".into(),
+            name: "Planning".into(),
+            description:
+                "Lists this project's plans and their amendments, from docs/design. Read-only."
+                    .into(),
+            version: "0.1.0".into(),
+            enabled: true,
+            menu: vec![PluginMenuItem {
+                id: "plans".into(),
+                label: "Plans in this project".into(),
+                opens: "modal".into(),
+                screens: "both".into(),
+            }],
+            reason: None,
+        }
+    }
+
     fn round_trip<T: Serialize + DeserializeOwned + PartialEq + std::fmt::Debug>(value: T) {
         let text = serde_json::to_string(&value).unwrap();
         let back: T = serde_json::from_str(&text).unwrap();
@@ -326,10 +508,12 @@ mod tests {
                 input: true,
                 mouse: true,
             }),
+            plugins: Some(vec![planning_info()]),
         });
         round_trip(ServerCapabilities {
             llm: Some(LlmInfo::available()),
             terminal: None,
+            plugins: None,
         });
         round_trip(ServerCapabilities {
             llm: None,
@@ -337,10 +521,12 @@ mod tests {
                 input: false,
                 mouse: false,
             }),
+            plugins: Some(vec![]),
         });
         round_trip(ServerCapabilities {
             llm: None,
             terminal: None,
+            plugins: Some(vec![planning_info()]),
         });
         round_trip(TurnStartParams {
             turn_id: 4,
@@ -473,6 +659,7 @@ mod tests {
             serde_json::to_value(ServerCapabilities {
                 llm: Some(LlmInfo::available()),
                 terminal: None,
+                plugins: None,
             })
             .unwrap(),
             json!({"llm": {"general_agent": true, "summaries": true}})
@@ -489,6 +676,7 @@ mod tests {
                     input: false,
                     mouse: false,
                 }),
+                plugins: None,
             })
             .unwrap(),
             json!({"terminal": {"input": false}})
@@ -522,5 +710,158 @@ mod tests {
             .unwrap(),
             json!({"input": true, "mouse": true})
         );
+    }
+
+    #[test]
+    fn plugin_messages_round_trip() {
+        use crate::envelope::{ErrorObject, codes};
+        round_trip(PluginCall {
+            ns: "dev.flankr.plugins.planning".into(),
+            id: Some(7),
+            method: "plans.show".into(),
+            params: json!({"name": "20261028_04_PLUGINS_PLAN"}),
+            session: Some("w1:p6".into()),
+        });
+        round_trip(PluginCall {
+            ns: "dev.flankr.plugins.planning".into(),
+            id: None,
+            method: "plans.list".into(),
+            params: json!({}),
+            session: None,
+        });
+        round_trip(PluginAccepted {});
+        assert_eq!(serde_json::to_value(PluginAccepted {}).unwrap(), json!({}));
+        round_trip(PluginResult {
+            ns: "dev.flankr.plugins.planning".into(),
+            id: 7,
+            result: Some(json!({"schema": 1, "plans": []})),
+            error: None,
+        });
+        round_trip(PluginResult {
+            ns: "dev.flankr.plugins.planning".into(),
+            id: 8,
+            result: None,
+            error: Some(ErrorObject::new(codes::PLUGIN_TOO_LARGE, "too large")),
+        });
+        round_trip(PluginNotify {
+            ns: "dev.flankr.plugins.planning".into(),
+            method: "progress".into(),
+            params: json!({"done": 3, "of": 9}),
+        });
+        round_trip(planning_info());
+        round_trip(PluginSetEnabledParams {
+            ns: "dev.flankr.plugins.planning".into(),
+            enabled: true,
+        });
+        round_trip(PluginSetEnabledResult { enabled: false });
+        assert_eq!(methods::PLUGIN_CALL, "plugin.call");
+        assert_eq!(methods::PLUGIN_RESULT, "plugin.result");
+        assert_eq!(methods::PLUGIN_NOTIFY, "plugin.notify");
+        assert_eq!(methods::PLUGIN_SET_ENABLED, "plugin.set_enabled");
+        assert_eq!(PLUGIN_MAX_BYTES, 256 * 1024);
+    }
+
+    #[test]
+    fn plugin_wire_shapes() {
+        // No `id` and no `session`: not written; `params` defaults to null.
+        assert_eq!(
+            serde_json::to_value(PluginCall {
+                ns: "dev.flankr.plugins.test".into(),
+                id: None,
+                method: "ping".into(),
+                params: serde_json::Value::Null,
+                session: None,
+            })
+            .unwrap(),
+            json!({"ns": "dev.flankr.plugins.test", "method": "ping", "params": null})
+        );
+        let c: PluginCall =
+            serde_json::from_value(json!({"ns": "dev.flankr.plugins.test", "method": "ping"}))
+                .unwrap();
+        assert_eq!(c.id, None);
+        assert!(c.params.is_null());
+        // A result carries `result` or `error`, the other not written.
+        assert_eq!(
+            serde_json::to_value(PluginResult {
+                ns: "dev.flankr.plugins.test".into(),
+                id: 1,
+                result: Some(json!([1])),
+                error: None,
+            })
+            .unwrap(),
+            json!({"ns": "dev.flankr.plugins.test", "id": 1, "result": [1]})
+        );
+        // PluginInfo: `reason` only when set; `menu` defaults.
+        let i: PluginInfo =
+            serde_json::from_value(json!({"ns": "dev.flankr.plugins.test"})).unwrap();
+        assert!(!i.enabled && i.menu.is_empty() && i.reason.is_none());
+        assert!(
+            serde_json::to_value(planning_info())
+                .unwrap()
+                .get("reason")
+                .is_none()
+        );
+        // An older daemon's hello and capabilities have no `plugins`: None,
+        // and not written.
+        let h: HelloResult = serde_json::from_value(json!({
+            "server": "flankr", "server_version": "0.1.0", "protocol_version": 1,
+            "vocabulary": []
+        }))
+        .unwrap();
+        assert_eq!(h.plugins, None);
+        assert!(serde_json::to_value(&h).unwrap().get("plugins").is_none());
+        let c: ServerCapabilities = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(c.plugins, None);
+        // An empty list is written and read as empty, not None.
+        let c = ServerCapabilities {
+            llm: None,
+            terminal: None,
+            plugins: Some(vec![]),
+        };
+        assert_eq!(serde_json::to_value(&c).unwrap(), json!({"plugins": []}));
+        let back: ServerCapabilities = serde_json::from_value(json!({"plugins": []})).unwrap();
+        assert_eq!(back.plugins, Some(vec![]));
+    }
+
+    #[test]
+    fn plugin_names() {
+        for good in [
+            "dev.flankr.plugins.planning",
+            "dev.flankr.plugins.test",
+            "com.example.a_1",
+            "a.b.c",
+        ] {
+            assert!(is_plugin_ns(good), "{good}");
+        }
+        let long = format!("dev.flankr.{}", "a".repeat(120));
+        for bad in [
+            "",
+            "dev.flankr",
+            "Dev.flankr.plugins",
+            "dev..flankr",
+            "dev.flankr.plugins.",
+            "dev.flankr.1plugin",
+            "dev.flankr.plug-in",
+            "dev.flankr.plugins/planning",
+            long.as_str(),
+        ] {
+            assert!(!is_plugin_ns(bad), "{bad}");
+        }
+        for good in ["plans.list", "plans.show", "a", "check_2"] {
+            assert!(is_plugin_method(good), "{good}");
+        }
+        let long = "a".repeat(65);
+        for bad in [
+            "",
+            "Plans",
+            "1plans",
+            "plans-list",
+            "plans/list",
+            "plugin call",
+            long.as_str(),
+        ] {
+            assert!(!is_plugin_method(bad), "{bad}");
+        }
+        assert!(is_plugin_method(&"a".repeat(64)));
     }
 }

@@ -181,10 +181,22 @@ pub mod codes {
     /// A companion turn is already running in this session
     /// (plan 20261022_02, decision 9).
     pub const BUSY: i64 = -32020;
+    /// `plugin.call` or `plugin.set_enabled` named a namespace that is not
+    /// one of the daemon's built-in plugins
+    /// (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.2, item 3).
+    /// Added in libflankr_proto 0.5.2.
+    pub const PLUGIN_UNKNOWN: i64 = -32030;
+    /// `plugin.call` named a plugin that is not enabled in the daemon's
+    /// `[plugins."<ns>"]` table. Added in 0.5.2.
+    pub const PLUGIN_DISABLED: i64 = -32031;
+    /// A plugin call's `params`, or its result, is over
+    /// [`PLUGIN_MAX_BYTES`](crate::companion::PLUGIN_MAX_BYTES) serialised.
+    /// Added in 0.5.2.
+    pub const PLUGIN_TOO_LARGE: i64 = -32032;
 
-    /// Every code above but `UNAVAILABLE`, the three subscription codes and
-    /// `LLM_UNAVAILABLE`, for checking they are distinct. Those came in
-    /// additive releases (0.1.1, 0.3.5, 0.3.10); growing this array would
+    /// Every code above but `UNAVAILABLE`, the three subscription codes,
+    /// `LLM_UNAVAILABLE` and the three plugin codes, for checking they are distinct. Those came in
+    /// additive releases (0.1.1, 0.3.5, 0.3.10, 0.5.2); growing this array would
     /// change its type.
     pub const ALL: [i64; 15] = [
         PARSE_ERROR,
@@ -271,6 +283,9 @@ mod tests {
             codes::SUBSCRIPTION_NOT_FOUND,
             codes::SESSION_CHANGED,
             codes::LLM_UNAVAILABLE,
+            codes::PLUGIN_UNKNOWN,
+            codes::PLUGIN_DISABLED,
+            codes::PLUGIN_TOO_LARGE,
         ] {
             assert!(seen.insert(later), "{later} repeats a code");
         }
