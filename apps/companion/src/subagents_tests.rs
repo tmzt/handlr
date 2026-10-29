@@ -77,7 +77,7 @@ fn children() -> Vec<ChildInfo> {
     ]
 }
 
-fn agent() -> AgentInfo {
+fn agent(children: Vec<ChildInfo>) -> AgentInfo {
     AgentInfo {
         pane_id: "p1".into(),
         name: Some("Claude p1".into()),
@@ -98,7 +98,7 @@ fn agent() -> AgentInfo {
         idle_ms: None,
         subagents_running: Some(2),
         summary: None,
-        children: children(),
+        children,
     }
 }
 
@@ -117,7 +117,7 @@ fn entry(role: Role, kind: EntryKind, tool: Option<&str>, text: &str) -> Entry {
 
 /// The view as the client gives it: a user turn, a reply and the
 /// parent's `Agent` call for a1; the subagent `child` shown, if any.
-fn view(child: Option<&str>) -> Event {
+fn view(child: Option<&str>, children: Vec<ChildInfo>) -> Event {
     let input = serde_json::json!({
         "description": "Build the overview screen plan",
         "prompt": "Read the plan and build it.",
@@ -164,11 +164,16 @@ fn view(child: Option<&str>) -> Event {
         held_newer: Vec::new(),
         bookends: Vec::new(),
         child: child.map(str::to_string),
-        children: children(),
+        children,
     }
 }
 
 fn run(script: &str) -> Option<Probe> {
+    run_with(script, children())
+}
+
+/// [`run`] with these subagents.
+fn run_with(script: &str, children: Vec<ChildInfo>) -> Option<Probe> {
     let dir = tempfile::tempdir().unwrap();
     let keys = dir.path().join("keys");
     let data = dir.path().join("data");
@@ -193,10 +198,10 @@ fn run(script: &str) -> Option<Probe> {
             server: "m4".into(),
         },
     );
-    probe::inject(READY, Event::Agents(vec![agent()]));
-    probe::inject_after("OpenAgent", view(None));
-    probe::inject_after("OpenChild", view(Some("a1")));
-    probe::inject_after("CloseChild", view(None));
+    probe::inject(READY, Event::Agents(vec![agent(children.clone())]));
+    probe::inject_after("OpenAgent", view(None, children.clone()));
+    probe::inject_after("OpenChild", view(Some("a1"), children.clone()));
+    probe::inject_after("CloseChild", view(None, children));
     let script = Script::parse(script).unwrap();
     match libmorph::script::run::<App>(&script, run) {
         Err(MorphError::Gpu(GpuError::Adapter(error))) => {
@@ -230,6 +235,12 @@ fn inputs_with(p: &Probe, part: &str) -> usize {
 /// The script that opens p1's view from the drawer, and the probe after
 /// it.
 fn open_view() -> Option<(String, Probe)> {
+    open_view_with(children())
+}
+
+/// [`open_view`] with these subagents.
+fn open_view_with(children: Vec<ChildInfo>) -> Option<(String, Probe)> {
+    let run = |script: &str| run_with(script, children.clone());
     let at = run(&format!("frames {SETTLE}\n"))?;
     assert!(
         icon(&at, "app/agent_menu").is_none(),
@@ -311,4 +322,72 @@ fn the_link_in_the_flow_opens_its_subagent() {
     let p = run(&format!("{open}{}frames 4\n", tap(link))).unwrap();
     assert_eq!(inputs_with(&p, "OpenChild(\"a1\")"), 1, "{:?}", p.inputs);
     assert_eq!(p.drawer.agent_child.as_deref(), Some("a1"));
+}
+
+/// The 03:11 EDT amendment: past three finished, the menu ends in
+/// All agents…, which opens the full list; a row opens its subagent, and
+/// the ✕ and Back close it.
+#[test]
+fn all_agents_opens_the_full_list_and_a_row_opens_its_subagent() {
+    // a1 running, then five finished.
+    let mut kids = vec![children().remove(0)];
+    kids.extend((0..5).map(|i| child(&format!("f{i}"), &format!("done {i}"), "", true, 40 + i)));
+    let run = |script: &str| run_with(script, kids.clone());
+    let Some((open, at)) = open_view_with(kids.clone()) else {
+        return;
+    };
+    let dot = icon(&at, "app/agent_menu").unwrap();
+    let script = format!("{open}{}frames 3\n", tap(dot));
+    let menu = run(&script).unwrap();
+    let ids = &menu.drawer.menu_items;
+    assert_eq!(
+        ids[ids.len() - 6..],
+        [
+            String::new(),
+            "app/agent/child/f0".into(),
+            "app/agent/child/f1".into(),
+            "app/agent/child/f2".into(),
+            String::new(),
+            subagent_menu::ALL.to_string(),
+        ],
+        "three finished, a separator, All agents…: {ids:?}"
+    );
+    let all = *menu.drawer.menu_rects.last().unwrap();
+    let script = format!("{script}{}frames 3\n", tap(all));
+    let modal = run(&script).unwrap();
+    let (rows, close) = modal
+        .drawer
+        .agents_modal
+        .clone()
+        .expect("the modal is open");
+    let sessions: Vec<Option<&str>> = rows.iter().map(|(s, _)| s.as_deref()).collect();
+    assert_eq!(
+        sessions,
+        [
+            None,
+            Some("a1"),
+            Some("f0"),
+            Some("f1"),
+            Some("f2"),
+            Some("f3"),
+            Some("f4")
+        ],
+        "main first, then every one"
+    );
+    // f4, beyond the menu's three, opens from here.
+    let p = run(&format!("{script}{}frames 4\n", tap(rows[6].1))).unwrap();
+    assert_eq!(inputs_with(&p, "OpenChild(\"f4\")"), 1, "{:?}", p.inputs);
+    assert!(p.drawer.agents_modal.is_none(), "closed by the tap");
+    // The ✕ closes it; so does Back, still in the view.
+    let p = run(&format!("{script}{}frames 3\n", tap(close))).unwrap();
+    assert!(p.drawer.agents_modal.is_none());
+    assert_eq!(inputs_with(&p, "OpenChild"), 0);
+    let p = run(&format!("{script}key back\nframes 3\n")).unwrap();
+    assert!(p.drawer.agents_modal.is_none());
+    assert_eq!(
+        p.drawer.agent_pane.as_deref(),
+        Some("p1"),
+        "still in the view"
+    );
+    assert_eq!(inputs_with(&p, "CloseChild"), 0);
 }

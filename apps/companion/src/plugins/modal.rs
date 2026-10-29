@@ -89,11 +89,56 @@ pub fn frame(layout: &Layout, content_h: f32) -> ModalFrame {
 
 /// Where a touch on the modal started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Target {
+pub(crate) enum Target {
     Content,
     Close,
     Outside,
     Card,
+}
+
+impl ModalFrame {
+    /// The part of the modal at `(x, y)`.
+    pub(crate) fn target(&self, x: f32, y: f32) -> Target {
+        if self.close.contains([x, y]) {
+            Target::Close
+        } else if self.content.contains([x, y]) {
+            Target::Content
+        } else if self.card.contains([x, y]) {
+            Target::Card
+        } else {
+            Target::Outside
+        }
+    }
+
+    /// Whether a touch that started on `target` and ended at `(x, y)`
+    /// closes the modal: on the X, or outside the card.
+    pub(crate) fn closes(&self, target: Target, x: f32, y: f32) -> bool {
+        match target {
+            Target::Close => self.close.contains([x, y]),
+            Target::Outside => !self.card.contains([x, y]),
+            _ => false,
+        }
+    }
+}
+
+/// The modal's shade over the screen of `layout`, its card, `title` and
+/// X, in frame `f` at scale `s`; the content is the caller's.
+pub fn draw_shell(
+    f: &ModalFrame,
+    title: &str,
+    layout: &Layout,
+    s: f32,
+    ctx: &DrawContext,
+    list: &mut DrawList,
+) {
+    fill(list, Rect::new(0.0, 0.0, layout.w, layout.h), DIM, 0.0);
+    fill(list, f.card, theme().card, RADIUS * s);
+    ctx.draw_text(list, title, f.title, TITLE_PT * s, theme().fg);
+    let [cx, cy] = f.close.center();
+    let h = CROSS * s;
+    let t = 2.0 * s;
+    list.push_line([cx - h, cy - h], [cx + h, cy + h], t, theme().dim);
+    list.push_line([cx - h, cy + h], [cx + h, cy - h], t, theme().dim);
 }
 
 /// The open modal's scroll and touch.
@@ -138,16 +183,7 @@ impl ModalView {
         };
         let f = self.frame(plugins, layout);
         if phase == TouchPhase::Started {
-            let target = if f.close.contains([x, y]) {
-                Target::Close
-            } else if f.content.contains([x, y]) {
-                Target::Content
-            } else if f.card.contains([x, y]) {
-                Target::Card
-            } else {
-                Target::Outside
-            };
-            self.touch = Some((id, target));
+            self.touch = Some((id, f.target(x, y)));
         }
         let Some((held, target)) = self.touch else {
             return Vec::new();
@@ -167,11 +203,7 @@ impl ModalView {
                 _ => Vec::new(),
             },
             Target::Close | Target::Outside if phase == TouchPhase::Ended => {
-                let on = match target {
-                    Target::Close => f.close.contains([x, y]),
-                    _ => !f.card.contains([x, y]),
-                };
-                if on {
+                if f.closes(target, x, y) {
                     plugins.close_modal();
                 }
                 Vec::new()
@@ -203,14 +235,7 @@ impl ModalView {
             1.0
         };
         let f = self.frame(plugins, layout);
-        fill(list, Rect::new(0.0, 0.0, layout.w, layout.h), DIM, 0.0);
-        fill(list, f.card, theme().card, RADIUS * s);
-        ctx.draw_text(list, &name, f.title, TITLE_PT * s, theme().fg);
-        let [cx, cy] = f.close.center();
-        let h = CROSS * s;
-        let t = 2.0 * s;
-        list.push_line([cx - h, cy - h], [cx + h, cy + h], t, theme().dim);
-        list.push_line([cx - h, cy + h], [cx + h, cy - h], t, theme().dim);
+        draw_shell(&f, &name, layout, s, ctx, list);
         let content_h = plugins.modal_height(f.content.w, s);
         list.push_clip(f.content.pos(), f.content.size());
         plugins.draw_modal(

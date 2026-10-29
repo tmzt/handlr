@@ -1,18 +1,24 @@
 //! The agent menu: the ⊙ title icon's popup on the agent view while the
 //! pane has subagents (docs/design/20261023_07_SUBAGENTS_PLAN.md, the
-//! 2026-10-28 20:46, 20:51 and 22:03 EDT amendments).
+//! 2026-10-28 20:46, 20:51 and 22:03 EDT amendments, and the 2026-10-29
+//! 03:11 EDT amendment).
 //!
 //! A libcontrols `PopupMenu` with radio marks (`PopupMarkStyle::Radio`,
 //! libcontrols 0.10.7), in the menu's own text colour, top to bottom:
-//! **main**, the pane's own agent; a **Running** heading and the running
-//! subagents, each by its short name, with its elapsed minutes, `(12m)`,
-//! only past 5; a **Finished** heading and the finished ones. Within each,
+//! **main**, the pane's own agent; a **Running** heading and every running
+//! subagent, each by its short name, with its elapsed minutes, `(12m)`,
+//! only past 5; a **Finished** heading and at most the
+//! [`FINISHED_SHOWN`] newest finished ones; then, only when more have
+//! finished than that, a separator and **All agents…**, which opens the
+//! full list in a modal ([`crate::agent::agents_modal`]). Within each,
 //! newest first, as the client lists them. A heading with nothing under
 //! it is left out. The session viewed has the filled radio (⦿), the
 //! others the empty one (⊙). Every item is an action; none is a toggle.
 
 use libcontrols::PopupItem;
 use libflankr_proto::common::ChildInfo;
+
+use crate::settings::copy;
 
 /// The main agent's item id.
 pub const MAIN: &str = "app/agent/main";
@@ -22,8 +28,13 @@ pub const CHILD: &str = "app/agent/child/";
 pub const MAIN_LABEL: &str = "main";
 pub const RUNNING: &str = "Running";
 pub const FINISHED: &str = "Finished";
+/// **All agents…**'s id.
+pub const ALL: &str = "app/agent/all";
 /// A running subagent's minutes show only past this many.
 pub const MINUTES_PAST: u64 = 5;
+/// The most finished subagents the menu lists; the rest are under
+/// **All agents…**.
+pub const FINISHED_SHOWN: usize = 3;
 
 /// What an item id chooses: `Some(None)` the main agent, `Some(Some(id))`
 /// a subagent; `None` for an id that is not the agent menu's.
@@ -67,13 +78,17 @@ pub fn label(child: &ChildInfo, now: u64) -> String {
 
 /// The menu's items for `children` (running first, then finished, newest
 /// first within each, as `Event::AgentView` gives them), with the
-/// session `viewed` (`None`: the main agent) checked, at `now`.
+/// session `viewed` (`None`: the main agent) checked, at `now`: every
+/// running one, the [`FINISHED_SHOWN`] newest finished, and
+/// **All agents…** when more have finished.
 pub fn items(children: &[ChildInfo], viewed: Option<&str>, now: u64) -> Vec<PopupItem> {
     let mut out = vec![PopupItem::action(MAIN, MAIN_LABEL).with_checked(Some(viewed.is_none()))];
     for (heading, finished) in [(RUNNING, false), (FINISHED, true)] {
+        let limit = if finished { FINISHED_SHOWN } else { usize::MAX };
         let mut group = children
             .iter()
             .filter(|c| c.finished == finished)
+            .take(limit)
             .peekable();
         if group.peek().is_none() {
             continue;
@@ -86,7 +101,17 @@ pub fn items(children: &[ChildInfo], viewed: Option<&str>, now: u64) -> Vec<Popu
             );
         }
     }
+    if offers_all(children) {
+        out.push(PopupItem::separator());
+        out.push(PopupItem::action(ALL, copy::AGENTS_ALL.text));
+    }
     out
+}
+
+/// Whether the menu offers **All agents…**: more finished subagents than
+/// it lists (the 03:11 EDT amendment, item 3).
+pub fn offers_all(children: &[ChildInfo]) -> bool {
+    children.iter().filter(|c| c.finished).count() > FINISHED_SHOWN
 }
 
 /// Seconds since 1970 on this device's clock.
@@ -170,6 +195,82 @@ pub(crate) mod tests {
             .collect();
         assert_eq!(filled, ["libtypedmd licences"]);
         assert_eq!(i[0].checked, Some(false));
+    }
+
+    /// `running` running subagents and `finished` finished ones, newest
+    /// first within each.
+    pub(crate) fn many(running: usize, finished: usize) -> Vec<ChildInfo> {
+        let r = (0..running).map(|i| child(&format!("r{i}"), &format!("run {i}"), false, i as u64));
+        let f = (0..finished)
+            .map(|i| child(&format!("f{i}"), &format!("done {i}"), true, 60 + i as u64));
+        r.chain(f).collect()
+    }
+
+    /// The 03:11 EDT amendment: every running one, at most three finished,
+    /// and All agents… only past three.
+    #[test]
+    fn the_menu_lists_three_finished_and_offers_all_agents_only_past_them() {
+        // None finished: no Finished heading, no All agents….
+        assert_eq!(
+            shown(&items(&many(2, 0), None, NOW)),
+            ["(*) main", "# Running", "( ) run 0", "( ) run 1"]
+        );
+        assert!(!offers_all(&many(2, 0)));
+        // Three finished: all of them, and still no All agents….
+        let three = shown(&items(&many(1, 3), None, NOW));
+        assert_eq!(
+            three,
+            [
+                "(*) main",
+                "# Running",
+                "( ) run 0",
+                "# Finished",
+                "( ) done 0",
+                "( ) done 1",
+                "( ) done 2",
+            ]
+        );
+        assert!(!offers_all(&many(1, 3)));
+        // Five finished: the three newest, a separator, All agents….
+        let i = items(&many(6, 5), None, NOW);
+        let five = shown(&i);
+        assert_eq!(
+            five[..8],
+            [
+                "(*) main",
+                "# Running",
+                "( ) run 0",
+                "( ) run 1",
+                "( ) run 2",
+                "( ) run 3",
+                "( ) run 4",
+                "( ) run 5",
+            ],
+            "every running one"
+        );
+        assert_eq!(
+            five[8..],
+            [
+                "# Finished",
+                "( ) done 0",
+                "( ) done 1",
+                "( ) done 2",
+                "",
+                copy::AGENTS_ALL.text,
+            ]
+        );
+        assert_eq!(i[i.len() - 2].kind, PopupItemKind::Separator);
+        let all = i.last().unwrap();
+        assert_eq!(
+            (all.kind, all.id.as_str(), all.checked),
+            (PopupItemKind::Action, ALL, None),
+            "an action with no radio"
+        );
+        assert_eq!(parse(ALL), None, "not a session");
+        assert!(offers_all(&many(0, 4)));
+        // Viewing a finished one past the three: no radio filled here.
+        let i = items(&many(0, 5), Some("f4"), NOW);
+        assert!(i.iter().all(|i| i.checked != Some(true)));
     }
 
     #[test]

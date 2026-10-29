@@ -54,6 +54,7 @@ use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts, Reply};
 use crate::theme::{theme, with_alpha};
 use crate::ui::Layout;
 
+pub mod agents_modal;
 pub mod choice_card;
 mod input_box;
 pub mod keys_row;

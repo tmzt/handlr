@@ -663,6 +663,28 @@ The volume menu's Skip, and the + menu's items
 
 - text: Attach image…
 
+The agent menu's last item and its modal, the full list of the pane's
+agents (docs/design/20261023_07_SUBAGENTS_PLAN.md, the 2026-10-29 03:11
+EDT amendment).
+
+# [Copy] agents_all
+
+- text: All agents…
+
+# [Copy] agents_title
+
+- text: All agents
+
+# [Copy] agents_minutes
+
+- [#] minutes: whole minutes since the subagent started
+- text: |
+    {{ [#] minutes }}m
+
+# [Copy] agents_finished
+
+- text: finished
+
 The planning plugin's modal and card (decision 3.8, item 7).
 
 # [Copy] planning_reading

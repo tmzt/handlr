@@ -89,6 +89,9 @@ pub enum Choice {
     /// The agent menu: show the main agent (`None`) or the subagent with
     /// this id (the subagents plan, the 20:46 EDT amendment, item 4).
     Session(Option<String>),
+    /// The agent menu's **All agents…**: the full list in its modal (the
+    /// subagents plan's 2026-10-29 03:11 EDT amendment, item 2).
+    AllAgents,
 }
 
 impl Choice {
@@ -110,6 +113,7 @@ impl Choice {
             PASTE_TEXT => Some(Choice::PasteText),
             ATTACH_IMAGE => Some(Choice::AttachImage),
             SHOW_CHANGES => Some(Choice::ShowChanges),
+            crate::agent::subagent_menu::ALL => Some(Choice::AllAgents),
             _ => {
                 if let Some(session) = crate::agent::subagent_menu::parse(id) {
                     return Some(Choice::Session(session));
@@ -925,6 +929,33 @@ mod tests {
             Choice::parse(subagent_menu::MAIN),
             Some(Choice::Session(None))
         );
+        assert_eq!(Choice::parse(subagent_menu::ALL), Some(Choice::AllAgents));
+    }
+
+    /// The 03:11 EDT amendment: past three finished, the menu's last item
+    /// is All agents…, below a separator, and choosing it names it.
+    #[test]
+    fn all_agents_is_the_agent_menus_last_item_and_is_chosen() {
+        use crate::agent::subagent_menu::{self, tests::NOW, tests::many};
+        let mut m = Menu::new();
+        m.set_layout(Layout {
+            w: 1080.0,
+            h: 2340.0,
+            scale: 2.0,
+            top: 80.0,
+            bottom: 60.0,
+        });
+        let anchor = Rect::new(660.0, 100.0, 84.0, 84.0);
+        let items = subagent_menu::items(&many(1, 5), None, NOW);
+        let last = items.len() - 1;
+        assert_eq!(items[last].label, copy::AGENTS_ALL.text);
+        m.open_radio(anchor, items);
+        m.draw(&mut DrawList::new(), &DrawContext::default());
+        let [x, y] = m.item_rect(last).expect("laid out").center();
+        m.touch(1, TouchPhase::Started, x, y);
+        m.touch(1, TouchPhase::Ended, x, y);
+        assert_eq!(m.take_choice(), Some(Choice::AllAgents));
+        assert!(!m.is_open());
     }
 
     #[test]

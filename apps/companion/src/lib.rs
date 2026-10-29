@@ -450,6 +450,9 @@ pub struct App {
     plugins: Plugins,
     /// The open plugin modal's scroll and touch.
     plugin_modal: plugins::modal::ModalView,
+    /// The agent menu's **All agents…** modal (the subagents plan's
+    /// 2026-10-29 03:11 EDT amendment, item 2).
+    agents_modal: crate::agent::agents_modal::AgentsModal,
     /// The built-in preview (plan 20261028_05, step 8), the GPU quad of
     /// its image, and what the daemon offers of binary transfers.
     preview: preview::Preview,
@@ -1370,6 +1373,19 @@ impl App {
         )
     }
 
+    /// The **All agents…** modal's list as things are now: main, every
+    /// running and every finished subagent.
+    fn agents_lines(&self) -> Vec<crate::agent::agents_modal::Line> {
+        let Some(agent) = &self.agent else {
+            return Vec::new();
+        };
+        crate::agent::agents_modal::lines(
+            agent.children(),
+            agent.child(),
+            crate::agent::subagent_menu::now(),
+        )
+    }
+
     /// The agent menu at `anchor`, its ⊙ (the 20:46 EDT amendment, item
     /// 3): below it, with radio marks.
     fn open_agent_menu(&mut self, anchor: libcontrols::Rect) {
@@ -1751,6 +1767,13 @@ impl App {
             Choice::Session(child) => {
                 self.agent_menu = false;
                 self.show_session(child);
+            }
+            Choice::AllAgents => {
+                self.agent_menu = false;
+                log::info!("agent menu: all agents");
+                self.agents_modal.open();
+                let lines = self.agents_lines();
+                self.agents_modal.follow(lines);
             }
         }
     }
@@ -3210,6 +3233,21 @@ impl App {
             self.menu_chosen();
             return;
         }
+        // The agent menu's All agents… modal, over the agent view.
+        if self.agents_modal.is_open() {
+            let layout = self.layout;
+            let lines = self.agents_lines();
+            let hit = self.agents_modal.touch(
+                &lines,
+                &layout,
+                (touch.id, touch.phase, touch.x, touch.y),
+                now,
+            );
+            if let Some(crate::agent::agents_modal::AgentsHit::Open(child)) = hit {
+                self.show_session(child);
+            }
+            return;
+        }
         // The preview, over the agent view, takes every touch while open.
         if self.preview.is_open() {
             let layout = self.layout;
@@ -3460,6 +3498,11 @@ impl App {
         let back = matches!(key, Key::Back | Key::Escape);
         // Back closes the ⋮ menu, then a plugin's modal.
         if back && self.menu.back() {
+            return KeyStatus::Handled;
+        }
+        // Then the All agents… modal.
+        if back && self.agents_modal.is_open() {
+            self.agents_modal.close();
             return KeyStatus::Handled;
         }
         if back && self.plugins.modal().is_some() {
@@ -4238,6 +4281,7 @@ impl MorphApp for App {
             updates: 0,
             plugins: Plugins::builtin(),
             plugin_modal: Default::default(),
+            agents_modal: Default::default(),
             preview: preview::Preview::new(Some(std::sync::Arc::clone(&faces))),
             image_quad: None,
             blob: None,
@@ -4449,6 +4493,22 @@ impl MorphApp for App {
             self.overview.tick(dt);
         }
         self.preview.tick(dt);
+        // The All agents… modal follows the subagents and their minutes;
+        // it closes with the view or its last subagent.
+        if self.agents_modal.is_open() {
+            if self.agent_menu_registered() {
+                let lines = self.agents_lines();
+                self.agents_modal.follow(lines);
+                let s = self.scale();
+                if self.agents_modal.tick(dt, s)
+                    && let Some(agent) = &mut self.agent
+                {
+                    agent.invalidate();
+                }
+            } else {
+                self.agents_modal.close();
+            }
+        }
         if self.plugins.modal().is_some() && self.plugin_modal.tick(dt, self.scale()) {
             self.overview.invalidate();
             if let Some(agent) = &mut self.agent {
@@ -4633,8 +4693,10 @@ impl MorphApp for App {
         // Another session's card changed: the screen under it draws again.
         let cards_changed = self.session_cards.take_dirty();
         // The ⋮ menu, a plugin's modal or card changed: the same.
-        let overlay_changed =
-            self.plugins.take_dirty() | self.menu.take_dirty() | self.preview.take_dirty();
+        let overlay_changed = self.plugins.take_dirty()
+            | self.menu.take_dirty()
+            | self.preview.take_dirty()
+            | self.agents_modal.take_dirty();
         // Another screen drew over the list: the one shown now draws it all.
         if self.shown != Some(shown) || cards_changed || overlay_changed {
             self.shown = Some(shown);
@@ -4712,9 +4774,13 @@ impl MorphApp for App {
             let layout = self.layout;
             self.plugin_modal
                 .draw(&self.plugins, &layout, &draw, &mut self.list);
-            // The preview over the agent view (plan 20261028_05, step 8).
+            // The preview over the agent view (plan 20261028_05, step 8),
+            // and the agent menu's All agents… modal.
             if shown == Shown::Agent {
                 self.preview.draw(&layout, &draw, &mut self.list);
+                let lines = self.agents_lines();
+                self.agents_modal
+                    .draw(&lines, &layout, &draw, &mut self.list);
             }
             self.menu.draw(&mut self.list, &draw);
         }
@@ -5014,6 +5080,9 @@ pub(crate) mod probe {
         pub agent_title: Option<String>,
         pub agent_child: Option<String>,
         pub child_links: Vec<(usize, Rect)>,
+        /// The All agents… modal, while open: its rows' sessions and
+        /// rects, and its ✕.
+        pub agents_modal: Option<crate::agent::agents_modal::Targets>,
     }
 
     /// When an injected event is given.
@@ -5165,6 +5234,7 @@ pub(crate) mod probe {
                         .collect()
                 })
                 .unwrap_or_default(),
+            agents_modal: app.agents_modal.targets(&app.agents_lines(), &app.layout),
         };
         PROBE.with(|p| p.borrow_mut().drawer = probe);
     }
