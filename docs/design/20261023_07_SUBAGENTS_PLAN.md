@@ -1,7 +1,7 @@
 ---
 title: Subagents, listed and shown in the agent view as the main agent is
 date: 2026-10-23
-status: Draft
+status: In implementation
 covers:
   - "Finding an agent session's subagents (Claude Code's background and
     foreground agents) and their state, behind the reader-agnostic trait"
@@ -308,3 +308,12 @@ agent view while the pane has subagents, left of the plans icon, the
 other plugins' icons and Settings, with the ⋮ always last. It counts
 toward that amendment's four. The 20:51 EDT amendment's icon, radio marks
 and menu stand.
+
+## Amendment — 2026-10-29 02:14 EDT: implementation started; the document is now immutable
+
+Implementation starts with this amendment, in the commit of step 2 (the
+protocol, libflankr_proto at its next free patch version), the first of
+steps 1 to 4 on `main-terminal`: `status` is `In implementation`, and
+the body above, with its amendments, is frozen (AGENTS.md Rule 1.5).
+Steps 1 to 4 are built now; step 5 (the app) follows the plan-table app
+work. Departures are recorded in `CHANGES.md`.

@@ -208,6 +208,54 @@ pub struct AgentInfo {
     /// the daemon has one; redacted, at most [`TURN_TEXT_MAX`] characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// The session's subagents (the subagents plan, decision 2): at most
+    /// [`CHILDREN_MAX`], the running first, then the finished, newest
+    /// first within each. Empty, and left off the wire, when it has none
+    /// or its reader reads none (only Claude Code's does).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<ChildInfo>,
+}
+
+/// The most subagents an [`AgentInfo`] lists.
+pub const CHILDREN_MAX: usize = 16;
+
+/// A subagent of an agent's session, as `agents.list` reports it (the
+/// subagents plan, decision 2, and the 17:47 EDT amendment, items 3 and
+/// 5). Its `id` names it to `session.peek`, `session.subscribe` and
+/// `speech.summarize` (their `child`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildInfo {
+    /// The agent's own id for it (Claude Code's agent id). A handle, never
+    /// shown.
+    pub id: String,
+    /// One or two words of its purpose, made by the daemon from
+    /// `description` (stop words and task verbs removed), else `kind`:
+    /// "overview screen".
+    pub short: String,
+    /// As the parent agent gave it, redacted.
+    pub description: String,
+    /// The subagent's type (`general-purpose`, `Explore`); empty when not
+    /// known.
+    #[serde(default)]
+    pub kind: String,
+    /// Started in the background.
+    #[serde(default)]
+    pub background: bool,
+    /// Marked finished, or not written for 60 s.
+    #[serde(default)]
+    pub finished: bool,
+    /// Its first entry's time, in seconds since 1970 on the daemon's
+    /// clock, for its elapsed minutes; 0 when not known.
+    #[serde(default)]
+    pub started: u64,
+    /// The parent's tool call that started it (Claude Code's `Agent`
+    /// call id), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_by: Option<String>,
+    /// Its turn, as [`AgentInfo::turn`] is the agent's. Absent when its
+    /// transcript could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<Turn>,
 }
 
 /// Where an agent's turn stands, from its own session (plan 20261023_04,
@@ -272,6 +320,12 @@ pub struct SessionPeekParams {
     /// 1 to `PEEK_ENTRIES_MAX`.
     #[serde(default = "peek_entries_default")]
     pub entries: usize,
+    /// A subagent of the pane's session, by [`ChildInfo::id`]: its
+    /// transcript is read instead of the main session's (the subagents
+    /// plan, decision 2). One the session does not have is
+    /// `UNKNOWN_AGENT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<String>,
 }
 
 /// An agent's session as `session.peek` reads it. The entries are
@@ -306,6 +360,10 @@ pub struct SpeechSummarizeParams {
     /// find the entry.
     #[serde(default)]
     pub text: String,
+    /// The reply is a subagent's, by [`ChildInfo::id`] (the subagents
+    /// plan, decision 2): it is found in that subagent's transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1347,6 +1405,13 @@ pub struct SessionSubscribeParams {
     /// 0 with a reset, which drops only the outline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub epoch: Option<u64>,
+    /// A subagent of the pane's session, by [`ChildInfo::id`] (the
+    /// subagents plan, decision 2): its transcript is delivered instead of
+    /// the main session's, with its own status (`working` while it runs,
+    /// `done` once finished). One the session does not have is
+    /// `UNKNOWN_AGENT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1902,6 +1967,121 @@ mod tests {
         }
     }
 
+    /// The subagents plan, step 2: `child` on the session methods,
+    /// `AgentInfo::children` and `ChildInfo`.
+    #[test]
+    fn subagents_round_trip_and_methods_without_child_read_as_before() {
+        let child = ChildInfo {
+            id: "b2c3d4e5f6071829".to_string(),
+            short: "session readers".to_string(),
+            description: "Find the session readers docs".to_string(),
+            kind: "Explore".to_string(),
+            background: false,
+            finished: true,
+            started: 1_767_693_900,
+            started_by: None,
+            turn: Some(Turn::Stopped {
+                line: "Found them.".to_string(),
+            }),
+        };
+        round_trip(child.clone());
+        assert_eq!(
+            serde_json::to_value(&child).unwrap(),
+            json!({
+                "id": "b2c3d4e5f6071829", "short": "session readers",
+                "description": "Find the session readers docs", "kind": "Explore",
+                "background": false, "finished": true, "started": 1_767_693_900u64,
+                "turn": {"state": "stopped", "line": "Found them."}
+            })
+        );
+        // The least a child can be sent as.
+        let least: ChildInfo = serde_json::from_value(
+            json!({"id": "x", "short": "general-purpose", "description": "x"}),
+        )
+        .unwrap();
+        assert_eq!(
+            least,
+            ChildInfo {
+                id: "x".to_string(),
+                short: "general-purpose".to_string(),
+                description: "x".to_string(),
+                ..ChildInfo::default()
+            }
+        );
+        // An agent with none: no `children` on the wire, and an older list
+        // reads as none.
+        let agent: AgentInfo = serde_json::from_value(json!({
+            "pane_id": "p1", "agent": "claude", "status": "working", "focused": false
+        }))
+        .unwrap();
+        assert!(agent.children.is_empty());
+        assert!(
+            serde_json::to_value(&agent)
+                .unwrap()
+                .get("children")
+                .is_none()
+        );
+        let with = AgentInfo {
+            children: vec![child.clone()],
+            ..agent
+        };
+        round_trip(with.clone());
+        assert_eq!(
+            serde_json::to_value(&with).unwrap()["children"][0]["short"],
+            "session readers"
+        );
+        // `child` on each session method; without it, as before.
+        for (method, without) in [
+            ("session.peek", json!({"pane_id": "p1"})),
+            ("speech.summarize", json!({"pane_id": "p1", "ts": "t"})),
+            ("session.subscribe", json!({"pane_id": "p1"})),
+        ] {
+            let mut with = without.clone();
+            with["child"] = json!("b2c3d4e5f6071829");
+            let (old, new) = match method {
+                "session.peek" => (
+                    serde_json::from_value::<SessionPeekParams>(without.clone())
+                        .unwrap()
+                        .child,
+                    serde_json::from_value::<SessionPeekParams>(with)
+                        .unwrap()
+                        .child,
+                ),
+                "speech.summarize" => (
+                    serde_json::from_value::<SpeechSummarizeParams>(without.clone())
+                        .unwrap()
+                        .child,
+                    serde_json::from_value::<SpeechSummarizeParams>(with)
+                        .unwrap()
+                        .child,
+                ),
+                _ => (
+                    serde_json::from_value::<SessionSubscribeParams>(without.clone())
+                        .unwrap()
+                        .child,
+                    serde_json::from_value::<SessionSubscribeParams>(with)
+                        .unwrap()
+                        .child,
+                ),
+            };
+            assert_eq!(old, None, "{method}");
+            assert_eq!(new.as_deref(), Some("b2c3d4e5f6071829"), "{method}");
+        }
+        let summarize = SpeechSummarizeParams {
+            pane_id: "p1".to_string(),
+            ts: "t".to_string(),
+            text: String::new(),
+            child: None,
+        };
+        assert!(
+            serde_json::to_value(&summarize)
+                .unwrap()
+                .get("child")
+                .is_none()
+        );
+        assert_eq!(CHILDREN_MAX, 16);
+    }
+
     #[test]
     fn the_subscription_types_round_trip() {
         let s = Serial::new(0x3fa9_c21e, 412, 0);
@@ -1912,6 +2092,7 @@ mod tests {
             outline: false,
             from: None,
             epoch: None,
+            child: None,
         });
         let p: SessionSubscribeParams =
             serde_json::from_value(json!({"pane_id": "w2:pZ"})).unwrap();
@@ -2064,6 +2245,7 @@ mod tests {
             outline: true,
             from: Some(8),
             epoch: Some(0x5eed),
+            child: None,
         };
         round_trip(p.clone());
         assert_eq!(serde_json::to_value(&p).unwrap()["from"], 8);
@@ -2375,6 +2557,19 @@ mod tests {
                 idle_ms: Some(4_000),
                 subagents_running: Some(2),
                 summary: Some("The plan is written.".to_string()),
+                children: vec![ChildInfo {
+                    id: "a1b2c3d4e5f60718".to_string(),
+                    short: "overview screen".to_string(),
+                    description: "Build the overview screen plan".to_string(),
+                    kind: "general-purpose".to_string(),
+                    background: true,
+                    finished: false,
+                    started: 1_767_693_601,
+                    started_by: Some("toolu_f6_build".to_string()),
+                    turn: Some(Turn::Working {
+                        line: "Bash cargo test".to_string(),
+                    }),
+                }],
             }],
             focus: Some(FocusInfo {
                 pane_id: "w2:pZ".to_string(),
@@ -2397,6 +2592,12 @@ mod tests {
         round_trip(SessionPeekParams {
             pane_id: "p1".to_string(),
             entries: 200,
+            child: None,
+        });
+        round_trip(SessionPeekParams {
+            pane_id: "p1".to_string(),
+            entries: 40,
+            child: Some("a1b2c3d4e5f60718".to_string()),
         });
         round_trip(SessionPeekResult {
             session: Some(SessionPeek {
@@ -2424,6 +2625,13 @@ mod tests {
             pane_id: "w2:pZ".to_string(),
             ts: "2026-10-23T06:00:00.000Z".to_string(),
             text: "Done: `src/prompts.rs` added.".to_string(),
+            child: None,
+        });
+        round_trip(SpeechSummarizeParams {
+            pane_id: "w2:pZ".to_string(),
+            ts: "2026-10-23T06:00:00.000Z".to_string(),
+            text: String::new(),
+            child: Some("a1b2c3d4e5f60718".to_string()),
         });
         round_trip(SpeechSummarizeResult {
             read: "I added the prompts module.".to_string(),
@@ -2737,6 +2945,13 @@ mod tests {
         // no id, and the pending question is left out when there is none.
         let peek: SessionPeekParams = serde_json::from_value(json!({"pane_id": "p1"})).unwrap();
         assert_eq!(peek.entries, PEEK_ENTRIES_DEFAULT);
+        // Without `child`, the main session, as before; and none is
+        // written when there is none.
+        assert_eq!(peek.child, None);
+        assert_eq!(
+            serde_json::to_value(&peek).unwrap(),
+            json!({"pane_id": "p1", "entries": 40})
+        );
         assert_eq!(
             serde_json::to_value(AgentSessionInfo {
                 session_id: None,

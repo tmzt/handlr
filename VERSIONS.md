@@ -781,3 +781,17 @@ and `Event`):
   answer in `CHOICE_ANSWER_WAIT`.
 - **Added:** `client::CHOICE_ANSWER_WAIT` (20 s).
 - Takes libflankr_proto 0.5.5.
+
+## libflankr_proto 0.5.6 — 2026-10-29 (the commit tagged `libflankr_proto-v0.5.6`)
+
+Plan 20261023_07 (subagents), step 2. Strictly additive (fields appended;
+defaulted when absent; left off the wire when empty or `None`):
+
+- **Added:** `AgentInfo::children` (`Vec<ChildInfo>`): at most
+  `CHILDREN_MAX` (16), running first, then finished, newest first within
+  each.
+- **Added:** `common::ChildInfo` (`id`, `short`, `description`, `kind`,
+  `background`, `finished`, `started`, `started_by`, `turn`; `Default`).
+- **Added:** `child: Option<String>` on `SessionPeekParams`,
+  `SpeechSummarizeParams` and `SessionSubscribeParams`; without it the main
+  session is read, as before; an unknown child is `UNKNOWN_AGENT`.
