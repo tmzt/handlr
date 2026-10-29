@@ -24,6 +24,11 @@
 use libherdr::protocol::AgentStatus;
 
 use super::redact::redact;
+use libflankr_proto::common::{
+    CHOICE_DETAIL_MAX, CHOICE_HEADER_MAX, CHOICE_LABEL_MAX, CHOICE_PREVIEW_MAX, ChoiceOption,
+    ChoiceQuestion, ChoiceSet,
+};
+
 use super::{EntryKind, Item, PENDING_QUESTION_MAX, PendingQuestion, Role, cut};
 use crate::suggestions::{Suggestions, Who};
 
@@ -48,6 +53,9 @@ pub fn pending_question(
     quiet: bool,
     asker: Option<&Asker>,
 ) -> Option<PendingQuestion> {
+    if let Some(at) = open_choice(items, status, quiet) {
+        return choice_question(&items[at]);
+    }
     let last = items
         .iter()
         .rposition(|i| i.role == Role::Assistant && i.kind == EntryKind::Text)?;
@@ -66,6 +74,78 @@ pub fn pending_question(
         return None;
     }
     question_for(&items[last], asker)
+}
+
+/// The index in `items` of the open choice question (plan 20261029_01,
+/// decision 4): the newest tool call with `choices` whose `call_id` has no
+/// result after it, when only context follows it and the pane waits or
+/// the file is quiet.
+pub(crate) fn open_choice(items: &[Item], status: &AgentStatus, quiet: bool) -> Option<usize> {
+    let at = items
+        .iter()
+        .rposition(|i| i.kind == EntryKind::ToolUse && i.choices.is_some())?;
+    let id = items[at].call_id.as_deref()?;
+    let after = &items[at + 1..];
+    if after
+        .iter()
+        .any(|i| i.kind == EntryKind::ToolResult && i.call_id.as_deref() == Some(id))
+    {
+        return None;
+    }
+    if !after.iter().all(|i| i.origin.is_some()) {
+        return None;
+    }
+    let waiting = matches!(
+        status,
+        AgentStatus::Idle | AgentStatus::Blocked | AgentStatus::Done
+    );
+    (waiting || quiet).then_some(at)
+}
+
+/// The pending question of a call with `choices`: every text redacted and
+/// cut to its bound, `text` the first question's. `SUGGESTIONS.md`'s rules
+/// are not applied, and it has no `answers`.
+pub(crate) fn choice_question(call: &Item) -> Option<PendingQuestion> {
+    let set = call.choices.as_ref()?;
+    let shown = |s: &str, max: usize| cut(&redact(s), max);
+    let questions = set
+        .questions
+        .iter()
+        .map(|q| {
+            let options = q
+                .options
+                .iter()
+                .map(|o| {
+                    ChoiceOption::new(
+                        shown(&o.label, CHOICE_LABEL_MAX),
+                        shown(&o.detail, CHOICE_DETAIL_MAX),
+                        o.preview.as_deref().map(|p| shown(p, CHOICE_PREVIEW_MAX)),
+                    )
+                })
+                .collect();
+            ChoiceQuestion::new(
+                shown(&q.header, CHOICE_HEADER_MAX),
+                shown(&q.text, PENDING_QUESTION_MAX),
+                q.multi,
+                q.other,
+                options,
+            )
+        })
+        .collect::<Vec<_>>();
+    let text = questions.first()?.text.clone();
+    Some(PendingQuestion {
+        text,
+        ts: call.ts.clone(),
+        about_plan: false,
+        plan: None,
+        links: Vec::new(),
+        answers: Vec::new(),
+        choices: Some(ChoiceSet::new(
+            set.id.clone(),
+            questions,
+            set.source.clone(),
+        )),
+    })
 }
 
 /// The question a reply asks, whether or not it waits: its final
@@ -105,6 +185,7 @@ pub fn question_for(reply: &Item, asker: Option<&Asker>) -> Option<PendingQuesti
         plan,
         links: Vec::new(),
         answers,
+        choices: None,
     })
 }
 
@@ -154,6 +235,8 @@ mod tests {
             text: text.to_string(),
             call_id: None,
             origin: None,
+            choices: None,
+            choice_result: None,
         }
     }
 
@@ -167,6 +250,8 @@ mod tests {
             text: "Bash {}".to_string(),
             call_id: None,
             origin: None,
+            choices: None,
+            choice_result: None,
         }
     }
 

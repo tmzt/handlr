@@ -99,6 +99,9 @@ pub struct HerdrToolExecutor {
     /// `[llm.uses.planning]` while it is on: what `list_files` and
     /// `read_file` may read (plan 20261027_04, decision 4).
     pub planning: Option<PlanningConfig>,
+    /// When set, a send to a pane showing a choice question is refused
+    /// (plan 20261029_01, decision 6).
+    pub sessions: Option<Arc<Sessions>>,
 }
 
 impl HerdrToolExecutor {
@@ -113,11 +116,19 @@ impl HerdrToolExecutor {
             current_agent: None,
             tab_follows_focus: false,
             planning: None,
+            sessions: None,
         }
     }
 
     pub fn with_planning(mut self, planning: PlanningConfig) -> Self {
         self.planning = Some(planning);
+        self
+    }
+
+    /// Refuse sends to a pane showing a choice question, read from these
+    /// sessions (plan 20261029_01, decision 6).
+    pub fn with_sessions(mut self, sessions: Arc<Sessions>) -> Self {
+        self.sessions = Some(sessions);
         self
     }
 
@@ -488,6 +499,20 @@ impl HerdrToolExecutor {
             None => "shell".to_string(),
         };
         self.addressed(&pane_id);
+
+        // Plan 20261029_01, decision 6: typed text would land in the
+        // question's screen as keystrokes.
+        if let (Some(sessions), Some(snap)) = (&self.sessions, &snapshot)
+            && let Some(reason) = crate::sessions::choice_refusal(
+                sessions,
+                !matches!(self.client.transport(), HerdrTransport::RemoteSsh { .. }),
+                snap,
+                &pane_id,
+            )
+        {
+            log::warn!("Refused '{text}' for pane '{pane_id}': {reason}");
+            return Err(reason);
+        }
 
         let message = !policy::is_allow_listed(&self.agents, &agent_name, text);
         log::info!(

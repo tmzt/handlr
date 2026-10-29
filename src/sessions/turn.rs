@@ -94,6 +94,8 @@ mod tests {
             text: text.to_string(),
             call_id: None,
             origin: None,
+            choices: None,
+            choice_result: None,
         }
     }
 
@@ -107,6 +109,8 @@ mod tests {
             text: text.to_string(),
             call_id: None,
             origin: None,
+            choices: None,
+            choice_result: None,
         }
     }
 

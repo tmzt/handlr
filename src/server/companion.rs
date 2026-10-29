@@ -770,7 +770,8 @@ async fn work(
             log: Arc::clone(&log),
             utterance: Some(text.clone()),
         })
-        .with_current_agent(Arc::clone(&session.current_agent), conn.tab_follows_focus());
+        .with_current_agent(Arc::clone(&session.current_agent), conn.tab_follows_focus())
+        .with_sessions(Arc::clone(&daemon.sessions));
     let executor = match planning {
         Some((config, _)) => executor.with_planning(config),
         None => executor,

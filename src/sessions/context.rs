@@ -180,6 +180,8 @@ mod tests {
             text: text.to_string(),
             call_id: None,
             origin: None,
+            choices: None,
+            choice_result: None,
         }
     }
 
@@ -265,6 +267,7 @@ mod tests {
             plan: None,
             links: vec![],
             answers: vec![],
+            choices: None,
         };
         let block = AgentContext::new("Claude", "p1", "blocked", &items, Some(q));
         let text = block.render();
@@ -288,6 +291,7 @@ mod tests {
                     plan: None,
                     links: vec![],
                     answers: vec![],
+                    choices: None,
                 };
                 AgentContext::new(
                     &format!("Agent {a}"),

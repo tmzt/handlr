@@ -157,6 +157,25 @@ pub fn is_allow_listed(agents: &[AgentConfig], agent: &str, command: &str) -> bo
         })
 }
 
+/// Check that a choice question's answer may be given (plan 20261029_01,
+/// decision 6): the agent's entry and reach as for a command, and its
+/// `allow_messages`, an answer being the user telling the agent something.
+/// Each Other text is checked with [`check_message`] as well.
+pub fn check_answer(
+    principal: &Principal,
+    agents: &[AgentConfig],
+    agent: &str,
+    pane_id: &str,
+) -> Result<(), Denied> {
+    let agent_cfg = entry(principal, agents, agent, pane_id)?;
+    if !agent_cfg.allow_messages {
+        return Err(Denied::MessagesOff {
+            agent: agent.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Check a dictated message (plan 20261023_02, decision 6 as amended):
 /// the agent's entry and reach as for a command, its `allow_messages`, then
 /// `validate_message`, and `check_paths` against `root`, the agent's project

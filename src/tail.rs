@@ -629,6 +629,7 @@ mod tests {
             plan: None,
             links: vec![],
             answers: vec![],
+            choices: None,
         }));
         assert_eq!(
             delivery_lines(&asked, &mut printed),

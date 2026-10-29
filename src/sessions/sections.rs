@@ -372,7 +372,9 @@ pub fn cards(
         }
         let next = placed[i + 1..].iter().find(|n| n.item.origin.is_none());
         // The pending question's reply: a live Question card.
-        if let Some(q) = live.and_then(|l| l.pending_question)
+        if let Some(q) = live
+            .and_then(|l| l.pending_question)
+            .filter(|q| q.choices.is_none())
             && Some(i) == last_reply
             && q.ts == p.item.ts
         {
@@ -392,6 +394,45 @@ pub fn cards(
                 }
             }
             _ => {}
+        }
+    }
+    // 2b. A choice question (plan 20261029_01, decision 4): live at the
+    // pending one's call, resolved at an answered one's.
+    for (i, p) in placed.iter().enumerate() {
+        let (Some(set), Some(id)) = (&p.item.choices, p.item.call_id.as_deref()) else {
+            continue;
+        };
+        if p.item.kind != EntryKind::ToolUse {
+            continue;
+        }
+        if let Some(q) = live
+            .and_then(|l| l.pending_question)
+            .filter(|q| q.choices.as_ref().is_some_and(|c| c.id == id))
+        {
+            out.push(question_card(file, p, q, true, name, linker));
+            continue;
+        }
+        let result = placed[i + 1..].iter().find(|r| {
+            r.item.kind == EntryKind::ToolResult
+                && r.item.call_id.as_deref() == Some(id)
+                && r.line.saturating_sub(p.line) <= REACH
+        });
+        if let Some(outcome) = result.and_then(|r| r.item.choice_result.as_ref()) {
+            let text = super::cut(&redact::redact(&choice_lines(set, outcome)), CARD_TEXT_MAX);
+            out.push(card(
+                Serial::new(file, p.line, SLOT_QUESTION),
+                CardBody {
+                    card: CardKind::Question,
+                    live: false,
+                    title: format!("{name} is asking"),
+                    links: linker.links(&text),
+                    text,
+                    confirm_id: None,
+                    about_plan: false,
+                    points: Vec::new(),
+                    spoken: None,
+                },
+            ));
         }
     }
     // 3. Something broke.
@@ -450,6 +491,28 @@ pub fn cards(
     out.sort_by_key(|s| s.serial.to_u64());
     out.dedup_by_key(|s| s.serial.to_u64());
     out
+}
+
+/// An answered choice question's card text: one line per question,
+/// `<header>: <answer>` (the question's text where it has no header), or
+/// `Closed on the Mac` when the call was rejected.
+pub(crate) fn choice_lines(set: &super::ChoiceSet, outcome: &super::ChoiceOutcome) -> String {
+    if outcome.rejected {
+        return "Closed on the Mac".to_string();
+    }
+    set.questions
+        .iter()
+        .zip(outcome.answers_for(set))
+        .map(|(q, a)| {
+            let head = if q.header.is_empty() {
+                &q.text
+            } else {
+                &q.header
+            };
+            format!("{head}: {}", a.as_deref().unwrap_or("(no answer)"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Whether the pane's state ends the turn on its newest reply: idle,

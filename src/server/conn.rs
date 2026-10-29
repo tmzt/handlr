@@ -942,6 +942,9 @@ async fn call(
         methods::TERMINAL_MOUSE if conn.is_companion() => super::terminal::mouse(conn, raw).await,
         methods::TERMINAL_RESIZE if conn.is_companion() => super::terminal::resize(conn, raw),
         methods::TERMINAL_PASTE if conn.is_companion() => super::terminal::paste(conn, raw).await,
+        // Plan 20261029_01, decision 2: for companions; anyone else gets
+        // METHOD_NOT_FOUND below.
+        methods::CHOICE_ANSWER if conn.is_companion() => super::choice::answer(conn, raw).await,
         companion::methods::PLUGIN_CALL if conn.is_companion() => {
             plugin_call(conn, request_id, params(raw)?)
         }
@@ -1130,6 +1133,19 @@ async fn call(
             let snap = snapshot(conn).await?;
             let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
             let agent = extract_agent_name_for_pane(&snap, &pane_id);
+            // Plan 20261029_01, decision 6: not while a choice question
+            // is open, whatever the kind.
+            if let Some(reason) = crate::sessions::choice_refusal(
+                &daemon.sessions,
+                !matches!(
+                    daemon.client.transport(),
+                    libherdr::transport::HerdrTransport::RemoteSsh { .. }
+                ),
+                &snap,
+                &pane_id,
+            ) {
+                return Err(ErrorObject::new(codes::NOT_PERMITTED, reason));
+            }
             if !p.parts.is_empty() {
                 return send_parts(conn, &snap, &pane_id, &agent, p).await;
             }

@@ -24,9 +24,11 @@ use serde_json::Value;
 
 use std::time::SystemTime;
 
+use libflankr_proto::common::{ChoiceOption, ChoiceQuestion, ChoiceSet};
+
 use super::{
-    EntryKind, Item, LineReader, Located, Matched, Role, SUBAGENT_LIVE, SessionReader, Subagents,
-    TEXT_MAX, TOOL_TEXT_MAX, cut, jsonl_newest_first, safe_id,
+    ChoiceOutcome, EntryKind, Item, LineReader, Located, Matched, Role, SUBAGENT_LIVE,
+    SessionReader, Subagents, TEXT_MAX, TOOL_TEXT_MAX, cut, jsonl_newest_first, safe_id,
 };
 
 /// How much of a file's start is searched for its `cwd`.
@@ -181,6 +183,8 @@ impl LineReader for ClaudeCode {
                 text: cut(text, TEXT_MAX),
                 call_id: None,
                 origin: None,
+                choices: None,
+                choice_result: None,
             })
         };
         match content {
@@ -192,6 +196,12 @@ impl LineReader for ClaudeCode {
                     Some("tool_use") => {
                         let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                         let input = b.get("input").map(Value::to_string).unwrap_or_default();
+                        let call_id = b.get("id").and_then(|i| i.as_str()).map(str::to_string);
+                        // Parsed from the whole input, before the cut.
+                        let choices = match (name, &call_id, b.get("input")) {
+                            (ASK_TOOL, Some(id), Some(input)) => ask_choices(id, input),
+                            _ => None,
+                        };
                         Some(Item {
                             pos: 0,
                             ts: ts.clone(),
@@ -199,14 +209,17 @@ impl LineReader for ClaudeCode {
                             kind: EntryKind::ToolUse,
                             tool: Some(name.to_string()),
                             text: cut(&format!("{name} {input}"), TOOL_TEXT_MAX),
-                            call_id: b.get("id").and_then(|i| i.as_str()).map(str::to_string),
+                            call_id,
                             origin: None,
+                            choices,
+                            choice_result: None,
                         })
                     }
                     Some("tool_result") => {
                         let body = result_text(b.get("content"));
-                        let error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true)
-                            && super::parse_command_exit_code(&body) != Some(0);
+                        let is_error = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+                        let choice_result = choice_outcome(v.get("toolUseResult"), &body, is_error);
+                        let error = is_error && super::parse_command_exit_code(&body) != Some(0);
                         let text = if error {
                             format!("error: {body}")
                         } else {
@@ -224,6 +237,8 @@ impl LineReader for ClaudeCode {
                                 .and_then(|i| i.as_str())
                                 .map(str::to_string),
                             origin: None,
+                            choices: None,
+                            choice_result,
                         })
                     }
                     // thinking, redacted_thinking, images and anything new.
@@ -325,6 +340,136 @@ fn meta_finished(path: &Path) -> bool {
         == Some(true)
 }
 
+/// Claude Code's question tool (plan 20261029_01).
+pub(crate) const ASK_TOOL: &str = "AskUserQuestion";
+/// The `source` of a Claude Code choice question.
+pub(crate) const ASK_SOURCE: &str = "claude_code/AskUserQuestion";
+/// The most of a choice result's text kept for finding its answers.
+const CHOICE_CONTENT_MAX: usize = 64 * 1024;
+
+/// The choice question an `AskUserQuestion` call with id `id` asks, from
+/// its whole `input` (plan 20261029_01, decision 4): each question's
+/// `header`, `question`, `multiSelect` and `options[].{label, description,
+/// preview}`; `other` unless the question is single-select with a
+/// preview (finding 4). `None` for the extended form (a `title`, or a
+/// question whose `kind` is not `"choice"`), for a malformed input, and
+/// for one outside decision 1's bounds: it stays a plain call, answered on
+/// the Mac.
+pub(crate) fn ask_choices(id: &str, input: &Value) -> Option<ChoiceSet> {
+    if input.get("title").is_some() {
+        return None;
+    }
+    let str_of = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
+    let mut questions = Vec::new();
+    for q in input.get("questions")?.as_array()? {
+        if q.get("kind").is_some_and(|k| k.as_str() != Some("choice")) {
+            return None;
+        }
+        let multi = q.get("multiSelect").and_then(Value::as_bool) == Some(true);
+        let mut options = Vec::new();
+        for o in q.get("options")?.as_array()? {
+            options.push(ChoiceOption::new(
+                str_of(o, "label")?,
+                str_of(o, "description").unwrap_or_default(),
+                str_of(o, "preview"),
+            ));
+        }
+        let preview = options.iter().any(|o| o.preview.is_some());
+        questions.push(ChoiceQuestion::new(
+            str_of(q, "header").unwrap_or_default(),
+            str_of(q, "question")?,
+            multi,
+            multi || !preview,
+            options,
+        ));
+    }
+    let set = ChoiceSet::new(id, questions, ASK_SOURCE);
+    set.within_bounds().then_some(set)
+}
+
+/// What a `tool_result` says about a choice question, if it may be the
+/// answer to one (plan 20261029_01, decision 4): `toolUseResult`'s
+/// `answers` by question when it has `questions` and `answers`; else the
+/// content, when it reads as answered (`Your questions have been
+/// answered:` or `The user answered:`); `rejected` when the result is an
+/// error saying the tool use was rejected. Whether it is the answer to a
+/// choice question is known by its `call_id`.
+pub(crate) fn choice_outcome(
+    structured: Option<&Value>,
+    body: &str,
+    is_error: bool,
+) -> Option<ChoiceOutcome> {
+    if is_error {
+        return body
+            .trim_start()
+            .starts_with("The user doesn't want to proceed with this tool use")
+            .then(|| ChoiceOutcome {
+                rejected: true,
+                ..ChoiceOutcome::default()
+            });
+    }
+    if let Some(r) = structured.filter(|r| r.get("questions").is_some())
+        && let Some(answers) = r.get("answers").and_then(Value::as_object)
+    {
+        let order: Vec<&str> = r
+            .get("questions")
+            .and_then(Value::as_array)
+            .map(|qs| {
+                qs.iter()
+                    .filter_map(|q| q.get("question").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut pairs: Vec<(String, String)> = order
+            .iter()
+            .filter_map(|q| {
+                let a = answers.get(*q)?.as_str()?;
+                Some((q.to_string(), a.to_string()))
+            })
+            .collect();
+        for (q, a) in answers {
+            if !order.contains(&q.as_str())
+                && let Some(a) = a.as_str()
+            {
+                pairs.push((q.clone(), a.to_string()));
+            }
+        }
+        return Some(ChoiceOutcome {
+            answers: pairs,
+            ..ChoiceOutcome::default()
+        });
+    }
+    let t = body.trim_start();
+    (t.starts_with("Your questions have been answered:") || t.starts_with("The user answered:"))
+        .then(|| ChoiceOutcome {
+            content: Some(cut(t, CHOICE_CONTENT_MAX)),
+            ..ChoiceOutcome::default()
+        })
+}
+
+/// The most of a session file's end searched for a call's line.
+const VERSION_SEARCH_MAX: u64 = 4 * 1024 * 1024;
+
+/// The Claude Code `version` on the line of tool call `id` in the session
+/// file at `path`, searched for in the file's last 4 MiB (plan 20261029_01,
+/// decision 5: logged with each answer).
+pub(crate) fn call_version(path: &Path, id: &str) -> Option<String> {
+    use std::io::{Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(VERSION_SEARCH_MAX)))
+        .ok()?;
+    let mut buf = Vec::new();
+    file.take(VERSION_SEARCH_MAX).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    let quoted = format!("\"{id}\"");
+    text.lines()
+        .rev()
+        .filter(|l| l.contains(&quoted) && l.contains("\"tool_use\""))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find_map(|v| v.get("version").and_then(Value::as_str).map(str::to_string))
+}
+
 /// The longest text of an entry that is context (a notification, a
 /// peer's message, a recap), in characters.
 pub(crate) const NOTICE_MAX: usize = 300;
@@ -403,6 +548,8 @@ fn queued_item(v: &Value, line_ts: &str) -> Option<Item> {
         text: cut(text, TEXT_MAX),
         call_id: None,
         origin: None,
+        choices: None,
+        choice_result: None,
     })
 }
 
@@ -482,6 +629,8 @@ fn notice(ts: &str, origin: String, text: &str) -> Option<Item> {
         text: cut(text, NOTICE_MAX),
         call_id: None,
         origin: Some(origin),
+        choices: None,
+        choice_result: None,
     })
 }
 
@@ -1054,3 +1203,6 @@ mod tests {
         assert!(activity.idle_ms.is_some());
     }
 }
+
+#[cfg(test)]
+mod choice_tests;

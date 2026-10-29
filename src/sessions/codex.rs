@@ -193,6 +193,8 @@ impl LineReader for Codex {
                     text: cut(&text, TEXT_MAX),
                     call_id: None,
                     origin: None,
+                    choices: None,
+                    choice_result: None,
                 }
             }
             Some("function_call") | Some("custom_tool_call") | Some("local_shell_call") => {
@@ -214,6 +216,8 @@ impl LineReader for Codex {
                     text: cut(&format!("{name} {input}"), TOOL_TEXT_MAX),
                     call_id,
                     origin: None,
+                    choices: None,
+                    choice_result: None,
                 }
             }
             Some("function_call_output") | Some("custom_tool_call_output") => {
@@ -237,6 +241,8 @@ impl LineReader for Codex {
                     text: cut(&text, TOOL_TEXT_MAX),
                     call_id,
                     origin: None,
+                    choices: None,
+                    choice_result: None,
                 }
             }
             // reasoning, and anything new.

@@ -289,6 +289,8 @@ fn decode_step(idx: u64, step_type: i64, status: i64, payload: &[u8]) -> Vec<Ite
                 text: cut(text, TEXT_MAX),
                 call_id: None,
                 origin: None,
+                choices: None,
+                choice_result: None,
             }]
         }
         15 => {
@@ -306,6 +308,8 @@ fn decode_step(idx: u64, step_type: i64, status: i64, payload: &[u8]) -> Vec<Ite
                         text: cut(narration, TEXT_MAX),
                         call_id: None,
                         origin: None,
+                        choices: None,
+                        choice_result: None,
                     });
                 }
             }
@@ -331,6 +335,8 @@ fn decode_step(idx: u64, step_type: i64, status: i64, payload: &[u8]) -> Vec<Ite
                         text: cut(&text, TOOL_TEXT_MAX),
                         call_id,
                         origin: None,
+                        choices: None,
+                        choice_result: None,
                     });
                 }
             }
@@ -352,6 +358,8 @@ fn decode_step(idx: u64, step_type: i64, status: i64, payload: &[u8]) -> Vec<Ite
                         text: cut(reply, TEXT_MAX),
                         call_id: None,
                         origin: None,
+                        choices: None,
+                        choice_result: None,
                     });
                 }
             }
@@ -388,6 +396,8 @@ fn decode_step(idx: u64, step_type: i64, status: i64, payload: &[u8]) -> Vec<Ite
                 text: cut(&text, TOOL_TEXT_MAX),
                 call_id,
                 origin: None,
+                choices: None,
+                choice_result: None,
             }]
         }
         101 => {
@@ -406,6 +416,8 @@ fn decode_step(idx: u64, step_type: i64, status: i64, payload: &[u8]) -> Vec<Ite
                 text: cut(title, TEXT_MAX),
                 call_id: None,
                 origin: Some("task".to_string()),
+                choices: None,
+                choice_result: None,
             }]
         }
         23 => {

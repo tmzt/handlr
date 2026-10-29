@@ -5,6 +5,7 @@
 //! requests on a connection run concurrently and `cancel` aborts one.
 
 pub mod blob;
+mod choice;
 pub mod companion;
 pub mod conn;
 pub mod herdr_attach;
@@ -108,6 +109,9 @@ pub struct Daemon {
     /// Binary transfers: the `images` store and the `git` cap (plan
     /// 20261028_05).
     pub blob: blob::BlobService,
+    /// Panes with a `choice.answer` being driven (plan 20261029_01): a
+    /// second answer to the same pane is refused meanwhile.
+    pub choice_answering: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl Daemon {
@@ -203,6 +207,7 @@ impl Daemon {
             herdr_attach,
             plugins,
             blob,
+            choice_answering: Default::default(),
         });
         // `[llm.uses.card_summaries]`: each new Finished card summarised
         // once, while card summaries are available.

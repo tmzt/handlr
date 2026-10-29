@@ -338,6 +338,8 @@ impl LineReader for Wider {
                 text: "a note".to_string(),
                 call_id: None,
                 origin: Some("recap".to_string()),
+                choices: None,
+                choice_result: None,
             }];
         }
         self.0.parse_line(line)

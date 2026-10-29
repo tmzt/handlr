@@ -12,6 +12,7 @@
 //! [`turn`] and [`context`] all redact.
 
 pub mod agy;
+pub mod choices;
 pub mod claude;
 pub mod codex;
 pub mod context;
@@ -32,7 +33,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub use libflankr_proto::common::{
-    ENTRY_SUMMARY_MAX, Entry, EntryKind, PENDING_QUESTION_MAX, PendingQuestion, Role,
+    ChoiceSet, ENTRY_SUMMARY_MAX, Entry, EntryKind, PENDING_QUESTION_MAX, PendingQuestion, Role,
 };
 
 use crate::core::agents::AgentRef;
@@ -77,6 +78,107 @@ pub struct Item {
     /// `agent:<id>`, `recap` or `compact`. Such an entry is never the
     /// user speaking.
     pub origin: Option<String>,
+    /// A tool call that asks a choice question (plan 20261029_01,
+    /// decision 4): its questions and options, not redacted. `None` from
+    /// every reader but Claude Code's and on every other line.
+    pub(crate) choices: Option<ChoiceSet>,
+    /// A tool result that answers a choice question, as the reader read
+    /// it. Only meaningful for a result whose `call_id` is a call with
+    /// `choices`.
+    pub(crate) choice_result: Option<ChoiceOutcome>,
+}
+
+/// How a choice question was answered, as its tool result recorded it
+/// (plan 20261029_01, decision 4). Not redacted.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ChoiceOutcome {
+    /// Each question's text and its answer, from a structured result
+    /// (Claude Code: `toolUseResult.answers`), in the order asked.
+    pub answers: Vec<(String, String)>,
+    /// The result's text, when there was no structured result: its
+    /// `"<question>"="<answer>"` pairs are found once the questions are
+    /// known ([`ChoiceOutcome::answers_for`]).
+    pub content: Option<String>,
+    /// The call was rejected (Esc, Cancel on the review, or "Chat about
+    /// this"): no answers.
+    pub rejected: bool,
+}
+
+impl ChoiceOutcome {
+    /// One answer per question of `set`, in order: by its text in
+    /// `answers`, else from `content`'s pairs. `None` where none was
+    /// recorded, and for every question when rejected.
+    pub fn answers_for(&self, set: &ChoiceSet) -> Vec<Option<String>> {
+        if self.rejected {
+            return vec![None; set.questions.len()];
+        }
+        if !self.answers.is_empty() {
+            return set
+                .questions
+                .iter()
+                .map(|q| {
+                    self.answers
+                        .iter()
+                        .find(|(text, _)| *text == q.text)
+                        .map(|(_, a)| a.clone())
+                })
+                .collect();
+        }
+        let Some(content) = &self.content else {
+            return vec![None; set.questions.len()];
+        };
+        let texts: Vec<&str> = set.questions.iter().map(|q| q.text.as_str()).collect();
+        content_pairs(content, &texts)
+    }
+}
+
+/// The answer to each of `questions` in a result text of the form
+/// `… "<q1>"="<a1>", "<q2>"="<a2>". …`, a preview answer followed by
+/// ` selected preview:\n<preview>` (plan 20261029_01, finding 1). Each
+/// answer runs to the next question's pair, or, for the last found, to
+/// the closing `"` before `. ` or the preview note.
+fn content_pairs(content: &str, questions: &[&str]) -> Vec<Option<String>> {
+    let starts: Vec<Option<(usize, usize)>> = questions
+        .iter()
+        .map(|q| {
+            let key = format!("\"{q}\"=\"");
+            content.find(&key).map(|at| (at, at + key.len()))
+        })
+        .collect();
+    starts
+        .iter()
+        .map(|found| {
+            let (_, from) = (*found)?;
+            // The end: the nearest start of another found pair after this
+            // one, else the content's end.
+            let next = starts
+                .iter()
+                .flatten()
+                .map(|(at, _)| *at)
+                .filter(|at| *at > from)
+                .min()
+                .unwrap_or(content.len());
+            let mut body = &content[from..next];
+            if let Some(at) = body.find("\" selected preview:") {
+                body = &body[..at + 1];
+            }
+            if next == content.len() {
+                // The last pair: `"<a>". You can now continue …`, or
+                // `"<a>". Read the answers carefully …`.
+                let end = ["\". You can now", "\". Read the answers"]
+                    .iter()
+                    .find_map(|m| body.find(m))
+                    .or_else(|| body.rfind("\"."));
+                if let Some(at) = end {
+                    body = &body[..at + 1];
+                }
+            }
+            let body = body.trim_end();
+            let body = body.strip_suffix(',').unwrap_or(body);
+            let body = body.strip_suffix('"').unwrap_or(body);
+            Some(body.to_string())
+        })
+        .collect()
 }
 
 impl Item {
@@ -547,6 +649,93 @@ impl Sessions {
     }
 }
 
+/// A choice question open in a pane's session (plan 20261029_01): the
+/// call as its reader read it, not redacted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenChoice {
+    /// The reader's kind (`claude_code`).
+    pub kind: &'static str,
+    pub located: Located,
+    /// The questions as the agent asked them.
+    pub set: ChoiceSet,
+    /// The call's timestamp.
+    pub ts: String,
+}
+
+impl Sessions {
+    /// The choice question open in `pane`'s session, whatever herdr's
+    /// status: the newest call with choices that has no result and only
+    /// context after it (decision 4's rule, the wait not required: the
+    /// question's screen is up from the moment the call is written).
+    pub fn open_choice(&self, pane: &AgentRef) -> Option<OpenChoice> {
+        let read = self.read(pane, |items| {
+            items
+                .iter()
+                .any(|i| i.choices.is_some() || (i.is_text() && i.role == Role::Assistant))
+        })?;
+        let at = pending::open_choice(&read.items, &pane.status, true)?;
+        let call = &read.items[at];
+        Some(OpenChoice {
+            kind: read.kind,
+            located: read.located,
+            set: call.choices.clone()?,
+            ts: call.ts.clone(),
+        })
+    }
+}
+
+impl Sessions {
+    /// How choice call `id` in `pane`'s session was answered, once its
+    /// result is written (plan 20261029_01, decision 5). A result that does
+    /// not read as an answer gives an outcome with no answers.
+    pub fn choice_result(&self, pane: &AgentRef, id: &str) -> Option<ChoiceOutcome> {
+        let read = self.read(pane, |items| {
+            items
+                .iter()
+                .any(|i| i.kind == EntryKind::ToolUse && i.call_id.as_deref() == Some(id))
+        })?;
+        let result = read
+            .items
+            .iter()
+            .rev()
+            .find(|i| i.kind == EntryKind::ToolResult && i.call_id.as_deref() == Some(id))?;
+        Some(
+            result
+                .choice_result
+                .clone()
+                .unwrap_or_else(|| ChoiceOutcome {
+                    content: Some(result.text.clone()),
+                    ..ChoiceOutcome::default()
+                }),
+        )
+    }
+}
+
+/// Why a message or command to `pane_id` is refused (plan 20261029_01,
+/// decision 6): its agent is showing a choice question, which typed text
+/// would land in as keystrokes. `None` when it is not, or the pane is not
+/// in `snapshot`. Session files are only read on this machine, so the
+/// caller passes `local: false` for a remote herdr and nothing is refused.
+pub fn choice_refusal(
+    sessions: &Sessions,
+    local: bool,
+    snapshot: &serde_json::Value,
+    pane_id: &str,
+) -> Option<String> {
+    if !local {
+        return None;
+    }
+    let pane = crate::core::agents::agents(snapshot)
+        .into_iter()
+        .find(|a| crate::watch::pane_ids_match(&a.pane_id, pane_id))?;
+    sessions.reader_for(&pane.agent)?;
+    sessions.open_choice(&pane)?;
+    Some(format!(
+        "{} is showing a question; answer it with its options",
+        crate::core::naming::capitalise(&pane.agent)
+    ))
+}
+
 /// A pane's session as `session.peek` and `agents.list` report it (plan
 /// 20261022_03, step 4): redacted entries, the newest last, and the
 /// pending question for the pane's status, and where its turn stands
@@ -923,6 +1112,8 @@ mod tests {
             text: long.clone(),
             call_id: None,
             origin: None,
+            choices: None,
+            choice_result: None,
         };
         let entry = item.entry();
         assert_eq!(entry.summary.chars().count(), ENTRY_SUMMARY_MAX);
