@@ -3515,3 +3515,47 @@ The plan table of the 2026-10-28 23:14 EDT amendment and those after it.
    nothing and `Input::Choose` fails with `NOT_PERMITTED`. `Output`
    carries `#[allow(clippy::large_enum_variant)]`, because
    `Event::AgentView` grew and boxing it would change the public type.
+
+## 2026-10-29 02:32 EDT — Plan 20261023_07 (subagents), step 5's departures
+
+Step 5 (the app), on flankr-companion 0.5.6, with the 2026-10-28 20:46,
+20:51 and 22:03 EDT amendments' agent menu in place of the chips.
+
+1. Decision 4's link: an `Entry` carries no tool call id, so the app does
+   not use `ChildInfo.started_by`. A call to `Agent` (or `Task`, its older
+   name) is matched to a subagent by the `description` in its input
+   (`Entry::text`, read even when the input was cut) against
+   `ChildInfo.description`: the same, or the start of it where the daemon
+   cut it with "…". Within a section, a subagent is linked from its
+   first call only. The link replaces the call's dim "> Agent {…}" line,
+   in the flow's text colour at the tool size, and does not fold; the
+   call's result line stays as it was.
+2. Decision 3's header: "<parent> › <description>" uses the subagent's
+   description, else its short name, type or id. The system Back on a
+   subagent sends `Input::CloseChild` (decision 3, "Back returns to the
+   parent"); the header's ‹ still closes the view (`Input::CloseAgent`).
+3. Decision 5: while a subagent is shown, Approve and Deny, the daemon's
+   answers, the suggested responses (Yes, No, approve, discuss,
+   implement) and a choice card's taps take no taps, and the buttons are
+   drawn at the disabled alpha; the row's Continue is not offered. The
+   choice card's own rows are not dimmed. The record button stays live
+   and sends to the parent pane.
+4. The menu's minutes are whole minutes since `ChildInfo.started`, on
+   the phone's clock, shown from 6 ("past 5"); none while `started` is 0.
+   The menu's items follow the subagents and their minutes while it is
+   open, and it closes when the last subagent goes. A label is the short
+   name, else the description, type or id.
+5. The 20:51 EDT amendment, item 1: libmsdf at the app's pin (0.6.1,
+   `76448a7`) has no U+2299 on the terminal face, so the ⊙ is drawn as a
+   plain ring (8.5 pt radius, 2 pt stroke) in the title's text colour. The
+   app checks the face when it draws, so the glyph is used once a libmsdf
+   that has it is pinned, with no other change.
+6. libcontrols sets the mark style per `PopupMenu`, so the app's one
+   shared menu is attached again with `PopupMarkStyle::Radio` when the
+   agent menu opens, and with checks when any other menu opens. The radio
+   sizes are libcontrols' defaults at the app's scale.
+7. Decision 6: "· N running" counts the listed subagents not finished
+   and is added to the card's state line. A subagent's question is shown
+   only while the agent itself does not ask; the state line names it
+   ("Asking · overview screen"), its question is the card's text, and the
+   card has the inactive Yes and No as for the agent's own question.
