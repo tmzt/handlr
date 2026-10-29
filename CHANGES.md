@@ -3237,3 +3237,31 @@ Small departures needed to make it work:
 9. Version numbers: libflankr_proto takes 0.5.3 here, so plan 20261028_05
    (binary transfers, Draft) takes the next free numbers when built
    (libflankr_proto 0.5.4, flankr-companion 0.5.2).
+
+## 2026-10-29 00:18 EDT — Plan 20261028_06 (the bottom bar updated), its departures
+
+1. Step 1 was built in libcontrols as 0.10.6 (toggle items), not the plan's
+   0.10.5, by release order; the app takes libcontrols 0.10.8 (with
+   libmsdf 0.6.1, moved together) and the volume menu stays open on a toggle.
+2. Decision 11.4: Paste text uses libmorph 0.5.1's `clipboard_has_text` and
+   `clipboard_text` (Android through libmobile 0.3.2 under libmorph's
+   `mobile-clipboard` feature; the Mac through libdevice), not an
+   `android::clipboard::read_text` named in the plan; the menu enables
+   Paste text from `clipboard_has_text`, so Android 12 shows no toast until
+   the user pastes.
+3. Step 6, decision 9: the keys row's CTRL/ALT latch clears when the arm
+   ends, not when the keyboard hides, as the row now stays while the
+   keyboard is down.
+4. Step 4, decision 7 (agreed by the owner, 2026-10-29): the right button's
+   2 s hold opens the typed message card even with the microphone off
+   (record dim); its tap still needs the microphone; on the overview the
+   hold also works with the general agent off.
+5. Decisions 11.2 and 11.3 with the 23:39 EDT amendment (the owner,
+   2026-10-29, "Show Gemini's + on desktop"): the desktop build shows
+   Gemini's + and its row, with Paste text through the Mac's clipboard; the
+   message card's + stays hidden without `images`; no keyboard toggle on the
+   desktop.
+6. Step 3: with All sound off, the volume glyph is dimmed but still shows
+   whether the options are on, rather than switching to the ✕.
+7. flankr-audio's `morph` libmorph pin moves with the companion's to 0.5.1,
+   since libmorph's `links = "libmorph"` allows one revision in a graph.
