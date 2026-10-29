@@ -3607,3 +3607,17 @@ Step 5 (the app), on flankr-companion 0.5.6, with the 2026-10-28 20:46,
 5. The modal reuses the plugin modal's frame and look through shared helpers
    factored out of `plugins/modal.rs` (no change for plugin modals), not a
    libcontrols `ModalDialog`.
+
+## 2026-10-29 15:18 EDT — the text input cards' microphone: two departures
+
+Plan 20261028_06 (bottom bar), the 2026-10-29 15:09 EDT amendment:
+
+1. **Item 1, the glyph:** the amendment names "the record button's mic
+   glyph", but record is drawn as a dot (no bundled face has a
+   microphone character). The microphone is drawn as strokes instead
+   (`mic_glyph` in `controls/square_button.rs`): a filled capsule
+   8 × 13 pt, the holder's U of radius 7 pt, a stem and a 10 pt base, at
+   1.8 pt, in `theme().fg`.
+2. **Item 1, where:** the microphone shows with the keyboard toggle, on a
+   phone only (decision 11.3), so the desktop's cards keep the row they
+   had (Gemini's + alone; none on the message card).
