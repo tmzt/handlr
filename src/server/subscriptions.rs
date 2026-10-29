@@ -45,6 +45,7 @@ use crate::core::confirm::{ConfirmEvent, Lifetime};
 use crate::sessions::hub::{self, Batch, LineIndex, Snapshot, Tailer};
 use crate::sessions::sections::REACH;
 use crate::sessions::{Located, redact};
+use libherdr::protocol::AgentStatus;
 
 /// The least time between two deliveries of a subscription.
 pub const GAP: Duration = Duration::from_millis(250);
@@ -191,6 +192,9 @@ struct Task {
     outline_last: Option<u64>,
     /// Outline mode: the epoch the client said it holds, for resuming.
     client_epoch: Option<u64>,
+    /// The subagent of the pane's session read instead of the main one
+    /// (the subagents plan, decision 2).
+    child: Option<String>,
 }
 
 /// `session.subscribe`: resolve the pane, check the principal, and answer
@@ -230,6 +234,18 @@ pub(super) async fn subscribe(
             format!("{} may not reach {}", conn.principal().id, named.shown),
         ));
     }
+    // A subagent the pane's session does not have is unknown (the
+    // subagents plan, step 3); its status is its own.
+    let mut status = conn::wire_status(&named.agent.status);
+    if let Some(id) = p.child.as_deref() {
+        let child = conn::sessions_here(daemon)
+            .then(|| daemon.sessions.child(&named.agent, id))
+            .flatten();
+        let Some((_, child)) = child else {
+            return Err(conn::unknown_child(&named.shown, Some(id)));
+        };
+        status = conn::wire_status(&crate::sessions::child_status(&child));
+    }
     let sub = Arc::new(Subscription {
         id: conn.next_subscription_id(),
         cancel: CancellationToken::new(),
@@ -248,7 +264,7 @@ pub(super) async fn subscribe(
         session: None,
         reason: None,
         waiting: Waiting::default(),
-        status: conn::wire_status(&named.agent.status),
+        status,
         question: None,
         last_seq: 0,
         last_sent: None,
@@ -258,6 +274,7 @@ pub(super) async fn subscribe(
         opened: None,
         outline_last: None,
         client_epoch: p.epoch,
+        child: p.child,
     };
     task.open(p.after, p.from).await;
     let delivery = task.take_delivery();
@@ -389,6 +406,19 @@ impl Task {
         &self.conn.daemon
     }
 
+    /// The session this subscription reads and the status it is read
+    /// with: the pane's, or its subagent's own (the subagents plan,
+    /// decision 2). `None` when there is none on this machine.
+    fn locate(&self, daemon: &Daemon) -> Option<(Located, AgentStatus)> {
+        if !conn::sessions_here(daemon) {
+            return None;
+        }
+        match daemon.sessions.locate_in(&self.pane, self.child.as_deref()) {
+            Ok(Some((_, located, read_as))) => Some((located, read_as.status)),
+            _ => None,
+        }
+    }
+
     /// Locate the pane's session and make the first delivery: a backfill,
     /// only what follows `after` when that is still of this file, or a
     /// reason. In outline mode, the outline from `from` when `after` is
@@ -414,12 +444,13 @@ impl Task {
         if daemon.sessions.reader_for(&self.pane.agent).is_none() {
             return self.no_session(delivery_reasons::NO_READER);
         }
-        let located = conn::sessions_here(&daemon)
-            .then(|| daemon.sessions.locate(&self.pane).map(|(_, l)| l))
-            .flatten();
-        let Some(located) = located else {
+        let Some((located, live)) = self.locate(&daemon) else {
             return self.no_session(delivery_reasons::NO_SESSION);
         };
+        if self.child.is_some() {
+            self.status = conn::wire_status(&live);
+            self.waiting.status = Some(self.status.clone());
+        }
         let subscribed = daemon
             .hub
             .subscribe(&self.pane.agent, self.pane.cwd.as_deref(), &located)
@@ -431,7 +462,7 @@ impl Task {
                 return self.no_session(delivery_reasons::NO_SESSION);
             }
         };
-        tailer.set_live(&self.name, &self.pane.status);
+        tailer.set_live(&self.name, &live);
         // The journal's confirmations still waiting are live cards.
         for a in tailer.unresolved() {
             if daemon.broker.pending(a.confirm_id).is_some() {
@@ -766,14 +797,22 @@ impl Task {
         };
         let pane = named.agent.clone();
         self.name = named.shown.clone();
-        let status = conn::wire_status(&pane.status);
+        let agent_changed = pane.agent != self.pane.agent;
+        let session_changed = pane.session != self.pane.session || pane.cwd != self.pane.cwd;
+        self.pane = pane;
+        // A subagent's status is its own: `done` once finished, and when
+        // it is no longer found.
+        let found = self.locate(&daemon);
+        let live = match (&self.child, &found) {
+            (None, _) => self.pane.status.clone(),
+            (Some(_), Some((_, live))) => live.clone(),
+            (Some(_), None) => AgentStatus::Done,
+        };
+        let status = conn::wire_status(&live);
         if status != self.status {
             self.status = status.clone();
             self.waiting.status = Some(status);
         }
-        let agent_changed = pane.agent != self.pane.agent;
-        let session_changed = pane.session != self.pane.session || pane.cwd != self.pane.cwd;
-        self.pane = pane;
         if agent_changed {
             self.permitted = self.conn.principal().may_reach(&self.pane.agent);
             self.open(None, None).await;
@@ -781,12 +820,10 @@ impl Task {
         }
         let tailer = self.sub.tailer.lock().unwrap().clone();
         if let Some(t) = &tailer {
-            t.set_live(&self.name, &self.pane.status);
+            t.set_live(&self.name, &live);
         }
         // A different file, as after `/clear`, or one found at last.
-        let now = conn::sessions_here(&daemon)
-            .then(|| daemon.sessions.locate(&self.pane).map(|(_, l)| l))
-            .flatten();
+        let now = found.map(|(located, _)| located);
         let moved = match (&self.located, &now) {
             (Some(a), Some(b)) => a.path != b.path,
             (None, Some(_)) => {

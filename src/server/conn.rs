@@ -803,6 +803,7 @@ struct Listed {
     idle_ms: Option<u64>,
     subagents_running: Option<u32>,
     summary: Option<String>,
+    children: Vec<common::ChildInfo>,
 }
 
 /// The session of the agent in `pane`, its turn (plan 20261023_04, A4),
@@ -821,6 +822,8 @@ fn agent_session(daemon: &Daemon, pane: &agents::AgentRef, now: SystemTime) -> L
     };
     peeked.link(daemon.repowiki.as_deref(), pane.cwd.as_deref());
     let activity = crate::sessions::activity(reader, &peeked.located, now);
+    // Its subagents (the subagents plan, decision 2).
+    let children = daemon.sessions.children_info(reader, &peeked.located);
     let summary = peeked
         .last_reply
         .and_then(|line| {
@@ -840,6 +843,7 @@ fn agent_session(daemon: &Daemon, pane: &agents::AgentRef, now: SystemTime) -> L
         idle_ms: activity.idle_ms,
         subagents_running: activity.subagents_running,
         summary,
+        children,
     }
 }
 
@@ -849,6 +853,16 @@ pub(super) async fn snapshot(conn: &Conn) -> Result<Value, ErrorObject> {
         .list_panes()
         .await
         .map_err(herdr_unavailable)
+}
+
+/// `-32002` for a subagent `child` that the session of the pane named
+/// `shown` does not have (the subagents plan, step 3), or for any subagent
+/// when the session files are not on this machine.
+pub(super) fn unknown_child(shown: &str, child: Option<&str>) -> ErrorObject {
+    ErrorObject::new(
+        codes::UNKNOWN_AGENT,
+        format!("{shown} has no subagent '{}'", child.unwrap_or_default()),
+    )
 }
 
 /// `-32002` for a target that names no pane or more than one. An
@@ -989,6 +1003,7 @@ async fn call(
                         idle_ms: listed.idle_ms,
                         subagents_running: listed.subagents_running,
                         summary: listed.summary,
+                        children: listed.children,
                         status: wire_status(&a.status),
                         pane_id: a.pane_id,
                         name: Some(named.shown),
@@ -1062,9 +1077,22 @@ async fn call(
                     format!("{} may not reach {}", conn.principal().id, named.shown),
                 ));
             }
-            let session = sessions_here(daemon)
-                .then(|| daemon.sessions.peek(pane, p.entries))
-                .flatten()
+            // A subagent's session (the subagents plan, decision 2), read
+            // with its own status; one the session lacks is unknown.
+            let peeked = match sessions_here(daemon)
+                .then(|| daemon.sessions.peek_in(pane, p.child.as_deref(), p.entries))
+            {
+                Some(Ok(peeked)) => peeked,
+                Some(Err(crate::sessions::UnknownChild)) | None if p.child.is_some() => {
+                    return Err(unknown_child(&named.shown, p.child.as_deref()));
+                }
+                _ => None,
+            };
+            let status = match (&p.child, &peeked) {
+                (Some(_), Some(peeked)) => peeked.status.clone(),
+                _ => pane.status.clone(),
+            };
+            let session = peeked
                 .map(|mut peeked| {
                     peeked.link(daemon.repowiki.as_deref(), pane.cwd.as_deref());
                     peeked
@@ -1077,7 +1105,7 @@ async fn call(
                 });
             ok(common::SessionPeekResult {
                 session,
-                status: wire_status(&pane.status),
+                status: wire_status(&status),
             })
         }
         methods::SESSION_SUBSCRIBE => {

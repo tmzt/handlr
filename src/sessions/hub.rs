@@ -905,8 +905,9 @@ impl Tailer {
         linker: &Linker,
     ) -> std::io::Result<TailState> {
         let (index, flagged) = LineIndex::scan(path)?;
+        // A subagent's transcript has its own reader (the subagents plan).
         let reader = sessions
-            .line_reader_for(agent)
+            .line_reader_at(agent, path)
             .ok_or_else(|| std::io::Error::other(format!("no line reader for {agent}")))?;
         let secrets = secret_calls(reader, path, &index, &flagged)?;
         let last = index.lines();
@@ -1014,7 +1015,7 @@ impl Tailer {
 
     /// The reader of this tailer's agent.
     fn reader(&self) -> Option<&dyn LineReader> {
-        self.sessions.line_reader_for(&self.agent)
+        self.sessions.line_reader_at(&self.agent, &self.path)
     }
 
     /// Subscribe: the batches from now, and the state they follow from.

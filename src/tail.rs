@@ -424,6 +424,7 @@ async fn subscribe(
                 outline,
                 from: None,
                 epoch: None,
+                child: None,
             },
         )
         .await?,

@@ -27,7 +27,7 @@ use std::time::SystemTime;
 use libflankr_proto::common::{ChoiceOption, ChoiceQuestion, ChoiceSet};
 
 use super::{
-    ChoiceOutcome, EntryKind, Item, LineReader, Located, Matched, Role, SUBAGENT_LIVE,
+    Child, ChoiceOutcome, EntryKind, Item, LineReader, Located, Matched, Role, SUBAGENT_LIVE,
     SessionReader, Subagents, TEXT_MAX, TOOL_TEXT_MAX, cut, jsonl_newest_first, safe_id,
 };
 
@@ -131,11 +131,53 @@ impl LineReader for ClaudeCode {
     }
 
     fn parse_line(&self, line: &str) -> Vec<Item> {
+        parse_line(line, false)
+    }
+}
+
+/// The reader of a subagent's own transcript
+/// (`<session>/subagents/agent-<id>.jsonl`, the subagents plan, decision
+/// 1), where every line is marked `isSidechain`: read as a main session
+/// is, those lines included.
+pub struct ClaudeChild;
+
+/// The one [`ClaudeChild`].
+pub static CHILD_READER: ClaudeChild = ClaudeChild;
+
+impl LineReader for ClaudeChild {
+    fn is_bookkeeping(&self, line: &[u8]) -> bool {
+        is_bookkeeping(line)
+    }
+
+    fn parse_line(&self, line: &str) -> Vec<Item> {
+        parse_line(line, true)
+    }
+}
+
+/// Whether `path` is a subagent's transcript: `agent-<id>.jsonl` in a
+/// `subagents` directory.
+pub fn is_child_path(path: &Path) -> bool {
+    let in_subagents = path
+        .parent()
+        .and_then(|d| d.file_name())
+        .is_some_and(|n| n == "subagents");
+    let named = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with("agent-") && n.ends_with(".jsonl"));
+    in_subagents && named
+}
+
+/// The entries of one line of a Claude Code transcript. A main session
+/// skips the lines of subagents (`isSidechain`); a subagent's own
+/// transcript (`sidechain`) is made of them.
+fn parse_line(line: &str, sidechain: bool) -> Vec<Item> {
+    {
         let Ok(v) = serde_json::from_str::<Value>(line) else {
             return Vec::new();
         };
         let flag = |k: &str| v.get(k).and_then(|f| f.as_bool()) == Some(true);
-        if flag("isSidechain") {
+        if flag("isSidechain") && !sidechain {
             return Vec::new();
         }
         let ts = v
@@ -279,7 +321,14 @@ impl SessionReader for ClaudeCode {
         at: &Located,
         enough: &dyn Fn(&[Item]) -> bool,
     ) -> Result<super::Read, String> {
+        if is_child_path(&at.path) {
+            return super::read_tail(&CHILD_READER, &at.path, enough);
+        }
         super::read_tail(self, &at.path, enough)
+    }
+
+    fn children(&self, at: &Located) -> Vec<Child> {
+        children_at(at, SystemTime::now())
     }
 
     /// From `<session dir>/subagents/agent-<id>.jsonl` and its
@@ -325,19 +374,104 @@ fn subagents_dir(path: &Path) -> PathBuf {
 /// The most of a subagent's meta file that is read.
 const META_MAX: u64 = 64 * 1024;
 
+/// The subagent meta file at `path`, parsed; `None` when it is missing,
+/// unreadable or not JSON.
+fn read_meta(path: &Path) -> Option<Value> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    file.take(META_MAX).read_to_end(&mut buf).ok()?;
+    serde_json::from_slice::<Value>(&buf).ok()
+}
+
 /// Whether the subagent meta file at `path` says `"finished": true`.
 fn meta_finished(path: &Path) -> bool {
-    let Ok(file) = std::fs::File::open(path) else {
-        return false;
+    read_meta(path).and_then(|v| v.get("finished").and_then(Value::as_bool)) == Some(true)
+}
+
+/// The most of a subagent transcript's start searched for its first
+/// entry's time.
+const FIRST_LINE_MAX: usize = 64 * 1024;
+
+/// The time of the first line of the transcript at `path`, in seconds
+/// since 1970: its `timestamp`, else the file's creation time.
+fn first_entry_secs(path: &Path) -> Option<u64> {
+    let from_line = super::first_line(path, FIRST_LINE_MAX)
+        .and_then(|l| serde_json::from_str::<Value>(&l).ok())
+        .and_then(|v| {
+            v.get("timestamp")
+                .and_then(Value::as_str)
+                .and_then(super::children::rfc3339_secs)
+        });
+    from_line.or_else(|| {
+        path.metadata()
+            .and_then(|m| m.created())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+    })
+}
+
+/// The children of the session `at` as of `now` (the subagents plan,
+/// decision 1): each `agent-<id>.jsonl` in its subagents directory, with
+/// its `agent-<id>.meta.json`'s `description`, `agentType`,
+/// `requestShape`, `toolUseId` and `worktreeBranch` (never
+/// `worktreePath`). A child is finished when its meta says so, or when
+/// its transcript has not been written within [`SUBAGENT_LIVE`], as
+/// [`ClaudeCode::subagents`] counts the running. A missing or unreadable
+/// meta gives the id as the description. Newest first, by the first
+/// entry's time, then by id.
+pub(crate) fn children_at(at: &Located, now: SystemTime) -> Vec<Child> {
+    let dir = subagents_dir(&at.path);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
     };
-    let mut buf = Vec::new();
-    if file.take(META_MAX).read_to_end(&mut buf).is_err() {
-        return false;
+    let mut found = Vec::new();
+    for path in entries.flatten().map(|e| e.path()) {
+        let Some(id) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".jsonl"))
+            .and_then(|n| n.strip_prefix("agent-"))
+            .filter(|id| safe_id(id))
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let Some(modified) = path.metadata().ok().and_then(|m| m.modified().ok()) else {
+            continue;
+        };
+        let meta = read_meta(&dir.join(format!("agent-{id}.meta.json")));
+        let field = |k: &str| {
+            meta.as_ref()
+                .and_then(|m| m.get(k))
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+        };
+        let marked = meta
+            .as_ref()
+            .and_then(|m| m.get("finished"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        let recent = now.duration_since(modified).unwrap_or_default() <= SUBAGENT_LIVE;
+        found.push(Child {
+            description: field("description").unwrap_or_else(|| id.clone()),
+            kind: field("agentType").unwrap_or_default(),
+            background: field("requestShape").as_deref() == Some("background"),
+            finished: marked || !recent,
+            started_by: field("toolUseId"),
+            worktree: field("worktreeBranch"),
+            started: first_entry_secs(&path),
+            located: Located {
+                path,
+                session_id: Some(id.clone()),
+                matched: Matched::Id,
+            },
+            id,
+        });
     }
-    serde_json::from_slice::<Value>(&buf)
-        .ok()
-        .and_then(|v| v.get("finished").and_then(Value::as_bool))
-        == Some(true)
+    found.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| a.id.cmp(&b.id)));
+    found
 }
 
 /// Claude Code's question tool (plan 20261029_01).
@@ -1185,6 +1319,137 @@ mod tests {
         assert_eq!(crate::sessions::activity(&r, &at, earlier).idle_ms, Some(0));
     }
 
+    /// The fixture session with two subagents: one finished with its
+    /// meta, one running without one (the subagents plan, step 1).
+    fn agents_session() -> Located {
+        reader()
+            .locate(
+                Some(Path::new("/work/agents")),
+                Some("00000000-0000-4000-8000-0000000000f6"),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn children_are_listed_with_their_fields_newest_first() {
+        let at = agents_session();
+        let running = at
+            .path
+            .with_extension("")
+            .join("subagents/agent-b2c3d4e5f6071829.jsonl");
+        let written = running.metadata().unwrap().modified().unwrap();
+        let now = written + std::time::Duration::from_secs(1);
+        let kids = children_at(&at, now);
+        let ids: Vec<&str> = kids.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["b2c3d4e5f6071829", "a1b2c3d4e5f60718"]);
+        // No meta: the id as its description, running while written.
+        let b2 = &kids[0];
+        assert_eq!(b2.description, "b2c3d4e5f6071829");
+        assert_eq!(
+            (b2.kind.as_str(), b2.background, b2.finished),
+            ("", false, false)
+        );
+        assert_eq!((&b2.started_by, &b2.worktree), (&None, &None));
+        assert_eq!(
+            b2.started,
+            super::super::children::rfc3339_secs("2026-01-06T10:05:00.000Z")
+        );
+        assert_eq!(b2.located.path, running);
+        assert_eq!(b2.located.session_id.as_deref(), Some("b2c3d4e5f6071829"));
+        // From its meta: the branch, never the worktree's path.
+        let a1 = &kids[1];
+        assert_eq!(a1.description, "Build the overview screen plan");
+        assert_eq!(a1.kind, "general-purpose");
+        assert!(a1.background && a1.finished);
+        assert_eq!(a1.started_by.as_deref(), Some("toolu_f6_build"));
+        assert_eq!(a1.worktree.as_deref(), Some("wt-overview"));
+        assert_eq!(
+            a1.started,
+            super::super::children::rfc3339_secs("2026-01-06T10:00:01.500Z")
+        );
+        assert!(!format!("{kids:?}").contains("worktrees/overview"));
+        // Their short names.
+        let shorts: Vec<String> = kids
+            .iter()
+            .map(|c| super::super::children::short_name(&c.description, &c.kind))
+            .collect();
+        assert_eq!(shorts, ["b2c3d4e5f6071829", "overview screen"]);
+        // The running count agrees.
+        assert_eq!(reader().subagents(&at, now).unwrap().running, 1);
+        // Unwritten for longer than SUBAGENT_LIVE: finished too.
+        let later = now + SUBAGENT_LIVE;
+        assert!(children_at(&at, later).iter().all(|c| c.finished));
+        assert_eq!(reader().subagents(&at, later).unwrap().running, 0);
+        // The trait's own call reads the same children.
+        assert_eq!(reader().children(&at).len(), 2);
+        // No subagents directory: none.
+        let plain = reader()
+            .locate(
+                Some(Path::new("/work/example")),
+                Some("00000000-0000-4000-8000-0000000000a1"),
+            )
+            .unwrap();
+        assert!(reader().children(&plain).is_empty());
+    }
+
+    #[test]
+    fn a_subagents_transcript_reads_as_items() {
+        let at = agents_session();
+        let kids = reader().children(&at);
+        let a1 = kids.iter().find(|c| c.id == "a1b2c3d4e5f60718").unwrap();
+        assert!(is_child_path(&a1.located.path));
+        assert!(!is_child_path(&at.path));
+        let items = reader().read_back(&a1.located, &|_| false).unwrap().items;
+        assert_eq!(
+            texts(&items),
+            vec![
+                (
+                    Role::User,
+                    EntryKind::Text,
+                    "Build the overview screen.".into()
+                ),
+                (
+                    Role::Assistant,
+                    EntryKind::Text,
+                    "I will build it in the worktree.".into()
+                ),
+                (
+                    Role::Assistant,
+                    EntryKind::ToolUse,
+                    r#"Bash {"command":"cargo test"}"#.into()
+                ),
+                (
+                    Role::Tool,
+                    EntryKind::ToolResult,
+                    "test result: ok. 12 passed".into()
+                ),
+                (
+                    Role::Assistant,
+                    EntryKind::Text,
+                    "Built the overview screen; the tests pass.\n\nShall I commit it?".into()
+                ),
+            ]
+        );
+        assert_eq!(items[3].tool.as_deref(), Some("Bash"));
+        // Its question is found as the main agent's is.
+        let q = crate::sessions::pending::pending_question(
+            &items,
+            &libherdr::protocol::AgentStatus::Done,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(q.text, "Shall I commit it?");
+        // The parent's own transcript still skips subagents' lines.
+        let parent = reader().read_back(&at, &|_| false).unwrap().items;
+        assert_eq!(parent.len(), 4);
+        assert!(parent.iter().all(|i| !i.text.contains("worktree")));
+        // The main reader skips a sidechain line; the child's reads it.
+        let line = r#"{"isSidechain":true,"type":"assistant","message":{"content":"x"}}"#;
+        assert!(reader().parse_line(line).is_empty());
+        assert_eq!(CHILD_READER.parse_line(line).len(), 1);
+    }
+
     #[test]
     fn other_readers_read_no_subagents() {
         let s = Sessions::with_home(&fixture("home"));
@@ -1198,6 +1463,7 @@ mod tests {
         };
         let now = SystemTime::now();
         assert_eq!(codex.subagents(&at, now), None);
+        assert!(codex.children(&at).is_empty());
         let activity = crate::sessions::activity(codex, &at, now);
         assert_eq!(activity.subagents_running, None);
         assert!(activity.idle_ms.is_some());

@@ -12,6 +12,7 @@
 //! [`turn`] and [`context`] all redact.
 
 pub mod agy;
+pub mod children;
 pub mod choices;
 pub mod claude;
 pub mod codex;
@@ -29,12 +30,14 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read as _, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 pub use libflankr_proto::common::{
     ChoiceSet, ENTRY_SUMMARY_MAX, Entry, EntryKind, PENDING_QUESTION_MAX, PendingQuestion, Role,
 };
+
+pub use children::Child;
 
 use crate::core::agents::AgentRef;
 use crate::suggestions::{SuggestionStore, Who};
@@ -360,6 +363,14 @@ pub trait SessionReader: Send + Sync {
         None
     }
 
+    /// The sessions started from `at`, newest first (the subagents plan,
+    /// decision 1): nested ones listed flat with the rest (the 17:49 EDT
+    /// amendment), finished ones for the session's life. None by default;
+    /// only Claude Code's reader finds them.
+    fn children(&self, _at: &Located) -> Vec<Child> {
+        Vec::new()
+    }
+
     /// The last `n` entries of the file at `path`.
     fn tail(&self, path: &Path, n: usize) -> Result<Vec<Item>, String> {
         let at = Located {
@@ -566,6 +577,32 @@ pub struct Sessions {
     /// The rules that give a pending question its answers (plan
     /// 20261027_06): the shipped ones until the daemon names its files.
     pub suggestions: Arc<SuggestionStore>,
+    /// Subagents' turns as last read, by transcript, with the transcript's
+    /// modification time and length and whether it was finished then: a
+    /// list reads only the transcripts that changed.
+    child_turns: Mutex<HashMap<PathBuf, ChildTurn>>,
+}
+
+/// A subagent's turn as read from its transcript at a modification time
+/// and length, finished or not.
+type ChildTurn = (Option<SystemTime>, u64, bool, turn::Turn);
+
+/// The most subagents' turns [`Sessions`] keeps.
+const CHILD_TURNS_MAX: usize = 512;
+
+/// A subagent named that the pane's session does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnknownChild;
+
+/// The status a subagent's session is read with (the subagents plan,
+/// decision 1): herdr's status is its parent's, so `done` once it is
+/// finished, else `working`.
+pub fn child_status(child: &Child) -> libherdr::protocol::AgentStatus {
+    if child.finished {
+        libherdr::protocol::AgentStatus::Done
+    } else {
+        libherdr::protocol::AgentStatus::Working
+    }
 }
 
 impl Default for Sessions {
@@ -599,6 +636,7 @@ impl Sessions {
                 .join("flankr")
                 .join("sessions"),
             suggestions: Arc::new(SuggestionStore::shipped()),
+            child_turns: Mutex::new(HashMap::new()),
         }
     }
 
@@ -622,6 +660,112 @@ impl Sessions {
         }
     }
 
+    /// The line-based reader for the file at `path` of an agent: a Claude
+    /// Code subagent's transcript has its own (the subagents plan,
+    /// decision 1), every other file its agent's.
+    pub fn line_reader_at(&self, agent: &str, path: &Path) -> Option<&dyn LineReader> {
+        if agent == "claude" && claude::is_child_path(path) {
+            return Some(&claude::CHILD_READER);
+        }
+        self.line_reader_for(agent)
+    }
+
+    /// The subagent `id` of the session of the agent in `pane`, if its
+    /// session has one by that id (the subagents plan, decision 2).
+    pub fn child(&self, pane: &AgentRef, id: &str) -> Option<(&dyn SessionReader, Child)> {
+        let (reader, located) = self.locate(pane)?;
+        let child = reader.children(&located).into_iter().find(|c| c.id == id)?;
+        Some((reader, child))
+    }
+
+    /// The session to read for `pane`, or for its subagent `child`: its
+    /// reader, where it is, and the pane as it is read, a subagent's with
+    /// its own status ([`child_status`]). `Ok(None)` when the pane has no
+    /// session here; [`UnknownChild`] when it has no such subagent.
+    #[allow(clippy::type_complexity)]
+    pub fn locate_in(
+        &self,
+        pane: &AgentRef,
+        child: Option<&str>,
+    ) -> Result<Option<(&dyn SessionReader, Located, AgentRef)>, UnknownChild> {
+        let Some(id) = child else {
+            return Ok(self
+                .locate(pane)
+                .map(|(reader, located)| (reader, located, pane.clone())));
+        };
+        let (reader, child) = self.child(pane, id).ok_or(UnknownChild)?;
+        let as_read = AgentRef {
+            status: child_status(&child),
+            ..pane.clone()
+        };
+        Ok(Some((reader, child.located, as_read)))
+    }
+
+    /// The subagents of the session `at`, as `agents.list` gives them (the
+    /// subagents plan, decision 2): at most [`CHILDREN_MAX`], the running
+    /// first, then the finished, newest first within each; each with its
+    /// short name and its turn, its description redacted and cut.
+    ///
+    /// [`CHILDREN_MAX`]: libflankr_proto::common::CHILDREN_MAX
+    pub fn children_info(
+        &self,
+        reader: &dyn SessionReader,
+        at: &Located,
+    ) -> Vec<libflankr_proto::common::ChildInfo> {
+        use libflankr_proto::common::{CHILDREN_MAX, ChildInfo, TURN_TEXT_MAX};
+        let mut children = reader.children(at);
+        // Stable: newest first within each.
+        children.sort_by_key(|c| c.finished);
+        children.truncate(CHILDREN_MAX);
+        children
+            .into_iter()
+            .map(|c| {
+                let description = cut(&redact::redact(&c.description), TURN_TEXT_MAX);
+                ChildInfo {
+                    id: c.id.clone(),
+                    short: children::short_name(&description, &c.kind),
+                    turn: self.child_turn(reader, &c),
+                    description,
+                    kind: c.kind,
+                    background: c.background,
+                    finished: c.finished,
+                    started: c.started.unwrap_or(0),
+                    started_by: c.started_by,
+                }
+            })
+            .collect()
+    }
+
+    /// The turn of subagent `child`, read again only when its transcript
+    /// or its finishing changed since last read.
+    fn child_turn(&self, reader: &dyn SessionReader, child: &Child) -> Option<turn::Turn> {
+        let modified = reader.modified(&child.located);
+        let len = std::fs::metadata(&child.located.path).ok()?.len();
+        let key = (modified, len, child.finished);
+        if let Some((m, l, f, turn)) = self.child_turns.lock().unwrap().get(&child.located.path)
+            && (*m, *l, *f) == key
+        {
+            return Some(turn.clone());
+        }
+        let read = reader
+            .read_back(&child.located, &|items: &[Item]| {
+                items
+                    .iter()
+                    .any(|i| i.is_text() && i.role == Role::Assistant)
+            })
+            .ok()?;
+        let turn = turn::turn(&read.items, &child_status(child), child.located.quiet());
+        let mut turns = self.child_turns.lock().unwrap();
+        if turns.len() >= CHILD_TURNS_MAX {
+            turns.clear();
+        }
+        turns.insert(
+            child.located.path.clone(),
+            (modified, len, child.finished, turn.clone()),
+        );
+        Some(turn)
+    }
+
     /// The session of the agent in `pane`, if it has a reader and a file.
     pub fn locate(&self, pane: &AgentRef) -> Option<(&dyn SessionReader, Located)> {
         let reader = self.reader_for(&pane.agent)?;
@@ -635,6 +779,16 @@ impl Sessions {
     /// holds (within the reader's limits).
     pub fn read(&self, pane: &AgentRef, enough: impl Fn(&[Item]) -> bool) -> Option<SessionRead> {
         let (reader, located) = self.locate(pane)?;
+        Self::read_at(reader, located, enough)
+    }
+
+    /// Read the session at `located` with `reader` from the end until
+    /// `enough` holds (within the reader's limits).
+    pub fn read_at(
+        reader: &dyn SessionReader,
+        located: Located,
+        enough: impl Fn(&[Item]) -> bool,
+    ) -> Option<SessionRead> {
         match reader.read_back(&located, &enough) {
             Ok(read) => Some(SessionRead {
                 kind: reader.kind(),
@@ -749,6 +903,9 @@ pub struct Peeked {
     /// The position ([`Item::pos`]) of the newest entry of the agent's own
     /// reply text read, where the latest Finished card would be.
     pub last_reply: Option<u64>,
+    /// The status the session was read with: herdr's for the pane, a
+    /// subagent's own ([`child_status`]).
+    pub status: libherdr::protocol::AgentStatus,
 }
 
 impl Peeked {
@@ -771,7 +928,32 @@ impl Sessions {
     /// and its turn. Reads back until there are `n` entries and an assistant
     /// reply among them, within `read_tail`'s limits.
     pub fn peek(&self, pane: &AgentRef, n: usize) -> Option<Peeked> {
-        let read = self.read(pane, |items| {
+        self.peek_in(pane, None, n).ok().flatten()
+    }
+
+    /// As [`Sessions::peek`], of `pane`'s session or of its subagent
+    /// `child` (the subagents plan, decision 2), read with the subagent's
+    /// own status. [`UnknownChild`] when the session has no such subagent.
+    pub fn peek_in(
+        &self,
+        pane: &AgentRef,
+        child: Option<&str>,
+        n: usize,
+    ) -> Result<Option<Peeked>, UnknownChild> {
+        let Some((reader, located, pane)) = self.locate_in(pane, child)? else {
+            return Ok(None);
+        };
+        Ok(self.peek_at(reader, located, &pane, n))
+    }
+
+    fn peek_at(
+        &self,
+        reader: &dyn SessionReader,
+        located: Located,
+        pane: &AgentRef,
+        n: usize,
+    ) -> Option<Peeked> {
+        let read = Self::read_at(reader, located, |items| {
             items.len() >= n
                 && items
                     .iter()
@@ -797,6 +979,7 @@ impl Sessions {
             .map(|i| i.pos);
         let skip = read.items.len().saturating_sub(n);
         Some(Peeked {
+            status: pane.status.clone(),
             located: read.located,
             entries: read.items[skip..].iter().map(Item::entry).collect(),
             pending_question,
@@ -813,11 +996,30 @@ impl Sessions {
     /// back until the reply is found, within `read_tail`'s limits; `None`
     /// when it is not there.
     pub fn reply_text(&self, pane: &AgentRef, ts: &str) -> Option<String> {
+        self.reply_text_in(pane, None, ts).ok().flatten()
+    }
+
+    /// As [`Sessions::reply_text`], in `pane`'s session or in its subagent
+    /// `child`'s (the subagents plan, decision 2). [`UnknownChild`] when
+    /// the session has no such subagent.
+    pub fn reply_text_in(
+        &self,
+        pane: &AgentRef,
+        child: Option<&str>,
+        ts: &str,
+    ) -> Result<Option<String>, UnknownChild> {
+        let Some((reader, located, _)) = self.locate_in(pane, child)? else {
+            return Ok(None);
+        };
+        Ok(Self::reply_at(reader, located, ts))
+    }
+
+    fn reply_at(reader: &dyn SessionReader, located: Located, ts: &str) -> Option<String> {
         let is_reply = |i: &Item| i.is_text() && i.role == Role::Assistant && i.ts == ts;
         if ts.is_empty() {
             return None;
         }
-        let read = self.read(pane, |items| items.iter().any(is_reply))?;
+        let read = Self::read_at(reader, located, |items| items.iter().any(is_reply))?;
         let parts: Vec<&str> = read
             .items
             .iter()

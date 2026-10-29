@@ -416,14 +416,28 @@ pub(super) async fn speech_summarize(
             format!("{} may not reach {}", conn.principal().id, named.shown),
         ));
     }
-    let key = (pane_id.clone(), p.ts.clone());
+    // A subagent's reply is found in its transcript (the subagents plan,
+    // decision 2); one the session lacks is unknown.
+    let found = match conn::sessions_here(daemon).then(|| {
+        daemon
+            .sessions
+            .reply_text_in(pane, p.child.as_deref(), &p.ts)
+    }) {
+        Some(Ok(found)) => found,
+        Some(Err(crate::sessions::UnknownChild)) | None if p.child.is_some() => {
+            return Err(conn::unknown_child(&named.shown, p.child.as_deref()));
+        }
+        _ => None,
+    };
+    // A subagent's replies are kept apart from its pane's.
+    let key = match &p.child {
+        Some(child) => (format!("{pane_id}/{child}"), p.ts.clone()),
+        None => (pane_id.clone(), p.ts.clone()),
+    };
     let _one = conn.speech.lock().await;
     let spoken_output = conn.spoken_output();
     let cached = spoken_output.then(|| daemon.speech.cached(&key)).flatten();
-    let reply = conn::sessions_here(daemon)
-        .then(|| daemon.sessions.reply_text(pane, &p.ts))
-        .flatten()
-        .unwrap_or_else(|| crate::sessions::redact::redact(&p.text));
+    let reply = found.unwrap_or_else(|| crate::sessions::redact::redact(&p.text));
     let project = named
         .project
         .as_ref()

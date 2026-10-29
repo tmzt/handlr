@@ -1389,6 +1389,196 @@ async fn session_peek_gives_the_agent_view_its_entries_and_question() {
     assert!(r.get("error").is_none(), "{r}");
 }
 
+/// Copy the directory `from` into `to`, its files and folders.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().flatten() {
+        let path = entry.path();
+        let dest = to.join(entry.file_name());
+        if path.is_dir() {
+            copy_tree(&path, &dest);
+        } else {
+            std::fs::copy(&path, &dest).unwrap();
+        }
+    }
+}
+
+/// A home holding the fixture session with two subagents in
+/// `/work/agents` (the subagents plan, step 1): `a1…` finished, by its
+/// meta; `b2…`, without a meta, written now and so running.
+fn agents_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let project = ".claude/projects/-work-agents";
+    copy_tree(&fixture_home().join(project), &home.path().join(project));
+    let running = home
+        .path()
+        .join(project)
+        .join("00000000-0000-4000-8000-0000000000f6/subagents/agent-b2c3d4e5f6071829.jsonl");
+    std::fs::File::options()
+        .write(true)
+        .open(running)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now())
+        .unwrap();
+    home
+}
+
+/// Make the mock's pane p1 Claude Code in `/work/agents`, with the
+/// session of [`agents_home`].
+async fn give_agents_session(daemon: &Daemon) {
+    match daemon.client.transport() {
+        HerdrTransport::Mock { state } => {
+            let mut state = state.write().await;
+            let pane = &mut state.snapshot.workspaces[0].tabs[0].panes[0];
+            pane.cwd = Some("/work/agents".to_string());
+            pane.agent_session = Some(AgentSession {
+                source: "herdr:claude".to_string(),
+                agent: "claude".to_string(),
+                kind: "id".to_string(),
+                value: "00000000-0000-4000-8000-0000000000f6".to_string(),
+            });
+        }
+        _ => unreachable!("tests use the mock"),
+    }
+}
+
+#[tokio::test]
+async fn a_subagent_is_listed_and_read_by_pane_and_child() {
+    // The subagents plan, step 3.
+    let home = agents_home();
+    let env = start_home(
+        confirming(),
+        Arc::new(MockReasoningEngine::with_handler(Script)),
+        false,
+        home.path(),
+    )
+    .await;
+    give_agents_session(&env.daemon).await;
+    set_status(&env.daemon, AgentStatus::Working).await;
+    let (mut c, _) = Client::companion(&env).await;
+
+    // agents.list: the running one first, then the finished.
+    let r = c.call("agents.list", json!({})).await;
+    let agent = &r["result"]["agents"][0];
+    assert_eq!(agent["subagents_running"], 1, "{r}");
+    let children = agent["children"].as_array().unwrap();
+    let ids: Vec<&str> = children.iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["b2c3d4e5f6071829", "a1b2c3d4e5f60718"], "{r}");
+    let (b2, a1) = (&children[0], &children[1]);
+    assert_eq!(b2["finished"], false);
+    assert_eq!(b2["short"], "b2c3d4e5f6071829");
+    assert_eq!(b2["started"], 1_767_693_900u64);
+    assert_eq!(b2["turn"]["state"], "working", "{b2}");
+    assert_eq!(a1["short"], "overview screen");
+    assert_eq!(a1["description"], "Build the overview screen plan");
+    assert_eq!(
+        (&a1["kind"], &a1["background"], &a1["finished"]),
+        (&json!("general-purpose"), &json!(true), &json!(true))
+    );
+    assert_eq!(a1["started_by"], "toolu_f6_build");
+    assert_eq!(a1["started"], 1_767_693_601u64);
+    assert_eq!(
+        a1["turn"],
+        json!({"state": "asking", "question": "Shall I commit it?"})
+    );
+    // A worktree's path is never sent.
+    assert!(!r.to_string().contains("worktrees/overview"), "{r}");
+
+    // session.peek by pane and child: the finished one's entries and
+    // question, with its own status.
+    let r = c
+        .call(
+            "session.peek",
+            json!({"pane_id": "p1", "child": "a1b2c3d4e5f60718"}),
+        )
+        .await;
+    let result = &r["result"];
+    assert_eq!(result["status"], "done", "{r}");
+    let session = &result["session"];
+    assert_eq!(session["session_id"], "a1b2c3d4e5f60718");
+    let summaries: Vec<&str> = session["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["summary"].as_str().unwrap())
+        .collect();
+    assert_eq!(summaries.len(), 5, "{r}");
+    assert_eq!(summaries[0], "Build the overview screen.");
+    assert_eq!(summaries[3], "test result: ok. 12 passed");
+    assert_eq!(session["pending_question"]["text"], "Shall I commit it?");
+    // The running one: working, nothing asked.
+    let r = c
+        .call(
+            "session.peek",
+            json!({"pane_id": "p1", "child": "b2c3d4e5f6071829"}),
+        )
+        .await;
+    assert_eq!(r["result"]["status"], "working", "{r}");
+    assert!(r["result"]["session"].get("pending_question").is_none());
+    // Without a child: the main session, as before.
+    let r = c.call("session.peek", json!({"pane_id": "p1"})).await;
+    let entries = r["result"]["session"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 4, "{r}");
+    assert_eq!(
+        r["result"]["session"]["session_id"],
+        "00000000-0000-4000-8000-0000000000f6"
+    );
+    assert!(!r.to_string().contains("Shall I commit it?"), "{r}");
+
+    // An unknown child is UNKNOWN_AGENT, on each method.
+    for (method, params) in [
+        ("session.peek", json!({"pane_id": "p1", "child": "nope"})),
+        (
+            "speech.summarize",
+            json!({"pane_id": "p1", "ts": "t", "child": "nope"}),
+        ),
+        (
+            "session.subscribe",
+            json!({"pane_id": "p1", "child": "nope"}),
+        ),
+        (
+            "session.peek",
+            json!({"pane_id": "p1", "child": "../../../etc/passwd"}),
+        ),
+    ] {
+        let r = c.call(method, params).await;
+        assert_eq!(r["error"]["code"], -32002, "{method}: {r}");
+    }
+
+    // speech.summarize finds a child's reply in its transcript, not the
+    // client's text.
+    let r = c
+        .call(
+            "speech.summarize",
+            json!({"pane_id": "p1", "ts": "2026-01-06T10:04:00.000Z",
+                "text": "not this", "child": "a1b2c3d4e5f60718"}),
+        )
+        .await;
+    let read = r["result"]["read"].as_str().unwrap_or_default();
+    assert!(read.contains("Built the overview screen"), "{r}");
+
+    // session.subscribe by child: its sections, with its own status.
+    let r = c
+        .call(
+            "session.subscribe",
+            json!({"pane_id": "p1", "child": "a1b2c3d4e5f60718"}),
+        )
+        .await;
+    let delivery = &r["result"]["delivery"];
+    assert_eq!(delivery["status"], "done", "{r}");
+    assert_eq!(delivery["session"]["session_id"], "a1b2c3d4e5f60718");
+    assert!(
+        delivery
+            .to_string()
+            .contains("I will build it in the worktree."),
+        "{r}"
+    );
+    assert!(
+        !delivery.to_string().contains("Async agent launched"),
+        "{r}"
+    );
+}
+
 /// Give the mock's pane the plan question fixture's session, in
 /// `/work/plans`.
 async fn give_plan_session(daemon: &Daemon) {
