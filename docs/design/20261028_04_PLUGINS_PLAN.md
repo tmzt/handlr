@@ -957,3 +957,61 @@ Implementation starts with this amendment, in the commit of step 1
 (libflankr_proto 0.5.2) on `main-plugins`: `status` is `In implementation`,
 and the body above is frozen (AGENTS.md Rule 1.5). Departures are recorded
 in `CHANGES.md`.
+
+## Amendment — 2026-10-28 22:03 EDT: title-bar icons, with Settings moving into the ⋮ past four
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-28: "if more than
+four title icons are registered Settings moves to extra menu. agent menu,
+plan menu (reuse todo icon for now), etc. extra menu is always last";
+then, on which icon, "the todo list icon used in the terminal/transcript
+switch", then "it could use the checkbox instead"; then "yes" to this
+wording. This adds to decision 3.6: its item 1 (where the ⋮ sits) and
+item 2's **Settings** item are replaced as below; the rest of 3.6, and the
+⋮'s menu itself, stand.
+
+1. **Title icons are registered.** The app and the plugins register
+   title-bar icons for a screen. Each has an id, a glyph, a label (used
+   when it moves into the ⋮ menu), the screens it shows on (overview,
+   agent view, settings) and what a tap does (opens its own popup menu, a
+   modal or a card). The drawer's ≡ (plan 20261028_03) is not one of them
+   and is not counted.
+2. **Order, left to right, ⋮ always last.** The registered icons in this
+   order, then the ⋮:
+   - the **agent menu**, the ⊙ of the subagents plan
+     (docs/design/20261023_07_SUBAGENTS_PLAN.md, its 20:46 and 20:51 EDT
+     amendments), on the agent view while the pane has subagents;
+   - the **plans menu**, the checkbox ☑ (U+2611, from the terminal face,
+     already in its symbol page), registered by the planning plugin while
+     it is enabled, on the overview and the agent view;
+   - other plugins' icons, in the registry's order;
+   - **Settings**, the gear, on the overview and the agent view.
+   Each icon is a 42 pt square target, in the title bar's text colour, as
+   the ⋮ is (3.6 item 1).
+3. **At most four icons before the ⋮.** When more than four are
+   registered for a screen, Settings leaves the title bar and becomes the
+   ⋮ menu's last item (after a separator). If more than four still
+   remain, the last plugin icons, in reverse registry order, follow it into
+   the menu as items under their labels, above Settings. While Settings is
+   in the title bar it is not also in the ⋮ menu (this replaces 3.6 item
+   2's **Settings** item, which is now in the menu only when moved there).
+   The ⋮ shows on every screen, dim while its menu would be empty.
+4. **A plugin's icon, by name.** `PluginMenuItem` gains `icon:
+   Option<String>`, appended, defaulted and left off the wire when `None`
+   (libflankr_proto, a patch release), naming one of the app's own icons;
+   an item with an icon is a title icon, one without is a ⋮ item as
+   before. A plugin cannot send its own glyph; an unknown name is drawn as
+   the item's first letter in a ring. Names in this amendment: `plans`
+   (☑). `opens` gains `"menu"`: the icon opens a `PopupMenu` of items the
+   device half gives (an app unaware of `"menu"` opens it as `"modal"`).
+5. **The planning plugin's icon** (its 0.1.1, additive): its `plans` item
+   gains `icon: "plans"` and `opens: "menu"`. A tap opens a popup menu,
+   "Reading plans…" as a heading until `plans.list` answers, then the ten
+   newest plans by title with their status as a dim second word, and a
+   last item **All plans…** that opens today's modal; choosing a plan opens
+   the modal on that plan (`plans.show`). The device half gains
+   `DevicePlugin::menu(item) -> Vec<PopupItem>`, called again on each
+   answer while the menu is open.
+6. **Steps.** These are built after step 8 as a follow-up: libflankr_proto
+   (`icon`), the daemon's planning half (0.1.1), flankr-companion if its
+   types change, and the app (the icon slots, the overflow, `opens:
+   "menu"`). Departures are recorded in CHANGES.md as usual.
