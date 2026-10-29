@@ -810,3 +810,11 @@ amendments:
 
 The previous amendment cites "CHANGES.md, the 00:49 EDT addendum"; the
 addendum is headed 2026-10-29 00:50 EDT. Nothing else changes.
+
+## Amendment — 2026-10-29 02:06 EDT: the muted speaker has a slash
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "mute icon
+should have slash through it when muted". This adds to the 00:26 EDT
+amendment's item 4: the muted glyph is the plain speaker, dim and with no
+waves, with a diagonal slash through it from top left to bottom right, in
+the same colour and stroke width as the speaker.
