@@ -1331,22 +1331,33 @@ impl App {
         )
     }
 
-    /// A tap on the volume button (the 2026-10-29 00:26 EDT amendment of
-    /// plan 20261028_06, item 1): mutes or unmutes, kept in
-    /// `settings.toml`. Muting stops what is being said at once, as Skip
-    /// does; neither speak option changes, and the client is told as if
-    /// both were off while muted.
+    /// A tap on the volume button while nothing is being said (the
+    /// 2026-10-29 00:26 EDT amendment of plan 20261028_06, item 1, and the
+    /// 00:43 EDT amendment, item 2): mutes or unmutes, kept in
+    /// `settings.toml`. Muting stops what is being said and clears the
+    /// queue (`Input::StopReading`, the 00:43 EDT amendment, item 3);
+    /// neither speak option changes, and the client is told as if both
+    /// were off while muted.
     fn toggle_mute(&mut self) {
         let muted = !self.settings.muted;
         log::info!("volume: muted {muted}");
         if muted {
-            self.send(Input::Skip);
+            self.send(Input::StopReading);
         }
         let settings = Settings {
             muted,
             ..self.settings.clone()
         };
         self.apply_settings(settings);
+    }
+
+    /// The volume button held 1 s while something is being said (the
+    /// 2026-10-29 00:43 EDT amendment, item 1): what is said stops and the
+    /// queue is cleared; mute stays as it is, so new replies are read as
+    /// they come. Held on to 2 s, the menu still opens.
+    fn stop_reading(&mut self) {
+        log::info!("volume: stop reading");
+        self.send(Input::StopReading);
     }
 
     /// A 2 s hold on the volume button (item 2): its menu opens anchored
@@ -2473,8 +2484,10 @@ impl App {
                     self.links.push(url);
                 }
             }
-            // The volume button's tap: mute or unmute (plan 20261028_06,
-            // the 2026-10-29 00:26 EDT amendment); its hold opens the menu.
+            // The volume button's tap while nothing is said: mute or
+            // unmute (plan 20261028_06, the 2026-10-29 00:26 EDT
+            // amendment); while speaking it skips (`hold_tap`), and its
+            // hold opens the menu.
             AgentHit::Volume => self.toggle_mute(),
             // Sent or cancelled: the keyboard goes with the prompt.
             AgentHit::Submit => {
@@ -2563,7 +2576,13 @@ impl App {
             return false;
         };
         log::info!("hold: pressed {hit:?}");
-        self.hold = Some(Hold::start(touch.id, hit, [touch.x, touch.y], now));
+        let mut hold = Hold::start(touch.id, hit, [touch.x, touch.y], now);
+        // Volume pressed while something is being said: its 1 s stop
+        // comes first (the 2026-10-29 00:43 EDT amendment, item 1).
+        if hit == AgentHit::Volume && self.speaking {
+            hold = hold.with_early(crate::controls::hold::STOP_HOLD);
+        }
+        self.hold = Some(hold);
         true
     }
 
@@ -2581,22 +2600,39 @@ impl App {
             TouchPhase::Ended => {
                 let hold = self.hold.take().expect("held");
                 if hold.is_tap() {
-                    self.hold_tap(hold.hit);
+                    self.hold_tap(&hold);
                 }
             }
         }
     }
 
     /// A press released before 2 s: the control's tap. Voice starts on the
-    /// release, no longer on touch-down (decision 7).
-    fn hold_tap(&mut self, hit: AgentHit) {
+    /// release, no longer on touch-down (decision 7). Volume pressed while
+    /// something was being said skips it, the next queued reply following
+    /// (the 2026-10-29 00:43 EDT amendment, item 1).
+    fn hold_tap(&mut self, hold: &Hold) {
+        let hit = hold.hit;
         let live = if self.agent.is_some() {
             settings::allows(hit)
         } else {
             settings::allows_on_overview(hit)
         };
-        if live || matches!(hit, AgentHit::PromptAttach(_)) {
+        if hit == AgentHit::Volume && hold.has_early() {
+            if live {
+                log::info!("volume: skip");
+                self.send(Input::Skip);
+            }
+        } else if live || matches!(hit, AgentHit::PromptAttach(_)) {
             self.agent_hit(hit);
+        }
+    }
+
+    /// A press's earlier step, fired at once (the 2026-10-29 00:43 EDT
+    /// amendment, item 1): volume's 1 s stop.
+    fn hold_early(&mut self, hit: AgentHit) {
+        log::info!("hold: early step {hit:?}");
+        if hit == AgentHit::Volume {
+            self.stop_reading();
         }
     }
 
@@ -4049,10 +4085,17 @@ impl MorphApp for App {
         for event in events {
             self.on_event(event);
         }
-        let sounds = match &mut self.audio {
+        #[allow(unused_mut)]
+        let mut sounds = match &mut self.audio {
             Some(audio) => audio.poll(),
             None => Vec::new(),
         };
+        #[cfg(test)]
+        sounds.extend(
+            probe::speaking(self.updates)
+                .into_iter()
+                .map(|on| AudioEvent::Input(Input::Speaking(on))),
+        );
         for event in sounds {
             self.on_audio(event);
         }
@@ -4063,6 +4106,13 @@ impl MorphApp for App {
         // A 2 s press fires at once (plan 20261028_06, decision 7), and
         // the screens draw its progress while it is timed.
         let elapsed = self.started.elapsed();
+        if let Some(hit) = self
+            .hold
+            .as_mut()
+            .and_then(|h| h.fire_early(elapsed).then_some(h.hit))
+        {
+            self.hold_early(hit);
+        }
         if let Some(hit) = self
             .hold
             .as_mut()
@@ -4660,6 +4710,27 @@ pub(crate) mod probe {
     /// input starting with `input`.
     pub fn inject_after(input: &'static str, event: flankr_companion::Event) {
         INJECT.with(|i| i.borrow_mut().push((When::After(input), event)));
+    }
+
+    thread_local! {
+        static SPEAKING: RefCell<Vec<(u32, bool)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// The speaker starts (`true`) or stops speaking on the app's update
+    /// `at`, as the audio's `Input::Speaking` (scripted tests, without
+    /// audio).
+    pub fn inject_speaking(at: u32, on: bool) {
+        SPEAKING.with(|s| s.borrow_mut().push((at, on)));
+    }
+
+    /// The speaking changes due by update `now`, in order.
+    pub fn speaking(now: u32) -> Vec<bool> {
+        SPEAKING.with(|s| {
+            let mut s = s.borrow_mut();
+            let (due, later): (Vec<_>, Vec<_>) = s.drain(..).partition(|(at, _)| *at <= now);
+            *s = later;
+            due.into_iter().map(|(_, on)| on).collect()
+        })
     }
 
     /// The events due by update `now`.

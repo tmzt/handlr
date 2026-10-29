@@ -8,6 +8,13 @@
 //! the slop, or a cancelled touch, ends the press with neither. While it is
 //! timed, the screens draw its progress ([`bar`]) along the control's
 //! bottom, with no press colour.
+//!
+//! A press may also be given an earlier step ([`Hold::with_early`]), as
+//! the volume button's 1 s stop while something is being said (the
+//! 2026-10-29 00:43 EDT amendment, item 1): it fires once at that time
+//! ([`Hold::fire_early`]) and the press goes on to the 2 s hold; a release
+//! after it is no tap. The bar fills over each step in turn: to the early
+//! time, then from it to 2 s.
 
 use std::time::Duration;
 
@@ -17,6 +24,9 @@ use crate::agent::AgentHit;
 
 /// How long a press is held to fire.
 pub const HOLD: Duration = Duration::from_secs(2);
+/// The volume button's earlier step while something is being said: a 1 s
+/// hold stops it (the 2026-10-29 00:43 EDT amendment, item 1).
+pub const STOP_HOLD: Duration = Duration::from_secs(1);
 /// How far a finger moves, in points, before a press is no tap.
 pub const SLOP: f32 = 10.0; // points
 
@@ -31,6 +41,9 @@ pub struct Hold {
     at: [f32; 2],
     fired: bool,
     moved: bool,
+    /// The earlier step, after the start, if the press has one.
+    early: Option<Duration>,
+    early_fired: bool,
 }
 
 impl Hold {
@@ -44,16 +57,53 @@ impl Hold {
             at,
             fired: false,
             moved: false,
+            early: None,
+            early_fired: false,
         }
     }
 
-    /// The press's progress in 0..1 while it is timed; None once fired or
-    /// moved.
+    /// The press with an earlier step at `after` from its start (less
+    /// than [`HOLD`]): [`Hold::fire_early`] fires once then, and the press
+    /// goes on to the hold.
+    pub fn with_early(self, after: Duration) -> Self {
+        debug_assert!(after < HOLD, "the early step comes before the hold");
+        Hold {
+            early: Some(after),
+            ..self
+        }
+    }
+
+    /// Whether the press has an earlier step.
+    pub fn has_early(&self) -> bool {
+        self.early.is_some()
+    }
+
+    /// True once, when the earlier step's time has passed unmoved; never
+    /// for a press without one.
+    pub fn fire_early(&mut self, now: Duration) -> bool {
+        let Some(after) = self.early else {
+            return false;
+        };
+        if self.early_fired || self.fired || self.moved || now.saturating_sub(self.start) < after {
+            return false;
+        }
+        self.early_fired = true;
+        true
+    }
+
+    /// The press's progress in 0..1 through the step it is in (the early
+    /// one, then the hold) while it is timed; None once fired or moved.
     pub fn progress(&self, now: Duration) -> Option<f32> {
         if self.fired || self.moved {
             return None;
         }
-        let t = now.saturating_sub(self.start).as_secs_f32() / HOLD.as_secs_f32();
+        let held = now.saturating_sub(self.start);
+        let (from, to) = match self.early {
+            Some(after) if !self.early_fired => (Duration::ZERO, after),
+            Some(after) => (after, HOLD),
+            None => (Duration::ZERO, HOLD),
+        };
+        let t = held.saturating_sub(from).as_secs_f32() / (to - from).as_secs_f32();
         Some(t.clamp(0.0, 1.0))
     }
 
@@ -75,9 +125,9 @@ impl Hold {
         }
     }
 
-    /// The release: a tap if it neither fired nor moved.
+    /// The release: a tap if it neither fired (either step) nor moved.
     pub fn is_tap(&self) -> bool {
-        !self.fired && !self.moved
+        !self.fired && !self.early_fired && !self.moved
     }
 
     /// Whether it fired.
@@ -127,6 +177,43 @@ mod tests {
         assert!(!h.is_tap());
         assert!(!h.fire(T0 + HOLD));
         assert_eq!(h.progress(T0 + Duration::from_secs(1)), None);
+    }
+
+    #[test]
+    fn an_early_step_fires_once_and_the_press_goes_on_to_the_hold() {
+        let ms = Duration::from_millis;
+        let mut h = Hold::start(1, AgentHit::Volume, [100.0, 100.0], T0).with_early(STOP_HOLD);
+        assert!(h.has_early());
+        // The bar fills over the first second.
+        assert_eq!(h.progress(T0 + ms(500)), Some(0.5));
+        assert!(!h.fire_early(T0 + ms(999)));
+        assert!(h.is_tap(), "released before 1 s: a tap");
+        assert!(!h.fire(T0 + ms(999)));
+        assert!(h.fire_early(T0 + STOP_HOLD));
+        assert!(!h.fire_early(T0 + ms(1500)), "once");
+        assert!(!h.is_tap(), "released after 1 s: no tap");
+        // Then it fills again, from 1 s to 2 s, and fires the hold.
+        assert_eq!(h.progress(T0 + STOP_HOLD), Some(0.0));
+        assert_eq!(h.progress(T0 + ms(1500)), Some(0.5));
+        assert!(!h.fire(T0 + ms(1999)));
+        assert!(h.fire(T0 + HOLD));
+        assert_eq!(h.progress(T0 + HOLD), None);
+        // Both due at once (a late frame): each fires.
+        let mut late = Hold::start(2, AgentHit::Volume, [0.0, 0.0], T0).with_early(STOP_HOLD);
+        assert!(late.fire_early(T0 + ms(2500)));
+        assert!(late.fire(T0 + ms(2500)));
+    }
+
+    #[test]
+    fn a_press_without_an_early_step_never_fires_one() {
+        let mut h = Hold::start(1, AgentHit::Volume, [0.0, 0.0], T0);
+        assert!(!h.has_early());
+        assert!(!h.fire_early(T0 + HOLD));
+        assert!(h.is_tap());
+        // A move cancels the early step too.
+        let mut m = Hold::start(1, AgentHit::Volume, [0.0, 0.0], T0).with_early(STOP_HOLD);
+        m.moved_to([0.0, 50.0], 1.0);
+        assert!(!m.fire_early(T0 + STOP_HOLD));
     }
 
     #[test]

@@ -25,6 +25,8 @@ const READY: u32 = 4;
 const SETTLE: u32 = 8;
 /// Frames for a 2 s press, at 15 fps, and some.
 const HOLD: u32 = 36;
+/// Frames for a press past 1 s and short of 2 s, at 15 fps.
+const STOP_HOLD: u32 = 20;
 
 fn run(script: &str) -> Option<Probe> {
     run_with(script, None)
@@ -32,6 +34,16 @@ fn run(script: &str) -> Option<Probe> {
 
 /// As [`run`], from `settings` as `settings.toml` when given.
 fn run_with(script: &str, settings: Option<&str>) -> Option<Probe> {
+    run_full(script, settings, false)
+}
+
+/// As [`run`], the speaker speaking from the update the sessions are
+/// given on.
+fn run_speaking(script: &str) -> Option<Probe> {
+    run_full(script, None, true)
+}
+
+fn run_full(script: &str, settings: Option<&str>, speaking: bool) -> Option<Probe> {
     let dir = tempfile::tempdir().unwrap();
     let keys = dir.path().join("keys");
     let data = dir.path().join("data");
@@ -52,6 +64,10 @@ fn run_with(script: &str, settings: Option<&str>) -> Option<Probe> {
     };
     probe::take();
     probe::injected(u32::MAX);
+    probe::speaking(u32::MAX);
+    if speaking {
+        probe::inject_speaking(READY, true);
+    }
     // Paired and connected, so the overview shows.
     probe::inject(
         READY,
@@ -198,17 +214,18 @@ fn a_tap_on_volume_mutes_and_unmutes_without_its_menu() {
     let Some((volume, _, _)) = bar() else { return };
     let [x, y] = volume.center();
     let tap = format!("touch 5 start {x} {y}\nframes 2\ntouch 5 end {x} {y}\nframes 4\n");
-    // Both options on: muting stops what is said and tells the client
-    // both are off; no menu opens.
+    // Both options on: muting stops what is said, clears the queue and
+    // tells the client both are off; no menu opens.
     let on = "speak_coding = true\nspeak_gemini = true\n";
     let p = run_with(&format!("frames {SETTLE}\n{tap}"), Some(on)).unwrap();
     assert!(p.drawer.menu_items.is_empty(), "{:?}", p.drawer.menu_items);
-    assert_eq!(inputs_with(&p, "Skip"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "ReadAloud(false)"), 1, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "speak_gemini: false"), 1, "{:?}", p.inputs);
-    // A second tap unmutes: both come back, and nothing is skipped.
+    // A second tap unmutes: both come back, and nothing more is stopped.
     let p = run_with(&format!("frames {SETTLE}\n{tap}{tap}"), Some(on)).unwrap();
-    assert_eq!(inputs_with(&p, "Skip"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
     let last = p
         .inputs
@@ -223,7 +240,7 @@ fn a_tap_on_volume_mutes_and_unmutes_without_its_menu() {
         Some("speak_coding = true\nmuted = true\n"),
     )
     .unwrap();
-    assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
 }
 
@@ -254,4 +271,63 @@ fn a_2_s_press_on_volume_opens_its_menu_of_the_two_options() {
     .unwrap();
     assert!(p.drawer.holding, "timed for its hold");
     assert!(p.drawer.menu_items.is_empty());
+}
+
+#[test]
+fn while_speaking_a_tap_on_volume_skips_and_does_not_mute() {
+    let Some((volume, _, _)) = bar() else { return };
+    let [x, y] = volume.center();
+    let p = run_speaking(&format!(
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes 2\ntouch 5 end {x} {y}\nframes 4\n"
+    ))
+    .unwrap();
+    assert_eq!(inputs_with(&p, "Skip"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
+    // Not muted: the settings are not sent again.
+    assert_eq!(inputs_with(&p, "ReadAloud(false)"), 0, "{:?}", p.inputs);
+    assert!(p.drawer.menu_items.is_empty(), "{:?}", p.drawer.menu_items);
+}
+
+#[test]
+fn while_speaking_a_1_s_press_on_volume_stops_and_clears_without_muting() {
+    let Some((volume, _, _)) = bar() else { return };
+    let [x, y] = volume.center();
+    // Held past 1 s: stopped before the release, no tap after it.
+    let p = run_speaking(&format!(
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {STOP_HOLD}\n"
+    ))
+    .unwrap();
+    assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
+    assert!(p.drawer.holding, "still timed for the menu");
+    assert!(p.drawer.menu_items.is_empty());
+    let p = run_speaking(&format!(
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {STOP_HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
+    ))
+    .unwrap();
+    assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Skip"), 0, "no tap: {:?}", p.inputs);
+    assert_eq!(
+        inputs_with(&p, "ReadAloud(false)"),
+        0,
+        "not muted: {:?}",
+        p.inputs
+    );
+    assert!(p.drawer.menu_items.is_empty(), "{:?}", p.drawer.menu_items);
+}
+
+#[test]
+fn while_speaking_a_2_s_press_on_volume_stops_then_opens_its_menu() {
+    let Some((volume, _, _)) = bar() else { return };
+    let [x, y] = volume.center();
+    let p = run_speaking(&format!(
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
+    ))
+    .unwrap();
+    assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
+    assert!(
+        p.drawer.menu_items.iter().any(|i| i == menu::SPEAK_CODING),
+        "{:?}",
+        p.drawer.menu_items
+    );
 }
