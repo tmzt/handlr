@@ -1764,3 +1764,15 @@ play and skip bullets, the 11:40 EDT centre placement, the 16:15 EDT
 keyboard-glyph amendment, the 00:47 EDT terminal-only keyboard glyph, and the
 10:42 EDT amendment's item 3); for the agent view's bottom row, the text
 card's row and the terminal keys row, that plan is the reference from here.
+
+## Amendment — 2026-10-29 01:28 EDT: L3, choice questions as plan 20261029_01 has them (living section L3)
+
+docs/design/20261029_01_CHOICE_QUESTIONS_PLAN.md (In implementation) adds
+to the agent view a live Question card for an agent's choice question
+(Claude Code's `AskUserQuestion`): its header chip, question, option rows
+with dim details, multi-select toggles and Done, Other… through the typed
+card, previews folded and expanded, one question at a time with a review
+and Submit, answered with `choice.answer`. Such a card has no record
+button and no Yes or No, and messages to the pane are refused while it is
+open. For that card, its decisions 6 to 9 are the reference from here;
+every other card is as this section has it.
