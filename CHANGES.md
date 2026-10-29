@@ -3331,3 +3331,40 @@ Small departures needed to make the plan work:
    does not wait for speech that never comes. No flankr-companion change.
 3. The Settings voice preview ("This is <voice>.") is silent while muted
    too.
+
+## 2026-10-29 01:02 EDT — Plan 20261028_05 (binary transfers), steps 7-8's departures
+
+1. Three events the plan does not name: `TransferStarted` (the id the
+   client picked), `Attachments` (the image grid's state) and `Blob` (given
+   after `Connected` and in a replay, only when the daemon offers it).
+2. Kind-2 output leaves the client's state through `State::take_binary`,
+   `binary` and `binary_written`, not a new `Output` variant, since
+   `Output` is exhaustive.
+3. `AttachImage` does not insert the `[image N]` token; the app does. An
+   image is detached once its token has been in the text and is gone;
+   `DetachImage` removes the token too.
+4. `TerminalPasteText` and `TerminalPasteImages` act on the open agent
+   view's armed terminal and carry no session.
+5. A send with images is `confirmed` only by the button, as any typed
+   message; images clear on Sent or Pending.
+6. A download in flight when the connection drops fails as `cancelled`,
+   "The connection closed; try again."
+7. `CompanionConfig::cache_dir` falls back to `data_dir/cache`, then the
+   system temp folder; the app sets it to libmorph's `cache_dir()`.
+8. flankr-companion's `tests/link.rs`
+   `removing_the_active_remote_moves_to_the_most_recently_paired` waits for
+   the remotes list before `expect_connected`; the queued writer exposed
+   the race behind the flake recorded in the 2026-10-28 20:42 EDT addendum,
+   item 11.
+9. The 20 000-line note reads "Cut at 20 000 lines." without "Share to see
+   it all", since the share icon is hidden.
+10. **Show uncommitted changes** is first in the ⋮ menu, with a separator
+    after it.
+11. Images are drawn by a small textured quad in the app
+    (`preview/gpu.rs`); the preview is drawn by the app, not a libcontrols
+    `ModalDialog`.
+12. Markdown bookmarks are placed by matching laid lines to the heading text.
+13. Not built in step 8: links on commit hashes in the general agent's chat
+    (`recent_commits` results). Not built in the plan: step 9 (attaching
+    images), the share icon and image previews on Android (waiting on the
+    libmobile and libmorph surfacing), and step 10 (README).
