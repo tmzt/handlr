@@ -260,3 +260,37 @@ fields stand, applied to the menu. Decision 4's link in the flow stands.
    subagents, its glyph and count, the menu's order, marks, colours and
    minutes (shown past 5 and not before), the checked item, and choosing
    a subagent and main.
+
+## Amendment — 2026-10-28 20:51 EDT: no colour; ⊙ is the icon, the dots a radio selector
+
+The owner (2026-10-28), to the lead's two ways of colouring the menu: "no
+color, it just echoes the agent selector in Claude, the empty dot is the
+menu icon then the dot is used as a radio selector in the menu"; then
+"yes" to this wording. This replaces the 20:46 EDT amendment's items 2
+and 3 and the colour of the 17:47 EDT amendment's item 2 (no cyan,
+bright or dim); the 20:46 EDT amendment's items 1 and 4–7 stand, with
+item 7's tests following this one.
+
+1. **The icon.** The title-bar button is the empty dot ⊙ (U+2299), in
+   the title bar's own text colour, from the terminal face; shown only
+   while the pane has subagents. It carries no count and no running or
+   finished state. Until the terminal symbol page has U+2299 (libmsdf's
+   glyph additions), it is drawn as a plain ring of the same size.
+2. **A radio selector.** Every item of the menu has a radio mark: ⦿
+   (filled) on the session being viewed, ⊙ (empty) on the others. There
+   is no check mark.
+3. **No colour.** Labels are in the menu's own text colour. The order
+   is **main**, then a **Running** heading and the running subagents,
+   newest first, each with its elapsed minutes past 5, `(12m)`; then a
+   **Finished** heading and the finished ones, newest first. A heading
+   with no subagents under it is left out. Headings are the
+   `PopupMenu`'s own (`PopupItemKind::Heading`).
+4. **libcontrols.** The menu's labels are in Roboto, which has neither
+   dot, so the marks are drawn by the `PopupMenu` itself: a radio style
+   for its mark column, a ring with a filled dot for the selected item,
+   drawn as its check is now (an additive libcontrols release, 0.10.4,
+   with its own plan in that repository).
+5. **Step 5's tests** check the icon hidden with no subagents and shown
+   as a ring or ⊙, the menu's order and headings, the minutes shown past
+   5 and not before, one filled radio on the session viewed, and
+   choosing a subagent and main.
