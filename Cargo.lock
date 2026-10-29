@@ -2311,7 +2311,7 @@ checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 [[package]]
 name = "libdevice"
 version = "0.1.2"
-source = "git+https://github.com/tmzt/libdevice#9cbddc9c10420ac8233d25416b847b514d98c62d"
+source = "git+https://github.com/tmzt/libdevice#31cc51ae567ad6a850a2695947d27dedff9538e2"
 dependencies = [
  "objc2 0.5.3",
  "objc2-app-kit",
@@ -2408,8 +2408,8 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmorph"
-version = "0.5.0"
-source = "git+https://github.com/tmzt/libmorph?rev=c9b432d80178536576c559d1af616b1f83cabea6#c9b432d80178536576c559d1af616b1f83cabea6"
+version = "0.5.1"
+source = "git+https://github.com/tmzt/libmorph?rev=c958897495d880c6117cae55e1b4d72b0c1b15a0#c958897495d880c6117cae55e1b4d72b0c1b15a0"
 dependencies = [
  "block2 0.5.1",
  "libdevice",
