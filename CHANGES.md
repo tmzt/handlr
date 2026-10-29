@@ -3205,3 +3205,35 @@ past four, Settings and then the last plugin icons move into the ⋮ menu.
 `PluginMenuItem.icon` (libflankr_proto patch), `opens: "menu"`, and the
 planning plugin 0.1.1's popup of plans. The subagents plan's ⊙ is the
 first of these icons (its 2026-10-28 22:03 EDT amendment).
+
+## 2026-10-28 22:31 EDT — Plan 20261028_04 (plugins), the 22:03 EDT amendment's departures
+
+The owner approved building the title-bar icons ("approve and build").
+Small departures needed to make it work:
+
+1. `DevicePlugin` also gains `menu_opened(item, out)` and
+   `menu_chosen(item, id, out)` beside the planned `menu(item)`, so a half
+   can send `plans.list` and act on a choice; its ids are prefixed
+   `app/popup/<ns>/<item>/` in the shared menu.
+2. `PopupItem` has one label and cannot dim a second word: a plan's status
+   follows its title after an en space, the title cut with … at 36
+   characters.
+3. The overview's gear is now the title bar's Settings icon: the overview's
+   own gear target and `OverviewHit::Settings` are gone; the gear is drawn
+   in the text colour, not the muted one, and answers while a prompt
+   overlay is open. The ⋮ is at the overview title's right edge, dim when
+   its menu is empty (Settings in the bar and no plugin items).
+4. A plugin icon moved into the ⋮ with `opens: "menu"` opens its popup
+   anchored at the ⋮; a half that gives no popup items opens its modal, and
+   an unknown `opens` is opened as a modal.
+5. The agent view's name and status lines are cut with … short of the
+   first title icon.
+6. The daemon refuses icon names other than 1-32 of a-z, 0-9 and `_`,
+   starting with a letter.
+7. The agent menu ⊙ is wired as a glyph and a hook
+   (`agent_menu_registered`, false) but not registered: the subagents plan
+   is not built.
+8. flankr-companion needed no change and is not bumped.
+9. Version numbers: libflankr_proto takes 0.5.3 here, so plan 20261028_05
+   (binary transfers, Draft) takes the next free numbers when built
+   (libflankr_proto 0.5.4, flankr-companion 0.5.2).
