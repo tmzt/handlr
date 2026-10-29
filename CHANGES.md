@@ -3450,3 +3450,22 @@ clock. Its content stands.
 9. Not covered by a test: the app's last hop from `ChoiceAction::Send` to
    `Input::Choose`, and the Other text handed back from the typed card; it
    is checked in step 7 on the Mac and the S23.
+
+## 2026-10-29 02:02 EDT — Plan 20261028_04 (plugins), the plan table's departures
+
+The plan table of the 2026-10-28 23:14 EDT amendment and those after it.
+
+1. In the popup, the NN, mm/dd and status columns are `PopupCellWidth::Auto`
+   (as wide as the widest cell, shared across rows), not fixed pixel
+   widths, since `DevicePlugin::menu` has no scale; the modal uses computed
+   fixed widths.
+2. The modal's rows are one 44 pt line, not a title and subtitle; the
+   "(README: <status>)" note is only on the plan's own page.
+3. A plan row's item label is its title, not drawn when cells are present.
+4. `DevicePlugin::menu`, `Plugins::open_menu` and `Plugins::menu_items`
+   return `PopupRow` (inside the app); the popup's theme gains
+   `dim_text_color` and a 10 pt column gap.
+5. Update times are compared in UTC (EDT, EST, CDT, CST, MDT, MST, PDT,
+   PST, UTC/GMT/Z and ±HH:MM understood; an unknown zone as UTC; a date
+   alone as its midnight); ties by file name, the later first; a plan with
+   no readable time last.
