@@ -1128,7 +1128,7 @@ pub(crate) mod tests {
         );
         let infos = host.infos();
         assert_eq!(infos[0].ns, "dev.flankr.plugins.planning");
-        assert_eq!(infos[0].version, "0.1.1");
+        assert_eq!(infos[0].version, "0.1.2");
         assert_eq!(infos[0].menu, vec![item]);
     }
 

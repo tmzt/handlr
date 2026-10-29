@@ -1,4 +1,4 @@
-//! The planning plugin's daemon half, `dev.flankr.plugins.planning@0.1.1`
+//! The planning plugin's daemon half, `dev.flankr.plugins.planning@0.1.2`
 //! (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.8).
 //!
 //! Read-only and off by default. `plans.list` lists the focused project's
@@ -8,13 +8,23 @@
 //! `read_file` and [`reader`]. tpt's query commands are declared from this
 //! version, but only the `read_file` source is switched on until tpt has
 //! them.
+//!
+//! From 0.1.2 it offers the general agent two read-only tools (the plan's
+//! 02:10 EDT amendment of 2026-10-29, item 6): `planning_plans_list {}`,
+//! the plans newest first by last update with their NN, date, title and
+//! abbreviated status, and `planning_plan_show { name }`, one plan as
+//! `plans.show` gives it.
 
 pub mod reader;
+
+use std::sync::LazyLock;
 
 use serde_json::{Value, json};
 
 use super::command::{ArgShape, CommandSpec, is_plan_name};
-use super::{MenuItem, Opens, Plugin, PluginCtx, PluginError, PluginVersion, Screens, codes};
+use super::{
+    MenuItem, Opens, Plugin, PluginCtx, PluginError, PluginVersion, Screens, ToolSpec, codes,
+};
 
 /// The plugin's package name.
 pub const NS: &str = "dev.flankr.plugins.planning";
@@ -66,6 +76,33 @@ const COMMANDS: [CommandSpec; 3] = [
     },
 ];
 
+/// Its general agent tools, both read-only.
+static TOOLS: LazyLock<[ToolSpec; 2]> = LazyLock::new(|| {
+    [
+        ToolSpec {
+            name: "plans_list",
+            description: "Lists the current project's plans and specs in docs/design, newest first by last update: each one's name, its sequence number within its day (nn), its date, title and abbreviated status (Draft, Hold, InImpl, Impl, Succd, Rtrd), and when it was last updated.",
+            params: json!({"type": "object", "properties": {}}),
+            read_only: true,
+        },
+        ToolSpec {
+            name: "plan_show",
+            description: "Shows one of the current project's plans: its front matter (title, date, status, covers, sources, related documents), its headings and its amendments' timestamps and subjects. Never the text itself.",
+            params: json!({
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "The plan's base name, as planning_plans_list gives it (e.g. 20261028_04_PLUGINS_PLAN)."
+                    }
+                },
+                "required": ["name"]
+            }),
+            read_only: true,
+        },
+    ]
+});
+
 /// The planning plugin.
 pub struct Planning;
 
@@ -84,7 +121,7 @@ impl Plugin for Planning {
     }
 
     fn version(&self) -> PluginVersion {
-        PluginVersion::Semver("0.1.1")
+        PluginVersion::Semver("0.1.2")
     }
 
     fn menu(&self) -> &'static [MenuItem] {
@@ -119,6 +156,30 @@ impl Plugin for Planning {
         match name {
             None => list(ctx).await,
             Some(name) => show(ctx, &name).await,
+        }
+    }
+
+    fn tools(&self) -> &[ToolSpec] {
+        &*TOOLS
+    }
+
+    /// The tools answer from `plans.list` and `plans.show`, from the same
+    /// source.
+    async fn run_tool(
+        &self,
+        name: &str,
+        args: Value,
+        ctx: &PluginCtx,
+    ) -> Result<Value, PluginError> {
+        match name {
+            "plans_list" => Ok(reader::agent_list(
+                &self.call("plans.list", json!({}), ctx).await?,
+            )),
+            "plan_show" => self.call("plans.show", args, ctx).await,
+            other => Err(PluginError::new(
+                libflankr_proto::envelope::codes::METHOD_NOT_FOUND,
+                format!("This plugin has no tool {other}."),
+            )),
         }
     }
 }

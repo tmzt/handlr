@@ -806,3 +806,16 @@ Plan 20261023_07 (subagents), step 4. Strictly additive (variants on the
 - **Added:** `Event::AgentView::child` (`Option<String>`) and
   `Event::AgentView::children` (`Vec<ChildInfo>`).
 - Takes libflankr_proto 0.5.6.
+
+## dev.flankr.plugins.planning 0.1.2 — 2026-10-29 (the commit tagged `dev.flankr.plugins.planning-v0.1.2`)
+
+Plan 20261028_04 (plugins), its 2026-10-29 02:10 EDT amendment, item 6.
+Additive:
+
+- **Added:** two read-only general agent tools. `planning_plans_list {}`:
+  the plans and specs in docs/design, newest first by last update, each
+  with its name, NN, date, title, abbreviated status (Draft, Hold,
+  InImpl, Impl, Succd, Rtrd) and update time. `planning_plan_show
+  { name }`: one plan's front matter, covers and amendments, as
+  `plans.show` gives them. Offered while the plugin is enabled and
+  `agent_tools` is not `false`. Methods and the menu unchanged.

@@ -218,7 +218,7 @@ async fn hello_lists_the_plugins_and_only_an_approver_switches_one_on() {
         .clone();
     assert_eq!(plugins.len(), 1, "{plugins:?}");
     assert_eq!(plugins[0]["ns"], PLANNING);
-    assert_eq!(plugins[0]["version"], "0.1.1");
+    assert_eq!(plugins[0]["version"], "0.1.2");
     assert_eq!(plugins[0]["enabled"], false);
     assert_eq!(
         plugins[0]["menu"],
@@ -347,4 +347,45 @@ async fn plans_list_on_this_checkout_matches_the_readme() {
         .plugin(3, "plans.show", json!({"name": "20261028_99_NONE_PLAN"}))
         .await;
     assert_eq!(shown["error"]["code"], -32111);
+}
+
+/// Plan 20261028_04, the 02:10 EDT amendment of 2026-10-29: the general
+/// agent's profile carries the enabled planning plugin's two tools, and
+/// loses them when it is switched off or `agent_tools = false`.
+#[tokio::test]
+async fn the_general_agent_is_offered_the_planning_tools_while_on() {
+    let env = start(&format!("{READ}[plugins.\"{PLANNING}\"]\nenabled = true\n")).await;
+    let names = |env: &Env| -> Vec<String> {
+        env._daemon
+            .llm
+            .agent_profile()
+            .plugin_tools
+            .into_iter()
+            .map(|t| t.name)
+            .collect()
+    };
+    assert_eq!(names(&env), ["planning_plans_list", "planning_plan_show"]);
+    std::fs::write(
+        &env.config,
+        format!("{READ}[plugins.\"{PLANNING}\"]\nenabled = true\nagent_tools = false\n"),
+    )
+    .unwrap();
+    env._daemon.plugins.check(true);
+    assert!(names(&env).is_empty());
+    std::fs::write(
+        &env.config,
+        format!("{READ}[plugins.\"{PLANNING}\"]\nenabled = true\nagent_tools = \"all\"\n"),
+    )
+    .unwrap();
+    env._daemon.plugins.check(true);
+    assert_eq!(names(&env).len(), 2);
+    let mut owner = env.device("owner", true).await;
+    let r = owner
+        .call(
+            "plugin.set_enabled",
+            json!({"ns": PLANNING, "enabled": false}),
+        )
+        .await;
+    assert_eq!(r["result"], json!({"enabled": false}), "{r}");
+    assert!(names(&env).is_empty());
 }

@@ -307,8 +307,8 @@ async fn the_tpt_path_passes_schema_1_through() {
 
 #[test]
 fn the_plans_item_is_a_title_icon_opening_a_menu() {
-    // 0.1.1 (plan 20261028_04, its 22:03 EDT amendment, item 5).
-    assert_eq!(Planning.version(), PluginVersion::Semver("0.1.1"));
+    // From 0.1.1 (plan 20261028_04, its 22:03 EDT amendment, item 5).
+    assert_eq!(Planning.version(), PluginVersion::Semver("0.1.2"));
     let menu = Planning.menu();
     assert_eq!(menu.len(), 1);
     assert_eq!(menu[0].id, "plans");
@@ -317,4 +317,140 @@ fn the_plans_item_is_a_title_icon_opening_a_menu() {
     assert_eq!(menu[0].opens.as_str(), "menu");
     assert_eq!(menu[0].screens, Screens::Both);
     assert_eq!(menu[0].icon, Some("plans"));
+}
+
+/// Plan 20261028_04, the 02:10 EDT amendment of 2026-10-29, item 6: the
+/// two read-only tools, named for the general agent.
+#[test]
+fn the_tools_are_read_only_and_namespaced() {
+    let names: Vec<String> = Planning
+        .tools()
+        .iter()
+        .map(|t| crate::plugins::agent_tool_name(NS, t.name))
+        .collect();
+    assert_eq!(names, ["planning_plans_list", "planning_plan_show"]);
+    assert!(Planning.tools().iter().all(|t| t.read_only));
+    let (kept, problems) = crate::plugins::registry::check(vec![Arc::new(Planning)]);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(kept.len(), 1);
+}
+
+#[tokio::test]
+async fn planning_plans_list_is_newest_first_with_abbreviated_statuses() {
+    let c = ctx(&fixture()).await;
+    let v = Planning
+        .run_tool("plans_list", json!({}), &c)
+        .await
+        .unwrap();
+    assert_eq!(v["root"], "planning");
+    let plans = v["plans"].as_array().unwrap();
+    let rows: Vec<(&str, u64, &str, &str, &str)> = plans
+        .iter()
+        .map(|p| {
+            (
+                p["name"].as_str().unwrap(),
+                p["nn"].as_u64().unwrap(),
+                p["date"].as_str().unwrap(),
+                p["status"].as_str().unwrap(),
+                p["updated"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (
+                "20261024_02_SETTINGS_SCREEN_PLAN",
+                2,
+                "2026-10-24",
+                "InImpl",
+                "2026-10-28 17:57 EDT"
+            ),
+            (
+                "20261027_04_GENERAL_AGENT_PLANNING_PLAN",
+                4,
+                "2026-10-27",
+                "InImpl",
+                "2026-10-27 11:28 EDT"
+            ),
+            (
+                "20261025_02_EXTRACT_LIBINFER_PLAN",
+                2,
+                "2026-10-25",
+                "Impl",
+                "2026-10-25 14:58 EDT"
+            ),
+            (
+                "20260831_03_SPEECH_PIPELINE_PLAN",
+                3,
+                "2026-08-31",
+                "Rtrd",
+                "2026-10-22 17:11 EDT"
+            ),
+        ]
+    );
+    assert_eq!(
+        plans[0]["title"],
+        "A settings screen, from a gear on the overview"
+    );
+}
+
+#[tokio::test]
+async fn planning_plan_show_is_plans_show() {
+    let c = ctx(&fixture()).await;
+    let args = json!({"name": "20261025_02_EXTRACT_LIBINFER_PLAN"});
+    let tool = Planning
+        .run_tool("plan_show", args.clone(), &c)
+        .await
+        .unwrap();
+    let call = Planning.call("plans.show", args, &c).await.unwrap();
+    assert_eq!(tool, call);
+    assert_eq!(tool["plan"]["status"], "Implemented");
+    assert!(tool["plan"]["covers"].is_array());
+    assert!(!tool["plan"]["amendments"].as_array().unwrap().is_empty());
+    let err = Planning
+        .run_tool("plan_show", json!({"name": "../x"}), &c)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, libflankr_proto::envelope::codes::INVALID_PARAMS);
+    let err = Planning
+        .run_tool("plans_show", json!({}), &c)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, libflankr_proto::envelope::codes::METHOD_NOT_FOUND);
+}
+
+/// The plugin host offers both once the plugin is on, and runs them on
+/// the caller's current agent's project.
+#[tokio::test]
+async fn the_host_offers_and_runs_the_planning_tools() {
+    use crate::llm::AgentToolSource;
+    use crate::plugins::{AgentToolCaller, HostOptions, PluginHost};
+    let text = "[plugins.\"dev.flankr.plugins.planning\"]\nenabled = true\n\
+                [llm.uses.planning]\nread = [\"*.md\", \"docs/**/*.md\"]\n";
+    let app: crate::config::AppConfig = toml::from_str(text).unwrap();
+    let host = PluginHost::new(
+        &app,
+        HostOptions {
+            plugins: Some(vec![Arc::new(Planning)]),
+            env: Some(CommandEnv::default()),
+            ..Default::default()
+        },
+    );
+    let names: Vec<String> = host.agent_tools().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["planning_plans_list", "planning_plan_show"]);
+    let caller = AgentToolCaller {
+        principal: Principal::local("t"),
+        pane: Some("w1:p1".into()),
+        lookup: Arc::new(FakeLookup(vec![(
+            "w1:p1".into(),
+            "claude".into(),
+            fixture().display().to_string(),
+        )])),
+    };
+    let v = host
+        .run_agent_tool("planning_plans_list", json!({}), caller)
+        .await
+        .unwrap();
+    assert_eq!(v["plans"].as_array().unwrap().len(), 4);
 }

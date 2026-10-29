@@ -675,6 +675,134 @@ pub fn plan_json(plan: &Plan, full: bool) -> Value {
     value
 }
 
+/// Days from 1970-01-01 to a civil date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// A time zone's offset from UTC, in minutes: the North American
+/// abbreviations the plans are stamped with, UTC, or `+HH:MM`/`-HHMM`.
+fn zone_offset(tz: &str) -> Option<i64> {
+    let hours = match tz {
+        "UTC" | "GMT" | "Z" => 0,
+        "EDT" => -4,
+        "EST" | "CDT" => -5,
+        "CST" | "MDT" => -6,
+        "MST" | "PDT" => -7,
+        "PST" => -8,
+        _ => {
+            let sign = match tz.as_bytes().first()? {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let digits: String = tz[1..].chars().filter(|c| *c != ':').collect();
+            if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let h: i64 = digits[0..2].parse().ok()?;
+            let m: i64 = digits[2..4].parse().ok()?;
+            return Some(sign * (h * 60 + m));
+        }
+    };
+    Some(hours * 60)
+}
+
+/// A plan's update time as minutes since 1970, UTC, for sorting:
+/// `YYYY-MM-DD`, optionally ` HH:MM` and a zone (an unknown or missing
+/// zone counts as UTC; a date alone is its midnight). The same reading as
+/// the app's plan table (the plan's 23:14 EDT amendment, item 2).
+pub fn update_key(t: &str) -> Option<i64> {
+    let mut parts = t.split_whitespace();
+    let date = parts.next()?;
+    let mut ymd = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    if ymd.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let mut minutes = days_from_civil(y, m, d) * 1440;
+    if let Some(hm) = parts.next() {
+        let (h, mi) = hm.split_once(':')?;
+        let (h, mi): (i64, i64) = (h.parse().ok()?, mi.parse().ok()?);
+        minutes += h * 60 + mi;
+        if let Some(off) = parts.next().and_then(zone_offset) {
+            minutes -= off;
+        }
+    }
+    Some(minutes)
+}
+
+/// A status as the plan table abbreviates it (the plan's 23:14 EDT
+/// amendment, "the plan table's statuses abbreviated"): `Draft`, `Hold`,
+/// `InImpl`, `Impl`, `Succd` and `Rtrd`; any other its first five letters.
+pub fn status_abbrev(status: &str) -> String {
+    let s = status.trim();
+    let shown = match s {
+        "Draft" => "Draft",
+        "Hold" => "Hold",
+        "In implementation" => "InImpl",
+        "Implemented" => "Impl",
+        _ if s.starts_with("Superseded") => "Succd",
+        _ if s.starts_with("Retired") => "Rtrd",
+        _ => return s.chars().take(5).collect(),
+    };
+    shown.to_string()
+}
+
+/// `planning_plans_list`'s answer (plan 20261028_04, the 02:10 EDT
+/// amendment of 2026-10-29, item 6), from `plans.list`'s: each plan's
+/// base name, NN, date, title and abbreviated status, and when it was last
+/// updated (its newest amendment, else its date, else its file name's),
+/// newest first; a plan whose time cannot be read goes last, and ties go
+/// by base name, the later first.
+pub fn agent_list(listed: &Value) -> Value {
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).map(str::to_string);
+    let mut rows: Vec<(Option<i64>, String, Value)> = listed
+        .get("plans")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| {
+            let base = text(p, "base")?;
+            let date = text(p, "date").or_else(|| text(p, "date_from_name"));
+            let updated = [
+                text(p, "last_amendment"),
+                date.clone(),
+                text(p, "date_from_name"),
+            ]
+            .into_iter()
+            .flatten()
+            .find(|t| update_key(t).is_some());
+            let key = updated.as_deref().and_then(update_key);
+            let title = text(p, "title").filter(|t| !t.trim().is_empty());
+            let mut row = json!({
+                "name": base,
+                "nn": p.get("nn").cloned().unwrap_or(Value::Null),
+                "date": date,
+                "title": title.unwrap_or_else(|| base.clone()),
+                "status": text(p, "status").map(|s| status_abbrev(&s)),
+                "updated": updated,
+            });
+            if let Some(error) = text(p, "error") {
+                row["error"] = json!(error);
+            }
+            Some((key, base, row))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+    json!({
+        "root": listed.get("root").cloned().unwrap_or(Value::Null),
+        "plans": rows.into_iter().map(|(_, _, row)| row).collect::<Vec<_>>(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -948,5 +1076,65 @@ tags:
         assert_eq!(v["headings"], json!([{"line": 7, "text": "1. Goal"}]));
         assert_eq!(v["amendments"], json!([]));
         assert_eq!(v["extra"], json!({}));
+    }
+
+    #[test]
+    fn statuses_abbreviated_as_the_plan_table() {
+        for (status, shown) in [
+            ("Draft", "Draft"),
+            ("Hold", "Hold"),
+            ("In implementation", "InImpl"),
+            ("Implemented", "Impl"),
+            ("Superseded (by 20261028_04_PLUGINS_PLAN)", "Succd"),
+            ("Retired (by x)", "Rtrd"),
+            ("Withdrawn", "Withd"),
+        ] {
+            assert_eq!(status_abbrev(status), shown, "{status}");
+        }
+    }
+
+    #[test]
+    fn update_times_read_zones_and_bare_dates() {
+        let edt = update_key("2026-10-28 23:14 EDT").unwrap();
+        assert_eq!(update_key("2026-10-29 03:14 UTC"), Some(edt));
+        assert_eq!(update_key("2026-10-29 08:44 +05:30"), Some(edt));
+        assert!(update_key("2026-10-28").unwrap() < edt);
+        assert_eq!(update_key("soon"), None);
+        assert_eq!(update_key("2026-13-01"), None);
+    }
+
+    #[test]
+    fn the_agent_list_sorts_by_last_update_and_falls_back() {
+        let listed = json!({"root": "r", "plans": [
+            {"base": "20261001_01_A_PLAN", "nn": 1, "date_from_name": "2026-10-01",
+             "title": "A", "status": "Draft", "date": "2026-10-01", "last_amendment": null},
+            {"base": "20261002_01_B_PLAN", "nn": 1, "date_from_name": "2026-10-02",
+             "title": null, "status": null, "date": null, "last_amendment": null,
+             "error": "unreadable"},
+            {"base": "20260901_02_C_PLAN", "nn": 2, "date_from_name": "2026-09-01",
+             "title": "C", "status": "Hold", "date": "2026-09-01",
+             "last_amendment": "2026-10-03 09:00 EDT"},
+        ]});
+        let v = agent_list(&listed);
+        let names: Vec<&str> = v["plans"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "20260901_02_C_PLAN",
+                "20261002_01_B_PLAN",
+                "20261001_01_A_PLAN"
+            ]
+        );
+        let b = &v["plans"][1];
+        assert_eq!(b["title"], "20261002_01_B_PLAN", "no title: the name");
+        assert_eq!(b["date"], "2026-10-02", "no date: the file name's");
+        assert_eq!(b["status"], Value::Null);
+        assert_eq!(b["error"], "unreadable");
+        assert_eq!(v["plans"][0]["status"], "Hold");
     }
 }
