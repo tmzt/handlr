@@ -699,3 +699,12 @@ item 2. Strictly additive:
 - **Added:** `methods::TERMINAL_PASTE` (`terminal.paste`),
   `TerminalPasteParams`, `TERMINAL_PASTE_TEXT_MAX` (8192),
   `TERMINAL_PASTE_IMAGES_MAX` (4).
+
+## libflankr_blob 0.1.0 — 2026-10-29 (the commit tagged `libflankr_blob-v0.1.0`)
+
+Plan 20261028_05, step 2. New crate: the kind-2 encoding (`BlobMessage`,
+`Body`, `Offer`, `Subcommand`, `DecodeError`), `Namespace`, `TransferId`,
+`Ids`, `Code` and its 20 codes, the limits of 4.4, the
+`Receiving`/`Sending` state machines and `Step`, `ImageType` sniffing,
+`GitRequest`/`Rev`, `ReadPattern` and `always_refused` (moved from the
+daemon), `sha256`, `hex`, `parse_reference`.

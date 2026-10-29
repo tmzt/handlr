@@ -2320,6 +2320,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libflankr_blob"
+version = "0.1.0"
+dependencies = [
+ "sha2",
+]
+
+[[package]]
 name = "libflankr_proto"
 version = "0.5.4"
 dependencies = [
