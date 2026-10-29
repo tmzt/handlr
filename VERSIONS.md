@@ -708,3 +708,15 @@ Plan 20261028_05, step 2. New crate: the kind-2 encoding (`BlobMessage`,
 `Receiving`/`Sending` state machines and `Step`, `ImageType` sniffing,
 `GitRequest`/`Rev`, `ReadPattern` and `always_refused` (moved from the
 daemon), `sha256`, `hex`, `parse_reference`.
+
+## flankr-companion 0.5.3 — 2026-10-29 (the commit tagged `flankr-companion-v0.5.3`)
+
+Plan 20261028_06 (the bottom bar updated), its 2026-10-29 00:43 EDT
+amendment, item 4. Strictly additive (a variant on the `#[non_exhaustive]`
+`Input`):
+
+- **Added:** `Input::StopReading`: what is being said stops
+  (`Event::StopSpeaking` while speaking), and every reply waiting to be
+  read (for its summary or its turn) and every held spoken notice is
+  dropped, so nothing follows it. Replies that come after are read as
+  usual. `Input::Skip` is unchanged: it stops only the current one.

@@ -148,6 +148,12 @@ pub enum Input {
     /// The play button while something is being said: stop it, and the
     /// next held reply follows.
     Skip,
+    /// Stop reading aloud (plan 20261028_06, the 2026-10-29 00:43 EDT
+    /// amendment, items 1, 3 and 4): what is being said stops, as with
+    /// [`Input::Skip`], and every reply and spoken notice waiting to be
+    /// said is dropped, so nothing follows it. Replies that come after
+    /// are read as usual.
+    StopReading,
     /// The app went to the background (`true`) or came back (`false`).
     /// In the background the link is a single sleeping socket: no polling,
     /// a slow ping, and only what the daemon pushes.
@@ -2252,6 +2258,7 @@ impl State {
                     out.push(event(Event::StopSpeaking));
                 }
             }
+            Input::StopReading => self.stop_reading(&mut out),
             Input::ReadAloud(on) => {
                 self.read_aloud = on;
                 // From now: what is already in the view is not read.
@@ -5199,6 +5206,22 @@ impl State {
         }
     }
 
+    /// [`Input::StopReading`]: the replies waiting (for their summary or
+    /// their turn) and the held notices are dropped, and what is being
+    /// said stops.
+    fn stop_reading(&mut self, out: &mut Vec<Output>) {
+        log::info!(
+            "read aloud: stopped; {} repl(ies) and {} notice(s) dropped",
+            self.reading.len(),
+            self.notices.len()
+        );
+        self.reading.clear();
+        self.notices.clear();
+        if self.speaking {
+            out.push(event(Event::StopSpeaking));
+        }
+    }
+
     /// The reply at `ts` is answered: it is not read, and if it is being
     /// read, that stops (owner, 2026-10-23: "if an answer is to a spoke
     /// question, it should skip the question playback").
@@ -7722,6 +7745,43 @@ mod tests {
         assert_eq!(events(&s.input(Input::Skip)), vec![Event::StopSpeaking]);
         // Stopped: the held reply is said next.
         assert_eq!(events(&s.input(Input::Speaking(false))), vec![say("one")]);
+    }
+
+    #[test]
+    fn stop_reading_stops_what_is_said_and_drops_what_waits() {
+        let mut s = online();
+        assert!(s.input(Input::StopReading).is_empty(), "nothing to stop");
+        s.input(Input::Speaking(true));
+        s.incoming(notice("one"));
+        s.incoming(notice("two"));
+        assert_eq!(s.held_notices(), 2);
+        assert_eq!(
+            events(&s.input(Input::StopReading)),
+            vec![Event::StopSpeaking]
+        );
+        assert_eq!(s.held_notices(), 0);
+        // Stopped: nothing follows.
+        assert!(said(&s.input(Input::Speaking(false))).is_empty());
+        // What comes after is said as usual.
+        assert_eq!(events(&s.incoming(notice("three"))), vec![say("three")]);
+    }
+
+    #[test]
+    fn stop_reading_drops_the_replies_waiting_to_be_read() {
+        let (mut s, asked, _) = reading(&[BACKQUOTES, PATHS]);
+        assert!(
+            events(&s.input(Input::StopReading)).is_empty(),
+            "not speaking"
+        );
+        // The summary comes, the wait runs out, or the connection closes:
+        // nothing is read.
+        let out = s.incoming(response(
+            asked[0].id.clone(),
+            json!({"read": "Done: reply text joins.", "complex": true}),
+        ));
+        assert!(said(&out).is_empty(), "{out:?}");
+        assert!(said(&s.input(Input::Tick(secs(400.0)))).is_empty());
+        assert!(said(&s.disconnected(1000)).is_empty());
     }
 
     #[test]
