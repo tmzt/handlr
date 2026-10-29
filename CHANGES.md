@@ -3307,3 +3307,16 @@ Small departures needed to make the plan work:
     the timeout test uses a 300 ms timeout on a stand-in for git; the
     environment test calls the capped runner with a stand-in path; "a third
     concurrent run is busy" is not tested (the 2-slot semaphore is in place).
+
+## 2026-10-29 00:50 EDT — Plan 20261028_06, its 00:43 EDT amendment: small choices
+
+1. Whether something is being spoken is decided at touch-down; if speech
+   ends mid-press, the release still skips (a no-op) rather than muting.
+2. "Speaking" ignores mute: muted, the client can still say confirmations
+   and notices not on the read-aloud queue, and a press during them skips
+   or stops them rather than unmuting.
+3. After the stop at 1 s, the hold bar refills from 1 s to 2 s for the menu.
+4. `Input::StopReading` does not clear the dictation read-back or the
+   confirmation prompts, which are not the read-aloud queue.
+5. The mute toggle's internal `Volume { muted, on }` replaces the app's
+   `volume_on: bool` (the 00:26 EDT amendment), internal to the app.
