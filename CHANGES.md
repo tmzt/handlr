@@ -3320,3 +3320,14 @@ Small departures needed to make the plan work:
    confirmation prompts, which are not the read-aloud queue.
 5. The mute toggle's internal `Volume { muted, on }` replaces the app's
    `volume_on: bool` (the 00:26 EDT amendment), internal to the app.
+
+## 2026-10-29 00:58 EDT — Plan 20261028_06, its 00:52 EDT amendment: mute stops all voice
+
+1. This supersedes item 2 of the 00:50 EDT addendum: muted, the client's
+   confirmations and notices are not spoken either.
+2. Every voice output reaches speech as an `Event::Say`; muted, the app
+   drops each one and reports it to the client as said at once
+   (`Input::Speaking(false)`), so a dictation read-back or a held notice
+   does not wait for speech that never comes. No flankr-companion change.
+3. The Settings voice preview ("This is <voice>.") is silent while muted
+   too.
