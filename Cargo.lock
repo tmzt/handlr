@@ -1389,6 +1389,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
  "walkdir",
 ]
 
@@ -1407,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "flankr-companion"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "flankr-speech",
@@ -2320,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "libflankr_proto"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bip39",
  "blake2",

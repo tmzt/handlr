@@ -568,6 +568,7 @@ dependencies = [
  "libmsdf",
  "libtypedmd",
  "log",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -1130,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "flankr-companion"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "base64 0.22.1",
  "flankr-speech",
@@ -1632,8 +1633,8 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libcontrols"
-version = "0.10.2"
-source = "git+https://github.com/tmzt/libcontrols?rev=e3140dbd7a36bba36157b1a78b5bf346510ab376#e3140dbd7a36bba36157b1a78b5bf346510ab376"
+version = "0.10.3"
+source = "git+https://github.com/tmzt/libcontrols?rev=ef860f0f33d6815030d315005f22711b9206e673#ef860f0f33d6815030d315005f22711b9206e673"
 dependencies = [
  "bytemuck",
  "libmsdf",
@@ -1656,7 +1657,7 @@ dependencies = [
 
 [[package]]
 name = "libflankr_proto"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "bip39",
  "blake2",

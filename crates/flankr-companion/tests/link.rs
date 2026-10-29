@@ -418,7 +418,7 @@ fn stored(dir: &tempfile::TempDir) -> Remotes {
 /// The next event that is not a `Disconnected` from the attempts on the
 /// missing socket, the remotes list, the cache's size, a remote's in the
 /// background, or what a remote coming in front gives of itself (its
-/// agents, pending panes, focus, cards and dictation card).
+/// agents, pending panes, focus, cards, dictation card and plugins).
 fn next_event(c: &Companion) -> Event {
     loop {
         match c.wait_timeout(TIMEOUT).expect("an event within 5 s") {
@@ -430,7 +430,8 @@ fn next_event(c: &Companion) -> Event {
             | Event::PendingPanes(_)
             | Event::Focus(_)
             | Event::SessionCards(_)
-            | Event::Dictation(_) => continue,
+            | Event::Dictation(_)
+            | Event::Plugins(_) => continue,
             e => return e,
         }
     }

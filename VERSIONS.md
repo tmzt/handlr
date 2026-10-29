@@ -594,3 +594,54 @@ Plan 20261028_03 (the session drawer), steps 3 and 4, with the 18:48 and
   `State::trade_terminals`; `Remotes::info_with`; `Cross::shown`.
 - libflankr_proto 0.5.0 → 0.5.1 (semver-compatible; `AgentInfo`'s
   `idle_ms`, `subagents_running`, `summary`).
+
+## libflankr_proto 0.5.2 — 2026-10-28 (the commit tagged `libflankr_proto-v0.5.2`)
+
+Plan 20261028_04 (plugins), step 1. Strictly additive:
+
+- **Added:** `companion::methods::{PLUGIN_CALL, PLUGIN_RESULT, PLUGIN_NOTIFY,
+  PLUGIN_SET_ENABLED}` (`plugin.call`, `plugin.result`, `plugin.notify`,
+  `plugin.set_enabled`); `PluginCall`, `PluginAccepted`, `PluginResult`,
+  `PluginNotify`, `PluginInfo`, `PluginMenuItem`, `PluginSetEnabledParams`,
+  `PluginSetEnabledResult`; `PLUGIN_MAX_BYTES` (256 KiB),
+  `PLUGIN_NS_MAX_BYTES`, `PLUGIN_METHOD_MAX_BYTES`, `is_plugin_ns()` and
+  `is_plugin_method()`; `envelope::codes::{PLUGIN_UNKNOWN (-32030),
+  PLUGIN_DISABLED (-32031), PLUGIN_TOO_LARGE (-32032)}`.
+- **Added:** `HelloResult::plugins` and `ServerCapabilities::plugins`
+  (`Option<Vec<PluginInfo>>`), appended, defaulted when absent and left off
+  the wire when `None`, so an older daemon's objects still read (no plugins).
+
+## dev.flankr.plugins.planning 0.1.0 — 2026-10-28 (the commit tagged `dev.flankr.plugins.planning-v0.1.0`)
+
+Plan 20261028_04 (plugins), step 3. The plugin's first release, disabled by
+default:
+
+- **Added:** the methods `plans.list {}` → `{schema: 1, root, plans: [...]}`
+  and `plans.show {name}` → `{schema: 1, plan: {...}}`, in tpt's schema-1
+  shapes (list items: `file`, `base`, `date_from_name`, `nn`, `name`,
+  `kind`, `title`, `date`, `status`, `status_base`, `status_by {ref}`,
+  `last_amendment`, `readme {row, status, decision}`, `error`; `show` adds
+  `covers`, `sources`, `related`, `living_sections`, `extra`, `headings`,
+  `amendments [{index, line, timestamp, subject, living_section}]`); the
+  errors -32110 (no docs/design plans) and -32111 (no plan of that name).
+- **Added:** the menu item `plans` ("Plans in this project", a modal, both
+  screens).
+
+## flankr-companion 0.5.1 — 2026-10-28 (the commit tagged `flankr-companion-v0.5.1`)
+
+Plan 20261028_04 (plugins), step 5. Strictly additive (`Input` and `Event`
+are `#[non_exhaustive]`):
+
+- **Added:** `Input::PluginCall { ns, id, method, params, session }` (sent as
+  `plugin.call`; a call refused at once, offline, malformed, over 256 KiB,
+  refused by the daemon or cut off by the connection closing, is answered
+  as `Event::PluginResult` with the error) and
+  `Input::SetPluginEnabled { ns, enabled }` (`plugin.set_enabled`).
+- **Added:** `Event::Plugins(Vec<PluginInfo>)` (after each `hello`, empty
+  from an older daemon; on each `server.capabilities` with `plugins`; after
+  a toggle is answered or refused; last in `State::replay`),
+  `Event::PluginResult(PluginResult)` and `Event::PluginNotify(PluginNotify)`.
+- **Added:** `State::plugins()`; `client::plugin_refusal()`: plugin inputs
+  for a remote not in use are refused (plugins act on the remote in use
+  only).
+- libflankr_proto 0.5.1 → 0.5.2 (semver-compatible).

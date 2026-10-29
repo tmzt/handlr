@@ -124,6 +124,8 @@ pub(super) struct Conn {
     written: Arc<std::sync::atomic::AtomicU64>,
     /// Open terminals (plan 20261027_07, decision 8).
     pub(super) terminals: super::terminal::Terminals,
+    /// Running plugin calls (plan 20261028_04, decision 3.2, item 2).
+    plugin_calls: crate::plugins::CallSlots,
 }
 
 impl Conn {
@@ -404,6 +406,7 @@ async fn serve<S>(
         queued: std::sync::atomic::AtomicU64::new(0),
         written,
         terminals: Default::default(),
+        plugin_calls: Default::default(),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -506,6 +509,7 @@ async fn serve<S>(
         sub.cancel();
     }
     conn.terminals.close_all(&conn.daemon);
+    conn.plugin_calls.close();
     if let Some(link) = &conn.daemon.link {
         link.end_pair_mode(conn.id);
     }
@@ -594,6 +598,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
             paired: paired_now.then_some(true),
             llm: Some(conn.daemon.llm.info()),
             terminal: super::terminal::info(&conn.daemon, conn.is_link()),
+            plugins: Some(conn.daemon.plugins.infos()),
         })?;
         return Ok((principal, result));
     }
@@ -839,6 +844,20 @@ async fn call(
         // Plan 20261027_08, steps 7 and 8.
         methods::TERMINAL_MOUSE if conn.is_companion() => super::terminal::mouse(conn, raw).await,
         methods::TERMINAL_RESIZE if conn.is_companion() => super::terminal::resize(conn, raw),
+        companion::methods::PLUGIN_CALL if conn.is_companion() => {
+            plugin_call(conn, request_id, params(raw)?)
+        }
+        companion::methods::PLUGIN_SET_ENABLED if conn.is_companion() => {
+            let p: companion::PluginSetEnabledParams = params(raw)?;
+            let daemon = Arc::clone(&conn.daemon);
+            let principal = conn.principal().clone();
+            // The write is small and local; it runs off the async workers.
+            let result =
+                tokio::task::spawn_blocking(move || daemon.plugins.set_enabled(&principal, p))
+                    .await
+                    .map_err(|e| ErrorObject::new(codes::INTERNAL_ERROR, e.to_string()))??;
+            ok(result)
+        }
         methods::AGENTS_INTERRUPT => {
             let p: common::AgentsInterruptParams = params(raw)?;
             let snap = snapshot(conn).await?;
@@ -1428,6 +1447,40 @@ async fn send_message(
     })
 }
 
+/// `plugin.call` (plan 20261028_04, decision 3.2): answered at once; the
+/// plugin starts once that answer is written, and its result and
+/// notifications come on this connection only. Its project is the call's
+/// `session`, else the conversation's current agent.
+fn plugin_call(
+    conn: &Arc<Conn>,
+    request_id: &Id,
+    call: companion::PluginCall,
+) -> Result<Value, ErrorObject> {
+    let pane = call
+        .session
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| conn.session().current_agent.lock().unwrap().clone());
+    let weak = Arc::downgrade(conn);
+    let (answered, ready) = tokio::sync::oneshot::channel();
+    let caller = crate::plugins::Caller {
+        principal: conn.principal().clone(),
+        pane,
+        lookup: Arc::new(crate::plugins::HerdrLookup::new(conn.daemon.client.clone())),
+        sink: Arc::new(move |note: Notification| {
+            if let Some(conn) = weak.upgrade() {
+                conn.send(&note);
+            }
+        }),
+        answered: Some(ready),
+    };
+    let accepted = conn.daemon.plugins.call(call, caller, &conn.plugin_calls)?;
+    conn.on_answered(request_id.clone(), answered);
+    ok(accepted)
+}
+
 /// Send this connection the events it is entitled to: what it subscribed
 /// to, confirmations if it can approve them, and the resolution of its own.
 async fn forward_events(conn: Arc<Conn>) {
@@ -1440,6 +1493,9 @@ async fn forward_events(conn: Arc<Conn>) {
     let mut llm = conn.daemon.llm.subscribe();
     llm.mark_unchanged();
     let mut llm_open = true;
+    let mut plugins = conn.daemon.plugins.subscribe();
+    plugins.mark_unchanged();
+    let mut plugins_open = true;
     let mut vocabulary_check = tokio::time::interval_at(
         tokio::time::Instant::now() + turns::VOCABULARY_INTERVAL,
         turns::VOCABULARY_INTERVAL,
@@ -1457,10 +1513,27 @@ async fn forward_events(conn: Arc<Conn>) {
                         companion::ServerCapabilities {
                             llm: Some(info),
                             terminal: super::terminal::info(&conn.daemon, conn.is_link()),
+                            plugins: Some(conn.daemon.plugins.infos()),
                         },
                     ));
                 }
                 Err(_) => llm_open = false,
+            },
+            // The plugin list changed: a toggle or a config reload (plan
+            // 20261028_04, decision 3.2, item 5).
+            changed = plugins.changed(), if companion && plugins_open => match changed {
+                Ok(()) => {
+                    let list = plugins.borrow_and_update().clone();
+                    conn.send(&Notification::new(
+                        companion::methods::SERVER_CAPABILITIES,
+                        companion::ServerCapabilities {
+                            llm: Some(conn.daemon.llm.info()),
+                            terminal: super::terminal::info(&conn.daemon, conn.is_link()),
+                            plugins: Some(list),
+                        },
+                    ));
+                }
+                Err(_) => plugins_open = false,
             },
             event = confirms.recv() => match event {
                 // A companion's own voice-turn question is sent by its turn,

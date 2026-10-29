@@ -728,7 +728,15 @@ impl Net {
         };
         match input {
             Input::SwitchRemote(id) => self.switch_remote(id).await,
-            Input::ToRemote { remote, input } => self.give(LinkKey::Remote(remote), *input),
+            Input::ToRemote { remote, input } => {
+                let key = LinkKey::Remote(remote);
+                // Plugins act on the remote in use only (plan 20261028_04,
+                // 3.10 item 3).
+                match crate::client::plugin_refusal(&input).filter(|_| !self.is_active(key)) {
+                    Some(events) => events.into_iter().for_each(|e| self.emit(e)),
+                    None => self.give(key, *input),
+                }
+            }
             Input::Background(on) => {
                 self.app_background = on;
                 for key in self.keys_of_links() {

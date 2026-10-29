@@ -28,6 +28,77 @@ pub const INSTRUCTION_FILES: [&str; 3] = ["AGENTS.md", "CLAUDE.md", "GEMINI.md"]
 pub struct ProjectFiles {
     root: PathBuf,
     read: Vec<ReadPattern>,
+    /// A second set a path must also match, when set: a plugin's own
+    /// `read_patterns()` (docs/design/20261028_04_PLUGINS_PLAN.md, decision
+    /// 3.3, item 3). An empty set allows nothing.
+    also: Option<Vec<ReadPattern>>,
+}
+
+/// What a file or git operation says when there is no current agent.
+pub const NO_PROJECT: &str = "No project is open: open a session, or focus an agent first";
+
+/// An agent's pane and its folder, as herdr's snapshot gives them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentFolder {
+    /// Canonical, as the snapshot has it (`w1:p6`).
+    pub pane_id: String,
+    /// Lowercased; `shell` when the pane runs no known agent.
+    pub agent: String,
+    /// The pane's `cwd`, as herdr reports it.
+    pub folder: String,
+}
+
+/// Refused when herdr is reached over SSH: the project's files are on
+/// another machine.
+pub fn check_local(client: &crate::transport::HerdrClient) -> Result<(), String> {
+    if matches!(
+        client.transport(),
+        crate::transport::HerdrTransport::RemoteSsh { .. }
+    ) {
+        return Err(
+            "The project's files are on another machine; flankr reads only its own.".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The folder of the agent in `pane_id`, on this machine: refused over
+/// SSH, else the pane's `cwd` from herdr's snapshot (plan 20261028_04,
+/// decision 3.3, item 2; moved here from the general agent's executor so
+/// both use one function).
+pub async fn agent_folder(
+    client: &crate::transport::HerdrClient,
+    pane_id: &str,
+) -> Result<String, String> {
+    agent_folder_named(client, pane_id).await.map(|a| a.folder)
+}
+
+/// As [`agent_folder`], with the pane's agent.
+pub async fn agent_folder_named(
+    client: &crate::transport::HerdrClient,
+    pane_id: &str,
+) -> Result<AgentFolder, String> {
+    check_local(client)?;
+    let snapshot = client
+        .list_panes()
+        .await
+        .map_err(|e| format!("herdr is not answering: {e}"))?;
+    folder_in(&snapshot, pane_id)
+}
+
+/// The agent in `pane_id` and its folder in `snapshot`.
+pub fn folder_in(snapshot: &serde_json::Value, pane_id: &str) -> Result<AgentFolder, String> {
+    crate::core::agents::agents(snapshot)
+        .into_iter()
+        .find(|a| crate::watch::pane_ids_match(&a.pane_id, pane_id))
+        .and_then(|a| {
+            Some(AgentFolder {
+                folder: a.cwd?,
+                pane_id: a.pane_id,
+                agent: a.agent,
+            })
+        })
+        .ok_or_else(|| format!("The folder of the current agent (pane {pane_id}) is not known."))
 }
 
 /// A `list_files` answer.
@@ -65,7 +136,18 @@ impl ProjectFiles {
         if !root.is_dir() {
             return Err(format!("The project's folder {cwd} is not a folder."));
         }
-        Ok(ProjectFiles { root, read })
+        Ok(ProjectFiles {
+            root,
+            read,
+            also: None,
+        })
+    }
+
+    /// The same project, where a path must also match one of `also`
+    /// (a plugin's own patterns); an empty `also` allows nothing.
+    pub fn narrowed(mut self, also: Vec<ReadPattern>) -> ProjectFiles {
+        self.also = Some(also);
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -74,7 +156,12 @@ impl ProjectFiles {
 
     /// Whether the root-relative `path` may be read by its name.
     pub fn allowed(&self, path: &str) -> bool {
-        !always_refused(path) && self.read.iter().any(|p| p.matches(path))
+        !always_refused(path)
+            && self.read.iter().any(|p| p.matches(path))
+            && self
+                .also
+                .as_ref()
+                .is_none_or(|also| also.iter().any(|p| p.matches(path)))
     }
 
     /// The readable regular files, narrowed by `glob`, sorted, at most
@@ -340,6 +427,46 @@ mod tests {
         let err = files.read("binary.md").unwrap_err();
         assert!(err.contains("not UTF-8"), "{err}");
         assert!(files.read("docs").is_err());
+    }
+
+    #[test]
+    fn a_narrowed_project_needs_both_sets() {
+        let (_dir, root) = sample();
+        let files = ProjectFiles::open(root.to_str().unwrap(), patterns(&["*.md", "docs/**/*.md"]))
+            .unwrap()
+            .narrowed(patterns(&["README.md", "docs/x.txt"]));
+        assert!(files.read("README.md").is_ok());
+        // The configured patterns match, the narrowing ones don't.
+        assert!(files.read("docs/design/x.md").is_err());
+        // The narrowing ones match, the configured ones don't.
+        assert!(files.read("docs/x.txt").is_err());
+        assert_eq!(files.list(None).unwrap().paths, ["README.md"]);
+        let none = ProjectFiles::open(root.to_str().unwrap(), patterns(&["**/*"]))
+            .unwrap()
+            .narrowed(vec![]);
+        assert!(none.read("README.md").is_err());
+        assert!(none.list(None).unwrap().paths.is_empty());
+    }
+
+    #[test]
+    fn an_agents_folder_comes_from_the_snapshot() {
+        let snap = serde_json::json!({
+            "panes": [
+                {"pane_id": "w1:p1", "workspace_id": "w1", "agent": "claude", "cwd": "/src/a"},
+                {"pane_id": "w1:p2", "workspace_id": "w1"}
+            ]
+        });
+        assert_eq!(
+            folder_in(&snap, "w1:p1").unwrap(),
+            AgentFolder {
+                pane_id: "w1:p1".into(),
+                agent: "claude".into(),
+                folder: "/src/a".into(),
+            }
+        );
+        let err = folder_in(&snap, "w1:p2").unwrap_err();
+        assert!(err.contains("is not known"), "{err}");
+        assert!(folder_in(&snap, "w1:p9").is_err());
     }
 
     #[test]

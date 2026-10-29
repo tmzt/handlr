@@ -366,6 +366,31 @@ hostname alone; `:port` is added only when two or more listed remotes
 would otherwise show the same nickname (then each of them shows
 `host:port`), whatever the port.
 
+## Amendment — 2026-10-28 20:43 EDT: Settings → Plugins (living section)
+
+docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.9, built in its step 6
+(approved by the owner with that plan, its 19:47 EDT amendment). A new
+entry for the living list of sections and rows (the 2026-10-28 13:03 EDT
+amendment):
+
+1. **A Plugins section, between Remotes and Device.** One standard
+   two-line row per plugin the daemon in use lists (its `PluginInfo`), in
+   the daemon's order: the plugin's name, with an ⓘ after it that opens its
+   description, package name, version and config key; under it, small and
+   dim, its version as the daemon gives it (`0.1.0`); and a toggle at the
+   right.
+2. **A plugin the app can't show** (no device half, or a daemon version
+   outside the half's range) has its toggle off and disabled, and its
+   second line says *Needs a newer app* or *Needs a newer flankr*.
+3. **A toggle** asks the daemon to write `[plugins."<ns>"] enabled`; the
+   switch is replaced by a spinner until the daemon's list
+   (`server.capabilities`) settles it. A refusal (for example a device that
+   may not approve) opens a notice, "<name> was not changed: <reason>",
+   with OK.
+4. **With no plugins listed** (an older daemon), the section is one
+   standard row, *This flankr has no plugins.*
+5. The copy is in `apps/companion/copy/SETTINGS_COPY.md`.
+
 ## Amendment — 2026-10-28 21:29 EDT: Photos, converted or unmodified (living section)
 
 docs/design/20261028_05_BINARY_FILES_PLAN.md, its 2026-10-28 21:29 EDT amendment, item 8,

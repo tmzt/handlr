@@ -38,11 +38,15 @@ libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "4de319ce57aea99297de
 # (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, step 2), drawn in
 # Roboto Regular, Bold and Italic (above) and the terminal face.
 flankr-markdown = { path = "../../crates/flankr-markdown" }
-# 0.10.2 (tag v0.10.2): Drawer and DrawerLayout (0.10.1) and EditableLabel
-# (0.10.2) for the session drawer (plan 20261028_03, step 5); 0.10.0's
-# label change needs nothing here (every Button label is plain). TextArea
-# since 0.9.1. On the same libmsdf.
-libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "e3140dbd7a36bba36157b1a78b5bf346510ab376" }
+# 0.10.3 (tag v0.10.3): PopupMenu, for the title bars' ⋮ (plan
+# 20261028_04, step 7); with Drawer and DrawerLayout (0.10.1) and
+# EditableLabel (0.10.2) for the session drawer (plan 20261028_03, step 5);
+# 0.10.0's label change needs nothing here (every Button label is plain).
+# TextArea since 0.9.1. On the same libmsdf.
+libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "ef860f0f33d6815030d315005f22711b9206e673" }
+# The device halves' supported daemon versions, in Cargo's caret meaning
+# (plan 20261028_04, 3.4 item 3); the version already in Cargo.lock.
+semver = "1.0.28"
 log = "0.4"
 # The key store's Noise key (src/keys.rs): cleared on drop, X25519 with the
 # curve25519-dalek snow already uses, and a random key from the OS.
@@ -51,6 +55,8 @@ curve25519-dalek = "4.1.3"
 getrandom = "0.2"
 # The server record, a TOML blob in the secure store, in FileKeyStore's layout.
 serde = { version = "1", features = ["derive"] }
+# The plugins' params and results (plan 20261028_04, step 6).
+serde_json = "1"
 # themes.toml (src/theme.rs), its themes in file order.
 toml = { version = "0.8", features = ["preserve_order"] }
 base64 = "0.22"

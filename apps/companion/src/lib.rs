@@ -70,10 +70,12 @@ mod drawer_tests;
 pub mod keys;
 pub mod markdown_view;
 pub mod memory;
+pub mod menu;
 pub mod notify;
 pub mod overview;
 #[cfg(all(test, not(target_os = "android")))]
 mod pairing_scan_tests;
+pub mod plugins;
 pub mod prompt;
 pub mod remotes;
 pub mod scanner;
@@ -113,14 +115,17 @@ use crate::agent::{AgentHit, AgentScreen, TermAsk, TermState, Terminal, Terminal
 use crate::drawer::{AppDrawer, DrawerHit, DrawerTouch};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
+use crate::menu::{Choice, Kebab, Menu};
 use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
+use crate::plugins::{Outgoing, Plugins, Screen as PluginScreen};
 use crate::prompt::keyboard::{FocusedPrompt, Ime, KeyboardRoute, PromptScreen, Typing};
 use crate::prompt::{MessagePrompt, PromptKind, Prompts, Sent};
 use crate::scanner::{Action as CameraAction, Scanner, Touched as ScanTouched};
 use crate::session_cards::{SessionCards, SessionHit, Touched};
 use crate::settings::background::{self, POST_NOTIFICATIONS, PermissionOs, TurnedOn};
 use crate::settings::build_info::BuildInfo;
+use crate::settings::screen::PluginShown;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::theme::{Role, theme};
 use crate::ui::{CameraView, Card, CardState, Glyph, Hit, Layout, Row, Screen, View, prompt_input};
@@ -405,6 +410,16 @@ pub struct App {
     /// (scripted tests).
     #[cfg(test)]
     updates: u32,
+    /// The plugins' device halves and the daemon's list, the router of
+    /// their message flow (docs/design/20261028_04_PLUGINS_PLAN.md, step 6).
+    plugins: Plugins,
+    /// The open plugin modal's scroll and touch.
+    plugin_modal: plugins::modal::ModalView,
+    /// The title bars' ⋮ menu (step 7), and a touch that came down on a ⋮.
+    menu: Menu,
+    kebab_touch: Option<u64>,
+    /// The screen's layout, as last laid out.
+    layout: Layout,
 }
 
 /// What a remote in the background last gave: its agents and pending
@@ -643,6 +658,7 @@ impl App {
         };
         log::info!("theme: {}", t.name);
         self.screen.restyle();
+        self.menu.restyle();
         self.overview.restyle();
         if let Some(a) = self.agent.as_mut() {
             a.restyle();
@@ -868,8 +884,36 @@ impl App {
             }
             Event::Error(e) => {
                 log::warn!("companion: {e}");
-                self.note = Some((e, Role::Warn));
+                // A plugin's toggle refused: its notice, in Settings.
+                if let Some(screen) = self.settings_screen.as_mut().filter(|s| s.plugin_pending()) {
+                    screen.plugin_failed(&e);
+                } else {
+                    self.note = Some((e, Role::Warn));
+                }
             }
+            // The daemon's plugins (plan 20261028_04, 3.10): the menu's
+            // items, Settings → Plugins, and the views of one turned off.
+            Event::Plugins(list) => {
+                log::info!(
+                    "plugins: {}",
+                    list.iter()
+                        .map(|p| format!(
+                            "{}@{}{}",
+                            p.ns,
+                            p.version,
+                            if p.enabled { " (on)" } else { "" }
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+                self.plugins.set_infos(list);
+                let shown = self.plugin_shown();
+                if let Some(screen) = &mut self.settings_screen {
+                    screen.set_plugins(shown);
+                }
+            }
+            Event::PluginResult(r) => self.plugin_calls(|p| p.result(r)),
+            Event::PluginNotify(n) => self.plugin_calls(|p| p.notify(n)),
             Event::Agents(agents) => {
                 self.agents = agents;
                 self.follow_sessions();
@@ -1149,6 +1193,123 @@ impl App {
             .map(|(id, _)| *id)
             .collect();
         self.drawer.content_mut().set_waiting(waiting);
+    }
+
+    /// Settings → Plugins' rows, from the daemon's list.
+    fn plugin_shown(&self) -> Vec<PluginShown> {
+        self.plugins
+            .infos()
+            .iter()
+            .map(|p| PluginShown {
+                ns: p.ns.clone(),
+                name: p.name.clone(),
+                description: p.description.clone(),
+                version: p.version.clone(),
+                enabled: p.enabled,
+                availability: self.plugins.availability(&p.ns),
+            })
+            .collect()
+    }
+
+    /// Runs `f` on the plugins and sends the calls it gives, each with the
+    /// agent view's pane as its session; a modal it opened starts at its
+    /// top.
+    fn plugin_calls(&mut self, f: impl FnOnce(&mut Plugins) -> Vec<Outgoing>) {
+        let before = self.plugins.modal().map(|(ns, _)| ns.to_string());
+        let calls = f(&mut self.plugins);
+        if self.plugins.modal().map(|(ns, _)| ns) != before.as_deref() {
+            self.plugin_modal.reset();
+        }
+        for (ns, call) in calls {
+            log::info!("plugins: {ns} {}", call.method);
+            self.send(Input::PluginCall {
+                ns,
+                id: call.id,
+                method: call.method,
+                params: call.params,
+                session: self.agent_pane.clone(),
+            });
+        }
+    }
+
+    /// The ⋮ of the screen shown, with its menu's screen; dim while its
+    /// menu would be empty.
+    fn kebab(&self) -> Option<(Kebab, PluginScreen)> {
+        if self.pairing.adding {
+            return None;
+        }
+        let (mut k, screen) = if let Some(s) = &self.settings_screen {
+            (s.kebab(), PluginScreen::Settings)
+        } else if let Some(a) = &self.agent {
+            (a.kebab(), PluginScreen::Agent)
+        } else if !self.pairing() {
+            (self.overview.kebab(), PluginScreen::Overview)
+        } else {
+            return None;
+        };
+        k.dim = self.menu_items(screen).is_empty();
+        Some((k, screen))
+    }
+
+    fn menu_items(&self, screen: PluginScreen) -> Vec<libcontrols::PopupItem> {
+        menu::items(screen, &self.plugins.menu(screen), self.read_aloud)
+    }
+
+    /// The ⋮ was tapped: its menu opens below it.
+    fn open_menu(&mut self) {
+        if let Some((k, screen)) = self.kebab() {
+            let items = self.menu_items(screen);
+            self.menu.open(k.rect, items);
+        }
+    }
+
+    /// What was chosen in the menu, if anything.
+    fn menu_chosen(&mut self) {
+        let Some(choice) = self.menu.take_choice() else {
+            return;
+        };
+        log::info!("menu: {choice:?}");
+        match choice {
+            Choice::ReadAloud => {
+                if self.agent.is_some() {
+                    self.agent_hit(AgentHit::ReadAloud);
+                }
+            }
+            Choice::Settings => {
+                if self.settings_screen.is_none() {
+                    self.open_settings();
+                }
+            }
+            Choice::Plugin { ns, item } => self.plugin_calls(|p| p.action(&ns, &item)),
+            Choice::Unpin(i) => self.plugins.unpin(i),
+        }
+    }
+
+    /// A pinned plugin card was tapped, or held for Unpin.
+    fn plugin_card_hit(&mut self, index: usize, x: f32, y: f32, held: bool) {
+        let s = self.scale();
+        let Some((_, rect)) = self
+            .overview
+            .plugin_cards()
+            .1
+            .into_iter()
+            .find(|(i, _)| *i == index)
+        else {
+            return;
+        };
+        if held {
+            let unpin = libcontrols::PopupItem::action(
+                format!("{}{index}", menu::UNPIN),
+                settings::copy::MENU_UNPIN.text,
+            );
+            self.menu.open(
+                libcontrols::Rect::new(rect.x, y - 1.0, rect.w, 2.0),
+                vec![unpin],
+            );
+            return;
+        }
+        let content = plugins::card::content(rect, s);
+        self.plugin_calls(|p| p.tap_card(index, x - content.x, y - content.y));
     }
 
     /// Opens the view of the agent in `pane_id`, from its card.
@@ -1619,6 +1780,7 @@ impl App {
         screen.set_remotes(self.remotes.clone());
         screen.set_device(&self.device);
         screen.set_cache(self.cache);
+        screen.set_plugins(self.plugin_shown());
         self.settings_screen = Some(screen);
     }
 
@@ -1656,6 +1818,10 @@ impl App {
             SettingsHit::ClearCache => {
                 log::info!("settings: clearing the cache");
                 self.send(Input::ClearCache);
+            }
+            SettingsHit::SetPluginEnabled { ns, enabled } => {
+                log::info!("plugins: {ns} {}", if enabled { "on" } else { "off" });
+                self.send(Input::SetPluginEnabled { ns, enabled });
             }
         }
     }
@@ -2343,6 +2509,24 @@ impl App {
     /// pairing screen, only a touch's end counts.
     fn touch(&mut self, touch: Touch) {
         let now = self.started.elapsed();
+        // The ⋮ menu, then a plugin's modal, take every touch while open
+        // (plan 20261028_04, decisions 3.6 and 3.7).
+        if self.menu.is_open() {
+            self.menu.touch(touch.id, touch.phase, touch.x, touch.y);
+            self.menu_chosen();
+            return;
+        }
+        if self.plugins.modal().is_some() && !self.pairing.adding {
+            let layout = self.layout;
+            let calls = self.plugin_modal.touch(
+                &mut self.plugins,
+                &layout,
+                (touch.id, touch.phase, touch.x, touch.y),
+                now,
+            );
+            self.plugin_calls(|_| calls);
+            return;
+        }
         // While the drawer shows, its touches are its own (3.9 item 38): a
         // tap on the scrim closes it; the screens under it get none.
         if self.drawer.is_shown() {
@@ -2359,6 +2543,24 @@ impl App {
                 }
                 DrawerTouch::Hit(hit) => self.drawer_hit(hit),
             }
+            return;
+        }
+        if let Some(id) = self.kebab_touch
+            && id == touch.id
+        {
+            if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
+                self.kebab_touch = None;
+                let on = self.kebab().is_some_and(|(k, _)| k.takes(touch.x, touch.y));
+                if touch.phase == TouchPhase::Ended && on {
+                    self.open_menu();
+                }
+            }
+            return;
+        }
+        if touch.phase == TouchPhase::Started
+            && self.kebab().is_some_and(|(k, _)| k.takes(touch.x, touch.y))
+        {
+            self.kebab_touch = Some(touch.id);
             return;
         }
         if let Some(hold) = self.center_hold.as_mut()
@@ -2478,6 +2680,9 @@ impl App {
                 Some(OverviewHit::Tap) => self.send(Input::Tap),
                 Some(OverviewHit::Settings) => self.open_settings(),
                 Some(OverviewHit::Menu) => self.open_drawer(),
+                Some(OverviewHit::PluginCard { index, x, y, held }) => {
+                    self.plugin_card_hit(index, x, y, held)
+                }
                 None => {}
             }
             return;
@@ -2589,6 +2794,14 @@ impl App {
     /// into the focused field (desktop): Enter pairs, Escape clears.
     fn key(&mut self, key: Key) -> KeyStatus {
         let back = matches!(key, Key::Back | Key::Escape);
+        // Back closes the ⋮ menu, then a plugin's modal.
+        if back && self.menu.back() {
+            return KeyStatus::Handled;
+        }
+        if back && self.plugins.modal().is_some() {
+            self.plugins.close_modal();
+            return KeyStatus::Handled;
+        }
         // Back (Escape on the desktop) closes the drawer, and is taken.
         if back && self.drawer.is_shown() {
             log::info!("drawer: closed by Back");
@@ -2848,9 +3061,23 @@ impl App {
         } else {
             "microphone off".to_string()
         };
+        self.layout = layout;
+        self.menu.set_layout(layout);
         if !self.pairing() {
+            // The pinned plugin cards' heights, at the grid's width.
+            let s = if layout.scale > 0.0 {
+                layout.scale
+            } else {
+                1.0
+            };
+            self.overview.set_layout(layout);
+            let width = self.overview.plugin_card_width();
+            let inner = plugins::card::content(libcontrols::Rect::new(0.0, 0.0, width, 1.0), s).w;
+            let heights = (0..self.plugins.cards().len())
+                .map(|i| plugins::card::height(self.plugins.card_height(i, inner, s), s))
+                .collect();
+            self.overview.set_plugin_cards(heights);
             let o = &mut self.overview;
-            o.set_layout(layout);
             o.set_general_agent_listening(ga_listening);
             let note = self
                 .note
@@ -3325,6 +3552,11 @@ impl MorphApp for App {
             retry_in: None,
             #[cfg(test)]
             updates: 0,
+            plugins: Plugins::builtin(),
+            plugin_modal: Default::default(),
+            menu: Menu::new(),
+            kebab_touch: None,
+            layout: Layout::default(),
         };
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
@@ -3479,6 +3711,15 @@ impl MorphApp for App {
             agent.tick(dt);
         } else {
             self.overview.tick(dt);
+        }
+        if self.plugins.modal().is_some() && self.plugin_modal.tick(dt, self.scale()) {
+            self.overview.invalidate();
+            if let Some(agent) = &mut self.agent {
+                agent.invalidate();
+            }
+            if let Some(screen) = &mut self.settings_screen {
+                screen.invalidate();
+            }
         }
         // The camera runs only while the window shows it (plan 20261028_02,
         // decision 15): the window replaced, or left while suspended, stops
@@ -3656,8 +3897,10 @@ impl MorphApp for App {
         };
         // Another session's card changed: the screen under it draws again.
         let cards_changed = self.session_cards.take_dirty();
+        // The ⋮ menu, a plugin's modal or card changed: the same.
+        let overlay_changed = self.plugins.take_dirty() | self.menu.take_dirty();
         // Another screen drew over the list: the one shown now draws it all.
-        if self.shown != Some(shown) || cards_changed {
+        if self.shown != Some(shown) || cards_changed || overlay_changed {
             self.shown = Some(shown);
             self.screen.invalidate();
             self.overview.invalidate();
@@ -3692,6 +3935,31 @@ impl MorphApp for App {
         if drew && shown != Shown::Pairing && !overlay {
             let s = ctx.scale_factor();
             self.session_cards.draw(&mut self.list, &draw, s);
+        }
+        // Over the screen: the ⋮, the pinned plugin cards in the grid, a
+        // plugin's modal, then the menu (plan 20261028_04, steps 6 and 7).
+        if drew && shown != Shown::Pairing {
+            let s = self.scale();
+            if let Some((k, _)) = self.kebab() {
+                k.draw(&mut self.list, s);
+            }
+            // Not over an expanded prompt card's overlay, which covers
+            // the grid.
+            if shown == Shown::Overview && !overlay {
+                let (clip, cards) = self.overview.plugin_cards();
+                self.list.push_clip(clip.pos(), clip.size());
+                for (i, rect) in cards {
+                    let name = self.plugins.card_name(i).unwrap_or_default().to_string();
+                    plugins::card::draw_frame(&mut self.list, &draw, rect, &name, s);
+                    let content = plugins::card::content(rect, s);
+                    self.plugins.draw_card(i, content, s, &draw, &mut self.list);
+                }
+                self.list.push_clip_end();
+            }
+            let layout = self.layout;
+            self.plugin_modal
+                .draw(&self.plugins, &layout, &draw, &mut self.list);
+            self.menu.draw(&mut self.list, &draw);
         }
         let (w, h) = frame.size;
         let s = ctx.scale_factor();

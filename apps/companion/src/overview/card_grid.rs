@@ -5,7 +5,10 @@
 //! the L3 amendment of 2026-10-28 00:47 EDT). The order is by `(workspace_id, tab_number)` and never changes as
 //! turns change: a card that needs input is marked where it is. Cards are
 //! equal width, 12 pt apart and from the edges, at least 112 pt high; the
-//! two of a row share its height. The grid scrolls on its own.
+//! two of a row share its height. The grid scrolls on its own. After the
+//! agent cards, full width, come the pinned plugin cards
+//! (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.7), whose heights
+//! the app gives ([`CardGrid::set_extra`]) and whose content it draws.
 
 use std::cmp::Ordering;
 use std::time::Duration;
@@ -74,6 +77,10 @@ pub struct CardGrid {
     /// Each card's pane and layout, in content coordinates (y from the
     /// grid's top).
     cards: Vec<(String, CardLayout)>,
+    /// The plugin cards' heights, as given, and their rects in content
+    /// coordinates.
+    extra: Vec<f32>,
+    extra_rects: Vec<Rect>,
     height: f32,
     scroll: Scroll,
 }
@@ -96,6 +103,8 @@ impl CardGrid {
             viewport: Rect::default(),
             scale: 1.0,
             cards: Vec::new(),
+            extra: Vec::new(),
+            extra_rects: Vec::new(),
             height: 0.0,
             scroll: Scroll::new(false),
         }
@@ -152,9 +161,63 @@ impl CardGrid {
             }
             y += row_h + gap;
         }
+        // The plugin cards, full width, below the line shown for none.
+        if self.extra.is_empty() {
+            self.extra_rects.clear();
+        } else {
+            if self.agents.is_empty() {
+                y += 40.0 * s;
+            }
+            let full = (v.w - 2.0 * gap).max(0.0);
+            self.extra_rects = self
+                .extra
+                .iter()
+                .map(|&h| {
+                    let r = Rect::new(v.x + gap, y, full, h);
+                    y += h + gap;
+                    r
+                })
+                .collect();
+        }
         self.height = y;
         self.cards = cards;
         self.scroll.set_extent(self.height, v.h);
+    }
+
+    /// The plugin cards' heights, in order: laid out after the agents'.
+    pub fn set_extra(&mut self, heights: Vec<f32>) -> bool {
+        if heights == self.extra {
+            return false;
+        }
+        self.extra = heights;
+        self.relayout();
+        true
+    }
+
+    /// Plugin card `i`'s rect on the screen.
+    pub fn extra_rect(&self, i: usize) -> Option<Rect> {
+        let r = self.extra_rects.get(i)?;
+        Some(Rect::new(r.x, r.y + self.dy(), r.w, r.h))
+    }
+
+    /// The plugin cards in the window, with their indexes.
+    pub fn extra_shown(&self) -> Vec<(usize, Rect)> {
+        let v = self.viewport;
+        (0..self.extra_rects.len())
+            .filter_map(|i| self.extra_rect(i).map(|r| (i, r)))
+            .filter(|(_, r)| r.y + r.h >= v.y && r.y <= v.y + v.h)
+            .collect()
+    }
+
+    /// The plugin card at `(x, y)` on the screen, inside the window.
+    pub fn extra_at(&self, x: f32, y: f32) -> Option<usize> {
+        if !self.viewport.contains([x, y]) {
+            return None;
+        }
+        self.extra_shown()
+            .into_iter()
+            .find(|(_, r)| r.contains([x, y]))
+            .map(|(i, _)| i)
     }
 
     /// The panes with a card, in their order.
@@ -430,6 +493,28 @@ mod tests {
         let third = g.card_rect("p6").unwrap();
         assert!(HALF.contains([third.x + 5.0, third.y + 5.0]));
         assert_eq!(g.pane_at(third.x + 5.0, third.y + 5.0), Some("p6"));
+    }
+
+    #[test]
+    fn plugin_cards_follow_the_agents_full_width_and_take_taps() {
+        let mut g = grid(&[
+            agent("p1", "w1", 1, None),
+            agent("p2", "w1", 2, None),
+            agent("p3", "w1", 3, None),
+        ]);
+        assert!(g.set_extra(vec![120.0, 80.0]));
+        assert!(!g.set_extra(vec![120.0, 80.0]));
+        let last = g.card_rect("p3").unwrap();
+        let first = g.extra_rect(0).unwrap();
+        assert!(first.y > last.y + last.h, "below the agents");
+        assert_eq!(first.w, HALF.w - 2.0 * CardGrid::GAP * 2.0);
+        let second = g.extra_rect(1).unwrap();
+        assert!(second.y >= first.y + first.h);
+        let [x, y] = first.center();
+        if HALF.contains([x, y]) {
+            assert_eq!(g.extra_at(x, y), Some(0));
+        }
+        assert_eq!(g.pane_at(x, y), None);
     }
 
     #[test]

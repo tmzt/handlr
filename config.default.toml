@@ -186,3 +186,14 @@ terminal_input = false
 # and the text to read aloud go on the card.
 # [summary]
 # cards = true
+
+# Built-in plugins, each off until its table says `enabled = true`; the
+# phone's Settings → Plugins writes that key here. A plugin reads only
+# where [llm.uses.planning] `read` and its own patterns both match, and
+# `commands` can only narrow (or, `false`, switch off) the commands it
+# declares.
+# The planning plugin lists this project's plans and their amendments,
+# from docs/design. Read-only.
+# [plugins."dev.flankr.plugins.planning"]
+# enabled = true
+# commands = false

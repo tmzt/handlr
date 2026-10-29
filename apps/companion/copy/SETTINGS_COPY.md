@@ -345,6 +345,48 @@ nickname is the default, shown in the field as `remote_details_default`.
 The fingerprint is collapsed under `remote_details_fingerprint` until
 tapped. Remove opens the same confirming modal as the X.
 
+# [Copy] section_plugins
+
+- text: PLUGINS
+
+Settings → Plugins (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.9):
+one row per plugin the daemon lists, its name, its version under it, an ⓘ
+with its description, and a toggle that writes the daemon's config.
+
+# [Copy] plugins_empty
+
+- text: This flankr has no plugins.
+
+# [Copy] plugin_info
+
+- [abc] description: the plugin's description, as the daemon gives it
+- [abc] ns: the plugin's package name
+- [abc] version: its version, as the daemon gives it
+- text: |
+    {{ [abc] description }}
+
+    Its package name is `{{ [abc] ns }}`, version `{{ [abc] version }}`.
+    Turning it on or off writes `enabled` under
+    `[plugins."{{ [abc] ns }}"]` in the daemon's `config.toml`; only a
+    device that can approve may change it. A plugin reads only the files
+    `[llm.uses.planning] read` allows, and never sends anything to an
+    agent.
+
+# [Copy] plugin_needs_app
+
+- text: Needs a newer app
+
+# [Copy] plugin_needs_flankr
+
+- text: Needs a newer flankr
+
+# [Copy] plugin_toggle_failed
+
+- [abc] name: the plugin's name
+- [abc] reason: the daemon's answer
+- text: |
+    **{{ [abc] name }} was not changed:** {{ [abc] reason }}.
+
 # [Copy] remote_not_in_use
 
 - text: not in use
@@ -583,3 +625,53 @@ the general agent's two bars while its card is hidden.
 # [Copy] prompt_no_messages
 
 - text: No messages sent to this session yet.
+
+The ⋮ menu in the title bars (docs/design/20261028_04_PLUGINS_PLAN.md,
+decision 3.6): the app's own items, after the plugins'.
+
+# [Copy] menu_read_aloud
+
+- text: Read aloud
+
+# [Copy] menu_settings
+
+- text: Settings
+
+# [Copy] menu_unpin
+
+- text: Unpin
+
+The planning plugin's modal and card (decision 3.8, item 7).
+
+# [Copy] planning_reading
+
+- text: Reading plans…
+
+# [Copy] planning_none
+
+- text: No plans in docs/design.
+
+# [Copy] planning_readme
+
+- [abc] status: the status in the README's decision table
+- text: (README: {{ [abc] status }})
+
+# [Copy] planning_back
+
+- text: ‹ Plans
+
+# [Copy] planning_pin
+
+- text: Pin
+
+# [Copy] planning_amendments
+
+- text: Amendments
+
+# [Copy] planning_no_amendments
+
+- text: No amendments.
+
+# [Copy] planning_unreadable
+
+- text: The plan could not be read.

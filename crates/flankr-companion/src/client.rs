@@ -236,6 +236,28 @@ pub enum Input {
         row: u16,
         modifiers: u8,
     },
+    /// A call to a plugin's own method (docs/design/20261028_04_PLUGINS_PLAN.md,
+    /// 3.10 item 1), sent as `plugin.call` to the remote in use. With
+    /// `id`, its answer comes as [`Event::PluginResult`] with the same
+    /// `ns` and `id`, also when the call is refused at once (offline, a
+    /// bad `ns` or `method`, `params` over
+    /// [`PLUGIN_MAX_BYTES`](wire::PLUGIN_MAX_BYTES), or the daemon's
+    /// refusal), or when the connection closes first (`CANCELLED`).
+    /// Without `id` it is a notification to the plugin and nothing
+    /// follows. `session` is the pane id of the agent view the phone has
+    /// open, if any. Added in 0.5.1.
+    PluginCall {
+        ns: String,
+        id: Option<u64>,
+        method: String,
+        params: Value,
+        session: Option<String>,
+    },
+    /// Settings → Plugins' toggle: `plugin.set_enabled` (3.10 item 1).
+    /// [`Event::Plugins`] follows either way: the daemon's list once
+    /// written, or the list as it was, with [`Event::Error`], when it was
+    /// refused. Added in 0.5.1.
+    SetPluginEnabled { ns: String, enabled: bool },
 }
 
 /// A grade of memory pressure (plan 20261022_03, the L3 amendment of
@@ -515,7 +537,10 @@ pub struct DeviceCodeFallback {
 
 /// What the client tells the app. Not exhaustive: a later variant is not
 /// a breaking change (plan 20261028_03, the 18:48 EDT amendment, item 6).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is implemented by hand: [`wire::PluginResult`]'s error object
+/// derives only `PartialEq`, though everything in it is `Eq`.
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Event {
     /// `hello` was answered.
@@ -748,7 +773,20 @@ pub enum Event {
         remote: RemoteId,
         event: Box<Event>,
     },
+    /// The daemon's built-in plugins, enabled or not
+    /// (docs/design/20261028_04_PLUGINS_PLAN.md, 3.10 item 2): after each
+    /// `hello` (empty from an older daemon, which has none), on each
+    /// `server.capabilities` that carries them, and after
+    /// [`Input::SetPluginEnabled`]. Added in 0.5.1.
+    Plugins(Vec<wire::PluginInfo>),
+    /// A plugin's answer to an [`Input::PluginCall`] with an `id`, or that
+    /// call's refusal. Added in 0.5.1.
+    PluginResult(wire::PluginResult),
+    /// A plugin's notification during a call. Added in 0.5.1.
+    PluginNotify(wire::PluginNotify),
 }
+
+impl Eq for Event {}
 
 /// Who said a line of [`Event::Conversation`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1032,6 +1070,15 @@ enum Sent {
     TerminalResize(String),
     /// `terminal.mouse` of this session.
     TerminalMouse(String),
+    /// `plugin.call` to `ns`, with the device's `id` if it has one.
+    PluginCall {
+        ns: String,
+        id: Option<u64>,
+    },
+    /// `plugin.set_enabled` of `ns`.
+    PluginSetEnabled {
+        ns: String,
+    },
 }
 
 /// The most `session.content` requests in flight at once.
@@ -1278,6 +1325,11 @@ pub struct State {
     server_name: String,
     vocabulary: Vec<String>,
     retry_in_ms: u32,
+    /// The daemon's plugins, as last told (plan 20261028_04).
+    plugins: Vec<wire::PluginInfo>,
+    /// The plugin calls with an `id` sent on this connection whose
+    /// `plugin.result` has not come, as `(ns, id)`.
+    plugin_waiting: Vec<(String, u64)>,
 }
 
 /// A refresh running (plan 20261022_03, the L3 amendment of 2026-10-24
@@ -1723,6 +1775,8 @@ impl State {
             server_name: String::new(),
             vocabulary: Vec::new(),
             retry_in_ms: 0,
+            plugins: Vec::new(),
+            plugin_waiting: Vec::new(),
         }
     }
 
@@ -1802,8 +1856,8 @@ impl State {
     /// the connection (`Connected`, `Vocabulary` and `Llm` online, else
     /// `Disconnected` with the last retry delay), then the agents, the
     /// pending panes, herdr's focus, the other sessions'
-    /// cards, the dictation card and the closed views' size, each given
-    /// even when empty so the app drops the last remote's.
+    /// cards, the dictation card, the closed views' size and the plugins,
+    /// each given even when empty so the app drops the last remote's.
     pub fn replay(&self) -> Vec<Event> {
         let mut events = Vec::new();
         if self.online() {
@@ -1825,6 +1879,8 @@ impl State {
         events.push(Event::Cache {
             bytes: self.cache_bytes(),
         });
+        // Last, so the app's plugin views follow this remote's list.
+        events.push(Event::Plugins(self.plugins.clone()));
         events
     }
 
@@ -1973,6 +2029,12 @@ impl State {
         &self.llm
     }
 
+    /// The daemon's plugins, as last told: empty before the first `hello`
+    /// and from a daemon without plugins (plan 20261028_04, 3.10).
+    pub fn plugins(&self) -> &[wire::PluginInfo] {
+        &self.plugins
+    }
+
     /// Whether a general agent turn may start: the user's toggle is on and
     /// the daemon offers one (plan 20261027_02, decisions 8 and 9).
     pub fn general_agent(&self) -> bool {
@@ -2021,6 +2083,16 @@ impl State {
         self.link = Link::Offline;
         self.retry_in_ms = retry_in_ms;
         self.sent.clear();
+        // Plugin calls waiting for their answer get none: they are
+        // cancelled, so the device half is not left waiting.
+        for (ns, id) in std::mem::take(&mut self.plugin_waiting) {
+            out.push(event(Event::PluginResult(plugin_error(
+                ns,
+                id,
+                libflankr_proto::envelope::codes::CANCELLED,
+                "the connection closed",
+            ))));
+        }
         // Terminals are opened again on the next connection.
         self.terminals.update(|b| ((), b.disconnected()));
         // The next connection's first list is given, changed or not.
@@ -2267,9 +2339,91 @@ impl State {
                 let acts = self.terminals.update(|b| b.mouse(&session, e));
                 self.terminal_acts(acts, &mut out);
             }
+            Input::PluginCall {
+                ns,
+                id,
+                method,
+                params,
+                session,
+            } => self.plugin_call(
+                wire::PluginCall {
+                    ns,
+                    id,
+                    method,
+                    params,
+                    session,
+                },
+                &mut out,
+            ),
+            Input::SetPluginEnabled { ns, enabled } => {
+                if self.online() {
+                    let params = wire::PluginSetEnabledParams {
+                        ns: ns.clone(),
+                        enabled,
+                    };
+                    out.push(self.request(
+                        wire::methods::PLUGIN_SET_ENABLED,
+                        params,
+                        Sent::PluginSetEnabled { ns },
+                    ));
+                } else {
+                    out.push(event(Event::Error("not connected to flankr".to_string())));
+                    out.push(event(Event::Plugins(self.plugins.clone())));
+                }
+            }
         }
         self.show_cards(&mut out);
         self.gate(out)
+    }
+
+    /// Sends `call` as `plugin.call`, or refuses it at once: offline, with
+    /// a malformed `ns` or `method`, or with `params` over the cap (plan
+    /// 20261028_04, 3.2 items 2 and 3). A refused call with an `id` is
+    /// answered as [`Event::PluginResult`] with the error.
+    fn plugin_call(&mut self, call: wire::PluginCall, out: &mut Vec<Output>) {
+        use libflankr_proto::envelope::codes;
+        let refusal = if !self.online() {
+            Some((codes::UNAVAILABLE, "not connected to flankr".to_string()))
+        } else if !wire::is_plugin_ns(&call.ns) {
+            Some((codes::INVALID_PARAMS, "a malformed plugin name".to_string()))
+        } else if !wire::is_plugin_method(&call.method) {
+            Some((
+                codes::INVALID_PARAMS,
+                "a malformed plugin method".to_string(),
+            ))
+        } else if serde_json::to_vec(&call.params).map_or(usize::MAX, |b| b.len())
+            > wire::PLUGIN_MAX_BYTES
+        {
+            Some((
+                codes::PLUGIN_TOO_LARGE,
+                "the call's params are over 256 KiB".to_string(),
+            ))
+        } else {
+            None
+        };
+        if let Some((code, message)) = refusal {
+            log::info!("plugin.call {} {}: {message}", call.ns, call.method);
+            if let Some(id) = call.id {
+                out.push(event(Event::PluginResult(plugin_error(
+                    call.ns, id, code, &message,
+                ))));
+            }
+            return;
+        }
+        if let Some(id) = call.id {
+            self.plugin_waiting.push((call.ns.clone(), id));
+        }
+        let sent = Sent::PluginCall {
+            ns: call.ns.clone(),
+            id: call.id,
+        };
+        out.push(self.request(wire::methods::PLUGIN_CALL, call, sent));
+    }
+
+    /// The daemon's plugin list, as told; given as [`Event::Plugins`].
+    fn set_plugins(&mut self, plugins: Vec<wire::PluginInfo>, out: &mut Vec<Output>) {
+        self.plugins = plugins;
+        out.push(event(Event::Plugins(self.plugins.clone())));
     }
 
     /// Closes the open view, if any: its subscription ends, and it is kept
@@ -4005,6 +4159,23 @@ impl State {
                     out.push(event(Event::Error(format!("hello refused: {message}"))));
                     out.push(Output::Close(message));
                 }
+                Sent::PluginCall { ns, id } => {
+                    log::info!("plugin.call {ns}: {message}");
+                    if let Some(id) = id {
+                        self.plugin_waiting.retain(|w| !(w.0 == ns && w.1 == id));
+                        out.push(event(Event::PluginResult(wire::PluginResult {
+                            ns,
+                            id,
+                            result: None,
+                            error: Some(error),
+                        })));
+                    }
+                }
+                Sent::PluginSetEnabled { ns } => {
+                    log::warn!("plugin.set_enabled {ns}: {message}");
+                    out.push(event(Event::Error(error.message)));
+                    out.push(event(Event::Plugins(self.plugins.clone())));
+                }
                 Sent::Turn(id) => {
                     out.push(event(Event::Error(message)));
                     self.end_turn(id, "error".to_string(), Vec::new(), out);
@@ -4178,6 +4349,19 @@ impl State {
                 let acts = self.terminals.update(|b| b.mouse_sent(&session, Ok(())));
                 self.terminal_acts(acts, out);
             }
+            // Handed to the plugin: its answer follows as `plugin.result`.
+            Sent::PluginCall { .. } => {}
+            Sent::PluginSetEnabled { ns } => {
+                match parse::<wire::PluginSetEnabledResult>(result) {
+                    Ok(r) => {
+                        if let Some(p) = self.plugins.iter_mut().find(|p| p.ns == ns) {
+                            p.enabled = r.enabled;
+                        }
+                    }
+                    Err(e) => log::warn!("a bad plugin.set_enabled result: {e}"),
+                }
+                out.push(event(Event::Plugins(self.plugins.clone())));
+            }
             Sent::Hello => match parse::<wire::HelloResult>(result) {
                 Ok(hello) => {
                     self.link = Link::Online;
@@ -4193,6 +4377,8 @@ impl State {
                     // What `[llm]` offers; an older daemon's is both.
                     let llm = hello.llm.unwrap_or_else(wire::LlmInfo::available);
                     self.set_llm(llm, out);
+                    // The plugins; an older daemon has none.
+                    self.set_plugins(hello.plugins.unwrap_or_default(), out);
                     // The terminal mode, if offered: what was open opens
                     // again (plan 20261027_07, step 4).
                     let acts = self.terminals.update(|b| b.set_info(hello.terminal));
@@ -4818,6 +5004,26 @@ impl State {
                     if let Some(llm) = c.llm {
                         self.set_llm(llm, out);
                     }
+                    if let Some(plugins) = c.plugins {
+                        self.set_plugins(plugins, out);
+                    }
+                }
+            }
+            wire::methods::PLUGIN_RESULT => {
+                if let Some(r) = parse_or_log::<wire::PluginResult>(note) {
+                    let key = (r.ns.clone(), r.id);
+                    match self.plugin_waiting.iter().position(|w| *w == key) {
+                        Some(i) => {
+                            self.plugin_waiting.remove(i);
+                            out.push(event(Event::PluginResult(r)));
+                        }
+                        None => log::warn!("plugin.result for no call of ours: {} {}", r.ns, r.id),
+                    }
+                }
+            }
+            wire::methods::PLUGIN_NOTIFY => {
+                if let Some(n) = parse_or_log::<wire::PluginNotify>(note) {
+                    out.push(event(Event::PluginNotify(n)));
                 }
             }
             methods::TERMINAL_CLOSED => {
@@ -5263,6 +5469,40 @@ fn focus_of(a: &common::AgentInfo) -> common::FocusInfo {
     }
 }
 
+/// A refused or cancelled plugin call's answer.
+fn plugin_error(ns: String, id: u64, code: i64, message: &str) -> wire::PluginResult {
+    wire::PluginResult {
+        ns,
+        id,
+        result: None,
+        error: Some(libflankr_proto::ErrorObject::new(code, message)),
+    }
+}
+
+/// What answers `input` given for a remote that is not in use, if it is
+/// a plugin input (plan 20261028_04, 3.10 item 3: plugins act on the
+/// active remote only): a plugin call with an `id` is answered as refused,
+/// a toggle with an error. `None` for every other input.
+pub fn plugin_refusal(input: &Input) -> Option<Vec<Event>> {
+    const MESSAGE: &str = "plugins act on the remote in use only";
+    match input {
+        Input::PluginCall { ns, id, .. } => Some(
+            id.map(|id| {
+                Event::PluginResult(plugin_error(
+                    ns.clone(),
+                    id,
+                    libflankr_proto::envelope::codes::NOT_PERMITTED,
+                    MESSAGE,
+                ))
+            })
+            .into_iter()
+            .collect(),
+        ),
+        Input::SetPluginEnabled { .. } => Some(vec![Event::Error(MESSAGE.to_string())]),
+        _ => None,
+    }
+}
+
 fn event(e: Event) -> Output {
     Output::Event(e)
 }
@@ -5398,6 +5638,8 @@ mod tests {
                 Event::Vocabulary(vec!["claude".into(), "hr".into()]),
                 // No `llm` from this daemon: both, as before.
                 Event::Llm(wire::LlmInfo::available()),
+                // No `plugins`: none.
+                Event::Plugins(vec![]),
             ]
         );
     }
@@ -8013,7 +8255,9 @@ mod tests {
         );
         assert!(matches!(&replay[3], Event::Agents(a) if a.len() == 1 && a[0].pane_id == "w2:pZ"));
         assert_eq!(replay[4], Event::PendingPanes(vec![]));
-        assert_eq!(replay.last(), Some(&Event::Cache { bytes: 0 }));
+        let n = replay.len();
+        assert_eq!(replay[n - 2], Event::Cache { bytes: 0 });
+        assert_eq!(replay[n - 1], Event::Plugins(vec![]));
 
         s.input(Input::OpenAgent("w2:pZ".into()));
         s.input(Input::DrawerShown(true));
@@ -10148,5 +10392,273 @@ mod tests {
         let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
         assert!(events(&out).contains(&Event::Arm));
         assert!(dictation_of(&out).unwrap().active);
+    }
+
+    // Plugins (docs/design/20261028_04_PLUGINS_PLAN.md, 3.10 and section 5).
+
+    const PLANNING: &str = "dev.flankr.plugins.planning";
+
+    fn planning_json(enabled: bool) -> Value {
+        json!({"ns": PLANNING, "name": "Planning",
+               "description": "Lists this project's plans.", "version": "0.1.0",
+               "enabled": enabled,
+               "menu": [{"id": "plans", "label": "Plans in this project",
+                         "opens": "modal", "screens": "both"}]})
+    }
+
+    fn plugin_events(out: &[Output]) -> Vec<Vec<wire::PluginInfo>> {
+        events(out)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Plugins(p) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn plugin_results(out: &[Output]) -> Vec<wire::PluginResult> {
+        events(out)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::PluginResult(r) => Some(r),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn call(id: Option<u64>, method: &str, params: Value) -> Input {
+        Input::PluginCall {
+            ns: PLANNING.into(),
+            id,
+            method: method.into(),
+            params,
+            session: Some("w2:pZ".into()),
+        }
+    }
+
+    #[test]
+    fn hello_and_capabilities_give_the_plugins() {
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(
+            id,
+            json!({"server": "flankr", "vocabulary": [], "plugins": [planning_json(false)]}),
+        ));
+        let lists = plugin_events(&out);
+        assert_eq!(lists.len(), 1, "{out:?}");
+        assert_eq!(lists[0][0].ns, PLANNING);
+        assert!(!lists[0][0].enabled);
+        assert_eq!(lists[0][0].menu[0].id, "plans");
+        assert_eq!(s.plugins().len(), 1);
+        // Capabilities with `plugins` replace them; without, change nothing.
+        let out = s.incoming(note(
+            "server.capabilities",
+            json!({"plugins": [planning_json(true)]}),
+        ));
+        assert!(plugin_events(&out)[0][0].enabled);
+        let out = s.incoming(note("server.capabilities", json!({})));
+        assert!(plugin_events(&out).is_empty());
+        assert!(s.plugins()[0].enabled);
+        // The replay ends with them.
+        assert_eq!(
+            s.replay().last(),
+            Some(&Event::Plugins(s.plugins().to_vec()))
+        );
+    }
+
+    #[test]
+    fn a_plugin_call_is_sent_and_its_result_given_once() {
+        let mut s = online();
+        let out = s.input(call(
+            Some(7),
+            "plans.show",
+            json!({"name": "20261028_04_PLUGINS_PLAN"}),
+        ));
+        let reqs = requests(&out, "plugin.call");
+        assert_eq!(reqs.len(), 1, "{out:?}");
+        assert_eq!(
+            reqs[0].params,
+            json!({"ns": PLANNING, "id": 7, "method": "plans.show",
+                   "params": {"name": "20261028_04_PLUGINS_PLAN"}, "session": "w2:pZ"})
+        );
+        // Accepted: nothing yet.
+        let out = s.incoming(response(reqs[0].id.clone(), json!({})));
+        assert!(plugin_results(&out).is_empty(), "{out:?}");
+        // A notification during it.
+        let out = s.incoming(note(
+            "plugin.notify",
+            json!({"ns": PLANNING, "method": "progress", "params": {"n": 1}}),
+        ));
+        assert_eq!(
+            events(&out),
+            [Event::PluginNotify(wire::PluginNotify {
+                ns: PLANNING.into(),
+                method: "progress".into(),
+                params: json!({"n": 1}),
+            })]
+        );
+        // The result.
+        let result = json!({"ns": PLANNING, "id": 7, "result": {"schema": 1}});
+        let out = s.incoming(note("plugin.result", result.clone()));
+        let r = plugin_results(&out);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].result, Some(json!({"schema": 1})));
+        // Again, or for another namespace's id: not ours.
+        assert!(plugin_results(&s.incoming(note("plugin.result", result))).is_empty());
+        let other = json!({"ns": "dev.flankr.plugins.test", "id": 7, "result": {}});
+        assert!(plugin_results(&s.incoming(note("plugin.result", other))).is_empty());
+    }
+
+    #[test]
+    fn a_plugin_call_without_an_id_is_sent_and_answers_nothing() {
+        let mut s = online();
+        let out = s.input(call(None, "ping", json!(null)));
+        let reqs = requests(&out, "plugin.call");
+        assert!(reqs[0].params.get("id").is_none());
+        let refusal = Response::err(
+            Some(reqs[0].id.clone()),
+            libflankr_proto::ErrorObject::new(-32031, "disabled"),
+        );
+        let out = s.incoming(Incoming::Response(refusal));
+        assert!(plugin_results(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_refused_plugin_call_is_a_plugin_result() {
+        use libflankr_proto::envelope::codes;
+        // By the daemon.
+        let mut s = online();
+        let out = s.input(call(Some(1), "plans.list", json!({})));
+        let id = requests(&out, "plugin.call")[0].id.clone();
+        let refusal = Response::err(
+            Some(id),
+            libflankr_proto::ErrorObject::new(codes::PLUGIN_DISABLED, "not enabled"),
+        );
+        let r = plugin_results(&s.incoming(Incoming::Response(refusal)));
+        assert_eq!((r[0].ns.as_str(), r[0].id), (PLANNING, 1));
+        assert_eq!(r[0].error.as_ref().unwrap().code, codes::PLUGIN_DISABLED);
+        assert!(r[0].result.is_none());
+        // Here, before sending: a bad method, a bad name, too large.
+        for (input, code) in [
+            (call(Some(2), "Plans", json!({})), codes::INVALID_PARAMS),
+            (
+                Input::PluginCall {
+                    ns: "planning".into(),
+                    id: Some(3),
+                    method: "plans.list".into(),
+                    params: json!({}),
+                    session: None,
+                },
+                codes::INVALID_PARAMS,
+            ),
+            (
+                call(
+                    Some(4),
+                    "plans.list",
+                    json!("x".repeat(wire::PLUGIN_MAX_BYTES)),
+                ),
+                codes::PLUGIN_TOO_LARGE,
+            ),
+        ] {
+            let out = s.input(input);
+            assert!(requests(&out, "plugin.call").is_empty(), "{out:?}");
+            assert_eq!(plugin_results(&out)[0].error.as_ref().unwrap().code, code);
+        }
+        // Offline.
+        let mut s = State::new("test");
+        let out = s.input(call(Some(5), "plans.list", json!({})));
+        assert!(sent(&out).is_empty());
+        assert_eq!(
+            plugin_results(&out)[0].error.as_ref().unwrap().code,
+            codes::UNAVAILABLE
+        );
+    }
+
+    #[test]
+    fn a_closed_connection_cancels_the_plugin_calls_waiting() {
+        let mut s = online();
+        let out = s.input(call(Some(9), "plans.list", json!({})));
+        let id = requests(&out, "plugin.call")[0].id.clone();
+        s.incoming(response(id, json!({})));
+        let r = plugin_results(&s.disconnected(1000));
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].id, 9);
+        assert_eq!(
+            r[0].error.as_ref().unwrap().code,
+            libflankr_proto::envelope::codes::CANCELLED
+        );
+        // Once.
+        s.connected();
+        assert!(plugin_results(&s.disconnected(1000)).is_empty());
+    }
+
+    #[test]
+    fn set_plugin_enabled_is_sent_and_settled_by_a_plugins_event() {
+        let mut s = State::new("test");
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        s.incoming(response(
+            id,
+            json!({"server": "flankr", "vocabulary": [], "plugins": [planning_json(false)]}),
+        ));
+        let out = s.input(Input::SetPluginEnabled {
+            ns: PLANNING.into(),
+            enabled: true,
+        });
+        let reqs = requests(&out, "plugin.set_enabled");
+        assert_eq!(reqs[0].params, json!({"ns": PLANNING, "enabled": true}));
+        let out = s.incoming(response(reqs[0].id.clone(), json!({"enabled": true})));
+        assert!(plugin_events(&out)[0][0].enabled);
+        // Refused: the error, and the list as it was.
+        let out = s.input(Input::SetPluginEnabled {
+            ns: PLANNING.into(),
+            enabled: false,
+        });
+        let id = requests(&out, "plugin.set_enabled")[0].id.clone();
+        let refusal = Response::err(
+            Some(id),
+            libflankr_proto::ErrorObject::new(-32007, "may not approve"),
+        );
+        let out = s.incoming(Incoming::Response(refusal));
+        assert!(events(&out).contains(&Event::Error("may not approve".into())));
+        assert!(plugin_events(&out)[0][0].enabled);
+        // Offline: refused here.
+        s.disconnected(1000);
+        let out = s.input(Input::SetPluginEnabled {
+            ns: PLANNING.into(),
+            enabled: false,
+        });
+        assert!(sent(&out).is_empty());
+        assert_eq!(plugin_events(&out).len(), 1);
+    }
+
+    #[test]
+    fn plugin_inputs_for_a_remote_not_in_use_are_refused() {
+        let refused = plugin_refusal(&call(Some(3), "plans.list", json!({}))).unwrap();
+        match &refused[..] {
+            [Event::PluginResult(r)] => {
+                assert_eq!((r.ns.as_str(), r.id), (PLANNING, 3));
+                assert_eq!(
+                    r.error.as_ref().unwrap().code,
+                    libflankr_proto::envelope::codes::NOT_PERMITTED
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            plugin_refusal(&call(None, "x", json!({})))
+                .unwrap()
+                .is_empty()
+        );
+        let toggle = Input::SetPluginEnabled {
+            ns: PLANNING.into(),
+            enabled: true,
+        };
+        assert!(matches!(
+            &plugin_refusal(&toggle).unwrap()[..],
+            [Event::Error(_)]
+        ));
+        assert!(plugin_refusal(&Input::Tap).is_none());
     }
 }

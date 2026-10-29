@@ -56,7 +56,7 @@ pub use gear::Gear;
 pub use panel_shader::{PanelInstance, PanelShader};
 
 /// What a touch on the overview did.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OverviewHit {
     /// A card: open the agent view on this pane.
     Agent(String),
@@ -69,6 +69,15 @@ pub enum OverviewHit {
     Settings,
     /// The ≡ button: open the drawer.
     Menu,
+    /// A pinned plugin card (plan 20261028_04, decision 3.7): its index,
+    /// where it was tapped on the screen, and whether it was held for
+    /// [`crate::plugins::card::HOLD`] (Unpin) rather than tapped.
+    PluginCard {
+        index: usize,
+        x: f32,
+        y: f32,
+        held: bool,
+    },
 }
 
 /// A card above the bottom row: its lines and, for a confirmation being
@@ -133,6 +142,8 @@ pub struct Overview {
     buttons: Vec<FlowButton>,
     hits: Vec<(AgentHit, Rect)>,
     touch: Option<(u64, Target)>,
+    /// When the touch held now came down.
+    touch_at: Duration,
     loaded: bool,
     dirty: bool,
     /// The height other sessions' cards take above the panels, and where
@@ -175,6 +186,7 @@ impl Overview {
             buttons: Vec::new(),
             hits: Vec::new(),
             touch: None,
+            touch_at: Duration::ZERO,
             loaded: false,
             dirty: true,
             cross_h: 0.0,
@@ -314,6 +326,30 @@ impl Overview {
     /// The ≡ button.
     pub fn menu(&self) -> Menu {
         self.menu
+    }
+
+    /// The ⋮, left of the gear (plan 20261028_04, decision 3.6, item 1).
+    pub fn kebab(&self) -> crate::menu::Kebab {
+        let g = self.gear.rect;
+        crate::menu::Kebab::place(g.x, g.y, g.h, self.scale())
+    }
+
+    /// The pinned plugin cards' heights, in order, at the end of the grid.
+    pub fn set_plugin_cards(&mut self, heights: Vec<f32>) {
+        if self.grid.set_extra(heights) {
+            self.dirty = true;
+        }
+    }
+
+    /// The width a plugin card is laid out at.
+    pub fn plugin_card_width(&self) -> f32 {
+        (self.layout.w - 2.0 * CardGrid::GAP * self.scale()).max(0.0)
+    }
+
+    /// The plugin cards in the grid's window, and the window to clip them
+    /// to.
+    pub fn plugin_cards(&self) -> (Rect, Vec<(usize, Rect)>) {
+        (self.grid.viewport(), self.grid.extra_shown())
     }
 
     pub fn grid(&self) -> &CardGrid {
@@ -480,6 +516,7 @@ impl Overview {
         now: Duration,
     ) -> Option<OverviewHit> {
         if phase == TouchPhase::Started {
+            self.touch_at = now;
             let target = if self.control_at(x, y).is_some() {
                 Target::Other
             } else if self.gear.contains(x, y) && !self.prompts.overlay().is_open() {
@@ -532,10 +569,18 @@ impl Overview {
                 None
             }
             Touched::Tap => match target {
-                Target::Grid => self
-                    .grid
-                    .pane_at(x, y)
-                    .map(|p| OverviewHit::Agent(p.to_string())),
+                Target::Grid => match self.grid.extra_at(x, y) {
+                    Some(index) => Some(OverviewHit::PluginCard {
+                        index,
+                        x,
+                        y,
+                        held: now.saturating_sub(self.touch_at) >= crate::plugins::card::HOLD,
+                    }),
+                    None => self
+                        .grid
+                        .pane_at(x, y)
+                        .map(|p| OverviewHit::Agent(p.to_string())),
+                },
                 Target::Gear => self.gear.contains(x, y).then_some(OverviewHit::Settings),
                 Target::Menu => self.menu.contains(x, y).then_some(OverviewHit::Menu),
                 Target::Prompt => None,
@@ -1541,5 +1586,50 @@ mod tests {
         o.draw(&mut list, &ctx, None);
         assert!(o.rect_of(AgentHit::GeneralAgent).is_some());
         assert!(gemini(&o).h > 0.0);
+    }
+
+    #[test]
+    fn the_kebab_sits_left_of_the_gear_on_its_line() {
+        let o = overview(1);
+        let (k, g) = (o.kebab().rect, o.gear().rect);
+        assert_eq!(k.x + k.w, g.x);
+        assert!((k.center()[1] - g.center()[1]).abs() < 0.01);
+        assert_eq!(k.w, crate::menu::Kebab::SIZE * PHONE.scale);
+    }
+
+    #[test]
+    fn a_plugin_card_follows_the_agents_and_a_tap_or_a_hold_is_its() {
+        let mut o = overview(2);
+        o.set_plugin_cards(vec![160.0]);
+        let (_, cards) = o.plugin_cards();
+        assert_eq!(cards.len(), 1);
+        let (i, r) = cards[0];
+        assert_eq!(i, 0);
+        let [x, y] = r.center();
+        assert_eq!(
+            tap(&mut o, x, y),
+            Some(OverviewHit::PluginCard {
+                index: 0,
+                x,
+                y,
+                held: false
+            })
+        );
+        o.touch(1, TouchPhase::Started, x, y, Duration::ZERO);
+        assert_eq!(
+            o.touch(1, TouchPhase::Ended, x, y, Duration::from_millis(2100)),
+            Some(OverviewHit::PluginCard {
+                index: 0,
+                x,
+                y,
+                held: true
+            })
+        );
+        // The agents' cards are still theirs.
+        let p1 = o.grid().card_rect("p1").unwrap().center();
+        assert_eq!(
+            tap(&mut o, p1[0], p1[1]),
+            Some(OverviewHit::Agent("p1".into()))
+        );
     }
 }
