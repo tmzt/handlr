@@ -818,3 +818,27 @@ should have slash through it when muted". This adds to the 00:26 EDT
 amendment's item 4: the muted glyph is the plain speaker, dim and with no
 waves, with a diagonal slash through it from top left to bottom right, in
 the same colour and stroke width as the speaker.
+
+## Amendment — 2026-10-29 14:43 EDT: centre and right open the typed card on a 500 ms hold
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "tap should
+trigger voice input card mode in both cases, 500ms+ hold opens card
+without arming voice", agreed as proposed. This replaces decision 7's
+2 s for the centre and right buttons only:
+
+1. **Tap, centre and right:** unchanged. The release before the hold
+   opens the card in voice mode and listens (`StartGeneralAgentPrompt(Voice)`
+   on the centre, `StartDictation` on the right). A tap on the centre
+   while Gemini listens still stops it.
+2. **Hold, centre and right: 500 ms.** At 500 ms from touch-down the press
+   fires at once, before the release, and opens the card typed, as
+   decision 7's 2 s press did: Gemini's card pinned with a typed prompt,
+   or the message card typed, the text area focused and the soft keyboard
+   up, the microphone not armed. The progress bar fills over the 500 ms;
+   the release after it is no tap. `SLOP` stays 10 pt.
+3. **Volume and the input rows' +:** unchanged, the 2 s hold (and volume's
+   1 s stop while speaking, the 00:43 EDT amendment).
+4. **The timer:** `controls/hold.rs` keeps `HOLD` = 2 s and adds
+   `CARD_HOLD` = 500 ms; a `Hold` is started with the time it fires at,
+   `CARD_HOLD` for `AgentHit::GeneralAgent` and `AgentHit::Message`, `HOLD`
+   for the others.
