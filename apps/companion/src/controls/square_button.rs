@@ -174,8 +174,11 @@ impl Volume {
 /// 2026-10-29 00:26 EDT amendment replaces it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waves {
-    /// Muted, or both options off: no arcs.
+    /// Both options off: no arcs.
     Off,
+    /// Muted: no arcs, and a slash through the speaker (the 2026-10-29
+    /// 02:06 EDT amendment).
+    Muted,
     /// Either option on: two arcs.
     Two,
     /// Something is being said: the arcs in turn, the inner, then both,
@@ -191,7 +194,10 @@ impl Waves {
     /// The waves for `volume`, while `speaking`, at the time now: none
     /// while muted or with both options off.
     pub fn now(volume: Volume, speaking: bool) -> Self {
-        if volume.muted || !volume.on {
+        if volume.muted {
+            return Waves::Muted;
+        }
+        if !volume.on {
             return Waves::Off;
         }
         if !speaking {
@@ -207,7 +213,7 @@ impl Waves {
     /// How many arcs are drawn: none, the inner one, or both.
     fn arcs(self) -> usize {
         match self {
-            Waves::Off => 0,
+            Waves::Off | Waves::Muted => 0,
             Waves::Two => 2,
             Waves::Speaking(0) => 1,
             Waves::Speaking(1) => 2,
@@ -257,6 +263,10 @@ pub(crate) fn volume_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32;
             let a1 = -50.0 + 100.0 * (i + 1) as f32 / SEGMENTS as f32;
             list.push_line(point(a0), point(a1), t, color);
         }
+    }
+    // Muted: a slash from the box's top left to its bottom right.
+    if waves == Waves::Muted {
+        list.push_line([x(0.0), y(-0.5)], [x(0.62), y(0.5)], t, color);
     }
 }
 
@@ -497,13 +507,14 @@ mod tests {
             muted: true,
             on: true,
         };
-        // The plain speaker: its body's four lines and the cone's three.
+        // The plain speaker: its body's four lines and the cone's three;
+        // muted, the same and one slash.
         let plain = glyph(off, false).instances.len();
-        assert_eq!(plain, glyph(muted, false).instances.len());
+        assert_eq!(glyph(muted, false).instances.len(), plain + 1);
         // No ✕ with both options off, nor waves while speaking.
         assert_eq!(Waves::now(off, true), Waves::Off);
-        assert_eq!(Waves::now(muted, true), Waves::Off);
-        assert_eq!(Waves::now(muted, false), Waves::Off);
+        assert_eq!(Waves::now(muted, true), Waves::Muted);
+        assert_eq!(Waves::now(muted, false), Waves::Muted);
         // Two arcs of six segments while an option is on.
         assert_eq!(glyph(on, false).instances.len(), plain + 12);
         assert_eq!(Waves::now(on, false), Waves::Two);
