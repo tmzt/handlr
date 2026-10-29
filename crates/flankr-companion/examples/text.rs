@@ -250,9 +250,14 @@ fn print_event(event: Event) {
             held_end: _,
             held_newer: _,
             bookends: _,
+            child,
+            children: _,
         } => {
             if new_content {
                 println!("* new content");
+            }
+            if let Some(c) = child {
+                println!("* subagent {c}");
             }
             if let Some(t) = typed {
                 println!("* typed: {t}");

@@ -795,3 +795,14 @@ defaulted when absent; left off the wire when empty or `None`):
 - **Added:** `child: Option<String>` on `SessionPeekParams`,
   `SpeechSummarizeParams` and `SessionSubscribeParams`; without it the main
   session is read, as before; an unknown child is `UNKNOWN_AGENT`.
+
+## flankr-companion 0.5.6 — 2026-10-29 (the commit tagged `flankr-companion-v0.5.6`)
+
+Plan 20261023_07 (subagents), step 4. Strictly additive (variants on the
+`#[non_exhaustive]` `Input`; fields appended to `Event::AgentView`):
+
+- **Added:** `Input::OpenChild(String)` and `Input::CloseChild` (back to the
+  parent).
+- **Added:** `Event::AgentView::child` (`Option<String>`) and
+  `Event::AgentView::children` (`Vec<ChildInfo>`).
+- Takes libflankr_proto 0.5.6.

@@ -125,6 +125,16 @@ pub enum Input {
     OpenAgent(String),
     /// Close the agent view: its subscription ends.
     CloseAgent,
+    /// Show the open view's subagent with this id (`ChildInfo::id`, from
+    /// [`Event::AgentView`]'s `children`) in the same view (the subagents
+    /// plan, decision 3 and step 4): the parent's subscription ends and
+    /// the subagent's session is subscribed to. Its pane stays the
+    /// parent's: what is sent from the view goes to the parent pane.
+    /// Nothing without an open view.
+    OpenChild(String),
+    /// Back from a subagent to its parent's main session in the same view.
+    /// Nothing when the view shows the main session.
+    CloseChild,
     /// The agent view's flow came within a screen of its top: page in the
     /// sections before the oldest held (`session.history`, A7).
     LoadEarlier,
@@ -772,6 +782,14 @@ pub enum Event {
         /// The Finished cards' slots, in index order, for the scrollbar's
         /// section labels (the 12:27 EDT amendment).
         bookends: Vec<crate::view::Bookend>,
+        /// The subagent shown, by its id, when the view shows one instead
+        /// of the main session (the subagents plan, step 4); `name` is
+        /// still its parent's.
+        child: Option<String>,
+        /// The pane's subagents as last listed (`AgentInfo::children`):
+        /// the running first, then the finished, newest first within
+        /// each. Empty when it has none.
+        children: Vec<common::ChildInfo>,
     },
     /// An agent finished a turn: a new Finished card, on the overview's
     /// list or in the agent view (plan 20261024_02, decision 3). Play the
@@ -927,6 +945,9 @@ pub enum Speaker {
 }
 
 /// What the driver must do.
+// `Event::AgentView` is the large one (its subagents, the subagents plan,
+// step 4); boxing it would change the public type.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Output {
     /// Give this event to the app.
@@ -1161,8 +1182,9 @@ enum Sent {
     Focus(String),
     /// `agents.send` of a dictated message.
     Message,
-    /// `session.subscribe` for the agent view of this pane.
-    Subscribe(String),
+    /// `session.subscribe` for the agent view of this pane, or of its
+    /// subagent.
+    Subscribe(String, Option<String>),
     /// `session.unsubscribe`.
     Unsubscribe,
     /// `session.history` for this subscription.
@@ -1497,6 +1519,9 @@ struct Refresh {
 #[derive(Debug)]
 struct AgentView {
     pane_id: String,
+    /// The subagent of the pane shown instead of its main session (the
+    /// subagents plan, step 4).
+    child: Option<String>,
     status: String,
     /// Every section given, by serial, for the life of the view.
     sections: Sections,
@@ -1570,9 +1595,10 @@ struct AgentView {
 }
 
 impl AgentView {
-    fn new(pane_id: String, status: String) -> Self {
+    fn new(pane_id: String, child: Option<String>, status: String) -> Self {
         AgentView {
             pane_id,
+            child,
             status,
             sections: Sections::default(),
             entries: Vec::new(),
@@ -1826,6 +1852,8 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 held_end,
                 held_newer,
                 bookends,
+                child,
+                children,
             },
             Event::AgentView {
                 name: name_b,
@@ -1842,6 +1870,8 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 held_end: held_end_b,
                 held_newer: held_newer_b,
                 bookends: bookends_b,
+                child: child_b,
+                children: children_b,
             },
         ) => {
             name == name_b
@@ -1856,6 +1886,8 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 && held_end == held_end_b
                 && held_newer == held_newer_b
                 && bookends == bookends_b
+                && child == child_b
+                && children == children_b
                 && sections == sections_b
         }
         _ => a == b,
@@ -2439,6 +2471,8 @@ impl State {
             Input::Clear => self.clear_dictation(&mut out),
             Input::Scratch => self.scratch(&mut out),
             Input::OpenAgent(pane_id) => self.open_agent(pane_id, &mut out),
+            Input::OpenChild(id) => self.open_child(Some(id), &mut out),
+            Input::CloseChild => self.open_child(None, &mut out),
             Input::CloseAgent => {
                 self.close_view(&mut out);
                 // Back on the overview: its list is refreshed.
@@ -2781,7 +2815,8 @@ impl State {
             return;
         };
         v.park();
-        self.closed.retain(|c| c.pane_id != v.pane_id);
+        self.closed
+            .retain(|c| c.pane_id != v.pane_id || c.child != v.child);
         self.closed.push_back(v);
         while self.closed.len() > CACHED_VIEWS {
             // TODO(plan 20261023_09): page the least recent out to the
@@ -3130,6 +3165,13 @@ impl State {
                 })
                 .unwrap_or_default(),
             bookends: self.bookends(v),
+            child: v.child.clone(),
+            children: self
+                .agents
+                .iter()
+                .find(|a| a.pane_id == v.pane_id)
+                .map(|a| a.children.clone())
+                .unwrap_or_default(),
         })
     }
 
@@ -3226,23 +3268,52 @@ impl State {
     }
 
     fn open_agent(&mut self, pane_id: String, out: &mut Vec<Output>) {
+        self.open_view(pane_id, None, out);
+    }
+
+    /// Show the open view's subagent `id` ([`Input::OpenChild`]), or, with
+    /// `None`, its parent's main session ([`Input::CloseChild`]).
+    fn open_child(&mut self, id: Option<String>, out: &mut Vec<Output>) {
+        let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
+            return;
+        };
+        self.open_view(pane_id, id, out);
+    }
+
+    /// Open the view of `pane_id`'s main session, or of its subagent
+    /// `child` (the subagents plan, step 4).
+    fn open_view(&mut self, pane_id: String, child: Option<String>, out: &mut Vec<Output>) {
         self.interact(&pane_id);
         // Its own cards are seen.
         self.cross.dismiss(&pane_id, true);
-        if self.view.as_ref().is_some_and(|v| v.pane_id == pane_id) {
+        if self
+            .view
+            .as_ref()
+            .is_some_and(|v| v.pane_id == pane_id && v.child == child)
+        {
             return self.show_view(out);
         }
-        // Another agent's view: its subscription ends, and it is cached.
+        // Another agent's view, or another session of this one: its
+        // subscription ends, and it is cached.
         self.close_view(out);
-        let status = self
-            .agents
-            .iter()
-            .find(|a| a.pane_id == pane_id)
-            .map(|a| a.status.clone())
-            .unwrap_or_default();
+        let agent = self.agents.iter().find(|a| a.pane_id == pane_id);
+        // A subagent's own status, until its subscription says.
+        let status = match (&child, agent) {
+            (None, Some(a)) => a.status.clone(),
+            (Some(id), Some(a)) => match a.children.iter().find(|c| &c.id == id) {
+                Some(c) if c.finished => "done".to_string(),
+                Some(_) => "working".to_string(),
+                None => String::new(),
+            },
+            (_, None) => String::new(),
+        };
         // A view closed lately reopens from the cache at once, and resumes
         // with what came while it was closed (the 12:12 EDT amendment).
-        let view = match self.closed.iter().position(|c| c.pane_id == pane_id) {
+        let cached = self
+            .closed
+            .iter()
+            .position(|c| c.pane_id == pane_id && c.child == child);
+        let view = match cached {
             Some(i) => {
                 let mut v = self.closed.remove(i).expect("a cached view");
                 log::info!(
@@ -3253,7 +3324,7 @@ impl State {
                 v.backfill = true;
                 v
             }
-            None => AgentView::new(pane_id, status),
+            None => AgentView::new(pane_id, child, status),
         };
         self.view = Some(view);
         self.show_cache(out);
@@ -3285,6 +3356,7 @@ impl State {
         }
         v.subscribing = true;
         let pane_id = v.pane_id.clone();
+        let child = v.child.clone();
         // In outline mode, from the first hole of the newest outline held
         // (plan 20261024_01, decision 6, and its epoch, CHANGES.md
         // 2026-10-24 00:36 EDT).
@@ -3304,8 +3376,10 @@ impl State {
             outline: true,
             from,
             epoch,
+            child: child.clone(),
         };
-        out.push(self.request(methods::SESSION_SUBSCRIBE, params, Sent::Subscribe(pane_id)));
+        let sent = Sent::Subscribe(pane_id, child);
+        out.push(self.request(methods::SESSION_SUBSCRIBE, params, sent));
     }
 
     /// Ends the open view's subscription, if it has one.
@@ -3666,7 +3740,10 @@ impl State {
         v.finished = finished;
         if finished.is_some() && v.worked {
             v.worked = false;
-            self.dinged.insert(v.pane_id.clone());
+            // A subagent's finish is not its parent's turn.
+            if v.child.is_none() {
+                self.dinged.insert(v.pane_id.clone());
+            }
             log::info!("ding: the viewed agent finished");
             out.push(event(Event::Ding));
         }
@@ -3687,7 +3764,7 @@ impl State {
             if self
                 .view
                 .as_ref()
-                .is_some_and(|v| v.pane_id == a.pane_id && v.answered)
+                .is_some_and(|v| v.pane_id == a.pane_id && v.child.is_none() && v.answered)
             {
                 continue;
             }
@@ -4153,6 +4230,12 @@ impl State {
         let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
             return;
         };
+        // A subagent takes no input from the pane: its answers are
+        // inactive (the subagents plan, decision 5).
+        if self.view.as_ref().is_some_and(|v| v.child.is_some()) {
+            log::info!("respond: a subagent's question is answered through its parent");
+            return;
+        }
         if !self.online() {
             out.push(event(Event::Say(
                 "I'm not connected to flankr.".to_string(),
@@ -4252,6 +4335,15 @@ impl State {
             )));
             return;
         };
+        if self.view.as_ref().is_some_and(|v| v.child.is_some()) {
+            out.push(event(choice_failed(
+                id,
+                pane_id,
+                "a subagent takes no answers; answer the main agent".to_string(),
+                Some(libflankr_proto::envelope::codes::NOT_PERMITTED),
+            )));
+            return;
+        }
         if !self.online() {
             out.push(event(choice_failed(
                 id,
@@ -4695,8 +4787,12 @@ impl State {
                     log::info!("speech.summarize: {message}; reading the reply here");
                     self.summarized(serial, None, out);
                 }
-                Sent::Subscribe(pane_id) => {
-                    if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
+                Sent::Subscribe(pane_id, child) => {
+                    if let Some(v) = self
+                        .view
+                        .as_mut()
+                        .filter(|v| v.pane_id == pane_id && v.child == child)
+                    {
                         v.subscribing = false;
                         v.answered = true;
                     }
@@ -4991,32 +5087,42 @@ impl State {
                     "a bad agents.send result: {e}"
                 )))),
             },
-            Sent::Subscribe(pane_id) => match parse::<common::SessionSubscribeResult>(result) {
-                Ok(r) => {
-                    let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) else {
-                        // The view closed or moved on while it was asked.
-                        let params = common::SessionUnsubscribeParams {
-                            subscription_id: r.subscription_id,
+            Sent::Subscribe(pane_id, child) => {
+                match parse::<common::SessionSubscribeResult>(result) {
+                    Ok(r) => {
+                        let Some(v) = self
+                            .view
+                            .as_mut()
+                            .filter(|v| v.pane_id == pane_id && v.child == child)
+                        else {
+                            // The view closed or moved on while it was asked.
+                            let params = common::SessionUnsubscribeParams {
+                                subscription_id: r.subscription_id,
+                            };
+                            out.push(self.request(
+                                methods::SESSION_UNSUBSCRIBE,
+                                params,
+                                Sent::Unsubscribe,
+                            ));
+                            return;
                         };
-                        out.push(self.request(
-                            methods::SESSION_UNSUBSCRIBE,
-                            params,
-                            Sent::Unsubscribe,
-                        ));
-                        return;
-                    };
-                    v.subscribing = false;
-                    v.subscription = Some(r.subscription_id);
-                    self.delivered(r.delivery, out);
-                    self.refresh_subscribed(out);
-                }
-                Err(e) => {
-                    if let Some(v) = self.view.as_mut().filter(|v| v.pane_id == pane_id) {
                         v.subscribing = false;
+                        v.subscription = Some(r.subscription_id);
+                        self.delivered(r.delivery, out);
+                        self.refresh_subscribed(out);
                     }
-                    log::warn!("a bad session.subscribe result: {e}");
+                    Err(e) => {
+                        if let Some(v) = self
+                            .view
+                            .as_mut()
+                            .filter(|v| v.pane_id == pane_id && v.child == child)
+                        {
+                            v.subscribing = false;
+                        }
+                        log::warn!("a bad session.subscribe result: {e}");
+                    }
                 }
-            },
+            }
             Sent::History(id) => match parse::<common::SessionHistoryResult>(result) {
                 Ok(page) => self.paged(id, page, out),
                 Err(e) => {
@@ -5155,9 +5261,11 @@ impl State {
 
     /// Ask the daemon how to say a reply, and queue it to be read in its
     /// turn. Offline, it is read through `flankr_speech` here.
+    #[allow(clippy::too_many_arguments)]
     fn read_reply(
         &mut self,
         pane_id: &str,
+        child: Option<String>,
         section: common::Serial,
         ts: String,
         text: String,
@@ -5170,6 +5278,7 @@ impl State {
                 pane_id: pane_id.to_string(),
                 ts: ts.clone(),
                 text: text.clone(),
+                child,
             };
             out.push(self.request(methods::SPEECH_SUMMARIZE, params, Sent::Summarize(serial)));
             None
@@ -5336,6 +5445,7 @@ impl State {
             }
         }
         let pane_id = v.pane_id.clone();
+        let child = v.child.clone();
         let ends_on_reply = v.status == "working" && v.entries.last().is_some_and(is_reply);
         // A card's spoken text that came for a reply still waiting.
         for r in self.reading.iter_mut().filter(|r| r.ready.is_none()) {
@@ -5347,7 +5457,7 @@ impl State {
         for (serial, ts, text, spoken) in replies {
             match spoken {
                 Some(spoken) => self.queue_spoken(serial, ts, text, spoken),
-                None => self.read_reply(&pane_id, serial, ts, text, out),
+                None => self.read_reply(&pane_id, child.clone(), serial, ts, text, out),
             }
         }
         // herdr says working but the session ends on a reply: the daemon's
@@ -5760,7 +5870,11 @@ impl State {
     /// the hour and is not the one viewed, how long the turn ran is asked
     /// for, for its finished card (the 16:01 EDT amendment).
     fn peek_finished(&mut self, a: &common::AgentInfo, line: &str, out: &mut Vec<Output>) {
-        let viewed = self.view.as_ref().map(|v| v.pane_id.as_str());
+        let viewed = self
+            .view
+            .as_ref()
+            .filter(|v| v.child.is_none())
+            .map(|v| v.pane_id.as_str());
         if Some(a.pane_id.as_str()) == viewed
             || !self.cross.recent(a, self.now)
             || a.session.is_none()
@@ -5770,6 +5884,7 @@ impl State {
         let params = common::SessionPeekParams {
             pane_id: a.pane_id.clone(),
             entries: common::PEEK_ENTRIES_MAX,
+            child: None,
         };
         let sent = Sent::Peek {
             pane_id: a.pane_id.clone(),
@@ -5873,7 +5988,14 @@ impl State {
             return;
         }
         let viewed = self.view.as_ref().map(|v| v.pane_id.as_str());
-        if viewed.is_some() && !self.cross.watching(viewed, self.now) {
+        // A view of an agent whose reader reads subagents keeps its
+        // children current (the subagents plan, step 4).
+        let children = viewed.is_some_and(|p| {
+            self.agents
+                .iter()
+                .any(|a| a.pane_id == p && a.subagents_running.is_some())
+        });
+        if viewed.is_some() && !children && !self.cross.watching(viewed, self.now) {
             return;
         }
         let due = match self.listed_at {
@@ -7789,6 +7911,173 @@ mod tests {
         let asked = requests(&out, "speech.summarize");
         assert_eq!(asked.len(), 1);
         assert_eq!(asked[0].params["text"], "newer");
+    }
+
+    /// The view's child and children, as last given.
+    fn children_of(s: &State) -> (Option<String>, Vec<String>, String) {
+        match s.agent_view() {
+            Some(Event::AgentView {
+                child,
+                children,
+                status,
+                ..
+            }) => (child, children.into_iter().map(|c| c.id).collect(), status),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_subagent_opens_in_the_view_is_read_and_returns_to_the_parent() {
+        // The subagents plan, step 4.
+        let mut s = online();
+        s.input(Input::Tick(secs(100.0)));
+        // Nothing without a view.
+        assert!(sent(&s.input(Input::OpenChild("a1".into()))).is_empty());
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let list = requests(&out, "agents.list")[0].clone();
+        let mut agent = agent_info("w2:pZ", "working");
+        agent["subagents_running"] = json!(1);
+        agent["children"] = json!([
+            {"id": "b2", "short": "session readers", "description": "Find the session readers docs",
+             "kind": "Explore", "started": 1_767_693_900u64,
+             "turn": {"state": "working", "line": "Read"}},
+            {"id": "a1", "short": "overview screen", "description": "Build the overview screen plan",
+             "kind": "general-purpose", "background": true, "finished": true,
+             "started": 1_767_693_601u64, "started_by": "toolu_f6_build",
+             "turn": {"state": "asking", "question": "Shall I commit it?"}}
+        ]);
+        s.incoming(response(list.id, json!({"agents": [agent.clone()]})));
+        session_answer(&mut s, &out, "working", asking());
+        // The main session, with the pane's children.
+        assert_eq!(
+            children_of(&s),
+            (
+                None,
+                vec!["b2".to_string(), "a1".to_string()],
+                "working".to_string()
+            )
+        );
+        // The main session's subscribe named no child.
+        assert!(
+            requests(&out, "session.subscribe")[0]
+                .params
+                .get("child")
+                .is_none()
+        );
+
+        // Open a1: the parent's subscription ends, and a1's session is
+        // subscribed to by pane and child.
+        let out = s.input(Input::OpenChild("a1".into()));
+        let ended = requests(&out, "session.unsubscribe");
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0].params["subscription_id"], 1);
+        let sub = requests(&out, "session.subscribe")[0].clone();
+        assert_eq!(sub.params["pane_id"], "w2:pZ");
+        assert_eq!(sub.params["child"], "a1");
+        // Until it answers: the subagent's own status, and nothing of the
+        // parent's.
+        assert_eq!(children_of(&s).0.as_deref(), Some("a1"));
+        assert_eq!(children_of(&s).2, "done");
+        assert!(summaries(&s).is_empty());
+        let child_session = json!({
+            "session_id": "a1", "matched": "id",
+            "entries": [
+                {"ts": "10", "role": "user", "kind": "text", "summary": "Build the overview screen."},
+                {"ts": "11", "role": "assistant", "kind": "text",
+                 "summary": "Built it.\n\nShall I commit it?"}
+            ],
+            "pending_question": {"text": "Shall I commit it?", "ts": "11"}
+        });
+        let mut delivery = delivery_of("done", &child_session);
+        delivery["subscription_id"] = json!(2);
+        delivery["session"]["session_id"] = json!("a1");
+        s.incoming(response(
+            sub.id.clone(),
+            json!({"subscription_id": 2, "delivery": delivery}),
+        ));
+        assert_eq!(
+            summaries(&s),
+            [
+                "Build the overview screen.",
+                "Built it.\n\nShall I commit it?"
+            ]
+        );
+        assert_eq!(children_of(&s).2, "done");
+        // A late delivery of the parent's subscription is not this view's.
+        let out = deliver(&mut s, vec![text_at(60, 0, "the parent's")], vec![]);
+        assert!(view_of(&out).is_none(), "{out:?}");
+        assert!(!summaries(&s).contains(&"the parent's".to_string()));
+        // Its replies are read aloud from its own transcript.
+        s.input(Input::ReadAloud(true));
+        let live = json!({"serial": serial(70, 0), "kind": "text", "entries": [
+            {"ts": "12", "role": "assistant", "kind": "text", "summary": "Committed."}
+        ]});
+        let out = s.incoming(note(
+            "session.delivery",
+            json!({"subscription_id": 2, "pane_id": "w2:pZ", "agent": "claude",
+                "reset": false, "session": {"session_id": "a1", "matched": "id"},
+                "reason": null, "sections": [live], "removed": []}),
+        ));
+        let asked = requests(&out, "speech.summarize");
+        assert_eq!(asked.len(), 1, "{out:?}");
+        assert_eq!(
+            (&asked[0].params["pane_id"], &asked[0].params["child"]),
+            (&json!("w2:pZ"), &json!("a1"))
+        );
+        // A subagent takes no answers: no message, and a choice fails.
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        assert!(requests(&out, "agents.send").is_empty(), "{out:?}");
+        let out = s.input(Input::Choose {
+            id: "toolu_x".into(),
+            answers: vec![],
+        });
+        assert!(requests(&out, "choice.answer").is_empty());
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Output::Event(Event::ChoiceAnswered { outcome, .. }) if outcome == "failed"
+            )),
+            "{out:?}"
+        );
+        // The same child again: nothing new is asked.
+        assert!(requests(&s.input(Input::OpenChild("a1".into())), "session.subscribe").is_empty());
+
+        // Back: a1's subscription ends, and the main session shows again at
+        // once from the cache, resubscribed from its newest serial.
+        let out = s.input(Input::CloseChild);
+        let ended = requests(&out, "session.unsubscribe");
+        assert_eq!(ended[0].params["subscription_id"], 2);
+        let sub = requests(&out, "session.subscribe")[0].clone();
+        assert!(sub.params.get("child").is_none(), "{:?}", sub.params);
+        assert_eq!(children_of(&s).0, None);
+        assert_eq!(summaries(&s), ["go", "Done.\n\nShall I go on?"]);
+        // Back again with no child shown: nothing.
+        assert!(sent(&s.input(Input::CloseChild)).is_empty());
+        // The child's view is cached too: it reopens at once.
+        s.incoming(response(
+            sub.id.clone(),
+            json!({"subscription_id": 3, "delivery": delivery_of("working", &asking())}),
+        ));
+        s.input(Input::OpenChild("a1".into()));
+        assert_eq!(summaries(&s)[0], "Build the overview screen.");
+
+        // A list that changes the children gives the view again. (Each
+        // switch asks for one; in a view of an agent with a subagents
+        // reader, the list is polled.)
+        let out = s.input(Input::CloseChild);
+        let list = requests(&out, "agents.list")[0].clone();
+        s.incoming(response(list.id, json!({"agents": [agent.clone()]})));
+        let out = s.input(Input::Tick(secs(200.0)));
+        let list = requests(&out, "agents.list")[0].clone();
+        agent["children"] = json!([]);
+        let out = s.incoming(response(list.id, json!({"agents": [agent]})));
+        match out.iter().find_map(|o| match o {
+            Output::Event(Event::AgentView { children, .. }) => Some(children.clone()),
+            _ => None,
+        }) {
+            Some(children) => assert!(children.is_empty()),
+            None => panic!("no view given: {out:?}"),
+        }
     }
 
     fn focus_on(pane: &str) -> Value {

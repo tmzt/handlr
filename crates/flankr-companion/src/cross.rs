@@ -407,6 +407,7 @@ mod tests {
             idle_ms: None,
             subagents_running: None,
             summary: None,
+            children: Vec::new(),
         }
     }
 
