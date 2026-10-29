@@ -1015,3 +1015,32 @@ item 2's **Settings** item are replaced as below; the rest of 3.6, and the
    (`icon`), the daemon's planning half (0.1.1), flankr-companion if its
    types change, and the app (the icon slots, the overflow, `opens:
    "menu"`). Departures are recorded in CHANGES.md as usual.
+
+## Amendment — 2026-10-28 23:14 EDT: the plan menu is a table, by last update
+
+The owner (2026-10-28): "plan menu should use a table view, plan index
+(the nn part) and mm/dd date, but sorted by update time"; then "yes" to
+this wording. This replaces the 22:03 EDT amendment's item 5 on the
+popup's rows ("the ten newest plans by title with their status as a dim
+second word") and CHANGES.md's departure 2 of that build (the status
+after an en space); the rest of item 5 (Reading plans…, All plans…,
+choosing a plan) stands.
+
+1. **A table.** Each row of the ☑ popup is one plan in four columns: its
+   **NN** (the sequence within its day, from the file name), its date as
+   **mm/dd** (from the file name), its **title** (cut with … to the
+   column's width), and its **status** in the dim colour (`Draft`,
+   `In implementation`, `Implemented`, `Hold`, or the word before
+   "(by" for `Superseded` and `Retired`). NN and mm/dd are right-aligned
+   in fixed-width columns, so the rows line up.
+2. **Sorted by last update**, newest first: a plan's update time is its
+   newest amendment's timestamp (`last_amendment`), else its front-matter
+   `date`, else the date in its file name. Ten rows, then **All plans…**.
+3. **libcontrols.** Columns in the popup need an additive `PopupMenu`
+   change: an item may carry cells (text, alignment, a fixed or flexible
+   width, dim or not) instead of one label, laid out in shared columns
+   across the menu. It is asked of libcontrols by a plan of its own there,
+   to be written; until it is released the rows are one label,
+   `NN mm/dd title · status` with NN and mm/dd zero-padded, sorted as in
+   item 2.
+4. **The modal's list** (All plans…) uses the same columns and order.
