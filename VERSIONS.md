@@ -819,3 +819,13 @@ Additive:
   { name }`: one plan's front matter, covers and amendments, as
   `plans.show` gives them. Offered while the plugin is enabled and
   `agent_tools` is not `false`. Methods and the menu unchanged.
+
+## flankr-companion 0.5.7 — 2026-10-29 (the commit tagged `flankr-companion-v0.5.7`)
+
+Plan 20261028_06 (bottom bar), its 2026-10-29 15:09 EDT amendment, item 5.
+Strictly additive (a variant on the `#[non_exhaustive]` `Input`):
+
+- **Added:** `Input::ContinueByVoice`: the typed prompt open (the message
+  or Gemini's) goes on in voice mode, its text kept as its first part, and
+  `Event::Arm` is sent. Nothing changes with the microphone setting off or
+  no typed prompt open.

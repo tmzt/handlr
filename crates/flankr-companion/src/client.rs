@@ -111,6 +111,11 @@ pub enum Input {
     StartTextPrompt,
     /// Start taking a general agent prompt (plan 20261024_03, the 00:30 EDT amendment).
     StartGeneralAgentPrompt(PromptMode),
+    /// The typed prompt open (the message or Gemini's) goes on by voice: the
+    /// same prompt in voice mode, its text kept as its first part, the gate
+    /// armed. Nothing with the microphone off or no typed prompt open (plan
+    /// 20261028_06, the 2026-10-29 15:09 EDT amendment, item 5).
+    ContinueByVoice,
     /// Set the current prompt text after an edit.
     SetText(String),
     /// The Submit button: submit the message now.
@@ -2456,6 +2461,7 @@ impl State {
             Input::StartDictation => self.start_dictation(&mut out),
             Input::StartTextPrompt => self.start_text_prompt(&mut out),
             Input::StartGeneralAgentPrompt(mode) => self.start_general_agent_prompt(mode, &mut out),
+            Input::ContinueByVoice => self.continue_by_voice(&mut out),
             Input::SetText(text) => {
                 self.blobs.text_changed(&text, &mut out);
                 if let Some(d) = self.dictation.as_mut() {
@@ -4020,6 +4026,26 @@ impl State {
         if mode == PromptMode::Voice {
             out.push(event(Event::Arm));
         }
+    }
+
+    /// The typed prompt open goes on by voice (`Input::ContinueByVoice`).
+    fn continue_by_voice(&mut self, out: &mut Vec<Output>) {
+        if !self.settings.microphone {
+            log::info!("dictation: the microphone is off");
+            return;
+        }
+        let Some(d) = self
+            .dictation
+            .as_mut()
+            .filter(|d| d.mode == PromptMode::Keyboard)
+        else {
+            return;
+        };
+        d.mode = PromptMode::Voice;
+        d.phase = DictationPhase::Collecting;
+        d.quiet_from = None;
+        self.show_dictation(out);
+        out.push(event(Event::Arm));
     }
 
     /// Take a message whose first parts are `parts`, already in it.
@@ -11508,6 +11534,44 @@ mod tests {
         let cards = cards_of(&out).expect("cards");
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].kind, crate::cross::SessionCardKind::Question);
+    }
+
+    #[test]
+    fn continue_by_voice_keeps_the_typed_text_and_arms() {
+        // The message card.
+        let mut s = online();
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        s.input(Input::StartTextPrompt);
+        s.input(Input::SetText("Please run".into()));
+        let out = s.input(Input::ContinueByVoice);
+        let d = dictation_of(&out).unwrap();
+        assert_eq!(d.mode, PromptMode::Voice);
+        assert!(!d.general_agent);
+        assert_eq!(d.text, "Please run");
+        assert!(events(&out).contains(&Event::Arm));
+        // What is said comes after it.
+        let out = s.input(Input::Utterance("the tests".into()));
+        assert_eq!(dictation_of(&out).unwrap().text, "Please run the tests");
+        // Already by voice: nothing.
+        assert!(s.input(Input::ContinueByVoice).is_empty());
+        // Gemini's card.
+        let mut s = online();
+        s.input(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+        s.input(Input::SetText("explain".into()));
+        let out = s.input(Input::ContinueByVoice);
+        let d = dictation_of(&out).unwrap();
+        assert!(d.general_agent);
+        assert_eq!(d.mode, PromptMode::Voice);
+        assert_eq!(d.text, "explain");
+        assert!(events(&out).contains(&Event::Arm));
+        // The microphone off: the typed prompt stays typed.
+        let mut s = online();
+        s.input(settings(true, true, false, true));
+        s.input(Input::StartTextPrompt);
+        assert!(s.input(Input::ContinueByVoice).is_empty());
+        // No prompt open: nothing.
+        let mut s = online();
+        assert!(s.input(Input::ContinueByVoice).is_empty());
     }
 
     #[test]
