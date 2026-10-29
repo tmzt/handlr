@@ -763,3 +763,26 @@ options are off); the menu's items, their toggles and Skip stand.
    `speak_gemini`; Settings → Sound gets no row for it. Muted, the app
    speaks nothing whatever the two options say; the client is told as if
    both were off.
+
+## Amendment — 2026-10-29 00:43 EDT: skip and stop while speaking; mute clears the queue
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "the volume
+button should still skip when actually [speaking], with 1s push to stop but
+not mute. mute should stop queued playback (clear queue)"; then "yes, write
+it and build, install when done" to the lead's wording. This replaces the
+00:26 EDT amendment's item 1 (a tap always mutes) for the time something is
+being spoken, and its "muting stops anything being spoken" with the
+clearing below; its items 2-5 stand.
+
+1. **While something is being spoken:** a **tap** skips the current reply
+   (the next queued one follows, as `Input::Skip`); a **1 s hold** stops:
+   the current reply ends and the queue is cleared, mute stays off, so new
+   replies are read as they come; a bar fills over the 1 s as for the 2 s
+   holds; **holding on to 2 s** still opens the menu, after the stop at 1 s.
+2. **While nothing is being spoken:** a tap mutes or unmutes, a 2 s hold
+   opens the menu (unchanged).
+3. **Muting clears the queue:** it stops the current reply and drops every
+   queued reply and spoken notice, so nothing plays after a mute.
+4. **flankr-companion, additive:** `Input::StopReading` stops the current
+   reply and clears the queued replies and notices; the 1 s stop and mute
+   both send it. The crate takes the next free patch number at its commit.
