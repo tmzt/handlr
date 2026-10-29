@@ -53,6 +53,17 @@ them.
 
 - text: Ding when an agent is done
 
+The two speak options, shared by the Sound rows and the volume menu
+(docs/design/20261028_06_BOTTOM_BAR_UPDATE_PLAN.md, decision 6).
+
+# [Copy] speak_coding
+
+- text: Speak coding responses
+
+# [Copy] speak_gemini
+
+- text: Speak agent (Gemini) responses
+
 # [Copy] voice
 
 - title: Voice
@@ -629,10 +640,6 @@ the general agent's two bars while its card is hidden.
 The ⋮ menu in the title bars (docs/design/20261028_04_PLUGINS_PLAN.md,
 decision 3.6): the app's own items, after the plugins'.
 
-# [Copy] menu_read_aloud
-
-- text: Read aloud
-
 # [Copy] menu_settings
 
 - text: Settings
@@ -640,6 +647,21 @@ decision 3.6): the app's own items, after the plugins'.
 # [Copy] menu_unpin
 
 - text: Unpin
+
+The volume menu's Skip, and the + menu's items
+(docs/design/20261028_06_BOTTOM_BAR_UPDATE_PLAN.md, decisions 3 and 8).
+
+# [Copy] menu_skip
+
+- text: Skip
+
+# [Copy] menu_paste_text
+
+- text: Paste text
+
+# [Copy] menu_attach_image
+
+- text: Attach image…
 
 The planning plugin's modal and card (decision 3.8, item 7).
 

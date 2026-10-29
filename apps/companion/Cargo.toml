@@ -24,16 +24,19 @@ libflankr_term = { path = "../../crates/libflankr_term" }
 flankr-audio = { path = "../../crates/flankr-audio" }
 # `StaticKey`, which the key store's Noise key implements.
 libflankr_proto = { path = "../../crates/libflankr_proto", features = ["link"] }
-# libmorph 0.5.0 (tag v0.5.0): the key store and the secure store
+# libmorph 0.5.1 (tag v0.5.1): the key store and the secure store
 # (`secure-store`), the camera (`ctx.camera()`, `on_camera`; plan
 # 20261028_02), URL schemes (`on_open_url`), `open_link`, `data_dir` on every host,
-# `build_info`, and the memory hooks (`on_low_memory`, `on_trim_memory`).
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c9b432d80178536576c559d1af616b1f83cabea6", default-features = false, features = ["secure-store"] }
+# `build_info`, and the memory hooks (`on_low_memory`, `on_trim_memory`);
+# 0.5.1: `clipboard_text` and `clipboard_has_text`, for Paste text (plan
+# 20261028_06, decision 11.4; macOS through libdevice, Android through
+# `mobile-clipboard` below).
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c958897495d880c6117cae55e1b4d72b0c1b15a0", default-features = false, features = ["secure-store"] }
 # The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
 # 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
-# Code's interface glyphs.
-libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "4de319ce57aea99297de0a805b899276dd90b411", features = ["font-apache-roboto-regular", "font-apache-roboto-bold", "font-apache-roboto-italic", "fonts-ofl-terminal"] }
+# Code's interface glyphs; 0.6.1 with libcontrols 0.10.8.
+libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "76448a74b9f52bcd1bb40506f06975cfd92e8b28", features = ["font-apache-roboto-regular", "font-apache-roboto-bold", "font-apache-roboto-italic", "fonts-ofl-terminal"] }
 # Basic Markdown, laid out as wrapped styled runs, for the settings copy
 # (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, step 2), drawn in
 # Roboto Regular, Bold and Italic (above) and the terminal face.
@@ -42,8 +45,10 @@ flankr-markdown = { path = "../../crates/flankr-markdown" }
 # 20261028_04, step 7); with Drawer and DrawerLayout (0.10.1) and
 # EditableLabel (0.10.2) for the session drawer (plan 20261028_03, step 5);
 # 0.10.0's label change needs nothing here (every Button label is plain).
-# TextArea since 0.9.1. On the same libmsdf.
-libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "ef860f0f33d6815030d315005f22711b9206e673" }
+# TextArea since 0.9.1. 0.10.8 (tag v0.10.8): toggle items that keep the
+# PopupMenu open (0.10.6, `PopupItem::toggle`, `PopupMenuEvent::Toggled`),
+# for the volume menu (plan 20261028_06, decision 3). On the same libmsdf.
+libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "1d813a1ff785d42f164eb004616fee3c3ef54c6a" }
 # The device halves' supported daemon versions, in Cargo's caret meaning
 # (plan 20261028_04, 3.4 item 3); the version already in Cargo.lock.
 semver = "1.0.28"
@@ -77,7 +82,7 @@ env_logger = "0.11"
 # `uses-feature` to the manifest.
 [target.'cfg(target_os = "android")'.dependencies]
 flankr-audio = { path = "../../crates/flankr-audio", features = ["morph"] }
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c9b432d80178536576c559d1af616b1f83cabea6", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery", "mobile-camera-qr"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c958897495d880c6117cae55e1b4d72b0c1b15a0", default-features = false, features = ["audio", "mobile", "secure-store", "mobile-foreground-service", "mobile-system-events", "mobile-battery", "mobile-camera-qr", "mobile-clipboard"] }
 android_logger = "0.14"
 
 # Generates the Gradle project when building for Android; a no-op on the
@@ -94,7 +99,7 @@ toml = { version = "0.8", features = ["preserve_order"] }
 
 # The key tests use libdevice's memory vault, through libmorph's `script`.
 [target.'cfg(not(target_os = "android"))'.dev-dependencies]
-libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c9b432d80178536576c559d1af616b1f83cabea6", default-features = false, features = ["secure-store", "script"] }
+libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c958897495d880c6117cae55e1b4d72b0c1b15a0", default-features = false, features = ["secure-store", "script"] }
 
 # The settings tests write settings.toml and delete data in a scratch directory.
 [dev-dependencies]

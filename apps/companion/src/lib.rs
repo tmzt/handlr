@@ -63,6 +63,8 @@
 //! everything in the data directory but the voice models.
 
 pub mod agent;
+#[cfg(all(test, not(target_os = "android")))]
+mod bottom_bar_tests;
 pub mod controls;
 pub mod drawer;
 #[cfg(all(test, not(target_os = "android")))]
@@ -112,7 +114,10 @@ use libmsdf::font::{
     TERMINAL_SYMBOLS_ATLAS, TerminalShaper, TextShaper,
 };
 
-use crate::agent::{AgentHit, AgentScreen, TermAsk, TermState, Terminal, TerminalSessions};
+use crate::agent::{
+    AgentHit, AgentScreen, TermAsk, TermKey, TermState, Terminal, TerminalSessions,
+};
+use crate::controls::Hold;
 use crate::drawer::{AppDrawer, DrawerHit, DrawerTouch};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
@@ -297,9 +302,6 @@ pub struct App {
     dictation: Option<Dictation>,
     /// The agent view, while it is open.
     agent: Option<AgentScreen>,
-    /// The agent view's play button: replies are read aloud. Kept while
-    /// the view is closed.
-    read_aloud: bool,
     /// Something is being said.
     speaking: bool,
     /// Phonon's voices, once it has loaded (`AudioEvent::TtsLoaded`), for
@@ -308,9 +310,6 @@ pub struct App {
     /// A *Voice* preview was asked and is not yet over: the next step cuts
     /// it off.
     previewing: bool,
-    /// An agent view has been opened: the overview's play has replies to
-    /// read.
-    viewed: bool,
     /// The settings, as last saved, and where `settings.toml` is.
     settings: Settings,
     data_dir: Option<PathBuf>,
@@ -360,9 +359,22 @@ pub struct App {
     /// 3): the focused prompt, the soft keyboard dismissed, and a physical
     /// keyboard (always on the desktop; on Android once one types).
     keyboard: KeyboardRoute,
-    /// A touch held on the centre button, watched for opening Gemini's card
-    /// pinned after 2 seconds (plan 20261027_03, decision 7).
-    center_hold: Option<CenterHold>,
+    /// A press on the centre or right button, or a typed card's +, timed
+    /// for its 2 s action (plan 20261028_06, decision 7; it replaces the
+    /// centre's `CenterHold`).
+    hold: Option<Hold>,
+    /// The shared menu shows the volume menu: its items follow the speak
+    /// options and speaking while it is open (decision 3).
+    volume_menu: bool,
+    /// The shared menu shows a typed card's + menu, for that card
+    /// (decision 8).
+    attach_menu: Option<PromptKind>,
+    /// A + menu to open, and a Paste text to do, for that card, once the
+    /// clipboard can be asked (the touch's or the update's context): the
+    /// menu asks only whether there is text (`clipboard_has_text`, no
+    /// Android 12 toast), the paste reads it (decision 11.4).
+    attach_wanted: Option<PromptKind>,
+    paste_wanted: Option<PromptKind>,
     /// The conversation with Gemini, as each screen's card is given it
     /// (plan 20261027_03, decision 1: each screen owns its own card).
     gemini_turns: Vec<(Speaker, String)>,
@@ -468,28 +480,6 @@ struct SessionPrompt {
     session_id: Option<String>,
     sent: Vec<Sent>,
     expanded: bool,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct CenterHold {
-    id: u64,
-    start: Duration,
-    opened: bool,
-    started_listening: bool,
-}
-
-impl CenterHold {
-    /// How long the centre button is held to open Gemini's card.
-    const OPENS: Duration = Duration::from_secs(2);
-
-    /// Whether the hold opens the card at `now`: once, at 2 s.
-    fn open_at(&mut self, now: Duration) -> bool {
-        if self.opened || now.saturating_sub(self.start) < Self::OPENS {
-            return false;
-        }
-        self.opened = true;
-        true
-    }
 }
 
 /// Where the shown screen is drawn: the surface, or the drawer's main
@@ -1305,12 +1295,7 @@ impl App {
     }
 
     fn menu_items(&self, screen: PluginScreen, bar: &Bar) -> Vec<libcontrols::PopupItem> {
-        menu::items(
-            screen,
-            &self.plugins.menu(screen),
-            self.read_aloud,
-            &bar.moved,
-        )
+        menu::items(screen, &self.plugins.menu(screen), &bar.moved)
     }
 
     /// The ⋮ was tapped: its menu opens below it.
@@ -1318,8 +1303,155 @@ impl App {
         if let Some((bar, screen)) = self.title_bar() {
             let items = self.menu_items(screen, &bar);
             self.popup = None;
+            self.volume_menu = false;
+            self.attach_menu = None;
             self.menu.open(bar.kebab.rect, items);
         }
+    }
+
+    /// Whether either speak option is on: the volume glyph's waves (plan
+    /// 20261028_06, decision 4).
+    fn volume_on(&self) -> bool {
+        self.settings.speak_coding || self.settings.speak_gemini
+    }
+
+    /// The volume menu's items as things are now (plan 20261028_06,
+    /// decision 3).
+    fn volume_items(&self) -> Vec<libcontrols::PopupItem> {
+        menu::volume_items(
+            self.settings.speak_coding,
+            self.settings.speak_gemini,
+            settings::general_agent_on(),
+            self.speaking,
+        )
+    }
+
+    /// A tap on the volume button: its menu opens anchored to it, above
+    /// the bar.
+    fn open_volume_menu(&mut self) {
+        let anchor = if let Some(agent) = &self.agent {
+            agent.rect_of(AgentHit::Volume)
+        } else {
+            self.overview.rect_of(AgentHit::Volume)
+        };
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let items = self.volume_items();
+        self.popup = None;
+        self.attach_menu = None;
+        self.volume_menu = true;
+        self.menu.open(anchor, items);
+    }
+
+    /// A typed card's +, tapped or held (plan 20261028_06, decision 8 and
+    /// the 23:39 EDT amendment): its menu opens anchored to it. Gemini's
+    /// holds Paste text only, until the general agent takes images; the
+    /// message card's adds Attach image… (that + shows only while the
+    /// daemon offers `images`, which it does not yet).
+    fn open_attach_menu(&mut self, kind: PromptKind) {
+        self.attach_wanted = Some(kind);
+    }
+
+    /// What waited for the clipboard: the + menu opened, Paste text
+    /// enabled while it holds text; and a Paste text done.
+    fn serve_clipboard(&mut self, ctx: &MorphContext) {
+        if let Some(kind) = self.attach_wanted.take() {
+            let has_text = ctx.clipboard_has_text();
+            self.show_attach_menu(kind, has_text);
+        }
+        if let Some(kind) = self.paste_wanted.take() {
+            let text = ctx.clipboard_text();
+            self.paste_text(kind, text);
+        }
+    }
+
+    /// `kind`'s + menu, anchored to its +, Paste text enabled while the
+    /// clipboard holds text (`has_text`).
+    fn show_attach_menu(&mut self, kind: PromptKind, has_text: bool) {
+        let anchor = if let Some(agent) = &self.agent {
+            agent.rect_of(AgentHit::PromptAttach(kind))
+        } else {
+            self.overview.rect_of(AgentHit::PromptAttach(kind))
+        };
+        let Some(anchor) = anchor else {
+            return;
+        };
+        let images = kind == PromptKind::Message && self.input_tools().images;
+        self.popup = None;
+        self.volume_menu = false;
+        self.attach_menu = Some(kind);
+        self.menu.open(anchor, menu::attach_items(images, has_text));
+    }
+
+    /// Typing's tools for the screens, now (plan 20261028_06, decisions 8,
+    /// 9 and 11): the toggles on a phone only; Gemini's + everywhere (the
+    /// owner, 2026-10-29: "Show Gemini's + on desktop"); the message
+    /// card's + only on a phone with the daemon's `images` (the binary
+    /// files plan, not yet offered).
+    fn input_tools(&self) -> prompt::InputTools {
+        let k = &self.keyboard;
+        prompt::InputTools {
+            mobile: cfg!(target_os = "android"),
+            images: false,
+            keyboard_up: matches!(k.focused(), Some(FocusedPrompt::Card { .. }))
+                && !k.dismissed()
+                && !k.physical(),
+            physical: k.physical(),
+        }
+    }
+
+    /// *Speak coding responses* or *Speak agent (Gemini) responses*
+    /// toggled to `on` in the volume menu, which stays open: saved, and
+    /// given to the client, as from Settings (plan 20261028_06, decision
+    /// 6).
+    fn set_speak(&mut self, gemini: bool, on: bool) {
+        let mut s = self.settings.clone();
+        if gemini {
+            s.speak_gemini = on;
+        } else {
+            s.speak_coding = on;
+        }
+        log::info!(
+            "volume: speak coding {}, speak gemini {}",
+            s.speak_coding,
+            s.speak_gemini
+        );
+        self.apply_settings(s);
+    }
+
+    /// **Paste text** into `kind`'s typed card: `text`, the clipboard's
+    /// (libmorph's `clipboard_text`, read on the user's tap), at the
+    /// cursor, through the keyboard route's commit path, as text typed on
+    /// the soft keyboard (decision 8).
+    fn paste_text(&mut self, kind: PromptKind, text: Option<String>) {
+        let Some(paste) = text.filter(|t| !t.is_empty()) else {
+            log::info!("paste text: no clipboard text");
+            return;
+        };
+        if !self
+            .prompts()
+            .card(kind)
+            .input()
+            .is_some_and(|i| i.keyboard())
+        {
+            log::info!("paste text: no typed prompt open");
+            return;
+        }
+        log::info!("paste text: {} bytes", paste.len());
+        let card = self.prompts().card(kind);
+        let text = card.input_text();
+        let at = card
+            .text_area()
+            .map_or(text.len(), |ta| ta.cursor().min(text.len()));
+        let at = (0..=at)
+            .rev()
+            .find(|&i| text.is_char_boundary(i))
+            .unwrap_or(0);
+        let mut next = text.clone();
+        next.insert_str(at, &paste);
+        self.send(Input::SetText(next));
+        self.keyboard.restart();
     }
 
     /// A title icon was tapped, or chosen from the ⋮ menu when it moved
@@ -1366,11 +1498,18 @@ impl App {
         };
         log::info!("menu: {choice:?}");
         match choice {
-            Choice::ReadAloud => {
-                if self.agent.is_some() {
-                    self.agent_hit(AgentHit::ReadAloud);
-                }
+            Choice::SpeakCoding(on) => self.set_speak(false, on),
+            Choice::SpeakGemini(on) => self.set_speak(true, on),
+            Choice::Skip => {
+                log::info!("volume: skip");
+                self.send(Input::Skip);
             }
+            // Read on the touch's context, right after this.
+            Choice::PasteText => self.paste_wanted = self.attach_menu,
+            // The media chooser (the binary files plan; libmorph's media
+            // request): not built yet, and the item shows only with the
+            // daemon's `images`.
+            Choice::AttachImage => log::info!("attach image: not built yet"),
             Choice::Settings => {
                 if self.settings_screen.is_none() {
                     self.open_settings();
@@ -1435,7 +1574,7 @@ impl App {
         agent.name = name;
         agent.set_scrollbar(self.settings.scrollbar);
         agent.set_sound(self.settings.sound);
-        agent.set_read_aloud(self.read_aloud);
+        agent.set_volume(self.volume_on());
         agent.set_speaking(self.speaking);
         let ga_listening = self.dictation.as_ref().is_some_and(|d| {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
@@ -1466,7 +1605,6 @@ impl App {
             agent.set_terminal_shown(true);
         }
         self.agent = Some(agent);
-        self.viewed = true;
     }
 
     /// The prompt cards of the screen shown.
@@ -1941,6 +2079,7 @@ impl App {
             self.service = Service::Off;
         }
         let voice_changed = settings.voice != self.settings.voice;
+        let coding_changed = settings.speak_coding != self.settings.speak_coding;
         self.settings = settings.clone();
         settings::set_current(settings.clone());
         if voice_changed {
@@ -1954,6 +2093,11 @@ impl App {
             log::warn!("settings: {e}");
         }
         self.send(Input::Settings(settings.to_client()));
+        // *Speak coding responses* is the client's read aloud (plan
+        // 20261028_06, decision 6), from the volume menu or Settings.
+        if coding_changed {
+            self.send(Input::ReadAloud(settings.speak_coding));
+        }
         // *Appearance* and the theme rows apply at once.
         self.apply_theme();
         if let Some(agent) = &mut self.agent {
@@ -2127,7 +2271,6 @@ impl App {
         if self.agent.take().is_some() {
             self.send(Input::CloseAgent);
         }
-        self.viewed = false;
         self.settings_screen = None;
         let mut overview = Overview::new();
         overview.shader_panels = self.panel_shader.is_some();
@@ -2163,6 +2306,7 @@ impl App {
         settings::set_current(self.settings.clone());
         self.apply_voice();
         self.send(Input::Settings(self.settings.to_client()));
+        self.send(Input::ReadAloud(self.settings.speak_coding));
         self.overview.settings_changed();
     }
 
@@ -2202,19 +2346,25 @@ impl App {
                     ));
                 }
             }
-            // The keyboard glyph: a typed prompt, to Gemini while its card
-            // is expanded, else a message. The keyboard route focuses it.
-            AgentHit::Keyboard => {
-                // While the terminal is armed, the keyboard types into it
-                // (plan 20261027_07, decision 7).
-                if self.agent.as_ref().is_some_and(AgentScreen::terminal_armed) {
-                    self.term_ime.get_or_insert_with(String::new);
-                    self.keyboard.focus(FocusedPrompt::Terminal);
-                } else if self.prompts().expanded() == Some(PromptKind::GeneralAgent) {
-                    self.agent_hit(AgentHit::PromptText(PromptKind::GeneralAgent));
+            // A typed card's +: a tap opens Gemini's menu directly (the
+            // 23:39 EDT amendment: nothing to attach yet); the message
+            // card's, shown only with the daemon's `images`, would open the
+            // media chooser (the binary files plan), not built yet.
+            AgentHit::PromptAttach(kind) => match kind {
+                PromptKind::GeneralAgent => self.open_attach_menu(kind),
+                PromptKind::Message => log::info!("attach: the media chooser is not built yet"),
+            },
+            // The keyboard toggle in a typed card's row (plan 20261028_06,
+            // decision 8): up, it hides the soft keyboard as its own
+            // dismissal does (the card and its text stay); down, it
+            // focuses the text area and raises it, as a tap on it does.
+            AgentHit::PromptIme(kind) => {
+                if self.input_tools().keyboard_up {
+                    log::info!("keyboard toggle: hide");
+                    self.keyboard.dismiss();
                 } else {
-                    self.send(Input::StartTextPrompt);
-                    self.focus_prompt(PromptKind::Message);
+                    log::info!("keyboard toggle: show");
+                    self.agent_hit(AgentHit::PromptText(kind));
                 }
             }
             // A tap on a card's text area: focused, and the soft keyboard
@@ -2299,21 +2449,8 @@ impl App {
                     self.links.push(url);
                 }
             }
-            AgentHit::ReadAloud if self.read_aloud && self.speaking => {
-                log::info!("read aloud: skip");
-                self.send(Input::Skip);
-            }
-            AgentHit::ReadAloud => {
-                self.read_aloud = !self.read_aloud;
-                log::info!(
-                    "agent view: read aloud {}",
-                    if self.read_aloud { "on" } else { "off" }
-                );
-                self.send(Input::ReadAloud(self.read_aloud));
-                if let Some(agent) = &mut self.agent {
-                    agent.set_read_aloud(self.read_aloud);
-                }
-            }
+            // The volume button: its menu (plan 20261028_06, decision 3).
+            AgentHit::Volume => self.open_volume_menu(),
             // Sent or cancelled: the keyboard goes with the prompt.
             AgentHit::Submit => {
                 self.keyboard.close();
@@ -2332,6 +2469,13 @@ impl App {
             // The keys row (plan 20261022_03, the L3 amendment of
             // 2026-10-28 10:42 EDT): CTRL and ALT latch, the others go to
             // the pane with them. The soft keyboard is left as it is.
+            // Its toggle (plan 20261028_06, decision 9) hides or raises the
+            // soft keyboard into the terminal; its + takes no taps until
+            // the terminal paste is built (step 8).
+            AgentHit::TermKey(TermKey::Ime) => self.toggle_terminal_keyboard(),
+            AgentHit::TermKey(TermKey::Attach) => {
+                log::info!("terminal +: not built yet");
+            }
             AgentHit::TermKey(key) => {
                 if let Some(keys) = self.agent.as_mut().and_then(|a| a.press_term_key(key)) {
                     self.send_terminal_keys(&keys);
@@ -2348,6 +2492,102 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    /// The control a touch starting at `(x, y)` presses, on the screen
+    /// shown, if it is one a 2 s hold gives a second action (plan
+    /// 20261028_06, decisions 7 and 8): the centre while it is ✦ Gemini
+    /// (not while Gemini listens, nor the ✕ while dictating), the right
+    /// while it is record (not send), and a typed card's +.
+    fn hold_target(&self, x: f32, y: f32) -> Option<AgentHit> {
+        if self.pairing.adding || self.settings_screen.is_some() {
+            return None;
+        }
+        let (hit, live) = if let Some(agent) = &self.agent {
+            let hit = agent.hit(x, y)?;
+            (hit, settings::allows(hit))
+        } else if !self.pairing() {
+            let hit = self.overview.hit(x, y)?;
+            (hit, settings::allows_on_overview(hit))
+        } else {
+            return None;
+        };
+        let listening = self.dictation.as_ref().is_some_and(|d| {
+            d.general_agent && d.active && d.mode == flankr_companion::PromptMode::Voice
+        });
+        match hit {
+            AgentHit::GeneralAgent if !listening && live => Some(hit),
+            // Typing needs no microphone: the right button's hold opens
+            // the typed message card even while record is dim (CHANGES.md
+            // departure; its tap still needs the microphone).
+            AgentHit::Message if settings::TEXT_INPUT => Some(hit),
+            AgentHit::PromptAttach(_) => Some(hit),
+            _ => None,
+        }
+    }
+
+    /// A touch starting on a control with a 2 s hold: timed from now.
+    /// Returns whether it was one.
+    fn start_hold(&mut self, touch: &Touch, now: Duration) -> bool {
+        let Some(hit) = self.hold_target(touch.x, touch.y) else {
+            return false;
+        };
+        log::info!("hold: pressed {hit:?}");
+        self.hold = Some(Hold::start(touch.id, hit, [touch.x, touch.y], now));
+        true
+    }
+
+    /// The rest of a held touch: a move past the slop ends it with neither
+    /// action; the release before 2 s is the control's tap.
+    fn hold_touch(&mut self, touch: &Touch) {
+        let s = self.scale();
+        let Some(hold) = self.hold.as_mut() else {
+            return;
+        };
+        match touch.phase {
+            TouchPhase::Started => {}
+            TouchPhase::Moved => hold.moved_to([touch.x, touch.y], s),
+            TouchPhase::Cancelled => self.hold = None,
+            TouchPhase::Ended => {
+                let hold = self.hold.take().expect("held");
+                if hold.is_tap() {
+                    self.hold_tap(hold.hit);
+                }
+            }
+        }
+    }
+
+    /// A press released before 2 s: the control's tap. Voice starts on the
+    /// release, no longer on touch-down (decision 7).
+    fn hold_tap(&mut self, hit: AgentHit) {
+        let live = if self.agent.is_some() {
+            settings::allows(hit)
+        } else {
+            settings::allows_on_overview(hit)
+        };
+        if live || matches!(hit, AgentHit::PromptAttach(_)) {
+            self.agent_hit(hit);
+        }
+    }
+
+    /// A press held for 2 s, fired at once, before the release (decision
+    /// 7): the centre opens Gemini's card pinned with a typed prompt, its
+    /// text area focused and the soft keyboard up, without listening; the
+    /// right opens the message card typed and focused; a + opens its menu.
+    fn hold_fired(&mut self, hit: AgentHit) {
+        log::info!("hold: fired {hit:?}");
+        match hit {
+            AgentHit::GeneralAgent => {
+                self.with_prompts(Prompts::hold_open);
+                self.agent_hit(AgentHit::PromptText(PromptKind::GeneralAgent));
+            }
+            AgentHit::Message => {
+                self.send(Input::StartTextPrompt);
+                self.focus_prompt(PromptKind::Message);
+            }
+            AgentHit::PromptAttach(kind) => self.open_attach_menu(kind),
+            _ => {}
         }
     }
 
@@ -2414,6 +2654,24 @@ impl App {
         }
         if !agent.terminal_armed() && self.term_ime.take().is_some() {
             log::info!("terminal: no longer armed; the keyboard leaves it");
+        }
+    }
+
+    /// The keys row's toggle: the soft keyboard hidden from the terminal as
+    /// its own dismissal does, or raised into it again (plan 20261028_06,
+    /// decision 9).
+    fn toggle_terminal_keyboard(&mut self) {
+        let up = self
+            .agent
+            .as_ref()
+            .is_some_and(AgentScreen::terminal_keyboard_up);
+        if up {
+            log::info!("terminal: keyboard toggle: hide");
+            self.keyboard.dismiss();
+        } else if self.agent.as_ref().is_some_and(AgentScreen::terminal_armed) {
+            log::info!("terminal: keyboard toggle: show");
+            self.term_ime.get_or_insert_with(String::new);
+            self.keyboard.focus(FocusedPrompt::Terminal);
         }
     }
 
@@ -2617,6 +2875,12 @@ impl App {
     /// pairing screen, only a touch's end counts.
     fn touch(&mut self, touch: Touch) {
         let now = self.started.elapsed();
+        // A press timed for its 2 s hold keeps its touch to the end, even
+        // once its action has opened a menu or a card under the finger.
+        if self.hold.is_some_and(|h| h.id == touch.id) {
+            self.hold_touch(&touch);
+            return;
+        }
         // The ⋮ menu, then a plugin's modal, take every touch while open
         // (plan 20261028_04, decisions 3.6 and 3.7).
         if self.menu.is_open() {
@@ -2683,69 +2947,8 @@ impl App {
             self.title_touch = Some((touch.id, target));
             return;
         }
-        if let Some(hold) = self.center_hold.as_mut()
-            && hold.id == touch.id
-        {
-            match touch.phase {
-                TouchPhase::Ended => {
-                    let opened = hold.opened;
-                    let started_listening = hold.started_listening;
-                    self.center_hold = None;
-                    if !opened && !started_listening {
-                        self.agent_hit(AgentHit::GeneralAgent);
-                    }
-                    return;
-                }
-                TouchPhase::Cancelled => {
-                    self.center_hold = None;
-                    return;
-                }
-                _ => return,
-            }
-        }
-
-        if touch.phase == TouchPhase::Started {
-            let on_center = if self.pairing.adding {
-                false
-            } else if let Some(agent) = &self.agent {
-                agent.hit(touch.x, touch.y) == Some(AgentHit::GeneralAgent)
-            } else if !self.pairing() {
-                self.overview.hit(touch.x, touch.y) == Some(AgentHit::GeneralAgent)
-            } else {
-                false
-            };
-            if on_center {
-                let currently_listening = self.dictation.as_ref().is_some_and(|d| {
-                    d.general_agent && d.active && d.mode == flankr_companion::PromptMode::Voice
-                });
-                let started_listening = if !currently_listening {
-                    // Activate immediately on press: start voice recognition, animation, and Gemini card!
-                    self.dictation = Some(flankr_companion::Dictation {
-                        active: true,
-                        mode: flankr_companion::PromptMode::Voice,
-                        text: String::new(),
-                        target: None,
-                        focus_moved: None,
-                        phase: flankr_companion::DictationPhase::Collecting,
-                        submit_in: None,
-                        general_agent: true,
-                    });
-                    self.set_listening(true);
-                    self.send(Input::StartGeneralAgentPrompt(
-                        flankr_companion::PromptMode::Voice,
-                    ));
-                    true
-                } else {
-                    false
-                };
-                self.center_hold = Some(CenterHold {
-                    id: touch.id,
-                    start: now,
-                    opened: false,
-                    started_listening,
-                });
-                return;
-            }
+        if touch.phase == TouchPhase::Started && self.start_hold(&touch, now) {
+            return;
         }
 
         // The add mode's pairing screen, over Settings: no session cards
@@ -3155,6 +3358,9 @@ impl App {
         let ga_listening = self.dictation.as_ref().is_some_and(|d| {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
         });
+        // Typing's tools and the volume glyph (plan 20261028_06).
+        let tools = self.input_tools();
+        let volume_on = self.volume_on();
         // The prompt cards' inputs (plan 20261027_03): a message to a
         // session, and a typed prompt to Gemini.
         let message = self
@@ -3209,7 +3415,8 @@ impl App {
             }));
             o.set_dictation(message.clone());
             o.set_gemini_input(gemini.clone());
-            o.set_play(self.read_aloud, self.speaking, self.viewed);
+            o.set_volume(volume_on, self.speaking);
+            o.set_input_tools(tools);
         }
 
         // The soft keyboard raised into the terminal: the keys row shows
@@ -3218,6 +3425,8 @@ impl App {
         let keys_row = self.terminal_keyboard_up(ctx.keyboard_inset());
         if let Some(agent) = &mut self.agent {
             agent.set_keys_row(keys_row);
+            agent.set_input_tools(tools);
+            agent.set_volume(volume_on);
             agent.set_layout(layout);
             agent.set_general_agent_listening(ga_listening);
             agent.set_dictation(message);
@@ -3626,11 +3835,9 @@ impl MorphApp for App {
             pending: Vec::new(),
             dictation: None,
             agent: None,
-            read_aloud: false,
             speaking: false,
             voices: None,
             previewing: false,
-            viewed: false,
             settings,
             data_dir,
             settings_screen: None,
@@ -3653,7 +3860,11 @@ impl MorphApp for App {
             agent_pane: None,
             scale: 1.0,
             keyboard: KeyboardRoute::new(cfg!(not(target_os = "android"))),
-            center_hold: None,
+            hold: None,
+            volume_menu: false,
+            attach_menu: None,
+            attach_wanted: None,
+            paste_wanted: None,
             gemini_turns: Vec::new(),
             sessions: HashMap::new(),
             agent_gemini_expanded: false,
@@ -3722,6 +3933,9 @@ impl MorphApp for App {
                 );
                 let companion = Companion::spawn_tapped(config, keys, app.notifier.tap());
                 companion.send(Input::Settings(app.settings.to_client()));
+                // *Speak coding responses*, kept across restarts (plan
+                // 20261028_06, decision 6).
+                companion.send(Input::ReadAloud(app.settings.speak_coding));
                 app.companion = Some(companion);
             }
             Err(e) => {
@@ -3815,15 +4029,33 @@ impl MorphApp for App {
 
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
-        // The 2 s hold opens Gemini's card pinned, not the overlay; the
-        // user expands it (plan 20261027_03, decision 7).
+        // A 2 s press fires at once (plan 20261028_06, decision 7), and
+        // the screens draw its progress while it is timed.
         let elapsed = self.started.elapsed();
-        if self
-            .center_hold
+        if let Some(hit) = self
+            .hold
             .as_mut()
-            .is_some_and(|h| h.open_at(elapsed))
+            .and_then(|h| h.fire(elapsed).then_some(h.hit))
         {
-            self.with_prompts(Prompts::hold_open);
+            self.hold_fired(hit);
+        }
+        self.serve_clipboard(ctx);
+        let progress = self
+            .hold
+            .and_then(|h| h.progress(elapsed).map(|p| (h.hit, p)));
+        self.overview
+            .set_hold(progress.filter(|_| self.agent.is_none()));
+        if let Some(agent) = &mut self.agent {
+            agent.set_hold(progress);
+        }
+        // The volume menu follows the options and speaking while open; it
+        // is no longer the volume menu once closed.
+        if !self.menu.is_open() {
+            self.volume_menu = false;
+            self.attach_menu = None;
+        } else if self.volume_menu {
+            let items = self.volume_items();
+            self.menu.refresh(items);
         }
         if let Some(screen) = &mut self.settings_screen {
             screen.tick(dt);
@@ -3897,6 +4129,7 @@ impl MorphApp for App {
     /// link it tapped opens.
     fn on_touch(&mut self, ctx: &mut MorphContext, touch: Touch) {
         self.touch(touch);
+        self.serve_clipboard(ctx);
         // Links tapped in the settings' copy and the agent view.
         let mut links = std::mem::take(&mut self.links);
         if let Some(screen) = &mut self.settings_screen {
@@ -4034,7 +4267,9 @@ impl MorphApp for App {
         let ga_listening = self.dictation.as_ref().is_some_and(|d| {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
         });
-        if ga_listening {
+        // The listening button's dingbats, the volume glyph's waves while
+        // something is said, and a held press's bar step every frame.
+        if ga_listening || self.speaking || self.hold.is_some() {
             self.overview.invalidate();
             if let Some(agent) = &mut self.agent {
                 agent.invalidate();
@@ -4361,6 +4596,13 @@ pub(crate) mod probe {
         pub approve: Option<Rect>,
         /// The other-session cards' agents, newest first.
         pub session_cards: Vec<String>,
+        /// The bottom bar's volume, centre and right buttons on the screen
+        /// shown, and the shared menu's item ids while it is open (plan
+        /// 20261028_06).
+        pub bar: Vec<(crate::agent::AgentHit, Rect)>,
+        pub menu_items: Vec<String>,
+        /// A press timed for its 2 s hold.
+        pub holding: bool,
     }
 
     /// When an injected event is given.
@@ -4446,6 +4688,26 @@ pub(crate) mod probe {
                 .iter()
                 .map(|c| c.agent.clone())
                 .collect(),
+            bar: {
+                use crate::agent::AgentHit;
+                [AgentHit::Volume, AgentHit::GeneralAgent, AgentHit::Message]
+                    .into_iter()
+                    .filter_map(|hit| {
+                        match &app.agent {
+                            Some(agent) => agent.rect_of(hit),
+                            None => app.overview.rect_of(hit),
+                        }
+                        .map(|r| (hit, r))
+                    })
+                    .collect()
+            },
+            menu_items: app
+                .menu
+                .items()
+                .iter()
+                .map(|i| i.id.as_str().to_string())
+                .collect(),
+            holding: app.hold.is_some(),
         };
         PROBE.with(|p| p.borrow_mut().drawer = probe);
     }
@@ -4539,15 +4801,10 @@ mod tests {
     #[test]
     fn the_2_s_hold_opens_geminis_card_pinned_not_the_overlay() {
         let start = Duration::from_secs(10);
-        let mut hold = CenterHold {
-            id: 1,
-            start,
-            opened: false,
-            started_listening: true,
-        };
-        assert!(!hold.open_at(start + Duration::from_millis(1999)));
-        assert!(hold.open_at(start + CenterHold::OPENS));
-        assert!(!hold.open_at(start + Duration::from_secs(3)), "once");
+        let mut hold = Hold::start(1, AgentHit::GeneralAgent, [0.0, 0.0], start);
+        assert!(!hold.fire(start + Duration::from_millis(1999)));
+        assert!(hold.fire(start + crate::controls::hold::HOLD));
+        assert!(!hold.fire(start + Duration::from_secs(3)), "once");
         // What it opens, on either screen: the card pinned, even with
         // nothing said yet, and the overlay closed, even if it was left
         // expanded.

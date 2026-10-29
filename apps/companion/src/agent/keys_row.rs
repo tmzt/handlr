@@ -17,17 +17,28 @@
 //!   sent with them ([`Latch::apply`]), and the latch clears.
 //! - **Drawing.** The labels in the UI font; the arrows as strokes (a shaft
 //!   and a head), since the faces' arrow glyphs are not relied on.
+//!
+//! Plan 20261028_06, decision 9, replaces the seven columns and when the
+//! row shows: nine equal columns, **+** at the far left ([`TermKey::Attach`])
+//! and the soft keyboard's toggle at the far right ([`TermKey::Ime`]), the
+//! row shown while the terminal is shown and armed, the keyboard up or not.
+//! The + is drawn dim and takes no taps while neither of its actions works
+//! (no `images` namespace, no clipboard call, no `terminal.paste`); the
+//! column stays, so the keys do not shift. On the desktop neither is drawn
+//! and their columns are empty (11.2, 11.3).
 
 use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 
 use super::{fill, line_h};
+use crate::controls::square_button::{ime_glyph, plus_glyph};
 use crate::theme::theme;
 
 /// The row's height, in points.
 pub const KEYS_H: f32 = 44.0;
-/// The row's columns: four keys and the d-pad's three.
-const COLUMNS: usize = 7;
+/// The row's columns: the +, four keys, the d-pad's three and the
+/// keyboard toggle.
+const COLUMNS: usize = 9;
 /// Space around and between the keys, in points.
 const GAP: f32 = 4.0;
 /// Space between the d-pad's halves, in points.
@@ -38,6 +49,8 @@ const LABEL_PT: f32 = 14.0;
 /// A key of the row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TermKey {
+    /// The + (no token; not sent).
+    Attach,
     Esc,
     Tab,
     Ctrl,
@@ -46,11 +59,14 @@ pub enum TermKey {
     Left,
     Down,
     Right,
+    /// The soft keyboard's show/hide toggle (no token; not sent).
+    Ime,
 }
 
 impl TermKey {
     /// Every key, in the row's order (the d-pad's top half first).
-    pub const ALL: [TermKey; 8] = [
+    pub const ALL: [TermKey; 10] = [
+        TermKey::Attach,
         TermKey::Esc,
         TermKey::Tab,
         TermKey::Ctrl,
@@ -59,10 +75,12 @@ impl TermKey {
         TermKey::Left,
         TermKey::Down,
         TermKey::Right,
+        TermKey::Ime,
     ];
 
     /// The `terminal.input` token it sends, unmodified; `None` for the
-    /// modifiers, which latch.
+    /// modifiers, which latch, and the + and the toggle, which send
+    /// nothing.
     pub fn token(self) -> Option<&'static str> {
         Some(match self {
             TermKey::Esc => "escape",
@@ -71,7 +89,7 @@ impl TermKey {
             TermKey::Down => "down",
             TermKey::Left => "left",
             TermKey::Right => "right",
-            TermKey::Ctrl | TermKey::Alt => return None,
+            TermKey::Ctrl | TermKey::Alt | TermKey::Attach | TermKey::Ime => return None,
         })
     }
 
@@ -195,6 +213,29 @@ impl Latch {
     }
 }
 
+/// What the + and the toggle show (decision 9).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Tools {
+    /// The +: `None` not drawn (the desktop), else whether it is live.
+    pub attach: Option<bool>,
+    /// The toggle: `None` not drawn (the desktop), else whether the soft
+    /// keyboard is up (hide) and whether it is live (no physical
+    /// keyboard).
+    pub ime: Option<(bool, bool)>,
+}
+
+impl Tools {
+    /// Whether a tap on `key` acts: the + and the toggle only while drawn
+    /// and live.
+    pub fn takes(&self, key: TermKey) -> bool {
+        match key {
+            TermKey::Attach => self.attach == Some(true),
+            TermKey::Ime => self.ime.is_some_and(|(_, live)| live),
+            _ => true,
+        }
+    }
+}
+
 /// The keys' rects in `row`, at scale `s`, in [`TermKey::ALL`]'s order.
 /// Their tap areas are [`tap_area`]s; a tap elsewhere in the row (the
 /// d-pad's empty top corners) does nothing.
@@ -210,14 +251,16 @@ pub fn lay_out(row: Rect, s: f32) -> Vec<(TermKey, Rect)> {
     let upper = |i| Rect::new(col_x(i), top, cw, half);
     let lower = |i| Rect::new(col_x(i), low, cw, half);
     vec![
-        (TermKey::Esc, whole(0)),
-        (TermKey::Tab, whole(1)),
-        (TermKey::Ctrl, whole(2)),
-        (TermKey::Alt, whole(3)),
-        (TermKey::Up, upper(5)),
-        (TermKey::Left, lower(4)),
-        (TermKey::Down, lower(5)),
-        (TermKey::Right, lower(6)),
+        (TermKey::Attach, whole(0)),
+        (TermKey::Esc, whole(1)),
+        (TermKey::Tab, whole(2)),
+        (TermKey::Ctrl, whole(3)),
+        (TermKey::Alt, whole(4)),
+        (TermKey::Up, upper(6)),
+        (TermKey::Left, lower(5)),
+        (TermKey::Down, lower(6)),
+        (TermKey::Right, lower(7)),
+        (TermKey::Ime, whole(8)),
     ]
 }
 
@@ -230,18 +273,44 @@ pub fn tap_area(rect: Rect, s: f32) -> Rect {
 }
 
 /// The row in `row`: its band, the keys, CTRL and ALT highlighted while
-/// latched.
+/// latched, the + and the toggle as `tools` says.
 pub fn draw(
     list: &mut DrawList,
     ctx: &DrawContext,
     row: Rect,
     keys: &[(TermKey, Rect)],
     latch: Latch,
+    tools: Tools,
     s: f32,
 ) {
     fill(list, row, theme().header, 0.0);
     let px = LABEL_PT * s;
     for &(key, r) in keys {
+        match key {
+            TermKey::Attach => {
+                if let Some(live) = tools.attach {
+                    let start = list.instances.len();
+                    fill(list, r, theme().card, 6.0 * s);
+                    plus_glyph(list, r, s, theme().accent);
+                    if !live {
+                        crate::settings::dim_since(list, start);
+                    }
+                }
+                continue;
+            }
+            TermKey::Ime => {
+                if let Some((up, live)) = tools.ime {
+                    let start = list.instances.len();
+                    fill(list, r, theme().card, 6.0 * s);
+                    ime_glyph(list, r, s, theme().fg, up);
+                    if !live {
+                        crate::settings::dim_since(list, start);
+                    }
+                }
+                continue;
+            }
+            _ => {}
+        }
         let on = latch.has(key);
         let (bg, fg) = if on {
             (theme().accent, theme().bg)
@@ -290,6 +359,7 @@ mod tests {
         assert_eq!(
             tokens,
             [
+                None,
                 Some("escape"),
                 Some("tab"),
                 None,
@@ -297,7 +367,8 @@ mod tests {
                 Some("up"),
                 Some("left"),
                 Some("down"),
-                Some("right")
+                Some("right"),
+                None
             ]
         );
         let mut l = Latch::default();
@@ -376,7 +447,31 @@ mod tests {
     }
 
     #[test]
-    fn the_row_is_seven_columns_with_the_dpad_in_two_halves() {
+    fn the_row_is_nine_columns_with_the_plus_and_the_toggle_at_its_ends() {
+        // A 411 pt phone at scale 1: (411 - 10 × 4) / 9, about 41 pt.
+        let row = Rect::new(0.0, 0.0, 411.0, KEYS_H);
+        let keys = lay_out(row, 1.0);
+        let rect = |k| keys.iter().find(|(key, _)| *key == k).unwrap().1;
+        let w = (411.0 - 10.0 * 4.0) / 9.0;
+        assert!((rect(TermKey::Esc).w - w).abs() < 0.01 && (w - 41.2).abs() < 0.1);
+        assert_eq!(rect(TermKey::Attach).x, 4.0);
+        assert!((rect(TermKey::Ime).x + w - (411.0 - 4.0)).abs() < 0.01);
+        assert!(rect(TermKey::Attach).x < rect(TermKey::Esc).x);
+        assert!(rect(TermKey::Right).x < rect(TermKey::Ime).x);
+        // Neither sends; the + is inert while neither of its actions works.
+        assert_eq!(TermKey::Attach.token(), None);
+        assert_eq!(TermKey::Ime.token(), None);
+        let phone = Tools {
+            attach: Some(false),
+            ime: Some((true, true)),
+        };
+        assert!(!phone.takes(TermKey::Attach) && phone.takes(TermKey::Ime));
+        assert!(!Tools::default().takes(TermKey::Ime), "the desktop");
+        assert!(phone.takes(TermKey::Esc));
+    }
+
+    #[test]
+    fn the_dpad_is_in_two_halves_and_every_key_one_column() {
         let s = 2.0;
         let row = Rect::new(0.0, 1000.0, 1080.0, KEYS_H * s);
         let keys = lay_out(row, s);
@@ -390,13 +485,14 @@ mod tests {
             assert!(r.x >= row.x && r.x + r.w <= row.x + row.w + 0.01, "{k:?}");
             assert!(r.y >= row.y && r.y + r.h <= row.y + row.h + 0.01, "{k:?}");
         }
+        let attach = rect(TermKey::Attach);
         let (esc, tab, ctrl, alt) = (
             rect(TermKey::Esc),
             rect(TermKey::Tab),
             rect(TermKey::Ctrl),
             rect(TermKey::Alt),
         );
-        assert!(esc.x < tab.x && tab.x < ctrl.x && ctrl.x < alt.x);
+        assert!(attach.x < esc.x && esc.x < tab.x && tab.x < ctrl.x && ctrl.x < alt.x);
         let (up, left, down, right) = (
             rect(TermKey::Up),
             rect(TermKey::Left),
@@ -425,7 +521,7 @@ mod tests {
         let ctx = DrawContext::default();
         let colours = |latch| {
             let mut list = DrawList::new();
-            draw(&mut list, &ctx, row, &keys, latch, s);
+            draw(&mut list, &ctx, row, &keys, latch, Tools::default(), s);
             list.instances.iter().map(|i| i.color).collect::<Vec<_>>()
         };
         assert!(!colours(Latch::default()).contains(&theme().accent));

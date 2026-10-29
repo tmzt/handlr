@@ -47,7 +47,7 @@ use crate::agent::{
     ACTION_H, AgentHit, BUTTON_H, Fill, Flow, FlowButton, PAD, Row, Terminal, columns, fill, line_h,
 };
 use crate::controls::scroll::Touched;
-use crate::controls::{ControlRow, SquareButton};
+use crate::controls::{ControlRow, RowState, SquareButton};
 use crate::drawer::Menu;
 use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts};
 use crate::settings;
@@ -127,10 +127,12 @@ pub struct Overview {
     /// asks.
     message: Option<MessagePrompt>,
     card: Option<Panel>,
-    read_aloud: bool,
+    /// Either speak option is on: the volume glyph bright, with waves
+    /// (plan 20261028_06, decision 4).
+    volume_on: bool,
     speaking: bool,
-    /// An agent view has been opened: play reads its replies.
-    play_live: bool,
+    /// A 2 s press timed on a control, and its progress (decision 7).
+    hold: Option<(AgentHit, f32)>,
     headings: Vec<Heading>,
     divider_y: Option<f32>,
     /// The ⋮, at the title's right; the title icons are left of it.
@@ -174,9 +176,9 @@ impl Overview {
             prompts: Prompts::new(),
             message: None,
             card: None,
-            read_aloud: false,
+            volume_on: false,
             speaking: false,
-            play_live: false,
+            hold: None,
             headings: Vec::new(),
             divider_y: None,
             kebab: crate::menu::Kebab::default(),
@@ -271,14 +273,29 @@ impl Overview {
         }
     }
 
-    /// The play button: on, something being said, and whether a view has
-    /// been opened for it to read.
-    pub fn set_play(&mut self, read_aloud: bool, speaking: bool, live: bool) {
-        if (read_aloud, speaking, live) != (self.read_aloud, self.speaking, self.play_live) {
-            self.read_aloud = read_aloud;
+    /// The volume button: either speak option on, and something being
+    /// said (its waves step). The same menu as the agent view's opens
+    /// from it (plan 20261028_06, open question 6).
+    pub fn set_volume(&mut self, on: bool, speaking: bool) {
+        if (on, speaking) != (self.volume_on, self.speaking) {
+            self.volume_on = on;
             self.speaking = speaking;
-            self.play_live = live;
             self.dirty = true;
+        }
+    }
+
+    /// The press being timed on `hit`, and its progress, for its bar.
+    pub fn set_hold(&mut self, hold: Option<(AgentHit, f32)>) {
+        if hold != self.hold {
+            self.hold = hold;
+            self.dirty = true;
+        }
+    }
+
+    /// Typing's tools, for the typed cards' rows (decision 8).
+    pub fn set_input_tools(&mut self, tools: crate::prompt::InputTools) {
+        if self.prompts.set_tools(tools) {
+            self.settle();
         }
     }
 
@@ -438,8 +455,7 @@ impl Overview {
             l.w - pad,
             row_bottom,
             s,
-            self.prompts.taking_input(),
-            self.general_agent_listening,
+            &RowState::three(self.prompts.taking_input(), self.general_agent_listening),
         );
         let mut above = row_bottom - BUTTON_H * s - 12.0 * s;
         let mut panels = Vec::new();
@@ -578,8 +594,6 @@ impl Overview {
                 Target::Menu => self.menu.contains(x, y).then_some(OverviewHit::Menu),
                 Target::Prompt => None,
                 Target::Other => match self.control_at(x, y) {
-                    // Nothing to read until a view has been opened.
-                    Some(AgentHit::ReadAloud) if !self.play_live => None,
                     // Turned off in the settings: no tap.
                     Some(hit) if !settings::allows_on_overview(hit) => None,
                     Some(hit) => Some(OverviewHit::Bottom(hit)),
@@ -639,7 +653,7 @@ impl Overview {
         self.grid.draw(list, ctx, self.shader_panels);
         self.prompts.draw_pinned(list, ctx);
         let recording = self.prompts.message_open();
-        let read_aloud = self.read_aloud && self.play_live;
+        let volume_on = self.volume_on;
         let draw_button = |list: &mut DrawList, b: &FlowButton| {
             SquareButton::draw_enabled(
                 list,
@@ -648,7 +662,7 @@ impl Overview {
                 b,
                 b.rect,
                 s,
-                read_aloud,
+                volume_on,
                 self.speaking,
                 recording,
                 settings::allows_on_overview(b.hit),
@@ -668,6 +682,18 @@ impl Overview {
         self.prompts.draw_overlay(list, ctx, l.w);
         for b in &self.buttons {
             draw_button(list, b);
+        }
+        // A 2 s press's progress along its control's bottom (plan
+        // 20261028_06, decision 7).
+        if let Some((hit, progress)) = self.hold
+            && let Some(r) = self.rect_of(hit)
+        {
+            fill(
+                list,
+                crate::controls::hold::bar(r, progress, s),
+                crate::agent::hold_colour(hit),
+                0.0,
+            );
         }
         self.dirty = false;
         true
@@ -1190,20 +1216,16 @@ mod tests {
     fn the_bottom_row_works_with_the_overlay_open() {
         let mut o = overview(2);
         talk(&mut o, 1);
-        o.set_play(false, false, true);
         open(&mut o);
-        let play = o.rect_of(AgentHit::ReadAloud).unwrap();
+        let play = o.rect_of(AgentHit::Volume).unwrap();
         let record = o.rect_of(AgentHit::Message).unwrap();
-        let keys = o.rect_of(AgentHit::Keyboard).unwrap();
-        assert_eq!((keys.w, keys.h), (record.w, record.h), "record's hit box");
-        assert!(keys.x + keys.w < record.x, "left of record");
         assert_eq!(
             tap(&mut o, record.x + 5.0, record.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::Message))
         );
         assert_eq!(
             tap(&mut o, play.x + 5.0, play.y + 5.0),
-            Some(OverviewHit::Bottom(AgentHit::ReadAloud))
+            Some(OverviewHit::Bottom(AgentHit::Volume))
         );
         assert!(o.prompts().overlay().is_open(), "the row leaves it open");
         // Taking a message: one card at a time. Gemini's goes to its bars,
@@ -1224,8 +1246,8 @@ mod tests {
     #[test]
     fn the_bottom_rows_hits() {
         let mut o = overview(2);
-        // Play at the left, record at the right, square.
-        let play = o.rect_of(AgentHit::ReadAloud).unwrap();
+        // Volume at the left, record at the right, square.
+        let play = o.rect_of(AgentHit::Volume).unwrap();
         let record = o.rect_of(AgentHit::Message).unwrap();
         assert!(play.x < 100.0 && record.x + record.w > 980.0);
         assert_eq!(play.w, play.h);
@@ -1235,19 +1257,18 @@ mod tests {
             tap(&mut o, record.x + 5.0, record.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::Message))
         );
-        // Centre button: General agent is in the middle.
+        // Centre button: General agent is in the middle, slot 1 of 3.
         let ga = o.rect_of(AgentHit::GeneralAgent).unwrap();
         assert!(ga.x > play.x && ga.x + ga.w < record.x);
+        assert!((ga.x - (play.x + record.x) * 0.5).abs() < 0.01, "evenly");
         assert_eq!(
             tap(&mut o, ga.x + 5.0, ga.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::GeneralAgent))
         );
-        // Play does nothing until a view has been opened.
-        assert_eq!(tap(&mut o, play.x + 5.0, play.y + 5.0), None);
-        o.set_play(false, false, true);
+        // The volume menu opens from the overview too (open question 6).
         assert_eq!(
             tap(&mut o, play.x + 5.0, play.y + 5.0),
-            Some(OverviewHit::Bottom(AgentHit::ReadAloud))
+            Some(OverviewHit::Bottom(AgentHit::Volume))
         );
         // Taking a message: cancel ('X') replaces the general agent button in
         // the middle, send at the right, and the message card above them.
@@ -1468,27 +1489,17 @@ mod tests {
     #[test]
     fn controls_the_settings_turn_off_are_dim_and_take_no_taps() {
         let mut o = overview(2);
-        o.set_play(true, false, true);
+        o.set_volume(true, false);
         let ctx = DrawContext::default();
-        let play = o.rect_of(AgentHit::ReadAloud).unwrap();
+        let play = o.rect_of(AgentHit::Volume).unwrap();
         let record = o.rect_of(AgentHit::Message).unwrap();
-        let keys = o.rect_of(AgentHit::Keyboard).unwrap();
         let mut list = DrawList::new();
         o.draw(&mut list, &ctx, None);
         assert_eq!(alpha_in(&list, play), 1.0);
         assert_eq!(alpha_in(&list, record), 1.0);
-        assert_eq!(
-            alpha_in(&list, keys),
-            1.0,
-            "keyboard is live with text input"
-        );
-        assert_eq!(
-            tap(&mut o, keys.x + 5.0, keys.y + 5.0),
-            Some(OverviewHit::Bottom(AgentHit::Keyboard))
-        );
 
         for (settings, off) in [
-            (with(false, true, true), AgentHit::ReadAloud),
+            (with(false, true, true), AgentHit::Volume),
             (with(true, false, true), AgentHit::Message),
             // Record on the overview is the general agent's too.
             (with(true, true, false), AgentHit::Message),

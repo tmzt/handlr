@@ -61,6 +61,13 @@ pub struct Settings {
     pub sound: bool,
     /// *Ding when an agent is done*; only while `sound` is on.
     pub ding: bool,
+    /// *Speak coding responses* (plan 20261028_06, decision 6): the
+    /// agent's replies read aloud (`Input::ReadAloud`); off until turned
+    /// on, as the play button's toggle was at every start.
+    pub speak_coding: bool,
+    /// *Speak agent (Gemini) responses*: Gemini's `turn.say` lines spoken;
+    /// on by default, as they always were.
+    pub speak_gemini: bool,
     /// *Microphone*.
     pub microphone: bool,
     /// *General agent (Gemini)*.
@@ -151,6 +158,8 @@ impl Default for Settings {
         Settings {
             sound: true,
             ding: true,
+            speak_coding: false,
+            speak_gemini: true,
             microphone: true,
             general_agent: true,
             tab_follows_focus: false,
@@ -172,6 +181,10 @@ struct SettingsFile {
     sound: bool,
     #[serde(default = "on")]
     ding: bool,
+    #[serde(default)]
+    speak_coding: bool,
+    #[serde(default = "on")]
+    speak_gemini: bool,
     #[serde(default = "on")]
     microphone: bool,
     #[serde(default = "on")]
@@ -248,6 +261,7 @@ impl Settings {
             microphone: self.microphone,
             general_agent: self.general_agent,
             tab_follows_focus: self.tab_follows_focus,
+            speak_gemini: self.speak_gemini,
         }
     }
 
@@ -281,6 +295,8 @@ impl Settings {
         Settings {
             sound: file.sound,
             ding: file.ding,
+            speak_coding: file.speak_coding,
+            speak_gemini: file.speak_gemini,
             microphone: file.microphone,
             general_agent: file.general_agent,
             tab_follows_focus: file.tab_follows_focus,
@@ -303,6 +319,8 @@ impl Settings {
         let file = SettingsFile {
             sound: self.sound,
             ding: self.ding,
+            speak_coding: self.speak_coding,
+            speak_gemini: self.speak_gemini,
             microphone: self.microphone,
             general_agent: self.general_agent,
             tab_follows_focus: self.tab_follows_focus,
@@ -410,14 +428,14 @@ pub fn set_current(settings: Settings) {
 }
 
 /// Whether the control `hit` is live with the settings as they are
-/// (decision 4): play with sound on; record, a card's reply, the dictation
+/// (decision 4): volume with sound on; record, a card's reply, the dictation
 /// controls and *discuss* (which takes a message) with the microphone on.
 pub fn allows(hit: AgentHit) -> bool {
     let s = current();
     match hit {
         // Typing needs no microphone, only text input.
-        AgentHit::Keyboard | AgentHit::PromptText(_) => TEXT_INPUT,
-        AgentHit::ReadAloud | AgentHit::Replay(_) => s.sound,
+        AgentHit::PromptText(_) | AgentHit::PromptIme(_) | AgentHit::PromptAttach(_) => TEXT_INPUT,
+        AgentHit::Volume | AgentHit::Replay(_) => s.sound,
         AgentHit::Message
         | AgentHit::Reply
         | AgentHit::Submit
@@ -535,6 +553,31 @@ mod tests {
     }
 
     #[test]
+    fn a_file_without_the_speak_keys_loads_as_today() {
+        // Read aloud was off at every start and Gemini always spoke (plan
+        // 20261028_06, finding 1): there is nothing else to migrate.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(FILE), "sound = true\nding = false\n").unwrap();
+        let s = Settings::load(dir.path());
+        assert!(!s.speak_coding && s.speak_gemini && !s.ding);
+        let d = Settings::default();
+        assert!(!d.speak_coding && d.speak_gemini);
+        // Kept as left, and Gemini's sent to the client.
+        let s = Settings {
+            speak_coding: true,
+            speak_gemini: false,
+            ..d
+        };
+        s.save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
+        assert!(text.contains("speak_coding = true"), "{text}");
+        assert!(text.contains("speak_gemini = false"), "{text}");
+        assert_eq!(Settings::load(dir.path()), s);
+        assert!(!s.to_client().speak_gemini);
+        assert!(Settings::default().to_client().speak_gemini);
+    }
+
+    #[test]
     fn tab_follows_focus_reaches_the_client() {
         assert!(!Settings::default().to_client().tab_follows_focus);
         let s = Settings {
@@ -551,6 +594,8 @@ mod tests {
         let s = Settings {
             sound: false,
             ding: true,
+            speak_coding: true,
+            speak_gemini: false,
             microphone: false,
             general_agent: false,
             tab_follows_focus: true,
@@ -725,12 +770,12 @@ mod tests {
     #[test]
     fn each_toggle_gates_its_controls() {
         set_current(Settings::default());
-        assert!(allows(AgentHit::ReadAloud) && allows(AgentHit::Message));
+        assert!(allows(AgentHit::Volume) && allows(AgentHit::Message));
         set_current(Settings {
             sound: false,
             ..Settings::default()
         });
-        assert!(!allows(AgentHit::ReadAloud));
+        assert!(!allows(AgentHit::Volume));
         assert!(allows(AgentHit::Message));
         set_current(Settings {
             microphone: false,
@@ -764,7 +809,7 @@ mod tests {
         });
         assert!(allows(AgentHit::Message), "in the agent view");
         assert!(!allows_on_overview(AgentHit::Message));
-        assert!(allows_on_overview(AgentHit::ReadAloud));
+        assert!(allows_on_overview(AgentHit::Volume));
         set_current(Settings::default());
     }
 

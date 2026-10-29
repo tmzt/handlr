@@ -1,13 +1,14 @@
 //! The bottom row's buttons and the agent view's as drawn: the square
-//! audio controls (play, send, cancel, record) by glyph, and the rest with
-//! their labels.
+//! audio controls (volume, send, cancel, record) by glyph, and the rest
+//! with their labels; and the glyphs drawn as strokes that the faces lack
+//! (the keyboard, the terminal, the list, the speaker, the +).
 
 use libcontrols::{DrawContext, Rect};
 use libmsdf::drawlist::DrawList;
 
 use crate::agent::{
     AgentHit, CANCEL_GLYPH, CELL_EM, DOT, FlowButton, GEMINI_GLYPH, PLAY_GLYPH, Row, SEND_GLYPH,
-    SKIP_GLYPH, Terminal, button, draw_row, fill, term_h,
+    Terminal, button, draw_row, fill, term_h,
 };
 use crate::settings;
 use crate::theme::theme;
@@ -94,7 +95,7 @@ fn draw_general_agent_listening(
 /// A keyboard drawn as strokes in `rect`, with no background: an outline
 /// and three rows of keys, the last a space bar. The faces have no
 /// keyboard character.
-fn keyboard_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
+pub(crate) fn keyboard_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
     let w = rect.w * 0.62;
     let h = w * 0.62;
     let x = rect.x + (rect.w - w) * 0.5;
@@ -120,6 +121,128 @@ fn keyboard_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
     }
     let bar = Rect::new(x + w * 0.28, y + h * 0.72, w * 0.44, key);
     fill(list, bar, color, key * 0.25);
+}
+
+/// The soft keyboard's show/hide toggle in `rect` (plan 20261028_06,
+/// decision 8): while the keyboard is `up`, the keyboard glyph moved up
+/// 3 pt with a down chevron 8 pt wide and 4 pt high 3 pt under it (hide);
+/// while it is down, the keyboard glyph alone (show). Stroke 1.8 pt.
+pub(crate) fn ime_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4], up: bool) {
+    if !up {
+        keyboard_glyph(list, rect, s, color);
+        return;
+    }
+    let moved = Rect::new(rect.x, rect.y - 3.0 * s, rect.w, rect.h);
+    keyboard_glyph(list, moved, s, color);
+    let b = glyph_box(moved);
+    let cx = rect.x + rect.w * 0.5;
+    let top = b.y + b.h + 3.0 * s;
+    let (half, h) = (4.0 * s, 4.0 * s);
+    let t = 1.8 * s;
+    list.push_line([cx - half, top], [cx, top + h], t, color);
+    list.push_line([cx, top + h], [cx + half, top], t, color);
+}
+
+/// A + centred in `rect` (plan 20261028_06, decision 8): two 2 pt strokes
+/// 18 pt long.
+pub(crate) fn plus_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
+    let [cx, cy] = rect.center();
+    let half = 9.0 * s;
+    let t = 2.0 * s;
+    list.push_line([cx - half, cy], [cx + half, cy], t, color);
+    list.push_line([cx, cy - half], [cx, cy + half], t, color);
+}
+
+/// The volume glyph's sound waves (plan 20261028_06, decision 4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Waves {
+    /// Both options off: no arcs, and a ✕.
+    Off,
+    /// Either option on: two arcs.
+    Two,
+    /// Something is being said: the arcs in turn, the inner, then both,
+    /// then none, at this step (0, 1, 2).
+    Speaking(u8),
+}
+
+impl Waves {
+    /// How long each speaking step lasts, as the listening button's
+    /// dingbats.
+    pub const STEP_MS: u128 = 300;
+
+    /// The waves for the options `on`, while `speaking`, at the time now.
+    pub fn now(on: bool, speaking: bool) -> Self {
+        if !on {
+            return Waves::Off;
+        }
+        if !speaking {
+            return Waves::Two;
+        }
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        Waves::Speaking(((millis / Self::STEP_MS) % 3) as u8)
+    }
+
+    /// How many arcs are drawn: none, the inner one, or both.
+    fn arcs(self) -> usize {
+        match self {
+            Waves::Off => 0,
+            Waves::Two => 2,
+            Waves::Speaking(0) => 1,
+            Waves::Speaking(1) => 2,
+            Waves::Speaking(_) => 0,
+        }
+    }
+}
+
+/// A speaker drawn as strokes in `rect`'s glyph box `b` (plan
+/// 20261028_06, decision 4), stroke 1.8 pt: a body from 0.06 to 0.24 of
+/// the box's width across its middle ± 0.22 of its height, a cone to 0.46
+/// at ± 0.5 and its mouth; with `waves`, arcs centred on the mouth of
+/// radii 0.22 and 0.40 of the width from -50° to +50°, six segments each;
+/// off, a ✕ in their place. No atlas glyph: libmsdf's Material subset has
+/// no `volume_up`, and 🔊 is not in the emoji set.
+pub(crate) fn volume_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4], waves: Waves) {
+    let b = glyph_box(rect);
+    let t = 1.8 * s;
+    let cy = b.y + b.h * 0.5;
+    let x = |f: f32| b.x + f * b.w;
+    let y = |f: f32| cy + f * b.h;
+    // The body.
+    let (l, r, top, bottom) = (x(0.06), x(0.24), y(-0.22), y(0.22));
+    for (a, c) in [
+        ([l, top], [r, top]),
+        ([r, top], [r, bottom]),
+        ([r, bottom], [l, bottom]),
+        ([l, bottom], [l, top]),
+    ] {
+        list.push_line(a, c, t, color);
+    }
+    // The cone and its mouth.
+    let mouth = x(0.46);
+    list.push_line([r, top], [mouth, y(-0.5)], t, color);
+    list.push_line([r, bottom], [mouth, y(0.5)], t, color);
+    list.push_line([mouth, y(-0.5)], [mouth, y(0.5)], t, color);
+    if waves == Waves::Off {
+        list.push_line([x(0.62), y(-0.28)], [x(0.90), y(0.28)], t, color);
+        list.push_line([x(0.62), y(0.28)], [x(0.90), y(-0.28)], t, color);
+        return;
+    }
+    for radius in [0.22, 0.40].into_iter().take(waves.arcs()) {
+        let rad = radius * b.w;
+        let point = |deg: f32| {
+            let a = deg.to_radians();
+            [mouth + rad * a.cos(), cy + rad * a.sin()]
+        };
+        const SEGMENTS: usize = 6;
+        for i in 0..SEGMENTS {
+            let a0 = -50.0 + 100.0 * i as f32 / SEGMENTS as f32;
+            let a1 = -50.0 + 100.0 * (i + 1) as f32 / SEGMENTS as f32;
+            list.push_line(point(a0), point(a1), t, color);
+        }
+    }
 }
 
 /// The glyphs' box in `rect`: the keyboard glyph's width, and its height.
@@ -180,8 +303,9 @@ pub(crate) fn list_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4
 }
 
 /// Draws `b` at `rect`: the take-a-message button as a white record dot on
-/// blue, the play button as its glyph (bright when `read_aloud`), and the
-/// rest as labelled buttons. A button the settings turn off (plan
+/// blue, the volume button as its glyph (bright with waves when
+/// `volume_on`, stepping while `speaking`), and the rest as labelled
+/// buttons. A button the settings turn off (plan
 /// 20261024_02, decision 4) is drawn at 35%, showing nothing live.
 pub struct SquareButton;
 
@@ -195,13 +319,13 @@ impl SquareButton {
         b: &FlowButton,
         rect: Rect,
         s: f32,
-        read_aloud: bool,
+        volume_on: bool,
         speaking: bool,
         recording: bool,
     ) {
         let enabled = settings::allows(b.hit);
         Self::draw_enabled(
-            list, ctx, term, b, rect, s, read_aloud, speaking, recording, enabled,
+            list, ctx, term, b, rect, s, volume_on, speaking, recording, enabled,
         );
     }
 
@@ -214,18 +338,18 @@ impl SquareButton {
         b: &FlowButton,
         rect: Rect,
         s: f32,
-        read_aloud: bool,
+        volume_on: bool,
         speaking: bool,
         recording: bool,
         enabled: bool,
     ) {
         let start = list.instances.len();
-        let (read_aloud, speaking, recording) = if enabled {
-            (read_aloud, speaking, recording)
+        let (speaking, recording) = if enabled {
+            (speaking, recording)
         } else {
-            (false, false, false)
+            (false, false)
         };
-        Self::draw_live(list, ctx, term, b, rect, s, read_aloud, speaking, recording);
+        Self::draw_live(list, ctx, term, b, rect, s, volume_on, speaking, recording);
         if !enabled {
             settings::dim_since(list, start);
         }
@@ -239,13 +363,12 @@ impl SquareButton {
         b: &FlowButton,
         rect: Rect,
         s: f32,
-        read_aloud: bool,
+        volume_on: bool,
         speaking: bool,
         recording: bool,
     ) {
         let px = 26.0 * s;
         match b.hit {
-            AgentHit::Keyboard => keyboard_glyph(list, rect, s, theme().fg),
             // The terminal glyph while the transcript shows; the list glyph
             // (its label `LIST_LABEL`) while the terminal does.
             AgentHit::TerminalToggle if b.label == crate::agent::LIST_LABEL => {
@@ -272,16 +395,12 @@ impl SquareButton {
                     d * 0.5,
                 );
             }
-            AgentHit::ReadAloud => {
+            AgentHit::Volume => {
                 fill(list, rect, b.bg, 10.0 * s);
-                // Bright when on, dull when off; skip while a reply is read.
-                let color = if read_aloud { theme().fg } else { theme().dim };
-                let (glyph, fallback) = if read_aloud && speaking {
-                    (SKIP_GLYPH, ">|")
-                } else {
-                    (PLAY_GLYPH, ">")
-                };
-                draw_glyph(list, ctx, term, glyph, fallback, rect, px, color);
+                // Bright with waves while either option is on, stepping
+                // while something is said; dim with a ✕ while both are off.
+                let color = if volume_on { theme().fg } else { theme().dim };
+                volume_glyph(list, rect, s, color, Waves::now(volume_on, speaking));
             }
             // A summary card's replay: the play glyph alone, dim.
             AgentHit::Replay(_) => {

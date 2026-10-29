@@ -15,7 +15,9 @@
 //! at least 3 lines of 12 pt, growing with its text and dropping to 11 and
 //! 10 pt to fit (the amendments of 2026-10-25 17:53 and 23:41 EDT), with
 //! the placeholder while it is empty. An up arrow (˄), drawn as strokes, at
-//! the top right expands the card; nothing else does (decision 4).
+//! the top right expands the card; nothing else does (decision 4). Under
+//! the box, a row of the + and the keyboard toggle ([`InputRow`], plan
+//! 20261028_06, decision 8); the card grows by 48 pt while it shows.
 
 use flankr_companion::Speaker;
 use libcontrols::{DrawContext, DrawControl, Rect, TextArea};
@@ -23,11 +25,12 @@ use libmsdf::drawlist::DrawList;
 
 use super::bars::Bars;
 use super::history::{History, Sent};
+use super::input_row::{InputRow, InputTools, ROW_GAP};
 use super::{PromptInput, PromptKind};
 use crate::agent::{
     AgentHit, BUTTON_H, Fill, FlowButton, PAD, Row, columns, fill, line_h, one_line, wrap_hard,
 };
-use crate::controls::ControlRow;
+use crate::controls::{ControlRow, RowState};
 use crate::settings;
 use crate::settings::copy;
 use crate::theme::theme;
@@ -113,6 +116,10 @@ pub struct PromptCard {
     buttons: Vec<FlowButton>,
     bars: Bars,
     scale: f32,
+    /// Typing's tools as the app gives them, and the row under the typed
+    /// box as laid out (plan 20261028_06, decision 8).
+    tools: InputTools,
+    row: Option<InputRow>,
 }
 
 impl PromptCard {
@@ -141,7 +148,26 @@ impl PromptCard {
             buttons: Vec::new(),
             bars: Bars::default(),
             scale: 1.0,
+            tools: InputTools::default(),
+            row: None,
         }
+    }
+
+    /// Typing's tools: whether the row has the + and the toggle, and the
+    /// toggle's state. Returns whether they changed.
+    pub fn set_tools(&mut self, tools: InputTools) -> bool {
+        let changed = tools != self.tools;
+        self.tools = tools;
+        changed
+    }
+
+    pub fn tools(&self) -> InputTools {
+        self.tools
+    }
+
+    /// The row under the typed box, as laid out.
+    pub fn row(&self) -> Option<&InputRow> {
+        self.row.as_ref()
     }
 
     pub fn kind(&self) -> PromptKind {
@@ -356,6 +382,7 @@ impl PromptCard {
         self.text_area = None;
         self.buttons.clear();
         self.bars.clear();
+        self.row = None;
     }
 
     /// *General agent*, hidden: its two bars, the lower's bottom at
@@ -480,7 +507,13 @@ impl PromptCard {
             0.0
         };
         let rows_h: f32 = rows.iter().map(|(_, px, _, gap)| line_h(*px) + gap).sum();
-        let box_h = typed_box.as_ref().map_or(0.0, |(_, _, h)| h + 8.0 * s);
+        // The row under the typed box grows the card by 48 pt.
+        let row_h = if typed_box.is_some() {
+            self.tools.grows(self.kind, s)
+        } else {
+            0.0
+        };
+        let box_h = typed_box.as_ref().map_or(0.0, |(_, _, h)| h + 8.0 * s) + row_h;
         let h = rows_h + box_h + 2.0 * pad + controls;
         let top = bottom - h;
         let rect = Rect::new(x, top, w, h);
@@ -536,11 +569,25 @@ impl PromptCard {
                 _ => ta.set_cursor(text.len()),
             }
             self.text_area = Some(ta);
+            self.row = InputRow::lay_out(
+                self.kind,
+                inner_x,
+                r.y + bh + ROW_GAP * s,
+                inner_w,
+                s,
+                &self.tools,
+            );
         }
         let a = ARROW * s;
         self.arrow = Rect::new(x + w - a - 2.0 * s, top + 2.0 * s, a, a);
         if self.reply.is_some() {
-            self.buttons = ControlRow::lay_out(inner_x, x + w - pad, bottom - pad, s, true, false);
+            self.buttons = ControlRow::lay_out(
+                inner_x,
+                x + w - pad,
+                bottom - pad,
+                s,
+                &RowState::three(true, false),
+            );
         }
         self.rect = rect;
         h
@@ -589,6 +636,9 @@ impl PromptCard {
             ta.set_cursor_from_pos([x, y]);
             return Some(AgentHit::PromptText(self.kind));
         }
+        if let Some(hit) = self.row.as_ref().and_then(|r| r.hit(x, y, 0.0)) {
+            return Some(hit);
+        }
         if self.arrow.contains([x, y]) {
             return Some(AgentHit::PromptExpand(self.kind));
         }
@@ -607,6 +657,9 @@ impl PromptCard {
             AgentHit::PromptExpand(kind) if kind == self.kind => Some(self.arrow),
             AgentHit::PromptText(kind) if kind == self.kind => {
                 self.text_area.as_ref().map(|ta| ta.rect)
+            }
+            AgentHit::PromptAttach(_) | AgentHit::PromptIme(_) => {
+                self.row.as_ref().and_then(|r| r.rect_of(hit, 0.0))
             }
             _ => self.buttons.iter().find(|b| b.hit == hit).map(|b| b.rect),
         }
@@ -629,6 +682,9 @@ impl PromptCard {
         }
         if let Some(ta) = &self.text_area {
             ta.draw(list, ctx);
+        }
+        if let Some(row) = &self.row {
+            row.draw(list, 0.0);
         }
         up_arrow(list, self.arrow, s, theme().dim);
         let voice = self.input.as_ref().is_some_and(|i| !i.keyboard());
@@ -762,6 +818,65 @@ mod tests {
         }
     }
 
+    const PHONE: InputTools = InputTools {
+        mobile: true,
+        images: false,
+        keyboard_up: true,
+        physical: false,
+    };
+
+    #[test]
+    fn a_typed_card_has_the_row_under_its_box_and_grows_by_48_pt() {
+        for kind in [PromptKind::Message, PromptKind::GeneralAgent] {
+            let mut c = PromptCard::new(kind);
+            c.set_input(Some(PromptInput::typed("hello")));
+            let desktop = laid(&mut c);
+            c.set_tools(PHONE);
+            let with = laid(&mut c);
+            if kind == PromptKind::Message {
+                // The desktop: no row on the message card.
+                assert!((with - desktop - 48.0 * 2.0).abs() < 0.01);
+            } else {
+                // Gemini's + shows on the desktop too, in a row of its own.
+                assert!((with - desktop).abs() < 0.01);
+            }
+            c.set_tools(InputTools::default());
+            laid(&mut c);
+            assert_eq!(
+                c.row()
+                    .is_some_and(|r| r.attach.is_some() && r.ime.is_none()),
+                kind == PromptKind::GeneralAgent,
+                "{kind:?} on the desktop"
+            );
+            c.set_tools(PHONE);
+            laid(&mut c);
+            let row = *c.row().expect("the row");
+            let ta = c.text_area().unwrap().rect;
+            let ime = row.ime.expect("the toggle on both cards");
+            assert!((ime.y - (ta.y + ta.h + 4.0 * 2.0)).abs() < 0.01);
+            assert_eq!(ime.h, 44.0 * 2.0);
+            assert!(c.rect().contains([ime.x + 1.0, ime.y + ime.h - 1.0]));
+            assert_eq!(
+                c.hit(ime.x + 5.0, ime.y + 5.0),
+                Some(AgentHit::PromptIme(kind))
+            );
+            assert_eq!(c.rect_of(AgentHit::PromptIme(kind)), Some(ime));
+            // The +: Gemini's for Paste text; the message's only with
+            // the daemon's images.
+            assert_eq!(
+                row.attach.is_some(),
+                kind == PromptKind::GeneralAgent,
+                "{kind:?}"
+            );
+            // A dictated message has no row.
+            if kind == PromptKind::Message {
+                c.set_input(Some(PromptInput::said("hello")));
+                laid(&mut c);
+                assert!(c.row().is_none());
+            }
+        }
+    }
+
     #[test]
     fn replying_puts_the_card_and_the_controls_inside() {
         let mut c = PromptCard::new(PromptKind::Message);
@@ -775,10 +890,7 @@ mod tests {
         let t = texts(&c);
         assert!(t.contains(&"Claude is asking") && t.contains(&"the second"));
         let hits: Vec<AgentHit> = c.buttons().iter().map(|b| b.hit).collect();
-        assert_eq!(
-            hits,
-            [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
-        );
+        assert_eq!(hits, [AgentHit::Volume, AgentHit::Clear, AgentHit::Submit]);
         let send = c.buttons()[2].rect;
         assert!(c.rect().contains([send.x + 1.0, send.y + 1.0]));
         assert_eq!(c.hit(send.x + 5.0, send.y + 5.0), Some(AgentHit::Submit));

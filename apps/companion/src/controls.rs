@@ -3,10 +3,12 @@
 //! libcontrols, and stay in the app until moving one is decided.
 
 pub mod control_row;
+pub mod hold;
 pub mod outline_button;
 pub mod scroll;
 pub mod square_button;
 
-pub use control_row::ControlRow;
+pub use control_row::{ControlRow, RowState};
+pub use hold::Hold;
 pub use outline_button::OutlineButton;
 pub use square_button::SquareButton;

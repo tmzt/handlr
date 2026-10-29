@@ -16,6 +16,7 @@
 pub mod bars;
 pub mod card;
 pub mod history;
+pub mod input_row;
 pub mod keyboard;
 pub mod overlay;
 
@@ -32,6 +33,7 @@ use crate::settings;
 pub use bars::Bars;
 pub use card::{PromptCard, Reply};
 pub use history::{History, Sent};
+pub use input_row::{InputRow, InputTools};
 pub use overlay::{OverlayTouch, PromptOverlay};
 
 /// A prompt card's mode (decision 1).
@@ -218,6 +220,14 @@ impl Prompts {
         changed
     }
 
+    /// Typing's tools, for the typed cards' rows (plan 20261028_06,
+    /// decision 8). Returns whether they changed.
+    pub fn set_tools(&mut self, tools: InputTools) -> bool {
+        let a = self.gemini.set_tools(tools);
+        let b = self.message.set_tools(tools);
+        a || b
+    }
+
     /// Gemini's typed prompt, while one is open. Returns whether it
     /// changed.
     pub fn set_gemini_input(&mut self, input: Option<PromptInput>) -> bool {
@@ -376,8 +386,9 @@ impl Prompts {
             let placeholder = card.placeholder();
             let text = card.input_text();
             let keyboard = card.input().is_some_and(PromptInput::keyboard);
+            let row = Some((kind, card.tools()));
             self.overlay
-                .set_input(&header, colour, &text, &placeholder, keyboard);
+                .set_input(&header, colour, &text, &placeholder, keyboard, row);
             let area = self.overlay.history_rect();
             self.card_mut(kind).history_mut().set_viewport(area, s);
         }
@@ -394,7 +405,7 @@ impl Prompts {
                 self.overlay.place_cursor(x, y);
                 return Some(AgentHit::PromptText(kind));
             }
-            return None;
+            return self.overlay.row_hit(x, y);
         }
         self.message
             .hit(x, y)
@@ -411,6 +422,11 @@ impl Prompts {
     pub fn rect_of(&self, hit: AgentHit) -> Option<Rect> {
         match hit {
             AgentHit::PromptText(kind) if self.expanded() == Some(kind) => self.overlay.text_rect(),
+            AgentHit::PromptAttach(kind) | AgentHit::PromptIme(kind)
+                if self.overlay.is_open() && self.expanded() == Some(kind) =>
+            {
+                self.overlay.row_rect(hit)
+            }
             AgentHit::PromptCollapse if self.overlay.is_open() => Some(self.overlay.handle_rect()),
             AgentHit::PromptBars => self.gemini.bars().rect(),
             _ => self
@@ -478,6 +494,7 @@ impl Prompts {
                         Some(AgentHit::PromptCollapse)
                     }
                     OverlayTouch::Text => Some(AgentHit::PromptText(kind)),
+                    OverlayTouch::Control(hit) => Some(hit),
                     OverlayTouch::Nothing | OverlayTouch::Scrolled => None,
                 }
             }

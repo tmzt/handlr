@@ -48,7 +48,7 @@ use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 use libmsdf::font::TerminalSource;
 use libmsdf::font::{GlyphStyle, TerminalShaper};
 
-use crate::controls::{ControlRow, SquareButton};
+use crate::controls::{ControlRow, RowState, SquareButton};
 use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts, Reply};
 use crate::theme::{theme, with_alpha};
 use crate::ui::Layout;
@@ -149,10 +149,10 @@ pub(crate) const SEND_GLYPH: &str = "\u{27A4}";
 pub(crate) const CANCEL_GLYPH: &str = "\u{2715}";
 /// The back glyph, from the terminal face (Roboto here is ASCII only).
 const BACK_GLYPH: &str = "\u{2039}";
-/// The play button's glyph, from the terminal face, and the skip glyph it
-/// shows while a reply is being read (no ⏭ in the face: play and a bar).
+/// A summary card's replay glyph, from the terminal face. (The play
+/// button and its skip glyph are gone: the volume button is drawn as
+/// strokes, plan 20261028_06, decision 4.)
 pub(crate) const PLAY_GLYPH: &str = "\u{25B6}";
-pub(crate) const SKIP_GLYPH: &str = "\u{25B6}\u{2502}";
 /// The general agent's glyph (✦), from the terminal face.
 pub(crate) const GEMINI_GLYPH: &str = "\u{2726}";
 /// Lines of a folded tool result shown: one, or a diff's or an error's
@@ -278,15 +278,14 @@ pub enum AgentHit {
     Back,
     /// The ≡ button at the header's left: open the session drawer.
     Menu,
-    /// Take a message to this agent.
+    /// The right button: a tap takes a message to this agent; a 2 s press
+    /// opens the message card typed (plan 20261028_06, decision 7).
     Message,
-    /// The centre button: trigger the general agent chat (Gemini).
+    /// The centre button: a tap starts the general agent chat (Gemini) by
+    /// voice; a 2 s press opens its card typed (decision 7).
     GeneralAgent,
-    /// The keyboard glyph left of record: type a message (plan
-    /// 20261022_03, the L3 amendment on the keyboard glyph).
-    Keyboard,
-    /// The fifth button, between play and the centre (plan 20261027_07,
-    /// decision 7 and the 20:44 EDT amendment): the terminal glyph while
+    /// Slot 1 of 4 (plan 20261027_07, decision 7 and the 20:44 EDT
+    /// amendment; plan 20261028_06, decision 1): the terminal glyph while
     /// the transcript shows, the list glyph while the terminal does; a tap
     /// swaps the views for the session.
     TerminalToggle,
@@ -303,8 +302,9 @@ pub enum AgentHit {
         text: bool,
         opens: bool,
     },
-    /// The play button: read the agent's replies aloud, or stop.
-    ReadAloud,
+    /// The volume button (plan 20261028_06, decisions 3 and 4): a tap
+    /// opens the volume menu.
+    Volume,
     /// A card's record button: take a message in reply to that card.
     Reply,
     /// The pinned bar: jump to its card.
@@ -330,6 +330,12 @@ pub enum AgentHit {
     Replay(u64),
     /// A prompt card's text area (plan 20261027_03, decision 6).
     PromptText(crate::prompt::PromptKind),
+    /// The + at the left of a typed card's row (plan 20261028_06,
+    /// decision 8 and the 23:39 EDT amendment).
+    PromptAttach(crate::prompt::PromptKind),
+    /// The soft keyboard's show/hide toggle at the right of a typed card's
+    /// row (decision 8).
+    PromptIme(crate::prompt::PromptKind),
     /// A pinned prompt card's up arrow: expand it (decision 4).
     PromptExpand(crate::prompt::PromptKind),
     /// The overlay's grab bar, or a swipe down on it: collapse it.
@@ -2314,8 +2320,16 @@ pub struct AgentScreen {
     /// The view's own prompt cards (plan 20261027_03, decision 1): Gemini's
     /// and the message card, and their overlay.
     prompts: Prompts,
-    /// The play button is on: replies are read aloud.
-    read_aloud: bool,
+    /// Either speak option is on: the volume glyph is bright, with waves
+    /// (plan 20261028_06, decision 4).
+    volume_on: bool,
+    /// A 2 s press timed on a control of the bar or the card's row, and
+    /// its progress: its bar is drawn along the control's bottom
+    /// (decision 7).
+    hold: Option<(AgentHit, f32)>,
+    /// Typing's tools as the app gives them: the card rows' and the keys
+    /// row's + and toggle (plan 20261028_06, decisions 8 and 9).
+    tools: crate::prompt::InputTools,
     /// Something is being said: the play button skips it.
     speaking: bool,
     /// The session has not answered yet.
@@ -3187,16 +3201,49 @@ impl AgentScreen {
             .filter(|_| !self.prompts.message().is_expanded())
     }
 
-    /// The play button's state: bright when on, dull when off.
-    pub fn set_read_aloud(&mut self, on: bool) {
-        if on != self.read_aloud {
-            self.read_aloud = on;
+    /// The volume button's state: bright with waves while either speak
+    /// option is on, dim with a ✕ while both are off.
+    pub fn set_volume(&mut self, on: bool) {
+        if on != self.volume_on {
+            self.volume_on = on;
             self.dirty = true;
         }
     }
 
-    pub fn read_aloud(&self) -> bool {
-        self.read_aloud
+    pub fn volume_on(&self) -> bool {
+        self.volume_on
+    }
+
+    /// The press being timed on `hit`, and its progress, for its bar.
+    pub fn set_hold(&mut self, hold: Option<(AgentHit, f32)>) {
+        if hold != self.hold {
+            self.hold = hold;
+            self.dirty = true;
+        }
+    }
+
+    /// Typing's tools: the cards' rows and the keys row's ends. The keys
+    /// row's soft keyboard state is [`Self::set_keys_row`]'s.
+    pub fn set_input_tools(&mut self, tools: crate::prompt::InputTools) {
+        let mut cards = tools;
+        // The cards' toggle is the card's keyboard, not the terminal's.
+        cards.keyboard_up = tools.keyboard_up && !self.keys_row;
+        let changed = self.prompts.set_tools(cards) || tools != self.tools;
+        self.tools = tools;
+        if changed {
+            self.settle();
+        }
+    }
+
+    /// The keys row's + and toggle (decision 9): on a phone, the + drawn
+    /// dim until the terminal paste is built (step 8), the toggle hiding
+    /// or showing the soft keyboard into the terminal.
+    pub fn keys_tools(&self) -> keys_row::Tools {
+        let mobile = self.tools.mobile;
+        keys_row::Tools {
+            attach: mobile.then_some(false),
+            ime: mobile.then_some((self.keys_row, !self.tools.physical)),
+        }
     }
 
     /// Whether the session is still loading: "(loading session)" until it
@@ -3247,18 +3294,12 @@ impl AgentScreen {
         wrap_hard(card.text.trim(), cols).len() > PIN_LINES
     }
 
-    /// Whether something is being said; with read aloud on, the play button
-    /// shows skip.
+    /// Whether something is being said: the volume glyph's waves step.
     pub fn set_speaking(&mut self, on: bool) {
         if on != self.speaking {
             self.speaking = on;
             self.dirty = true;
         }
-    }
-
-    /// Whether a tap on the play button skips what is being said.
-    pub fn skips(&self) -> bool {
-        self.read_aloud && self.speaking
     }
 
     pub fn set_layout(&mut self, layout: Layout) {
@@ -3394,52 +3435,32 @@ impl AgentScreen {
         let row_bottom = l.h - l.bottom - keys_h - 16.0 * s;
         let dictating = self.dictating();
         let replying = self.replying();
-        let mut buttons = if replying.is_some() {
+        // Four evenly spaced slots (plan 20261028_06, decision 1): volume,
+        // the terminal/list glyph, the centre and the right. A
+        // terminal-only session takes no message and has no list: no
+        // record and no switch; the keys row's toggle raises its keyboard.
+        let buttons = if replying.is_some() {
             Vec::new()
         } else {
+            let terminal = (!self.terminal_only).then_some(if self.term_shown {
+                LIST_LABEL
+            } else {
+                TERMINAL_LABEL
+            });
             ControlRow::lay_out(
                 pad,
                 l.w - pad,
                 row_bottom,
                 s,
-                self.prompts.taking_input(),
-                self.general_agent_listening,
+                &RowState {
+                    slots: 4,
+                    dictating: self.prompts.taking_input(),
+                    general_agent_listening: self.general_agent_listening,
+                    terminal,
+                    record: !self.terminal_only,
+                },
             )
         };
-        // A terminal-only session takes no message: no record button, and
-        // the keyboard glyph only while the terminal is armed, where it
-        // raises the terminal's keyboard.
-        if self.terminal_only {
-            let armed = self.terminal_armed();
-            buttons.retain(|b| match b.hit {
-                AgentHit::Message => false,
-                AgentHit::Keyboard => armed,
-                _ => true,
-            });
-        }
-        // The terminal/list glyph, wherever the keyboard glyph is: between
-        // play and the centre, mirroring the keyboard glyph's place right
-        // of it, with its hit box and no background (plan 20261027_07,
-        // decision 7). Not for a terminal-only session, which has no list.
-        if let Some(keys) = buttons
-            .iter()
-            .find(|b| b.hit == AgentHit::Keyboard)
-            .filter(|_| !self.terminal_only)
-        {
-            let sq = BUTTON_H * s;
-            let rect = Rect::new(pad + sq + 12.0 * s, keys.rect.y, sq, sq);
-            buttons.push(FlowButton {
-                hit: AgentHit::TerminalToggle,
-                rect,
-                label: if self.term_shown {
-                    LIST_LABEL
-                } else {
-                    TERMINAL_LABEL
-                }
-                .into(),
-                bg: [0.0; 4],
-            });
-        }
         let menu = Rect::new(0.0, l.top, BACK_W * s, HEADER_H * s);
         let back = Rect::new(BACK_W * s, l.top, BACK_W * s, HEADER_H * s);
         let mut above = if replying.is_some() {
@@ -4177,9 +4198,12 @@ impl AgentScreen {
     fn place_hits(&mut self) {
         self.hits.clear();
         let s = self.scale();
+        let tools = self.keys_tools();
         for &(key, r) in &self.frame.keys {
-            self.hits
-                .push((AgentHit::TermKey(key), keys_row::tap_area(r, s)));
+            if tools.takes(key) {
+                self.hits
+                    .push((AgentHit::TermKey(key), keys_row::tap_area(r, s)));
+            }
         }
         for b in &self.frame.buttons {
             self.hits.push((b.hit, b.rect));
@@ -4639,25 +4663,32 @@ impl AgentScreen {
     }
 
     /// The soft keyboard is raised into the terminal, or no longer is: the
-    /// keys row shows above it, or goes, and the terminal's area shrinks
-    /// or grows by its height (plan 20261022_03, the L3 amendment of
-    /// 2026-10-28 10:42 EDT). The latch clears with the row.
+    /// keys row's toggle shows hide or show (plan 20261028_06, decision
+    /// 9), and the row moves with the keyboard's inset.
     pub fn set_keys_row(&mut self, on: bool) {
         if on == self.keys_row {
             return;
         }
-        log::info!("terminal: keys row {}", if on { "shown" } else { "hidden" });
+        log::info!(
+            "terminal: soft keyboard {}",
+            if on { "raised" } else { "down" }
+        );
         self.keys_row = on;
-        if !on {
-            self.term_latch = Latch::default();
-        }
         self.settle();
     }
 
-    /// Whether the keys row shows: the terminal does, and the soft keyboard
-    /// is raised into it.
+    /// Whether the soft keyboard is raised into the terminal.
+    pub fn terminal_keyboard_up(&self) -> bool {
+        self.keys_row
+    }
+
+    /// Whether the keys row shows: the terminal does, and is armed, the
+    /// soft keyboard up or not (plan 20261028_06, decision 9; it replaces
+    /// L3's "while the keyboard is raised into the terminal"). With the
+    /// keyboard up it sits just above it; down, at the screen's bottom
+    /// inset, under the bar, which it lifts.
     pub fn keys_row_shown(&self) -> bool {
-        self.keys_row && self.term_shown
+        self.terminal_armed()
     }
 
     /// CTRL and ALT as latched for the next key.
@@ -4698,9 +4729,12 @@ impl AgentScreen {
         self.term_stamp = Some(stamp);
         self.term_state = state;
         self.dirty = true;
-        // A terminal-only session's keyboard glyph comes and goes with the
-        // arm.
-        if self.terminal_only && armed != self.terminal_armed() {
+        // The keys row comes and goes with the arm (plan 20261028_06,
+        // decision 9), and the latch with the row.
+        if armed != self.terminal_armed() {
+            if !self.terminal_armed() {
+                self.term_latch = Latch::default();
+            }
             self.settle();
         }
     }
@@ -4983,7 +5017,7 @@ impl AgentScreen {
                     b,
                     rect,
                     s,
-                    self.read_aloud,
+                    self.volume_on,
                     self.speaking,
                     recording,
                 );
@@ -5114,7 +5148,7 @@ impl AgentScreen {
                 b,
                 b.rect,
                 s,
-                self.read_aloud,
+                self.volume_on,
                 self.speaking,
                 recording,
             );
@@ -5135,7 +5169,7 @@ impl AgentScreen {
                     b,
                     b.rect,
                     s,
-                    self.read_aloud,
+                    self.volume_on,
                     self.speaking,
                     recording,
                 );
@@ -5169,20 +5203,43 @@ impl AgentScreen {
                 b,
                 b.rect,
                 s,
-                self.read_aloud,
+                self.volume_on,
                 self.speaking,
                 recording,
                 self.live(b.hit),
             );
         }
         if let Some(row) = self.frame.keys_row {
-            keys_row::draw(list, ctx, row, &self.frame.keys, self.term_latch, s);
+            let tools = self.keys_tools();
+            keys_row::draw(list, ctx, row, &self.frame.keys, self.term_latch, tools, s);
+        }
+        // A 2 s press's progress along its control's bottom (plan
+        // 20261028_06, decision 7).
+        if let Some((hit, progress)) = self.hold
+            && let Some(r) = self.rect_of(hit)
+        {
+            fill(
+                list,
+                crate::controls::hold::bar(r, progress, s),
+                hold_colour(hit),
+                0.0,
+            );
         }
     }
 
     /// Marks the screen to be drawn again.
     pub fn invalidate(&mut self) {
         self.dirty = true;
+    }
+}
+
+/// A press's progress bar's colour: the accent along the +, the text
+/// colour along the bar's buttons (visible on record's blue and on the
+/// centre's background).
+pub(crate) fn hold_colour(hit: AgentHit) -> [f32; 4] {
+    match hit {
+        AgentHit::PromptAttach(_) => theme().accent,
+        _ => theme().fg,
     }
 }
 
@@ -6133,10 +6190,7 @@ mod tests {
             ..PromptInput::said("please go on").into()
         }));
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(
-            hits,
-            [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
-        );
+        assert_eq!(hits, [AgentHit::Volume, AgentHit::Clear, AgentHit::Submit]);
         let card = a.prompts().message();
         let rows: Vec<&str> = card.rows().iter().map(|r| r.text.as_str()).collect();
         assert_eq!(rows, ["Message to Claude", "please go on"]);
@@ -6351,31 +6405,30 @@ mod tests {
             a.hit(f.back.x + 10.0, f.back.y + 10.0),
             Some(AgentHit::Back)
         );
-        assert_eq!(f.buttons.len(), 5);
-        assert_eq!(f.buttons[4].hit, AgentHit::TerminalToggle);
-        // Play at the bottom left, general agent in the centre, the message
-        // button at the bottom right, the keyboard glyph just left of it.
+        // Four evenly spaced slots (plan 20261028_06, decision 1): volume
+        // at the bottom left, the terminal glyph, general agent, the
+        // message button at the bottom right; no keyboard glyph.
+        assert_eq!(
+            f.buttons.iter().map(|b| b.hit).collect::<Vec<_>>(),
+            [
+                AgentHit::Volume,
+                AgentHit::TerminalToggle,
+                AgentHit::GeneralAgent,
+                AgentHit::Message
+            ]
+        );
         let play = f.buttons[0].rect;
-        assert_eq!(f.buttons[0].hit, AgentHit::ReadAloud);
         assert!((play.x - PAD * PHONE.scale).abs() < 0.5);
-        let center = &f.buttons[1];
-        assert_eq!(center.hit, AgentHit::GeneralAgent);
-        let keys = &f.buttons[2];
         let mic = f.buttons[3].rect;
-        assert_eq!(f.buttons[3].hit, AgentHit::Message);
         assert!((mic.y - play.y).abs() < 0.5);
         assert!((mic.x + mic.w - (PHONE.w - PAD * PHONE.scale)).abs() < 0.5);
         assert!(mic.y + mic.h <= PHONE.h - PHONE.bottom);
-        assert_eq!(keys.hit, AgentHit::Keyboard);
-        assert_eq!(
-            (keys.rect.w, keys.rect.h),
-            (mic.w, mic.h),
-            "record's hit box"
-        );
-        assert!(keys.rect.x + keys.rect.w < mic.x, "left of record");
-        assert_eq!(keys.bg[3], 0.0, "no background");
-        // Live with text input.
-        assert!(crate::settings::allows(AgentHit::Keyboard));
+        let step = (mic.x - play.x) / 3.0;
+        for (i, b) in f.buttons.iter().enumerate() {
+            assert!((b.rect.x - (play.x + i as f32 * step)).abs() < 0.5, "{i}");
+            assert_eq!((b.rect.w, b.rect.h), (mic.w, mic.h));
+        }
+        assert_eq!(f.buttons[1].bg[3], 0.0, "the switch has no background");
     }
 
     #[test]
@@ -6396,11 +6449,11 @@ mod tests {
         assert_eq!(row[0].hit, AgentHit::Suggest(Suggestion::Continue));
         assert_eq!((row[0].label, row[0].color), ("cont", theme().yellow));
         assert!(row[0].rect.y + row[0].rect.h <= a.frame().buttons[0].rect.y);
-        // The play button redraws when it changes, and keeps its place.
+        // The volume button redraws when it changes, and keeps its place.
         a.draw(&mut DrawList::new(), &DrawContext::default(), None);
-        a.set_read_aloud(true);
+        a.set_volume(true);
         assert!(a.draw(&mut DrawList::new(), &DrawContext::default(), None));
-        assert!(a.read_aloud());
+        assert!(a.volume_on());
         let r = row[0].rect;
         assert_eq!(
             a.hit(r.x + 5.0, r.y + 5.0),
@@ -6454,15 +6507,15 @@ mod tests {
         let mut a = screen(conversation(3), vec![], None);
         let f = a.frame().clone();
         let play = f.buttons[0].rect;
-        let centre = f.buttons[1].rect;
-        let keys = f.buttons[2].rect;
+        let centre = f.buttons[2].rect;
+        let mic = f.buttons[3].rect;
         let b = toggle_of(&a);
         assert!(b.rect.x > play.x + play.w && b.rect.x + b.rect.w < centre.x);
-        assert_eq!((b.rect.w, b.rect.h, b.rect.y), (keys.w, keys.h, keys.y));
+        assert_eq!((b.rect.w, b.rect.h, b.rect.y), (mic.w, mic.h, mic.y));
         assert_eq!(b.bg[3], 0.0, "no background");
-        // Mirrors the keyboard glyph: as far from play as it is from record.
-        let mic = f.buttons[3].rect;
-        assert!(((b.rect.x - (play.x + play.w)) - (mic.x - (keys.x + keys.w))).abs() < 0.5);
+        // Slot 1 of 4 (plan 20261028_06, decision 1): a third of the way
+        // from volume to record.
+        assert!((b.rect.x - (play.x + (mic.x - play.x) / 3.0)).abs() < 0.5);
         assert_eq!(b.label, TERMINAL_LABEL);
         assert_eq!(
             a.hit(b.rect.x + 4.0, b.rect.y + 4.0),
@@ -6520,9 +6573,9 @@ mod tests {
     }
 
     /// Plan 20261022_03, the 2026-10-28 00:47 EDT amendment: a shell's view
-    /// opens on the terminal and stays there; no terminal/list glyph, no
-    /// record button, and the keyboard glyph only while the terminal is
-    /// armed.
+    /// opens on the terminal and stays there; no terminal/list glyph and no
+    /// record button. Its keyboard glyph while armed is the keys row's
+    /// toggle now (plan 20261028_06, decision 9).
     #[test]
     fn a_shells_view_is_the_terminal_alone() {
         let mut a = screen(conversation(3), vec![], None);
@@ -6539,21 +6592,14 @@ mod tests {
             let h = hits(a);
             assert!(gone.iter().all(|g| !h.contains(g)), "{h:?}");
         };
-        none_of(
-            &a,
-            &[
-                AgentHit::TerminalToggle,
-                AgentHit::Message,
-                AgentHit::Keyboard,
-            ],
-        );
-        assert!(hits(&a).contains(&AgentHit::ReadAloud));
+        none_of(&a, &[AgentHit::TerminalToggle, AgentHit::Message]);
+        assert!(hits(&a).contains(&AgentHit::Volume));
         // Their places take no tap.
         assert!(a.rect_of(AgentHit::TerminalToggle).is_none());
         assert!(a.rect_of(AgentHit::Message).is_none());
         // Offered and open: still no glyph; the transcript cannot come back.
         a.set_terminal_state((1, true, true, None), offered(true));
-        none_of(&a, &[AgentHit::TerminalToggle, AgentHit::Keyboard]);
+        none_of(&a, &[AgentHit::TerminalToggle]);
         a.toggle_terminal();
         a.set_terminal_shown(false);
         assert!(a.terminal_shown());
@@ -6561,7 +6607,8 @@ mod tests {
             a.take_terminal_asks().is_empty(),
             "never closed by a toggle"
         );
-        // Armed: the keyboard glyph comes, for the terminal's keyboard.
+        // Armed: the keys row comes, its toggle for the terminal's
+        // keyboard; the bar is unchanged.
         let mut state = offered(true);
         state.status = Some(flankr_companion::TerminalStatus {
             open: true,
@@ -6579,11 +6626,11 @@ mod tests {
         });
         a.set_terminal_state((2, true, true, Some(60)), state);
         assert!(a.terminal_armed());
-        assert!(hits(&a).contains(&AgentHit::Keyboard));
+        assert!(a.frame().keys_row.is_some());
         none_of(&a, &[AgentHit::TerminalToggle, AgentHit::Message]);
-        // The arm ends: it goes again.
+        // The arm ends: the row goes again.
         a.set_terminal_state((3, true, true, None), offered(true));
-        none_of(&a, &[AgentHit::Keyboard]);
+        assert!(a.frame().keys_row.is_none());
     }
 
     #[test]
@@ -6701,7 +6748,7 @@ mod tests {
         a.set_terminal_state((3, true, true, Some(60)), open_state(true, true));
         assert!(a.terminal_armed());
         tap(&mut a, 3, Duration::from_secs(2));
-        assert_eq!(a.take_terminal_asks(), [TermAsk::Keyboard]);
+        assert_eq!(no_resize(a.take_terminal_asks()), [TermAsk::Keyboard]);
         // A finger resting is not a hold any more: nothing after 2 s.
         a.touch(4, TouchPhase::Started, x, y, Duration::from_secs(3));
         for _ in 0..100 {
@@ -6746,7 +6793,7 @@ mod tests {
         a.set_terminal_state((2, true, true, Some(60)), open_state(true, true));
         // The slop's own pixels count once the drag is the wheel's: 5 rows
         // and those few make 5 lines.
-        assert_eq!(a.take_terminal_asks(), [TermAsk::Scroll(5)]);
+        assert_eq!(no_resize(a.take_terminal_asks()), [TermAsk::Scroll(5)]);
         // Up two and a half rows from there (the slop's pixels were the
         // remainder): negative, and no second arm.
         a.touch(1, TouchPhase::Moved, x, y + 2.5 * pitch, MS * 3);
@@ -6795,6 +6842,14 @@ mod tests {
     // Plan 20261027_08, step 9: the fit and the mouse.
 
     /// The resizes among `asks`.
+    /// `asks` without the resizes: the keys row coming with the arm (plan
+    /// 20261028_06, decision 9) shrinks the terminal.
+    fn no_resize(asks: Vec<TermAsk>) -> Vec<TermAsk> {
+        asks.into_iter()
+            .filter(|a| !matches!(a, TermAsk::Resize { .. }))
+            .collect()
+    }
+
     fn resizes(asks: &[TermAsk]) -> Vec<(u16, u16)> {
         asks.iter()
             .filter_map(|a| match a {
@@ -6943,7 +6998,7 @@ mod tests {
         // Unarmed: the arm first and the keyboard, the click held.
         assert_eq!(a.take_terminal_asks(), [TermAsk::Arm, TermAsk::Keyboard]);
         a.set_terminal_state((2, true, true, Some(60)), attached_state(true, true));
-        let asks = a.take_terminal_asks();
+        let asks = no_resize(a.take_terminal_asks());
         let click = |kind| {
             TermAsk::Mouse(MouseAt {
                 kind,
@@ -6974,11 +7029,14 @@ mod tests {
         a.set_terminal_state((4, true, true, None), attached_state(false, true));
         a.touch(4, TouchPhase::Started, x, y, Duration::from_secs(3));
         a.touch(4, TouchPhase::Ended, x, y, Duration::from_secs(3) + MS);
-        assert_eq!(a.take_terminal_asks(), [TermAsk::Arm, TermAsk::Keyboard]);
+        assert_eq!(
+            no_resize(a.take_terminal_asks()),
+            [TermAsk::Arm, TermAsk::Keyboard]
+        );
         a.touch(5, TouchPhase::Started, x, y, Duration::from_secs(9));
         a.touch(5, TouchPhase::Cancelled, x, y, Duration::from_secs(9) + MS);
         a.set_terminal_state((5, true, true, Some(60)), attached_state(true, true));
-        assert!(a.take_terminal_asks().is_empty());
+        assert!(no_resize(a.take_terminal_asks()).is_empty());
     }
 
     #[test]
@@ -7088,22 +7146,23 @@ mod tests {
         assert!(colours.contains(&red), "the red background is filled");
         assert!(!a.draw(&mut list, &ctx, None), "only on change");
         // No frame (plan 20261022_03, the L3 amendment of 2026-10-28 10:42
-        // EDT): armed draws just what unarmed does.
-        let armed: Vec<_> = list
-            .instances
-            .iter()
-            .map(|i| (i.position, i.size, i.color))
-            .collect();
+        // EDT): armed draws just what unarmed does over the terminal. (The
+        // keys row comes with the arm and lifts the bar, plan 20261028_06,
+        // decision 9.)
+        let t = a.terminal_rect();
+        let over = |list: &DrawList| -> Vec<_> {
+            list.instances
+                .iter()
+                .filter(|i| i.position[1] < t.y + t.h)
+                .map(|i| (i.position, i.size, i.color))
+                .collect()
+        };
+        let armed = over(&list);
         unarmed.status.as_mut().unwrap().armed_for = None;
         a.set_terminal_state((4, true, true, None), unarmed);
         assert!(!a.terminal_armed());
         assert!(a.draw(&mut list, &ctx, None));
-        let drawn: Vec<_> = list
-            .instances
-            .iter()
-            .map(|i| (i.position, i.size, i.color))
-            .collect();
-        assert_eq!(armed, drawn);
+        assert_eq!(armed, over(&list));
     }
 
     /// An armed terminal with the soft keyboard raised into it, over the
@@ -7117,18 +7176,17 @@ mod tests {
             ..PHONE
         };
         a.set_layout(l);
+        a.set_keys_row(true);
         a.take_terminal_asks();
         (a, l)
     }
 
+    /// Plan 20261028_06, decision 9: the row shows while the terminal is
+    /// shown and armed, the keyboard up or not.
     #[test]
-    fn the_keys_row_sits_on_the_keyboard_and_the_terminal_shrinks_by_it() {
+    fn the_keys_row_shows_while_armed_and_the_terminal_shrinks_by_it() {
         let (mut a, l) = keys_row_screen();
         let s = l.scale;
-        assert!(a.frame().keys_row.is_none());
-        let before = a.terminal_rect();
-        let fit = a.terminal_fit().unwrap();
-        a.set_keys_row(true);
         assert!(a.keys_row_shown());
         let row = a.frame().keys_row.expect("the keys row");
         // The full width, one row high, just above the keyboard's inset.
@@ -7144,24 +7202,36 @@ mod tests {
         for b in &a.frame().buttons {
             assert!(b.rect.y + b.rect.h <= row.y, "{:?} above the row", b.hit);
         }
-        // The terminal loses the row's height, and fits fewer rows.
+        // The keyboard hidden: the row stays, at the bottom inset, under
+        // the bar, which it lifts.
+        a.set_keys_row(false);
+        a.set_layout(PHONE);
+        let down = a.frame().keys_row.expect("still shown, armed");
+        assert_eq!(
+            down,
+            Rect::new(
+                0.0,
+                PHONE.h - PHONE.bottom - KEYS_H * s,
+                PHONE.w,
+                KEYS_H * s
+            )
+        );
+        for b in &a.frame().buttons {
+            assert!(b.rect.y + b.rect.h <= down.y, "{:?} above the row", b.hit);
+        }
+        a.take_terminal_asks();
+        // No longer armed: the row goes, and the terminal grows by it.
+        let before = a.terminal_rect();
+        a.set_terminal_state((2, true, true, None), open_state(true, false));
+        assert!(!a.keys_row_shown());
+        assert!(a.frame().keys_row.is_none());
         let after = a.terminal_rect();
         assert_eq!(after.y, before.y);
-        assert!((before.h - after.h - KEYS_H * s).abs() < 0.01);
-        let [(c, r)] = resizes(&a.take_terminal_asks())[..] else {
-            panic!("one resize");
-        };
-        assert_eq!(c, fit.0);
-        let px = terminal_view::START_PT * s;
-        assert!(fit.1 - r >= (KEYS_H * s / term_h(px)).floor() as u16);
-        assert_eq!(a.terminal_fit(), Some((c, r)));
-        // Gone with the keyboard: the terminal is whole again.
-        a.set_keys_row(false);
-        assert!(a.frame().keys_row.is_none());
-        assert_eq!(a.terminal_rect(), before);
-        assert_eq!(resizes(&a.take_terminal_asks()), vec![fit]);
+        assert!((after.h - before.h - KEYS_H * s).abs() < 0.01);
+        assert_eq!(resizes(&a.take_terminal_asks()).len(), 1);
         // Not over the transcript.
-        a.set_keys_row(true);
+        a.set_terminal_state((3, true, true, Some(0)), attached_state(true, false));
+        assert!(a.keys_row_shown());
         a.toggle_terminal();
         assert!(!a.keys_row_shown());
         assert!(a.frame().keys_row.is_none());
@@ -7170,12 +7240,19 @@ mod tests {
     #[test]
     fn the_keys_rows_taps_are_its_keys_not_the_terminals() {
         let (mut a, _) = keys_row_screen();
-        a.set_keys_row(true);
-        // The row's own resize.
-        assert_eq!(resizes(&a.take_terminal_asks()).len(), 1);
+        // A phone: the + inert (no terminal paste yet), the toggle live.
+        a.set_input_tools(crate::prompt::InputTools {
+            mobile: true,
+            ..Default::default()
+        });
+        a.take_terminal_asks();
         let keys = a.frame().keys.clone();
         for (i, (key, r)) in keys.iter().enumerate() {
             let t = Duration::from_secs(i as u64);
+            if *key == TermKey::Attach {
+                assert_eq!(tap(&mut a, 10 + i as u64, *r, t), None, "the + is inert");
+                continue;
+            }
             assert_eq!(
                 tap(&mut a, 10 + i as u64, *r, t),
                 Some(AgentHit::TermKey(*key))
@@ -7188,20 +7265,14 @@ mod tests {
         }
         // No arm, no keyboard, no click: the terminal never saw them.
         assert!(a.take_terminal_asks().is_empty());
-        // Unarmed, a tap on the row arms nothing either.
+        // Unarmed there is no row to tap (plan 20261028_06, decision 9).
         a.set_terminal_state((2, true, true, None), attached_state(false, false));
-        let esc = keys[0].1;
-        assert_eq!(
-            tap(&mut a, 30, esc, Duration::from_secs(20)),
-            Some(AgentHit::TermKey(TermKey::Esc))
-        );
-        assert!(a.take_terminal_asks().is_empty());
+        assert!(a.frame().keys_row.is_none());
     }
 
     #[test]
     fn ctrl_and_alt_latch_for_the_next_key() {
         let (mut a, _) = keys_row_screen();
-        a.set_keys_row(true);
         // The keys send at once.
         assert_eq!(a.press_term_key(TermKey::Esc).as_deref(), Some("escape"));
         assert_eq!(a.press_term_key(TermKey::Tab).as_deref(), Some("tab"));
@@ -7256,9 +7327,12 @@ mod tests {
             a.press_term_key(TermKey::Esc).as_deref(),
             Some("ctrl+alt+escape")
         );
-        // The row goes with the keyboard, and the latch with it.
+        // The keyboard hidden: the row and the latch stay while armed.
         a.press_term_key(TermKey::Ctrl);
         a.set_keys_row(false);
+        assert!(!a.latch().is_empty());
+        // The row goes with the arm, and the latch with it.
+        a.set_terminal_state((2, true, true, None), open_state(true, false));
         assert!(a.latch().is_empty());
     }
 
@@ -7297,7 +7371,6 @@ mod tests {
             ("back", BACK_GLYPH),
             ("play", PLAY_GLYPH),
             ("send", SEND_GLYPH),
-            ("skip", SKIP_GLYPH),
             ("prompt", "\u{203A}"),
             ("cancel", CANCEL_GLYPH),
             ("notice dot", notice_line::DOT),
@@ -7368,16 +7441,14 @@ mod tests {
         a.set_dictation(Some(said("please go on").into()));
         let f = a.frame().clone();
         let hits: Vec<AgentHit> = f.buttons.iter().map(|b| b.hit).collect();
-        assert_eq!(
-            hits,
-            [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
-        );
-        // Square: play, cancel in the middle, send in record's place.
+        assert_eq!(hits, [AgentHit::Volume, AgentHit::Clear, AgentHit::Submit]);
+        // Square: volume, cancel in the centre's slot (2 of 4), send in
+        // record's place.
         for b in &f.buttons {
             assert!((b.rect.w - b.rect.h).abs() < 0.5);
         }
-        let mid = f.buttons[1].rect;
-        assert!((mid.x + mid.w * 0.5 - PHONE.w * 0.5).abs() < 0.5);
+        let (play, mid, send) = (f.buttons[0].rect, f.buttons[1].rect, f.buttons[2].rect);
+        assert!((mid.x - (play.x + (send.x - play.x) * 2.0 / 3.0)).abs() < 0.5);
         // The pinned card collapses above the message card.
         assert!(f.pin.is_some());
         let pin = f.pin.expect("the pinned card");
@@ -7446,10 +7517,7 @@ mod tests {
         assert!(card.rows().iter().any(|r| r.text.ends_with("is asking")));
         assert!(card.rows().iter().any(|r| r.text == "yes, the second one"));
         let hits: Vec<AgentHit> = card.buttons().iter().map(|b| b.hit).collect();
-        assert_eq!(
-            hits,
-            [AgentHit::ReadAloud, AgentHit::Clear, AgentHit::Submit]
-        );
+        assert_eq!(hits, [AgentHit::Volume, AgentHit::Clear, AgentHit::Submit]);
         let b = card.buttons()[2].rect;
         assert_eq!(a.hit(b.x + 5.0, b.y + 5.0), Some(AgentHit::Submit));
         a.touch(1, TouchPhase::Started, b.x + 5.0, b.y + 5.0, Duration::ZERO);
@@ -7465,36 +7533,59 @@ mod tests {
             p.collapse();
         });
         assert!(a.frame().buttons.is_empty());
-        // Sent or cancelled: back to play and record.
+        // Sent or cancelled: back to the four slots.
         a.set_dictation(None);
         assert!(a.replying_to().is_none());
         let hits: Vec<AgentHit> = a.frame().buttons.iter().map(|b| b.hit).collect();
         assert_eq!(
             hits,
             [
-                AgentHit::ReadAloud,
+                AgentHit::Volume,
+                AgentHit::TerminalToggle,
                 AgentHit::GeneralAgent,
-                AgentHit::Keyboard,
                 AgentHit::Message,
-                AgentHit::TerminalToggle
             ]
         );
     }
 
     #[test]
-    fn play_skips_while_a_reply_is_read() {
+    fn the_volume_glyph_redraws_while_speaking_and_when_it_stops() {
         let mut a = screen(conversation(3), vec![], None);
-        a.set_speaking(true);
-        assert!(!a.skips(), "read aloud is off: a tap turns it on");
-        a.set_read_aloud(true);
-        assert!(a.skips());
+        a.set_volume(true);
         a.draw(&mut DrawList::new(), &DrawContext::default(), None);
+        a.set_speaking(true);
+        assert!(a.draw(&mut DrawList::new(), &DrawContext::default(), None));
         a.set_speaking(false);
-        assert!(!a.skips());
         assert!(
             a.draw(&mut DrawList::new(), &DrawContext::default(), None),
             "the glyph changes back"
         );
+    }
+
+    #[test]
+    fn a_held_press_draws_its_bar_along_the_buttons_bottom() {
+        let mut a = screen(conversation(3), vec![], None);
+        let r = a.rect_of(AgentHit::Message).unwrap();
+        let bars = |a: &mut AgentScreen| {
+            let mut list = DrawList::new();
+            a.invalidate();
+            a.draw(&mut list, &DrawContext::default(), None);
+            list.instances
+                .iter()
+                .filter(|i| {
+                    i.color == theme().fg
+                        && i.position[1] > r.y + r.h - 12.0 * PHONE.scale
+                        && i.position[1] < r.y + r.h
+                        && i.position[0] >= r.x
+                        && i.position[0] < r.x + r.w
+                })
+                .count()
+        };
+        let none = bars(&mut a);
+        a.set_hold(Some((AgentHit::Message, 0.5)));
+        assert_eq!(bars(&mut a), none + 1, "the bar under record");
+        a.set_hold(None);
+        assert_eq!(bars(&mut a), none);
     }
 
     #[test]
@@ -8966,7 +9057,7 @@ mod tests {
         use crate::settings::{self, DISABLED_ALPHA, Settings};
         let cards = vec![card(CardKind::Question, 3, true)];
         let mut a = screen(conversation(3), cards, Some(0));
-        a.set_read_aloud(true);
+        a.set_volume(true);
         let tap = |a: &mut AgentScreen, r: Rect| {
             a.touch(1, TouchPhase::Started, r.x + 5.0, r.y + 5.0, Duration::ZERO);
             a.touch(1, TouchPhase::Ended, r.x + 5.0, r.y + 5.0, MS)
@@ -8977,7 +9068,7 @@ mod tests {
                     sound: false,
                     ..Settings::default()
                 },
-                vec![AgentHit::ReadAloud],
+                vec![AgentHit::Volume],
             ),
             (
                 Settings {
@@ -9010,16 +9101,6 @@ mod tests {
                 assert_eq!(tap(&mut a, yes), Some(AgentHit::Suggest(Suggestion::Yes)));
             }
         }
-        // The keyboard glyph is live with text input.
-        let keys = a.rect_of(AgentHit::Keyboard).unwrap();
-        let mut list = DrawList::new();
-        a.draw(&mut list, &DrawContext::default(), None);
-        assert_eq!(alpha_in(&list, keys), 1.0, "keyboard live with text input");
-        assert_eq!(
-            tap(&mut a, keys),
-            Some(AgentHit::Keyboard),
-            "keyboard live with text input"
-        );
         settings::set_current(Settings::default());
     }
 

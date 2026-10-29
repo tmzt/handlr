@@ -5,20 +5,21 @@
 //! the gear), of the agent view's header and of the settings' title: a
 //! 42 pt target, its three dots in the theme's text colour, drawn dim and
 //! taking no taps while its menu would be empty. A tap opens the one
-//! [`Menu`], a libcontrols `PopupMenu` (libcontrols 0.10.3) on its own
+//! [`Menu`], a libcontrols `PopupMenu` (libcontrols 0.10.8) on its own
 //! router's modal stack, shared by the screens and drawn over them.
 //!
 //! The menu holds, top to bottom ([`items`]): the enabled plugins' items
 //! for the screen, under each plugin's name as a heading when more than
-//! one plugin has items; a separator; the app's own: **Read aloud** (the
-//! agent view only, checked while on: the play button's toggle); then,
-//! after a separator, the title icons that did not fit in the title bar
-//! (the plan's 22:03 EDT amendment, item 3): plugin icons under their
-//! labels, then **Settings** last ([`crate::titlebar`]). Ids are
-//! `<ns>/<item>` for a plugin's and `app/read_aloud`, `app/settings` for
-//! the app's ([`Choice`]). The same menu offers **Unpin** for a plugin
-//! card held for 2 s on the overview ([`UNPIN`]), and is a plugin's popup
-//! menu for an `opens: "menu"` title icon ([`crate::plugins::POPUP`]).
+//! one plugin has items; then, after a separator, the title icons that
+//! did not fit in the title bar (the plan's 22:03 EDT amendment, item 3):
+//! plugin icons under their labels, then **Settings** last
+//! ([`crate::titlebar`]). Its **Read aloud** is gone: the volume menu
+//! holds both speak options (plan 20261028_06, decision 6). Ids are
+//! `<ns>/<item>` for a plugin's and `app/...` for the app's ([`Choice`]).
+//! The same menu offers **Unpin** for a plugin card held for 2 s on the
+//! overview ([`UNPIN`]), is a plugin's popup menu for an `opens: "menu"`
+//! title icon ([`crate::plugins::POPUP`]), the volume button's menu
+//! ([`volume_items`]) and the text input's + menu ([`attach_items`]).
 
 use std::sync::Arc;
 
@@ -37,8 +38,14 @@ use crate::titlebar::{Icon, Source};
 use crate::ui::Layout;
 
 /// The app's own items' ids.
-pub const READ_ALOUD: &str = "app/read_aloud";
 pub const SETTINGS: &str = "app/settings";
+/// The volume menu's (plan 20261028_06, decision 3).
+pub const SPEAK_CODING: &str = "app/speak_coding";
+pub const SPEAK_GEMINI: &str = "app/speak_gemini";
+pub const SKIP: &str = "app/skip";
+/// The + menu's (decision 8 and the 23:39 EDT amendment).
+pub const PASTE_TEXT: &str = "app/paste_text";
+pub const ATTACH_IMAGE: &str = "app/attach_image";
 /// A held card's Unpin; the card's index follows the slash.
 pub const UNPIN: &str = "app/unpin/";
 
@@ -48,8 +55,17 @@ const ENTRY: &str = "title_menu";
 /// What a chosen item asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Choice {
-    ReadAloud,
     Settings,
+    /// The volume menu: *Speak coding responses* or *Speak agent (Gemini)
+    /// responses* toggled in place, to the state given (the menu stays
+    /// open); or Skip.
+    SpeakCoding(bool),
+    SpeakGemini(bool),
+    Skip,
+    /// The + menu: the clipboard's text at the cursor, or the media
+    /// chooser.
+    PasteText,
+    AttachImage,
     Plugin {
         ns: String,
         item: String,
@@ -65,11 +81,23 @@ pub enum Choice {
 }
 
 impl Choice {
+    /// The choice a toggle item's `Toggled` names: its id and its new
+    /// state.
+    pub fn toggled(id: &str, checked: bool) -> Option<Choice> {
+        match id {
+            SPEAK_CODING => Some(Choice::SpeakCoding(checked)),
+            SPEAK_GEMINI => Some(Choice::SpeakGemini(checked)),
+            _ => None,
+        }
+    }
+
     /// The choice an item id names.
     pub fn parse(id: &str) -> Option<Choice> {
         match id {
-            READ_ALOUD => Some(Choice::ReadAloud),
             SETTINGS => Some(Choice::Settings),
+            SKIP => Some(Choice::Skip),
+            PASTE_TEXT => Some(Choice::PasteText),
+            ATTACH_IMAGE => Some(Choice::AttachImage),
             _ => {
                 if let Some(i) = id.strip_prefix(UNPIN) {
                     return i.parse().ok().map(Choice::Unpin);
@@ -96,15 +124,10 @@ impl Choice {
 }
 
 /// The items of the ⋮ menu on `screen`: `plugins`' entries for it, then
-/// the app's own, with Read aloud checked when `read_aloud` (decision
-/// 3.6, item 2), then the title icons `moved` into it, Settings last (the
-/// plan's 22:03 EDT amendment, item 3). Settings is here only when moved.
-pub fn items(
-    screen: Screen,
-    plugins: &[MenuEntry],
-    read_aloud: bool,
-    moved: &[Icon],
-) -> Vec<PopupItem> {
+/// the title icons `moved` into it, Settings last (the plan's 22:03 EDT
+/// amendment, item 3). Settings is here only when moved. Decision 3.6's
+/// Read aloud is removed (plan 20261028_06, decision 6).
+pub fn items(_screen: Screen, plugins: &[MenuEntry], moved: &[Icon]) -> Vec<PopupItem> {
     let mut out = Vec::new();
     let mut groups: Vec<&str> = Vec::new();
     for p in plugins {
@@ -125,13 +148,6 @@ pub fn items(
             ));
         }
     }
-    let mut own = Vec::new();
-    if screen == Screen::Agent {
-        own.push(
-            PopupItem::action(READ_ALOUD, copy::MENU_READ_ALOUD.text)
-                .with_checked(Some(read_aloud)),
-        );
-    }
     let moved: Vec<PopupItem> = moved
         .iter()
         .map(|icon| match &icon.source {
@@ -139,14 +155,61 @@ pub fn items(
             _ => PopupItem::action(icon.id(), icon.label.clone()),
         })
         .collect();
-    for group in [own, moved] {
-        if group.is_empty() {
-            continue;
-        }
+    if !moved.is_empty() {
         if !out.is_empty() {
             out.push(PopupItem::separator());
         }
-        out.extend(group);
+        out.extend(moved);
+    }
+    out
+}
+
+/// A speak option of the volume menu: a libcontrols toggle item (0.10.6),
+/// checked while `on`, dim while not `enabled`. Choosing it flips it in
+/// place and keeps the menu open, and [`Menu::take_choice`] gives its
+/// `Toggled` (plan 20261028_06, decision 3).
+fn speak_item(id: &'static str, label: &str, on: bool, enabled: bool) -> PopupItem {
+    PopupItem::toggle(id, label, on).with_enabled(enabled)
+}
+
+/// The volume menu (plan 20261028_06, decision 3), top to bottom: *Speak
+/// coding responses*, *Speak agent (Gemini) responses* (dim while
+/// `gemini_offered` is not: the general agent off or not offered), and,
+/// while `speaking`, a separator and Skip, last, nearest the finger.
+pub fn volume_items(
+    speak_coding: bool,
+    speak_gemini: bool,
+    gemini_offered: bool,
+    speaking: bool,
+) -> Vec<PopupItem> {
+    let mut out = vec![
+        speak_item(SPEAK_CODING, copy::SPEAK_CODING.text, speak_coding, true),
+        speak_item(
+            SPEAK_GEMINI,
+            copy::SPEAK_GEMINI.text,
+            speak_gemini,
+            gemini_offered,
+        ),
+    ];
+    if speaking {
+        out.push(PopupItem::separator());
+        out.push(PopupItem::action(SKIP, copy::MENU_SKIP.text));
+    }
+    out
+}
+
+/// The + menu (plan 20261028_06, decision 8 and the 23:39 EDT amendment):
+/// **Paste text**, enabled while the clipboard holds text (`clipboard`,
+/// libmorph's `clipboard_has_text`), and, where `images` are taken (the message card, while
+/// the daemon offers `images`), **Attach image…**.
+pub fn attach_items(images: bool, clipboard: bool) -> Vec<PopupItem> {
+    let mut out =
+        vec![PopupItem::action(PASTE_TEXT, copy::MENU_PASTE_TEXT.text).with_enabled(clipboard)];
+    if images {
+        out.push(PopupItem::action(
+            ATTACH_IMAGE,
+            copy::MENU_ATTACH_IMAGE.text,
+        ));
     }
     out
 }
@@ -355,6 +418,7 @@ impl Menu {
         }
         events.into_iter().find_map(|e| match e {
             PopupMenuEvent::Chosen(id) => Choice::parse(id.as_str()),
+            PopupMenuEvent::Toggled { id, checked } => Choice::toggled(id.as_str(), checked),
             _ => None,
         })
     }
@@ -469,16 +533,16 @@ mod tests {
     #[test]
     fn the_items_per_screen_and_plugin_state() {
         let planning = entry("dev.flankr.plugins.planning", "Planning", "plans");
-        // No plugin items: the app's own; Settings is in the title bar.
-        assert!(items(Screen::Overview, &[], false, &[]).is_empty());
-        assert_eq!(ids(&items(Screen::Agent, &[], true, &[])), [READ_ALOUD]);
-        assert!(items(Screen::Settings, &[], false, &[]).is_empty());
+        // No plugin items: nothing (Read aloud is the volume menu's now);
+        // Settings is in the title bar.
+        assert!(items(Screen::Overview, &[], &[]).is_empty());
+        assert!(items(Screen::Agent, &[], &[]).is_empty());
+        assert!(items(Screen::Settings, &[], &[]).is_empty());
         // One plugin: no heading.
         assert_eq!(
             ids(&items(
                 Screen::Overview,
                 std::slice::from_ref(&planning),
-                false,
                 &[]
             )),
             ["dev.flankr.plugins.planning/plans"]
@@ -486,28 +550,85 @@ mod tests {
         // Two: each under its name.
         let other = entry("dev.flankr.plugins.test", "Test", "go");
         assert_eq!(
-            ids(&items(
-                Screen::Agent,
-                &[planning.clone(), other],
-                false,
-                &[]
-            )),
+            ids(&items(Screen::Agent, &[planning.clone(), other], &[])),
             [
                 "# Planning",
                 "dev.flankr.plugins.planning/plans",
                 "# Test",
                 "dev.flankr.plugins.test/go",
-                "---",
-                READ_ALOUD,
             ]
         );
-        // Read aloud's check follows the play button.
-        let on = items(Screen::Agent, &[], true, &[]);
-        assert_eq!(on[0].checked, Some(true));
+    }
+
+    #[test]
+    fn the_volume_menu_checks_each_option_and_skips_only_while_speaking() {
+        let i = volume_items(false, true, true, false);
+        assert_eq!(ids(&i), [SPEAK_CODING, SPEAK_GEMINI]);
+        assert_eq!(i[0].label, "Speak coding responses");
+        assert_eq!(i[1].label, "Speak agent (Gemini) responses");
+        assert_eq!((i[0].checked, i[1].checked), (Some(false), Some(true)));
+        assert!(i[0].enabled && i[1].enabled);
+        assert_eq!(i[0].kind, libcontrols::PopupItemKind::Toggle);
+        // Gemini's dim without the general agent.
+        assert!(!volume_items(true, true, false, false)[1].enabled);
+        // Speaking: a separator and Skip, last.
+        let i = volume_items(true, false, true, true);
+        assert_eq!(ids(&i), [SPEAK_CODING, SPEAK_GEMINI, "---", SKIP]);
+        assert_eq!(i[3].label, "Skip");
         assert_eq!(
-            items(Screen::Agent, &[], false, &[])[0].checked,
-            Some(false)
+            Choice::toggled(SPEAK_CODING, true),
+            Some(Choice::SpeakCoding(true))
         );
+        assert_eq!(
+            Choice::toggled(SPEAK_GEMINI, false),
+            Some(Choice::SpeakGemini(false))
+        );
+        assert_eq!(Choice::toggled(SKIP, true), None);
+        assert_eq!(Choice::parse(SKIP), Some(Choice::Skip));
+    }
+
+    #[test]
+    fn the_plus_menu_has_paste_text_disabled_until_the_clipboard_call() {
+        let i = attach_items(false, false);
+        assert_eq!(ids(&i), [PASTE_TEXT]);
+        assert_eq!(i[0].label, "Paste text");
+        assert!(!i[0].enabled);
+        assert!(attach_items(false, true)[0].enabled);
+        assert_eq!(ids(&attach_items(true, false)), [PASTE_TEXT, ATTACH_IMAGE]);
+        assert_eq!(Choice::parse(PASTE_TEXT), Some(Choice::PasteText));
+        assert_eq!(Choice::parse(ATTACH_IMAGE), Some(Choice::AttachImage));
+    }
+
+    #[test]
+    fn the_volume_menu_opens_above_a_bottom_button() {
+        let mut m = Menu::new();
+        m.set_layout(Layout {
+            w: 822.0,
+            h: 1800.0,
+            scale: 2.0,
+            top: 80.0,
+            bottom: 40.0,
+        });
+        let anchor = Rect::new(24.0, 1600.0, 104.0, 104.0);
+        m.open(anchor, volume_items(false, true, true, true));
+        let mut list = DrawList::new();
+        m.draw(&mut list, &DrawContext::default());
+        let last = m.item_rect(3).expect("laid out");
+        assert!(last.y + last.h <= anchor.y, "above its anchor");
+        // A tap on Speak coding responses toggles it and the menu stays
+        // open; Skip then chooses and closes it.
+        let [x, y] = m.item_rect(0).unwrap().center();
+        m.touch(1, TouchPhase::Started, x, y);
+        m.touch(1, TouchPhase::Ended, x, y);
+        assert_eq!(m.take_choice(), Some(Choice::SpeakCoding(true)));
+        assert!(m.is_open(), "a toggle keeps the menu open");
+        assert_eq!(m.items()[0].checked, Some(true));
+        m.draw(&mut DrawList::new(), &DrawContext::default());
+        let [x, y] = m.item_rect(3).unwrap().center();
+        m.touch(2, TouchPhase::Started, x, y);
+        m.touch(2, TouchPhase::Ended, x, y);
+        assert_eq!(m.take_choice(), Some(Choice::Skip));
+        assert!(!m.is_open());
     }
 
     #[test]
@@ -515,24 +636,21 @@ mod tests {
         // Up to three plugin icons and Settings: all in the bar.
         for n in 0..=3 {
             assert!(moved(Screen::Overview, n).is_empty());
-            let i = items(Screen::Agent, &[], false, &moved(Screen::Agent, n));
+            let i = items(Screen::Agent, &[], &moved(Screen::Agent, n));
             assert!(!ids(&i).contains(&SETTINGS.to_string()), "{n}");
         }
         // Five registered: Settings last, after a separator.
         let m = moved(Screen::Agent, 4);
+        assert_eq!(ids(&items(Screen::Agent, &[], &m)), [SETTINGS]);
         assert_eq!(
-            ids(&items(Screen::Agent, &[], false, &m)),
-            [READ_ALOUD, "---", SETTINGS]
-        );
-        assert_eq!(
-            ids(&items(Screen::Overview, &[], false, &m)),
+            ids(&items(Screen::Overview, &[], &m)),
             [SETTINGS],
             "nothing else: no separator"
         );
         // Six: the last plugin icon above it, under its label.
         let m = moved(Screen::Overview, 5);
         let planning = entry("dev.flankr.plugins.planning", "Planning", "plans");
-        let i = items(Screen::Overview, &[planning], false, &m);
+        let i = items(Screen::Overview, &[planning], &m);
         assert_eq!(
             ids(&i),
             [
@@ -548,7 +666,6 @@ mod tests {
 
     #[test]
     fn choices_parse_from_ids() {
-        assert_eq!(Choice::parse(READ_ALOUD), Some(Choice::ReadAloud));
         assert_eq!(Choice::parse(SETTINGS), Some(Choice::Settings));
         assert_eq!(Choice::parse("app/unpin/2"), Some(Choice::Unpin(2)));
         assert_eq!(
@@ -584,7 +701,7 @@ mod tests {
         let anchor = Rect::new(980.0, 100.0, 84.0, 84.0);
         m.open(
             anchor,
-            items(Screen::Overview, &[], false, &moved(Screen::Overview, 4)),
+            items(Screen::Overview, &[], &moved(Screen::Overview, 4)),
         );
         assert!(m.is_open());
         // Drawn once, so it has a layout.
@@ -600,7 +717,7 @@ mod tests {
         // Outside: dismissed, nothing chosen.
         m.open(
             anchor,
-            items(Screen::Overview, &[], false, &moved(Screen::Overview, 4)),
+            items(Screen::Overview, &[], &moved(Screen::Overview, 4)),
         );
         m.touch(2, TouchPhase::Started, 10.0, 2000.0);
         m.touch(2, TouchPhase::Ended, 10.0, 2000.0);
@@ -609,7 +726,7 @@ mod tests {
         // Back closes it.
         m.open(
             anchor,
-            items(Screen::Overview, &[], false, &moved(Screen::Overview, 4)),
+            items(Screen::Overview, &[], &moved(Screen::Overview, 4)),
         );
         assert!(m.back());
         assert!(!m.back());

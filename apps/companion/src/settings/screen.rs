@@ -338,6 +338,10 @@ struct Nodes {
     titles: Vec<(Section, NodeId)>,
     sound: NodeId,
     ding: NodeId,
+    /// *Speak coding responses* and *Speak agent (Gemini) responses*
+    /// (plan 20261028_06, decision 6), after *Ding*.
+    speak_coding: NodeId,
+    speak_gemini: NodeId,
     voice: NodeId,
     microphone: NodeId,
     general_agent: NodeId,
@@ -1049,6 +1053,8 @@ impl SettingsScreen {
         };
         let sound = toggle(&mut router, copy::SOUND.label(), false);
         let ding = toggle(&mut router, copy::DING.label(), false);
+        let speak_coding = toggle(&mut router, copy::SPEAK_CODING.label(), false);
+        let speak_gemini = toggle(&mut router, copy::SPEAK_GEMINI.label(), false);
         let voice = {
             let mut row = OptionRow::new(
                 copy::VOICE.label(),
@@ -1149,6 +1155,8 @@ impl SettingsScreen {
             titles,
             sound,
             ding,
+            speak_coding,
+            speak_gemini,
             voice,
             microphone,
             general_agent,
@@ -1257,9 +1265,16 @@ impl SettingsScreen {
             };
             match section {
                 Section::Sound => {
+                    // The speak rows are inactive without sound, Gemini's
+                    // also while the general agent is off or not offered
+                    // (plan 20261028_06, decision 6).
+                    let gemini =
+                        settings.sound && settings.general_agent && super::llm().general_agent;
                     for (id, on, enabled) in [
                         (n.sound, settings.sound, true),
                         (n.ding, settings.ding, settings.sound),
+                        (n.speak_coding, settings.speak_coding, settings.sound),
+                        (n.speak_gemini, settings.speak_gemini, gemini),
                     ] {
                         let rect = row(&mut y);
                         if let Some(t) = router.get_mut::<ToggleRow>(id) {
@@ -1486,6 +1501,8 @@ impl SettingsScreen {
         [
             n.sound,
             n.ding,
+            n.speak_coding,
+            n.speak_gemini,
             n.microphone,
             n.general_agent,
             n.tab_follows_focus,
@@ -1747,6 +1764,10 @@ impl SettingsScreen {
             s.sound = !s.sound;
         } else if target == n.ding {
             s.ding = !s.ding;
+        } else if target == n.speak_coding {
+            s.speak_coding = !s.speak_coding;
+        } else if target == n.speak_gemini {
+            s.speak_gemini = !s.speak_gemini;
         } else if target == n.microphone {
             s.microphone = !s.microphone;
         } else if target == n.general_agent {
@@ -2231,6 +2252,8 @@ impl SettingsScreen {
         [
             n.sound,
             n.ding,
+            n.speak_coding,
+            n.speak_gemini,
             n.microphone,
             n.general_agent,
             n.tab_follows_focus,
@@ -2350,6 +2373,10 @@ mod tests {
         top: 80.0,
         bottom: 40.0,
     };
+
+    /// A taller phone, for the rows at the end of the Device section with
+    /// the Sound section's two speak rows (plan 20261028_06) above them.
+    const TALL: Layout = Layout { h: 2700.0, ..PHONE };
 
     /// A host whose battery state cannot be known.
     struct NoBattery;
@@ -2590,6 +2617,43 @@ mod tests {
         crate::settings::set_llm(flankr_companion::wire::LlmInfo::available());
         s.llm_changed();
         assert!(s.toggle(label).unwrap().enabled);
+    }
+
+    /// Plan 20261028_06, decision 6: the two speak rows after Ding, the
+    /// same values as the volume menu, inactive without sound, Gemini's
+    /// also without the general agent.
+    #[test]
+    fn the_speak_rows_toggle_and_are_dim_without_sound_or_the_general_agent() {
+        let mut s = plain();
+        let coding = "Speak coding responses";
+        let gemini = "Speak agent (Gemini) responses";
+        assert!(!s.toggle(coding).unwrap().on && s.toggle(gemini).unwrap().on);
+        assert_eq!(
+            tap_row(&mut s, coding),
+            Some(SettingsHit::Changed(Settings {
+                speak_coding: true,
+                ..Settings::default()
+            }))
+        );
+        assert_eq!(
+            tap_row(&mut s, gemini),
+            Some(SettingsHit::Changed(Settings {
+                speak_coding: true,
+                speak_gemini: false,
+                ..Settings::default()
+            }))
+        );
+        // The general agent off: Gemini's dim, coding's live.
+        tap_row(&mut s, "General agent (Gemini)");
+        assert!(!s.toggle(gemini).unwrap().enabled);
+        assert!(s.toggle(coding).unwrap().enabled);
+        assert_eq!(tap_row(&mut s, gemini), None, "dim, it takes no taps");
+        tap_row(&mut s, "General agent (Gemini)");
+        // All sound off: both dim.
+        tap_row(&mut s, "All sound");
+        assert!(!s.toggle(coding).unwrap().enabled);
+        assert!(!s.toggle(gemini).unwrap().enabled);
+        assert_eq!(tap_row(&mut s, coding), None);
     }
 
     #[test]
@@ -3508,6 +3572,7 @@ mod tests {
             opened: Rc::clone(&opened),
         };
         let mut s = screen(true, Box::new(phone(false, true, VendorPage::None)));
+        s.set_layout(TALL);
         assert!(s.row_rect("Battery optimization").is_some());
         assert_eq!(s.battery_notes(), [BATTERY_RESTRICTED]);
         // Optimized: an *Enable* button on the right asks the system; the
@@ -3530,7 +3595,7 @@ mod tests {
         assert!(s.row_rect("Samsung battery (app sleeping)").is_some());
         tap_row(&mut s, "Samsung battery (app sleeping)");
         assert!(s.row_rect("Samsung battery (app sleeping)").is_none());
-        s.set_layout(Layout { w: 1200.0, ..PHONE });
+        s.set_layout(Layout { w: 1200.0, ..TALL });
         assert!(s.row_rect("Samsung battery (app sleeping)").is_none());
 
         let s = screen(true, Box::new(phone(true, false, VendorPage::Opened)));
@@ -3776,6 +3841,7 @@ mod tests {
             ("Appearance", Info::Appearance),
         ] {
             let mut s = screen(true, Box::new(phone()));
+            s.set_layout(TALL);
             let before = s.settings();
             let [x, y] = s.info_point(label).unwrap_or_else(|| panic!("{label}'s ⓘ"));
             assert_eq!(tap(&mut s, x, y), None);
@@ -3961,9 +4027,14 @@ mod tests {
     #[test]
     fn the_voice_row_follows_ding_and_is_inactive_before_load_and_without_sound() {
         let mut s = plain();
+        // After Ding and the two speak rows (plan 20261028_06, decision 6).
         let ding = s.row_rect("Ding when an agent is done").unwrap();
+        let coding = s.row_rect("Speak coding responses").unwrap();
+        let gemini = s.row_rect("Speak agent (Gemini) responses").unwrap();
+        assert_eq!(coding.y, ding.y + ding.h, "right after Ding");
+        assert_eq!(gemini.y, coding.y + coding.h);
         let row = s.row_rect("Voice").expect("a Voice row");
-        assert_eq!(row.y, ding.y + ding.h, "right after Ding, in Sound");
+        assert_eq!(row.y, gemini.y + gemini.h, "after the speak rows, in Sound");
         assert!(row.y < s.row_rect("Microphone").unwrap().y);
         assert_eq!(s.voice_shown().as_deref(), Some("Default"));
         // Phonon has not loaded: dim, and the arrows do nothing.

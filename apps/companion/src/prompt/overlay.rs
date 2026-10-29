@@ -9,6 +9,9 @@
 //! down on it (or on a history with nothing above to go back to), and
 //! Back close it. The slide is short ([`PromptOverlay::SLIDE`]) and driven
 //! by `tick`; while it moves, the sheet is drawn where it has got to.
+//!
+//! Under its input area, while it is typed, the card's row of the + and
+//! the keyboard toggle ([`InputRow`], plan 20261028_06, decision 8).
 
 use std::time::Duration;
 
@@ -16,7 +19,10 @@ use libcontrols::{DrawContext, DrawControl, Rect, TextArea};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
+use super::PromptKind;
 use super::history::History;
+use super::input_row::{InputRow, InputTools, ROW_GAP};
+use crate::agent::AgentHit;
 use crate::agent::{PAD, columns, fill, line_h, one_line, wrap_hard};
 use crate::controls::scroll::Touched;
 use crate::theme::theme;
@@ -31,6 +37,8 @@ pub enum OverlayTouch {
     Collapse,
     /// A tap on the input area.
     Text,
+    /// A tap on the input row's + or toggle.
+    Control(AgentHit),
 }
 
 /// A finger on the sheet.
@@ -42,6 +50,8 @@ struct Swipe {
     handle: bool,
     /// Started on the input area.
     text: bool,
+    /// Started on the input row's control.
+    control: Option<AgentHit>,
     /// The history had nothing above to scroll back to when it started.
     at_top: bool,
 }
@@ -60,6 +70,10 @@ pub struct PromptOverlay {
     text_area: Option<TextArea>,
     /// The history's window, when open.
     history: Rect,
+    /// The typed card's kind and typing's tools, for the row; and the row
+    /// as placed (where it opens to).
+    row_for: Option<(PromptKind, InputTools)>,
+    row: Option<InputRow>,
 }
 
 impl Default for PromptOverlay {
@@ -95,6 +109,8 @@ impl PromptOverlay {
             header: String::new(),
             colour: [0.0; 4],
             text_area: None,
+            row_for: None,
+            row: None,
             history: Rect::default(),
         }
     }
@@ -107,7 +123,8 @@ impl PromptOverlay {
     }
 
     /// The expanded card's header, its colour, and its input: the text,
-    /// the placeholder, and whether it is typed.
+    /// the placeholder, and whether it is typed; while typed, `row` is the
+    /// card's kind and typing's tools for the row under it.
     pub fn set_input(
         &mut self,
         header: &str,
@@ -115,7 +132,9 @@ impl PromptOverlay {
         text: &str,
         placeholder: &str,
         keyboard: bool,
+        row: Option<(PromptKind, InputTools)>,
     ) {
+        self.row_for = row.filter(|_| keyboard);
         self.header = header.to_string();
         self.colour = colour;
         let cursor = self
@@ -162,7 +181,10 @@ impl PromptOverlay {
         let pad = Self::INPUT_PAD * s;
         let head = (Self::HANDLE_H + Self::HEADER_H) * s;
         let input_h = self.input_h();
-        let history_h = (a.h - head - input_h - 2.0 * pad).max(0.0);
+        let row_h = self
+            .row_for
+            .map_or(0.0, |(kind, tools)| tools.grows(kind, s));
+        let history_h = (a.h - head - input_h - row_h - 2.0 * pad).max(0.0);
         self.history = Rect::new(a.x, a.y + head, a.w, history_h);
         let r = Rect::new(
             a.x + pad,
@@ -173,6 +195,19 @@ impl PromptOverlay {
         if let Some(ta) = &mut self.text_area {
             ta.rect = r;
         }
+        self.row = self.row_for.and_then(|(kind, tools)| {
+            InputRow::lay_out(kind, r.x, r.y + r.h + ROW_GAP * s, r.w, s, &tools)
+        });
+    }
+
+    /// The input row's control at `(x, y)`, where it is now.
+    pub fn row_hit(&self, x: f32, y: f32) -> Option<AgentHit> {
+        self.row.as_ref()?.hit(x, y, self.drop())
+    }
+
+    /// Where the input row's `hit` is now.
+    pub fn row_rect(&self, hit: AgentHit) -> Option<Rect> {
+        self.row.as_ref()?.rect_of(hit, self.drop())
     }
 
     /// The history's window when open.
@@ -280,6 +315,7 @@ impl PromptOverlay {
                 start_y: y,
                 handle: self.handle_rect().contains([x, y]),
                 text,
+                control: self.row_hit(x, y),
                 at_top: history.scroll().offset() <= 0.0,
             });
         }
@@ -293,6 +329,13 @@ impl PromptOverlay {
         if swipe.text {
             return if ended {
                 OverlayTouch::Text
+            } else {
+                OverlayTouch::Nothing
+            };
+        }
+        if let Some(hit) = swipe.control {
+            return if ended && self.row_hit(x, y) == Some(hit) {
+                OverlayTouch::Control(hit)
             } else {
                 OverlayTouch::Nothing
             };
@@ -365,6 +408,9 @@ impl PromptOverlay {
             ta.rect = moved;
             ta.draw(list, ctx);
         }
+        if let Some(row) = &self.row {
+            row.draw(list, drop);
+        }
     }
 }
 
@@ -392,6 +438,7 @@ mod tests {
             "",
             "Ask Gemini\u{2026}",
             false,
+            None,
         );
         let mut h = History::new();
         h.set_viewport(o.history_rect(), 2.0);
@@ -503,10 +550,52 @@ mod tests {
             OverlayTouch::Text
         );
         assert!(o.is_open());
-        o.set_input("x", theme().accent, "1\n2\n3\n4\n5", "", true);
+        o.set_input("x", theme().accent, "1\n2\n3\n4\n5", "", true, None);
         let taller = o.text_rect().unwrap();
         assert!(taller.h > r.h);
         assert_eq!(o.input_text(), "1\n2\n3\n4\n5");
+    }
+
+    #[test]
+    fn typed_the_row_is_under_the_input_and_its_toggle_is_tapped() {
+        let (mut o, mut h) = overlay(3);
+        o.open();
+        settle(&mut o);
+        let tools = InputTools {
+            mobile: true,
+            images: false,
+            keyboard_up: true,
+            physical: false,
+        };
+        let before = o.text_rect().unwrap();
+        o.set_input(
+            "\u{2726} Gemini",
+            theme().accent,
+            "",
+            "Ask Gemini\u{2026}",
+            true,
+            Some((PromptKind::GeneralAgent, tools)),
+        );
+        let r = o.text_rect().unwrap();
+        assert!(
+            (before.y - r.y - 48.0 * 2.0).abs() < 0.01,
+            "lifted by 48 pt"
+        );
+        let ime = o
+            .row_rect(AgentHit::PromptIme(PromptKind::GeneralAgent))
+            .expect("the toggle");
+        assert!((ime.y - (r.y + r.h + 4.0 * 2.0)).abs() < 0.01);
+        assert!(ime.y + ime.h <= o.rect().y + o.rect().h);
+        assert!(
+            o.row_rect(AgentHit::PromptAttach(PromptKind::GeneralAgent))
+                .is_some()
+        );
+        let (x, y) = (ime.x + 5.0, ime.y + 5.0);
+        o.touch(1, TouchPhase::Started, x, y, Duration::ZERO, &mut h);
+        assert_eq!(
+            o.touch(1, TouchPhase::Ended, x, y, MS, &mut h),
+            OverlayTouch::Control(AgentHit::PromptIme(PromptKind::GeneralAgent))
+        );
     }
 
     #[test]
