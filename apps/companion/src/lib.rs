@@ -83,6 +83,7 @@ pub mod session_cards;
 pub mod settings;
 pub mod terminal_keys;
 pub mod theme;
+pub mod titlebar;
 pub mod ui;
 
 use std::collections::HashMap;
@@ -115,7 +116,7 @@ use crate::agent::{AgentHit, AgentScreen, TermAsk, TermState, Terminal, Terminal
 use crate::drawer::{AppDrawer, DrawerHit, DrawerTouch};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
-use crate::menu::{Choice, Kebab, Menu};
+use crate::menu::{Choice, Menu};
 use crate::notify::Notifier;
 use crate::overview::{Overview, OverviewHit, Panel};
 use crate::plugins::{Outgoing, Plugins, Screen as PluginScreen};
@@ -128,6 +129,7 @@ use crate::settings::build_info::BuildInfo;
 use crate::settings::screen::PluginShown;
 use crate::settings::{Settings, SettingsHit, SettingsScreen};
 use crate::theme::{Role, theme};
+use crate::titlebar::Bar;
 use crate::ui::{CameraView, Card, CardState, Glyph, Hit, Layout, Row, Screen, View, prompt_input};
 
 /// The frame rate: enough for text, and far less heat than the display's
@@ -415,9 +417,13 @@ pub struct App {
     plugins: Plugins,
     /// The open plugin modal's scroll and touch.
     plugin_modal: plugins::modal::ModalView,
-    /// The title bars' ⋮ menu (step 7), and a touch that came down on a ⋮.
+    /// The title bars' ⋮ menu (step 7), and a touch that came down on a
+    /// title icon or the ⋮ (the plan's 22:03 EDT amendment).
     menu: Menu,
-    kebab_touch: Option<u64>,
+    title_touch: Option<(u64, TitleTarget)>,
+    /// The plugin whose popup menu the shared menu shows, `(ns, item)`:
+    /// its items are asked for again on each answer while it is open.
+    popup: Option<(String, String)>,
     /// The screen's layout, as last laid out.
     layout: Layout,
 }
@@ -534,6 +540,22 @@ impl PermissionOs for ContextPermissions<'_> {
 
 /// Opens `url` in the phone's browser (libmorph 0.4.0's `open_link`).
 /// Never logged past its kind: a query or fragment may be a secret.
+/// What a touch on the title bar came down on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TitleTarget {
+    Kebab,
+    Icon(titlebar::Source),
+}
+
+/// The title bar's target at `(x, y)`: an icon, or the ⋮ while it takes
+/// taps.
+fn title_target(bar: &Bar, x: f32, y: f32) -> Option<TitleTarget> {
+    if let Some(i) = bar.icon_at(x, y) {
+        return Some(TitleTarget::Icon(bar.icons[i].0.source.clone()));
+    }
+    bar.kebab.takes(x, y).then_some(TitleTarget::Kebab)
+}
+
 fn open_link(ctx: &MorphContext, url: &str) {
     match ctx.open_link(url) {
         Ok(()) => log::info!("link: opened"),
@@ -907,6 +929,13 @@ impl App {
                         .join(", ")
                 );
                 self.plugins.set_infos(list);
+                // A plugin's popup goes with it.
+                if let Some((ns, _)) = &self.popup
+                    && !self.plugins.active(ns)
+                {
+                    self.menu.close();
+                    self.popup = None;
+                }
                 let shown = self.plugin_shown();
                 if let Some(screen) = &mut self.settings_screen {
                     screen.set_plugins(shown);
@@ -1220,6 +1249,15 @@ impl App {
         if self.plugins.modal().map(|(ns, _)| ns) != before.as_deref() {
             self.plugin_modal.reset();
         }
+        // A plugin's popup, while open, shows its items as they are now.
+        if let Some((ns, item)) = &self.popup {
+            if self.menu.is_open() {
+                let items = self.plugins.menu_items(ns, item);
+                self.menu.refresh(items);
+            } else {
+                self.popup = None;
+            }
+        }
         for (ns, call) in calls {
             log::info!("plugins: {ns} {}", call.method);
             self.send(Input::PluginCall {
@@ -1232,13 +1270,22 @@ impl App {
         }
     }
 
-    /// The ⋮ of the screen shown, with its menu's screen; dim while its
-    /// menu would be empty.
-    fn kebab(&self) -> Option<(Kebab, PluginScreen)> {
+    /// Whether the agent menu (the subagents plan's ⊙,
+    /// docs/design/20261023_07_SUBAGENTS_PLAN.md) is registered: on the
+    /// agent view while its pane has subagents. The app has no subagent
+    /// list yet, so it never is; this is the hook that plan fills in.
+    fn agent_menu_registered(&self) -> bool {
+        false
+    }
+
+    /// The title bar of the screen shown, with its menu's screen: the
+    /// registered icons, then the ⋮, dim while its menu would be empty
+    /// (the plan's 22:03 EDT amendment).
+    fn title_bar(&self) -> Option<(Bar, PluginScreen)> {
         if self.pairing.adding {
             return None;
         }
-        let (mut k, screen) = if let Some(s) = &self.settings_screen {
+        let (kebab, screen) = if let Some(s) = &self.settings_screen {
             (s.kebab(), PluginScreen::Settings)
         } else if let Some(a) = &self.agent {
             (a.kebab(), PluginScreen::Agent)
@@ -1247,20 +1294,69 @@ impl App {
         } else {
             return None;
         };
-        k.dim = self.menu_items(screen).is_empty();
-        Some((k, screen))
+        let icons = titlebar::registered(
+            screen,
+            self.agent_menu_registered(),
+            &self.plugins.icons(screen),
+        );
+        let mut bar = Bar::new(kebab, icons, self.scale());
+        bar.kebab.dim = self.menu_items(screen, &bar).is_empty();
+        Some((bar, screen))
     }
 
-    fn menu_items(&self, screen: PluginScreen) -> Vec<libcontrols::PopupItem> {
-        menu::items(screen, &self.plugins.menu(screen), self.read_aloud)
+    fn menu_items(&self, screen: PluginScreen, bar: &Bar) -> Vec<libcontrols::PopupItem> {
+        menu::items(
+            screen,
+            &self.plugins.menu(screen),
+            self.read_aloud,
+            &bar.moved,
+        )
     }
 
     /// The ⋮ was tapped: its menu opens below it.
     fn open_menu(&mut self) {
-        if let Some((k, screen)) = self.kebab() {
-            let items = self.menu_items(screen);
-            self.menu.open(k.rect, items);
+        if let Some((bar, screen)) = self.title_bar() {
+            let items = self.menu_items(screen, &bar);
+            self.popup = None;
+            self.menu.open(bar.kebab.rect, items);
         }
+    }
+
+    /// A title icon was tapped, or chosen from the ⋮ menu when it moved
+    /// there: `anchor` is where a popup menu opens.
+    fn title_icon(&mut self, source: titlebar::Source, anchor: libcontrols::Rect) {
+        log::info!("title icon: {source:?}");
+        match source {
+            titlebar::Source::Settings => {
+                if self.settings_screen.is_none() {
+                    self.open_settings();
+                }
+            }
+            // The subagents plan's menu, once it registers (see
+            // `agent_menu_registered`).
+            titlebar::Source::AgentMenu => {}
+            titlebar::Source::Plugin { ns, item, opens } => {
+                if opens == "menu" {
+                    self.open_plugin_menu(&ns, &item, anchor);
+                } else {
+                    // A modal or a card, or an `opens` this app does not
+                    // know: as a modal (`Plugins::action`).
+                    self.plugin_calls(|p| p.action(&ns, &item));
+                }
+            }
+        }
+    }
+
+    /// `ns`'s `opens: "menu"` icon: its popup opens at `anchor` with the
+    /// half's items, asked again on each answer while open; a half with
+    /// none opens its modal instead.
+    fn open_plugin_menu(&mut self, ns: &str, item: &str, anchor: libcontrols::Rect) {
+        let (calls, items) = self.plugins.open_menu(ns, item);
+        if !items.is_empty() {
+            self.menu.open(anchor, items);
+            self.popup = Some((ns.to_string(), item.to_string()));
+        }
+        self.plugin_calls(|_| calls);
     }
 
     /// What was chosen in the menu, if anything.
@@ -1280,7 +1376,19 @@ impl App {
                     self.open_settings();
                 }
             }
-            Choice::Plugin { ns, item } => self.plugin_calls(|p| p.action(&ns, &item)),
+            Choice::Plugin { ns, item } => {
+                // A title icon moved into the ⋮ menu opens as it would
+                // from the bar, its popup at the ⋮.
+                let anchor = self.title_bar().map(|(b, _)| b.kebab.rect);
+                match (self.plugins.opens(&ns, &item), anchor) {
+                    (Some("menu"), Some(anchor)) => self.open_plugin_menu(&ns, &item, anchor),
+                    _ => self.plugin_calls(|p| p.action(&ns, &item)),
+                }
+            }
+            Choice::Popup { ns, item, id } => {
+                self.popup = None;
+                self.plugin_calls(|p| p.menu_chosen(&ns, &item, &id));
+            }
             Choice::Unpin(i) => self.plugins.unpin(i),
         }
     }
@@ -2545,22 +2653,34 @@ impl App {
             }
             return;
         }
-        if let Some(id) = self.kebab_touch
+        // Then the title icons and the ⋮, before the screen under them: a
+        // press and a release on the same one.
+        if let Some((id, target)) = self.title_touch.clone()
             && id == touch.id
         {
             if matches!(touch.phase, TouchPhase::Ended | TouchPhase::Cancelled) {
-                self.kebab_touch = None;
-                let on = self.kebab().is_some_and(|(k, _)| k.takes(touch.x, touch.y));
-                if touch.phase == TouchPhase::Ended && on {
-                    self.open_menu();
+                self.title_touch = None;
+                let bar = self.title_bar().map(|(b, _)| b);
+                if touch.phase == TouchPhase::Ended
+                    && let Some(bar) = bar
+                    && title_target(&bar, touch.x, touch.y).as_ref() == Some(&target)
+                {
+                    match target {
+                        TitleTarget::Kebab => self.open_menu(),
+                        TitleTarget::Icon(source) => {
+                            let anchor = bar.rect_of(&source).unwrap_or(bar.kebab.rect);
+                            self.title_icon(source, anchor);
+                        }
+                    }
                 }
             }
             return;
         }
         if touch.phase == TouchPhase::Started
-            && self.kebab().is_some_and(|(k, _)| k.takes(touch.x, touch.y))
+            && let Some((bar, _)) = self.title_bar()
+            && let Some(target) = title_target(&bar, touch.x, touch.y)
         {
-            self.kebab_touch = Some(touch.id);
+            self.title_touch = Some((touch.id, target));
             return;
         }
         if let Some(hold) = self.center_hold.as_mut()
@@ -2678,7 +2798,6 @@ impl App {
                 Some(OverviewHit::Agent(pane_id)) => self.open_agent(pane_id),
                 Some(OverviewHit::Bottom(hit)) => self.agent_hit(hit),
                 Some(OverviewHit::Tap) => self.send(Input::Tap),
-                Some(OverviewHit::Settings) => self.open_settings(),
                 Some(OverviewHit::Menu) => self.open_drawer(),
                 Some(OverviewHit::PluginCard { index, x, y, held }) => {
                     self.plugin_card_hit(index, x, y, held)
@@ -3555,7 +3674,8 @@ impl MorphApp for App {
             plugins: Plugins::builtin(),
             plugin_modal: Default::default(),
             menu: Menu::new(),
-            kebab_touch: None,
+            title_touch: None,
+            popup: None,
             layout: Layout::default(),
         };
         app.notifier
@@ -3920,6 +4040,15 @@ impl MorphApp for App {
                 agent.invalidate();
             }
         }
+        // The agent view's header text stops short of its title icons.
+        if shown == Shown::Agent
+            && let Some((bar, _)) = self.title_bar()
+        {
+            let x = bar.icons.first().map_or(bar.kebab.rect.x, |(_, r)| r.x);
+            if let Some(agent) = &mut self.agent {
+                agent.set_title_right(x);
+            }
+        }
         let drew = match (&mut self.settings_screen, &mut self.agent) {
             _ if shown == Shown::Pairing && self.pairing.adding => {
                 self.screen.draw(&mut self.list, &draw)
@@ -3940,8 +4069,14 @@ impl MorphApp for App {
         // plugin's modal, then the menu (plan 20261028_04, steps 6 and 7).
         if drew && shown != Shown::Pairing {
             let s = self.scale();
-            if let Some((k, _)) = self.kebab() {
-                k.draw(&mut self.list, s);
+            if let Some((bar, screen)) = self.title_bar() {
+                // On the agent view's header, else the screen's ground.
+                let under = if screen == PluginScreen::Agent {
+                    theme().header
+                } else {
+                    theme().bg
+                };
+                bar.draw(&mut self.list, &draw, Some(&term), s, under);
             }
             // Not over an expanded prompt card's overlay, which covers
             // the grid.

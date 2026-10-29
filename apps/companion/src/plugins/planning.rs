@@ -12,6 +12,13 @@
 //!   its title, date and status; its `covers` as a short list; then
 //!   **Amendments**, each its timestamp exactly as written and its
 //!   subject.
+//! - **The ☑ title icon** (`plans` with `opens: "menu"`, the daemon
+//!   half's 0.1.1; the plan's 22:03 EDT amendment, item 5): a popup menu,
+//!   "Reading plans…" as a heading until `plans.list` answers, then the
+//!   ten newest plans by title, each with its status after an en space
+//!   (a `PopupItem` has one label, so the status cannot be dimmed), and
+//!   **All plans…**, which opens the modal; choosing a plan opens the
+//!   modal on it (`plans.show`).
 //! - **The pinned card**, keyed by the plan's base name: its title, its
 //!   status, and its last amendment's timestamp and subject; a tap opens
 //!   the modal on that plan, calling `plans.show` again so it is current.
@@ -22,7 +29,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use libcontrols::{DrawContext, Rect};
+use libcontrols::{DrawContext, PopupItem, Rect};
 use libmsdf::drawlist::DrawList;
 use serde_json::{Value, json};
 
@@ -44,6 +51,14 @@ const TAP_H: f32 = 44.0;
 const GAP: f32 = 12.0;
 /// The most `covers` items shown.
 const COVERS_MAX: usize = 6;
+/// The plans the popup menu lists, newest first.
+pub const MENU_PLANS: usize = 10;
+/// The popup's characters a line: its 320 pt widest, less its padding,
+/// at its 16 pt, as [`columns`] counts.
+const MENU_COLUMNS: usize = 36;
+/// The popup's item ids: a plan's is this and its base name.
+pub const MENU_PLAN: &str = "plan/";
+pub const MENU_ALL: &str = "all";
 
 /// A plan as `plans.list` gives it, as far as the list shows it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -169,6 +184,8 @@ enum Page {
 #[derive(Clone, Debug, PartialEq)]
 enum Asked {
     List,
+    /// `plans.list` for the popup menu.
+    Menu,
     /// `plans.show` for the modal.
     Show,
     /// `plans.show` for the card with this key.
@@ -239,6 +256,9 @@ pub struct Planning {
     cards: Vec<(String, CardShows)>,
     /// The width and scale the views were last laid out at, for taps.
     laid: Cell<(f32, f32)>,
+    /// The popup menu's plans: `None` while reading, else the list or
+    /// why it could not be read.
+    menu: Option<Result<Vec<PlanRow>, String>>,
 }
 
 impl Default for Planning {
@@ -255,6 +275,7 @@ impl Planning {
             asked: HashMap::new(),
             cards: Vec::new(),
             laid: Cell::new((0.0, 1.0)),
+            menu: None,
         }
     }
 
@@ -451,6 +472,29 @@ impl Planning {
     }
 }
 
+/// A popup row's label: the title, cut with … to leave room, an en space,
+/// then the status.
+pub fn menu_label(row: &PlanRow) -> String {
+    let status = row.status.trim();
+    if status.is_empty() {
+        return cut_to(&row.title, MENU_COLUMNS);
+    }
+    let room = MENU_COLUMNS
+        .saturating_sub(status.chars().count() + 1)
+        .max(12);
+    format!("{}\u{2002}{status}", cut_to(&row.title, room))
+}
+
+/// `text` in at most `max` characters, cut with ….
+fn cut_to(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('\u{2026}');
+    out
+}
+
 /// About how wide `text` is at `px`: half an em a character, as
 /// [`columns`] counts.
 fn columns_w(text: &str, px: f32) -> f32 {
@@ -473,6 +517,57 @@ impl DevicePlugin for Planning {
         }
     }
 
+    fn menu_opened(&mut self, item: &str, out: &mut PluginOut) {
+        if item == "plans" {
+            self.menu = None;
+            self.asked.retain(|_, a| *a != Asked::Menu);
+            let id = out.call("plans.list", json!({}));
+            self.asked.insert(id, Asked::Menu);
+        }
+    }
+
+    fn menu(&self, item: &str) -> Vec<PopupItem> {
+        if item != "plans" {
+            return Vec::new();
+        }
+        let all = PopupItem::action(MENU_ALL, copy::PLANNING_ALL_PLANS.text);
+        match &self.menu {
+            None => vec![PopupItem::heading(copy::PLANNING_READING.text)],
+            Some(Ok(rows)) if rows.is_empty() => vec![
+                PopupItem::heading(copy::PLANNING_MENU_NONE.text),
+                PopupItem::separator(),
+                all,
+            ],
+            Some(Ok(rows)) => {
+                let mut items: Vec<PopupItem> = rows
+                    .iter()
+                    .take(MENU_PLANS)
+                    .map(|r| PopupItem::action(format!("{MENU_PLAN}{}", r.base), menu_label(r)))
+                    .collect();
+                items.push(PopupItem::separator());
+                items.push(all);
+                items
+            }
+            Some(Err(why)) => vec![
+                PopupItem::heading(cut_to(why, MENU_COLUMNS)),
+                PopupItem::separator(),
+                all,
+            ],
+        }
+    }
+
+    fn menu_chosen(&mut self, item: &str, id: &str, out: &mut PluginOut) {
+        if item != "plans" {
+            return;
+        }
+        if id == MENU_ALL {
+            self.action(item, out);
+        } else if let Some(base) = id.strip_prefix(MENU_PLAN) {
+            out.open(ViewKind::Modal);
+            self.show(base, out);
+        }
+    }
+
     fn message(&mut self, msg: PluginMessage, out: &mut PluginOut) {
         let PluginMessage::Result { id, result } = msg else {
             return;
@@ -482,6 +577,13 @@ impl DevicePlugin for Planning {
         };
         out.redraw();
         match (asked, result) {
+            (Asked::Menu, Ok(v)) => {
+                let rows = rows_of(&v);
+                // The modal's ‹ lists them without reading again.
+                self.list = Some(rows.clone());
+                self.menu = Some(Ok(rows));
+            }
+            (Asked::Menu, Err(e)) => self.menu = Some(Err(e.message)),
             (Asked::List, Ok(v)) => {
                 let rows = rows_of(&v);
                 self.list = Some(rows.clone());
@@ -585,7 +687,8 @@ impl DevicePlugin for Planning {
             ViewKind::Modal => {
                 self.page = Page::Reading;
                 // Answers still on their way find nothing to fill.
-                self.asked.retain(|_, a| matches!(a, Asked::Card(_)));
+                self.asked
+                    .retain(|_, a| matches!(a, Asked::Card(_) | Asked::Menu));
             }
             ViewKind::Card(key) => {
                 self.cards.retain(|(k, _)| k != key);
@@ -771,5 +874,122 @@ mod tests {
         p.close(&ViewKind::Modal);
         answer(&mut p, 2, list_fixture());
         assert_eq!(texts(&p, &ViewKind::Modal), [copy::PLANNING_READING.text]);
+    }
+
+    fn labels(items: &[PopupItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| match i.kind {
+                libcontrols::PopupItemKind::Heading => format!("# {}", i.label),
+                libcontrols::PopupItemKind::Separator => "---".into(),
+                _ => format!("{} = {}", i.id.as_str(), i.label),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_popup_reads_then_lists_the_newest_with_all_plans_last() {
+        let mut p = Planning::new();
+        let mut out = PluginOut::new(1);
+        p.menu_opened("plans", &mut out);
+        // No modal: only the list asked for.
+        assert!(out.opens.is_empty());
+        assert_eq!(out.calls.len(), 1);
+        assert_eq!(out.calls[0].method, "plans.list");
+        assert_eq!(
+            labels(&p.menu("plans")),
+            [format!("# {}", copy::PLANNING_READING.text)]
+        );
+        assert!(p.menu("other").is_empty());
+        let out = answer(&mut p, 1, list_fixture());
+        assert!(out.redraw);
+        assert_eq!(
+            labels(&p.menu("plans")),
+            [
+                "plan/20261028_04_PLUGINS_PLAN = Built-in plugins,\u{2026}\u{2002}In implementation"
+                    .to_string(),
+                "plan/20261024_02_SETTINGS_SCREEN_PLAN = The settings scre\u{2026}\u{2002}In implementation"
+                    .to_string(),
+                "---".to_string(),
+                format!("all = {}", copy::PLANNING_ALL_PLANS.text),
+            ]
+        );
+        // The modal is not opened by it.
+        assert_eq!(texts(&p, &ViewKind::Modal), [copy::PLANNING_READING.text]);
+    }
+
+    #[test]
+    fn the_popup_holds_ten_and_says_why_when_it_cannot_read() {
+        let plans: Vec<Value> = (1..=12)
+            .map(|n| {
+                json!({"base": format!("20261028_{n:02}_P{n}_PLAN"), "title": format!("Plan {n}"),
+                       "status": "Draft"})
+            })
+            .collect();
+        let mut p = Planning::new();
+        let mut out = PluginOut::new(1);
+        p.menu_opened("plans", &mut out);
+        answer(&mut p, 1, json!({"schema": 1, "plans": plans}));
+        let items = p.menu("plans");
+        assert_eq!(items.len(), MENU_PLANS + 2);
+        assert_eq!(items[0].id.as_str(), "plan/20261028_12_P12_PLAN");
+        assert_eq!(items[0].label, "Plan 12\u{2002}Draft");
+        assert_eq!(items[9].id.as_str(), "plan/20261028_03_P3_PLAN");
+        // An empty list, then an error.
+        let mut out = PluginOut::new(2);
+        p.menu_opened("plans", &mut out);
+        assert_eq!(p.menu("plans").len(), 1, "reading again");
+        answer(&mut p, 2, json!({"schema": 1, "plans": []}));
+        assert_eq!(
+            labels(&p.menu("plans"))[0],
+            format!("# {}", copy::PLANNING_MENU_NONE.text)
+        );
+        let mut out = PluginOut::new(3);
+        p.menu_opened("plans", &mut out);
+        let mut out = PluginOut::new(4);
+        p.message(
+            PluginMessage::Result {
+                id: 3,
+                result: Err(ErrorObject::new(-32110, "No plans in docs/design")),
+            },
+            &mut out,
+        );
+        let l = labels(&p.menu("plans"));
+        assert_eq!(l[0], "# No plans in docs/design");
+        assert_eq!(
+            l.last().unwrap(),
+            &format!("all = {}", copy::PLANNING_ALL_PLANS.text)
+        );
+    }
+
+    #[test]
+    fn all_plans_opens_the_modal_and_a_plan_opens_it_on_that_plan() {
+        let mut p = Planning::new();
+        let mut out = PluginOut::new(1);
+        p.menu_opened("plans", &mut out);
+        answer(&mut p, 1, list_fixture());
+        // All plans…: today's modal, read again.
+        let mut out = PluginOut::new(2);
+        p.menu_chosen("plans", MENU_ALL, &mut out);
+        assert_eq!(out.opens, [ViewKind::Modal]);
+        assert_eq!(out.calls[0].method, "plans.list");
+        p.close(&ViewKind::Modal);
+        // A plan: the modal on it.
+        let mut out = PluginOut::new(3);
+        p.menu_chosen("plans", "plan/20261028_04_PLUGINS_PLAN", &mut out);
+        assert_eq!(out.opens, [ViewKind::Modal]);
+        assert_eq!(out.calls[0].method, "plans.show");
+        assert_eq!(
+            out.calls[0].params,
+            json!({"name": "20261028_04_PLUGINS_PLAN"})
+        );
+        answer(&mut p, 3, show_fixture());
+        assert!(matches!(p.page(), Page::Plan(_)));
+        // ‹ lists what the popup read, without a call.
+        p.laid.set((1000.0, 2.0));
+        let mut out = PluginOut::new(4);
+        p.tap(&ViewKind::Modal, 10.0, 10.0, &mut out);
+        assert!(out.calls.is_empty());
+        assert!(matches!(p.page(), Page::List(rows) if rows.len() == 2));
     }
 }

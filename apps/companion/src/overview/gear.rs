@@ -37,6 +37,12 @@ impl Gear {
     /// Draws it at about a third of its target: the teeth, the wheel, the
     /// hole. The target stays 44 pt.
     pub fn draw(&self, list: &mut DrawList) {
+        self.draw_in(list, theme().muted, theme().bg);
+    }
+
+    /// [`Gear::draw`] in `color`, its hole in `under` (what it is drawn
+    /// on): the title bar's gear is in the title's text colour.
+    pub fn draw_in(&self, list: &mut DrawList, color: [f32; 4], under: [f32; 4]) {
         let [cx, cy] = self.rect.center();
         let r = self.rect.w * 0.16;
         let tooth = r * 0.5;
@@ -46,7 +52,7 @@ impl Gear {
             fill(
                 list,
                 Rect::new(tx - tooth * 0.5, ty - tooth * 0.5, tooth, tooth),
-                theme().muted,
+                color,
                 tooth * 0.3,
             );
         }
@@ -54,14 +60,14 @@ impl Gear {
         fill(
             list,
             Rect::new(cx - wheel, cy - wheel, 2.0 * wheel, 2.0 * wheel),
-            theme().muted,
+            color,
             wheel,
         );
         let hole = r * 0.42;
         fill(
             list,
             Rect::new(cx - hole, cy - hole, 2.0 * hole, 2.0 * hole),
-            theme().bg,
+            under,
             hole,
         );
     }

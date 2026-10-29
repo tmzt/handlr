@@ -21,8 +21,10 @@
 //! The ≡ button ([`Menu`]) at the left of the title opens the session
 //! drawer (plan 20261028_03, 3.10; the 18:48 EDT amendment, item 1).
 //!
-//! The gear ([`Gear`]) at the right of the title opens the settings
-//! (plan 20261024_02). What they turn off is off here too (decision 4):
+//! The title-bar icons at the right of the title, the gear ([`Gear`],
+//! which opens the settings, plan 20261024_02) among them, then the ⋮,
+//! are placed and drawn by the app ([`crate::titlebar`]) from
+//! [`Overview::kebab`]. What the settings turn off is off here too (decision 4):
 //! play without sound, record without the microphone or the general agent,
 //! and the message card being said without the microphone are drawn dim
 //! and take no taps, and without the general agent Gemini's card and its
@@ -65,8 +67,6 @@ pub enum OverviewHit {
     Bottom(AgentHit),
     /// A tap on no control.
     Tap,
-    /// The gear: open the settings.
-    Settings,
     /// The ≡ button: open the drawer.
     Menu,
     /// A pinned plugin card (plan 20261028_04, decision 3.7): its index,
@@ -94,8 +94,6 @@ enum Target {
     Grid,
     /// A prompt card, its bars or its overlay ([`Prompts::touch`]).
     Prompt,
-    /// The gear.
-    Gear,
     /// The ≡ button.
     Menu,
     /// A control, or nothing.
@@ -135,7 +133,8 @@ pub struct Overview {
     play_live: bool,
     headings: Vec<Heading>,
     divider_y: Option<f32>,
-    gear: Gear,
+    /// The ⋮, at the title's right; the title icons are left of it.
+    kebab: crate::menu::Kebab,
     menu: Menu,
     /// The confirmation card as placed.
     panels: Vec<Flow>,
@@ -180,7 +179,7 @@ impl Overview {
             play_live: false,
             headings: Vec::new(),
             divider_y: None,
-            gear: Gear::default(),
+            kebab: crate::menu::Kebab::default(),
             menu: Menu::default(),
             panels: Vec::new(),
             buttons: Vec::new(),
@@ -319,19 +318,16 @@ impl Overview {
         self.dirty = true;
     }
 
-    pub fn gear(&self) -> Gear {
-        self.gear
-    }
-
     /// The ≡ button.
     pub fn menu(&self) -> Menu {
         self.menu
     }
 
-    /// The ⋮, left of the gear (plan 20261028_04, decision 3.6, item 1).
+    /// The ⋮, at the title's right, always last (plan 20261028_04,
+    /// decision 3.6, item 1, and its 22:03 EDT amendment); the title
+    /// icons, Settings' gear among them, are placed left of it.
     pub fn kebab(&self) -> crate::menu::Kebab {
-        let g = self.gear.rect;
-        crate::menu::Kebab::place(g.x, g.y, g.h, self.scale())
+        self.kebab
     }
 
     /// The pinned plugin cards' heights, in order, at the end of the grid.
@@ -393,7 +389,7 @@ impl Overview {
         let pad = PAD * s;
         let mut headings = Vec::new();
         let mut y = l.top + 24.0 * s;
-        self.gear = Gear::place(l.w, pad, y, TITLE_PT * s * 1.35, s);
+        self.kebab = crate::menu::Kebab::place(l.w - pad, y, TITLE_PT * s * 1.35, s);
         // The ≡ at the left, its bars where the title began; the title
         // after it.
         self.menu = Menu::place(pad * 0.5, y, TITLE_PT * s * 1.35, s);
@@ -519,8 +515,6 @@ impl Overview {
             self.touch_at = now;
             let target = if self.control_at(x, y).is_some() {
                 Target::Other
-            } else if self.gear.contains(x, y) && !self.prompts.overlay().is_open() {
-                Target::Gear
             } else if self.menu.contains(x, y) && !self.prompts.overlay().is_open() {
                 Target::Menu
             } else if self.prompts.claims(x, y) {
@@ -557,7 +551,7 @@ impl Overview {
         }
         let touched = match target {
             Target::Grid => self.grid.touch(id, phase, x, y, now),
-            Target::Prompt | Target::Gear | Target::Menu | Target::Other => match phase {
+            Target::Prompt | Target::Menu | Target::Other => match phase {
                 TouchPhase::Ended => Touched::Tap,
                 _ => Touched::Nothing,
             },
@@ -581,7 +575,6 @@ impl Overview {
                         .pane_at(x, y)
                         .map(|p| OverviewHit::Agent(p.to_string())),
                 },
-                Target::Gear => self.gear.contains(x, y).then_some(OverviewHit::Settings),
                 Target::Menu => self.menu.contains(x, y).then_some(OverviewHit::Menu),
                 Target::Prompt => None,
                 Target::Other => match self.control_at(x, y) {
@@ -642,7 +635,6 @@ impl Overview {
             };
             ctx.draw_text(list, &h.text, [x, h.y], px, h.color);
         }
-        self.gear.draw(list);
         self.menu.draw(list, s, theme().muted);
         self.grid.draw(list, ctx, self.shader_panels);
         self.prompts.draw_pinned(list, ctx);
@@ -1446,18 +1438,16 @@ mod tests {
     }
 
     #[test]
-    fn the_gear_is_at_the_right_of_the_title_and_opens_the_settings() {
+    fn the_kebab_is_at_the_right_of_the_title_and_not_the_overviews_to_tap() {
         let mut o = overview(2);
-        let g = o.gear().rect;
+        let k = o.kebab().rect;
         let title = &o.headings[0];
         assert_eq!(title.text, "flankr");
-        assert!((g.x + g.w - (PHONE.w - PAD * 2.0)).abs() < 0.01);
-        assert_eq!(g.w, Gear::SIZE * 2.0);
-        assert!(g.y <= title.y + title.px && g.y + g.h >= title.y);
-        assert_eq!(
-            tap(&mut o, g.x + g.w * 0.5, g.y + g.h * 0.5),
-            Some(OverviewHit::Settings)
-        );
+        assert!((k.x + k.w - (PHONE.w - PAD * 2.0)).abs() < 0.01);
+        assert_eq!(k.w, crate::menu::Kebab::SIZE * PHONE.scale);
+        assert!(k.y <= title.y + title.px && k.y + k.h >= title.y);
+        // The app takes the title bar's taps before the overview.
+        assert_eq!(tap(&mut o, k.x + k.w * 0.5, k.y + k.h * 0.5), None);
     }
 
     #[test]
@@ -1586,15 +1576,6 @@ mod tests {
         o.draw(&mut list, &ctx, None);
         assert!(o.rect_of(AgentHit::GeneralAgent).is_some());
         assert!(gemini(&o).h > 0.0);
-    }
-
-    #[test]
-    fn the_kebab_sits_left_of_the_gear_on_its_line() {
-        let o = overview(1);
-        let (k, g) = (o.kebab().rect, o.gear().rect);
-        assert_eq!(k.x + k.w, g.x);
-        assert!((k.center()[1] - g.center()[1]).abs() < 0.01);
-        assert_eq!(k.w, crate::menu::Kebab::SIZE * PHONE.scale);
     }
 
     #[test]

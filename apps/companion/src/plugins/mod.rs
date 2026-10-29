@@ -22,7 +22,7 @@ pub mod card;
 pub mod modal;
 pub mod planning;
 
-use libcontrols::{DrawContext, Rect};
+use libcontrols::{DrawContext, PopupItem, PopupItemKind, Rect};
 use libflankr_proto::ErrorObject;
 use libflankr_proto::companion::{PluginInfo, PluginNotify, PluginResult};
 use libmsdf::drawlist::DrawList;
@@ -141,6 +141,19 @@ pub trait DevicePlugin {
     fn tap(&mut self, view: &ViewKind, x: f32, y: f32, out: &mut PluginOut);
     /// Back, the modal's close, a card unpinned, or the plugin turned off.
     fn close(&mut self, view: &ViewKind);
+    /// The title icon of `item`, an item with `opens: "menu"`, was tapped
+    /// (the plan's 22:03 EDT amendment, item 4): its popup menu opens with
+    /// [`DevicePlugin::menu`]'s items, and it may send calls now.
+    fn menu_opened(&mut self, _item: &str, _out: &mut PluginOut) {}
+    /// The items of `item`'s popup menu, with ids of the half's own; asked
+    /// on opening and again after each answer while it is open. None: the
+    /// app opens the item as a modal instead ([`DevicePlugin::action`]).
+    fn menu(&self, _item: &str) -> Vec<PopupItem> {
+        Vec::new()
+    }
+    /// The item `id` of `item`'s popup menu was chosen; the menu has
+    /// closed.
+    fn menu_chosen(&mut self, _item: &str, _id: &str, _out: &mut PluginOut) {}
 }
 
 /// Whether the daemon's plugin `version` is in a device half's `range`
@@ -216,7 +229,8 @@ impl Screen {
     }
 }
 
-/// A plugin's menu item, for the ⋮ menu.
+/// A plugin's menu item, for the ⋮ menu, or, with an `icon`, for the
+/// title bar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuEntry {
     pub ns: String,
@@ -224,6 +238,21 @@ pub struct MenuEntry {
     pub name: String,
     pub item: String,
     pub label: String,
+    /// `"modal"`, `"card"`, `"menu"`, or a value this app does not know
+    /// (opened as `"modal"`).
+    pub opens: String,
+    /// The app's icon name for a title icon.
+    pub icon: Option<String>,
+}
+
+/// The prefix of a plugin popup menu's item ids: `app/popup/<ns>/<item>/`
+/// and the half's own id ([`popup_id`]).
+pub const POPUP: &str = "app/popup/";
+
+/// The id a plugin popup's item `id` of `ns`'s `item` is given in the
+/// shared menu: a plugin's ns and item ids hold no `/`.
+pub fn popup_id(ns: &str, item: &str, id: &str) -> String {
+    format!("{POPUP}{ns}/{item}/{id}")
 }
 
 /// A call for the app to send, with its plugin's `ns`.
@@ -308,8 +337,35 @@ impl Plugins {
         self.dirty = true;
     }
 
-    /// The active plugins' items for `screen`, in the daemon's order.
+    /// The active plugins' ⋮ items for `screen` (those without an icon),
+    /// in the daemon's order.
     pub fn menu(&self, screen: Screen) -> Vec<MenuEntry> {
+        self.entries(screen)
+            .into_iter()
+            .filter(|e| e.icon.is_none())
+            .collect()
+    }
+
+    /// The active plugins' title icons for `screen` (items with an icon),
+    /// in the daemon's (the registry's) order.
+    pub fn icons(&self, screen: Screen) -> Vec<MenuEntry> {
+        self.entries(screen)
+            .into_iter()
+            .filter(|e| e.icon.is_some())
+            .collect()
+    }
+
+    /// What `ns`'s `item` opens, while the plugin is active.
+    pub fn opens(&self, ns: &str, item: &str) -> Option<&str> {
+        if !self.active(ns) {
+            return None;
+        }
+        let info = self.infos.iter().find(|i| i.ns == ns)?;
+        let m = info.menu.iter().find(|m| m.id == item)?;
+        Some(m.opens.as_str())
+    }
+
+    fn entries(&self, screen: Screen) -> Vec<MenuEntry> {
         self.infos
             .iter()
             .filter(|i| self.active(&i.ns))
@@ -322,6 +378,8 @@ impl Plugins {
                         name: i.name.clone(),
                         item: m.id.clone(),
                         label: m.label.clone(),
+                        opens: m.opens.clone(),
+                        icon: m.icon.clone(),
                     })
             })
             .collect()
@@ -376,9 +434,60 @@ impl Plugins {
         out.calls.into_iter().map(|c| (ns.to_string(), c)).collect()
     }
 
-    /// A menu item of `ns` was chosen.
+    /// A menu item of `ns` was chosen. An item whose `opens` this app
+    /// does not know opens as a modal (the plan's 22:03 EDT amendment,
+    /// item 4).
     pub fn action(&mut self, ns: &str, item: &str) -> Vec<Outgoing> {
-        self.with_half(ns, |h, out| h.action(item, out))
+        let unknown = !matches!(self.opens(ns, item), None | Some("modal" | "card" | "menu"));
+        self.with_half(ns, |h, out| {
+            h.action(item, out);
+            if unknown && !out.opens.contains(&ViewKind::Modal) {
+                out.open(ViewKind::Modal);
+            }
+        })
+    }
+
+    /// `ns`'s `item`, an `opens: "menu"` title icon, was tapped: the
+    /// calls its half sends and the popup's items, with ids from
+    /// [`popup_id`]. No items (a half that has no menu for it): it is
+    /// opened as a modal instead, and the items are empty.
+    pub fn open_menu(&mut self, ns: &str, item: &str) -> (Vec<Outgoing>, Vec<PopupItem>) {
+        if !self.active(ns) {
+            return (Vec::new(), Vec::new());
+        }
+        let calls = self.with_half(ns, |h, out| h.menu_opened(item, out));
+        let items = self.menu_items(ns, item);
+        if items.is_empty() {
+            let mut calls = calls;
+            calls.extend(self.action(ns, item));
+            return (calls, Vec::new());
+        }
+        (calls, items)
+    }
+
+    /// `ns`'s popup items for `item` as they are now, ids prefixed
+    /// ([`popup_id`]); none while it is not active.
+    pub fn menu_items(&self, ns: &str, item: &str) -> Vec<PopupItem> {
+        if !self.active(ns) {
+            return Vec::new();
+        }
+        let Some(h) = self.half(ns) else {
+            return Vec::new();
+        };
+        h.menu(item)
+            .into_iter()
+            .map(|mut i| {
+                if i.kind == PopupItemKind::Action {
+                    i.id = popup_id(ns, item, i.id.as_str()).into();
+                }
+                i
+            })
+            .collect()
+    }
+
+    /// The popup item `id` (the half's own) of `ns`'s `item` was chosen.
+    pub fn menu_chosen(&mut self, ns: &str, item: &str, id: &str) -> Vec<Outgoing> {
+        self.with_half(ns, |h, out| h.menu_chosen(item, id, out))
     }
 
     /// A `plugin.result`, for its namespace's half only.
@@ -525,6 +634,7 @@ pub(crate) mod tests {
                 label: "Open it".into(),
                 opens: "modal".into(),
                 screens: screens.into(),
+                icon: None,
             }],
             reason: None,
         }
@@ -727,5 +837,130 @@ pub(crate) mod tests {
         assert_eq!(p.cards().len(), MAX_CARDS);
         p.unpin(0);
         assert_eq!(p.cards().len(), MAX_CARDS - 1);
+    }
+
+    fn planning_info(opens: &str, icon: Option<&str>) -> PluginInfo {
+        PluginInfo {
+            ns: planning::NS.into(),
+            name: "Planning".into(),
+            description: String::new(),
+            version: "0.1.1".into(),
+            enabled: true,
+            menu: vec![PluginMenuItem {
+                id: "plans".into(),
+                label: "Plans in this project".into(),
+                opens: opens.into(),
+                screens: "both".into(),
+                icon: icon.map(str::to_string),
+            }],
+            reason: None,
+        }
+    }
+
+    fn popup_ids(items: &[PopupItem]) -> Vec<String> {
+        items
+            .iter()
+            .map(|i| match i.kind {
+                PopupItemKind::Heading => format!("# {}", i.label),
+                PopupItemKind::Separator => "---".into(),
+                _ => i.id.as_str().to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_item_with_an_icon_is_a_title_icon_not_a_menu_item() {
+        let mut p = Plugins::builtin();
+        p.set_infos(vec![planning_info("menu", Some("plans"))]);
+        assert!(p.menu(Screen::Overview).is_empty());
+        let icons = p.icons(Screen::Agent);
+        assert_eq!(icons.len(), 1);
+        assert_eq!(icons[0].icon.as_deref(), Some("plans"));
+        assert_eq!(icons[0].opens, "menu");
+        assert!(p.icons(Screen::Settings).is_empty());
+        assert_eq!(p.opens(planning::NS, "plans"), Some("menu"));
+        // From an older daemon (0.1.0): a ⋮ item, as before.
+        p.set_infos(vec![planning_info("modal", None)]);
+        assert!(p.icons(Screen::Overview).is_empty());
+        assert_eq!(p.menu(Screen::Overview).len(), 1);
+    }
+
+    #[test]
+    fn opens_menu_gives_the_popup_before_and_after_the_answer() {
+        let mut p = Plugins::builtin();
+        p.set_infos(vec![planning_info("menu", Some("plans"))]);
+        let (calls, items) = p.open_menu(planning::NS, "plans");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, planning::NS);
+        assert_eq!(calls[0].1.method, "plans.list");
+        assert_eq!(
+            popup_ids(&items),
+            [format!(
+                "# {}",
+                crate::settings::copy::PLANNING_READING.text
+            )]
+        );
+        assert!(p.modal().is_none(), "no modal for a popup");
+        p.result(PluginResult {
+            ns: planning::NS.into(),
+            id: calls[0].1.id.unwrap(),
+            result: Some(json!({"schema": 1, "plans": [
+                {"base": "20261028_04_PLUGINS_PLAN", "title": "Plugins", "status": "In implementation"}
+            ]})),
+            error: None,
+        });
+        let items = p.menu_items(planning::NS, "plans");
+        let plan = popup_id(planning::NS, "plans", "plan/20261028_04_PLUGINS_PLAN");
+        let all = popup_id(planning::NS, "plans", planning::MENU_ALL);
+        assert_eq!(popup_ids(&items), [plan.clone(), "---".into(), all.clone()]);
+        assert_eq!(items[0].label, "Plugins\u{2002}In implementation");
+        // Its ids parse back to the plugin's own.
+        let Some(crate::menu::Choice::Popup { ns, item, id }) = crate::menu::Choice::parse(&plan)
+        else {
+            panic!("not a popup id: {plan}");
+        };
+        assert_eq!((ns.as_str(), item.as_str()), (planning::NS, "plans"));
+        // Choosing the plan opens the modal on it.
+        let calls = p.menu_chosen(&ns, &item, &id);
+        assert_eq!(p.modal().map(|(ns, _)| ns), Some(planning::NS));
+        assert_eq!(calls[0].1.method, "plans.show");
+        assert_eq!(
+            calls[0].1.params,
+            json!({"name": "20261028_04_PLUGINS_PLAN"})
+        );
+        // All plans…: the modal's list.
+        p.close_modal();
+        let calls = p.menu_chosen(planning::NS, "plans", planning::MENU_ALL);
+        assert!(p.modal().is_some());
+        assert_eq!(calls[0].1.method, "plans.list");
+        // Turned off: no items.
+        p.set_infos(vec![PluginInfo {
+            enabled: false,
+            ..planning_info("menu", Some("plans"))
+        }]);
+        assert!(p.menu_items(planning::NS, "plans").is_empty());
+    }
+
+    #[test]
+    fn a_half_with_no_menu_and_an_unknown_opens_open_as_a_modal() {
+        // A's half has no popup: `opens: "menu"` opens its modal.
+        let (mut p, a, _) = two();
+        let mut i = info(A, "0.1.0", true, "both");
+        i.menu[0].opens = "menu".into();
+        i.menu[0].icon = Some("x".into());
+        p.set_infos(vec![i]);
+        let (calls, items) = p.open_menu(A, "open");
+        assert!(items.is_empty());
+        assert_eq!(calls.len(), 1);
+        assert_eq!(p.modal().map(|(ns, _)| ns), Some(A));
+        assert!(a.borrow().contains(&"action open".to_string()));
+        // An `opens` this app does not know, on a half that opens
+        // nothing for it: a modal all the same.
+        let mut p = Plugins::builtin();
+        let mut i = planning_info("sheet", Some("plans"));
+        i.menu[0].id = "other".into();
+        p.set_infos(vec![i]);
+        p.action(planning::NS, "other");
+        assert_eq!(p.modal().map(|(ns, _)| ns), Some(planning::NS));
     }
 }

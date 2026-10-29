@@ -11,11 +11,14 @@
 //! The menu holds, top to bottom ([`items`]): the enabled plugins' items
 //! for the screen, under each plugin's name as a heading when more than
 //! one plugin has items; a separator; the app's own: **Read aloud** (the
-//! agent view only, checked while on: the play button's toggle) and
-//! **Settings** (the overview and the agent view). Ids are `<ns>/<item>`
-//! for a plugin's and `app/read_aloud`, `app/settings` for the app's
-//! ([`Choice`]). The same menu offers **Unpin** for a plugin card held
-//! for 2 s on the overview ([`UNPIN`]).
+//! agent view only, checked while on: the play button's toggle); then,
+//! after a separator, the title icons that did not fit in the title bar
+//! (the plan's 22:03 EDT amendment, item 3): plugin icons under their
+//! labels, then **Settings** last ([`crate::titlebar`]). Ids are
+//! `<ns>/<item>` for a plugin's and `app/read_aloud`, `app/settings` for
+//! the app's ([`Choice`]). The same menu offers **Unpin** for a plugin
+//! card held for 2 s on the overview ([`UNPIN`]), and is a plugin's popup
+//! menu for an `opens: "menu"` title icon ([`crate::plugins::POPUP`]).
 
 use std::sync::Arc;
 
@@ -27,9 +30,10 @@ use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
 
 use crate::agent::fill;
-use crate::plugins::{MenuEntry, Screen};
+use crate::plugins::{MenuEntry, POPUP, Screen};
 use crate::settings::copy;
 use crate::theme::theme;
+use crate::titlebar::{Icon, Source};
 use crate::ui::Layout;
 
 /// The app's own items' ids.
@@ -52,6 +56,12 @@ pub enum Choice {
     },
     /// Unpin the overview's plugin card at this index.
     Unpin(usize),
+    /// The item `id` of `ns`'s popup menu for its `item`.
+    Popup {
+        ns: String,
+        item: String,
+        id: String,
+    },
 }
 
 impl Choice {
@@ -63,6 +73,17 @@ impl Choice {
             _ => {
                 if let Some(i) = id.strip_prefix(UNPIN) {
                     return i.parse().ok().map(Choice::Unpin);
+                }
+                if let Some(rest) = id.strip_prefix(POPUP) {
+                    let (ns, rest) = rest.split_once('/')?;
+                    let (item, id) = rest.split_once('/')?;
+                    return (!ns.is_empty() && !item.is_empty() && !id.is_empty()).then(|| {
+                        Choice::Popup {
+                            ns: ns.to_string(),
+                            item: item.to_string(),
+                            id: id.to_string(),
+                        }
+                    });
                 }
                 let (ns, item) = id.split_once('/')?;
                 (ns != "app" && !ns.is_empty() && !item.is_empty()).then(|| Choice::Plugin {
@@ -76,8 +97,14 @@ impl Choice {
 
 /// The items of the ⋮ menu on `screen`: `plugins`' entries for it, then
 /// the app's own, with Read aloud checked when `read_aloud` (decision
-/// 3.6, item 2).
-pub fn items(screen: Screen, plugins: &[MenuEntry], read_aloud: bool) -> Vec<PopupItem> {
+/// 3.6, item 2), then the title icons `moved` into it, Settings last (the
+/// plan's 22:03 EDT amendment, item 3). Settings is here only when moved.
+pub fn items(
+    screen: Screen,
+    plugins: &[MenuEntry],
+    read_aloud: bool,
+    moved: &[Icon],
+) -> Vec<PopupItem> {
     let mut out = Vec::new();
     let mut groups: Vec<&str> = Vec::new();
     for p in plugins {
@@ -105,13 +132,22 @@ pub fn items(screen: Screen, plugins: &[MenuEntry], read_aloud: bool) -> Vec<Pop
                 .with_checked(Some(read_aloud)),
         );
     }
-    if matches!(screen, Screen::Overview | Screen::Agent) {
-        own.push(PopupItem::action(SETTINGS, copy::MENU_SETTINGS.text));
+    let moved: Vec<PopupItem> = moved
+        .iter()
+        .map(|icon| match &icon.source {
+            Source::Settings => PopupItem::action(SETTINGS, copy::MENU_SETTINGS.text),
+            _ => PopupItem::action(icon.id(), icon.label.clone()),
+        })
+        .collect();
+    for group in [own, moved] {
+        if group.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(PopupItem::separator());
+        }
+        out.extend(group);
     }
-    if !out.is_empty() && !own.is_empty() {
-        out.push(PopupItem::separator());
-    }
-    out.extend(own);
     out
 }
 
@@ -270,6 +306,33 @@ impl Menu {
         self.dirty = true;
     }
 
+    /// While open, its items replaced by `items` (a plugin's popup after
+    /// an answer); unchanged items are left as they are.
+    pub fn refresh(&mut self, items: Vec<PopupItem>) {
+        if self.state.is_open() && !items.is_empty() && self.state.items() != items {
+            self.state.open(self.state.anchor(), items);
+            self.dirty = true;
+        }
+    }
+
+    /// The items shown, while open.
+    pub fn items(&self) -> Vec<PopupItem> {
+        if self.state.is_open() {
+            self.state.items()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Closes it, if open.
+    pub fn close(&mut self) {
+        if self.state.is_open() {
+            self.state.close();
+            let _ = self.state.take_events();
+            self.dirty = true;
+        }
+    }
+
     pub fn is_open(&self) -> bool {
         self.state.is_open()
     }
@@ -372,7 +435,24 @@ mod tests {
             name: name.into(),
             item: item.into(),
             label: format!("{name} {item}"),
+            opens: "modal".into(),
+            icon: None,
         }
+    }
+
+    fn icon(ns: &str, item: &str) -> MenuEntry {
+        MenuEntry {
+            icon: Some(item.into()),
+            ..entry(ns, "Icon", item)
+        }
+    }
+
+    /// What moved into the ⋮ menu with `n` plugin icons on `screen`.
+    fn moved(screen: Screen, n: usize) -> Vec<Icon> {
+        let icons: Vec<MenuEntry> = (0..n)
+            .map(|i| icon(&format!("dev.flankr.plugins.i{i}"), "go"))
+            .collect();
+        crate::titlebar::overflow(crate::titlebar::registered(screen, false, &icons)).1
     }
 
     fn ids(items: &[PopupItem]) -> Vec<String> {
@@ -389,26 +469,29 @@ mod tests {
     #[test]
     fn the_items_per_screen_and_plugin_state() {
         let planning = entry("dev.flankr.plugins.planning", "Planning", "plans");
-        // No plugin items: the app's own.
-        assert_eq!(ids(&items(Screen::Overview, &[], false)), [SETTINGS]);
-        assert_eq!(
-            ids(&items(Screen::Agent, &[], true)),
-            [READ_ALOUD, SETTINGS]
-        );
-        assert!(items(Screen::Settings, &[], false).is_empty());
+        // No plugin items: the app's own; Settings is in the title bar.
+        assert!(items(Screen::Overview, &[], false, &[]).is_empty());
+        assert_eq!(ids(&items(Screen::Agent, &[], true, &[])), [READ_ALOUD]);
+        assert!(items(Screen::Settings, &[], false, &[]).is_empty());
         // One plugin: no heading.
         assert_eq!(
             ids(&items(
                 Screen::Overview,
                 std::slice::from_ref(&planning),
-                false
+                false,
+                &[]
             )),
-            ["dev.flankr.plugins.planning/plans", "---", SETTINGS]
+            ["dev.flankr.plugins.planning/plans"]
         );
         // Two: each under its name.
         let other = entry("dev.flankr.plugins.test", "Test", "go");
         assert_eq!(
-            ids(&items(Screen::Agent, &[planning.clone(), other], false)),
+            ids(&items(
+                Screen::Agent,
+                &[planning.clone(), other],
+                false,
+                &[]
+            )),
             [
                 "# Planning",
                 "dev.flankr.plugins.planning/plans",
@@ -416,13 +499,51 @@ mod tests {
                 "dev.flankr.plugins.test/go",
                 "---",
                 READ_ALOUD,
-                SETTINGS
             ]
         );
         // Read aloud's check follows the play button.
-        let on = items(Screen::Agent, &[], true);
+        let on = items(Screen::Agent, &[], true, &[]);
         assert_eq!(on[0].checked, Some(true));
-        assert_eq!(items(Screen::Agent, &[], false)[0].checked, Some(false));
+        assert_eq!(
+            items(Screen::Agent, &[], false, &[])[0].checked,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn settings_is_in_the_menu_only_when_moved_there() {
+        // Up to three plugin icons and Settings: all in the bar.
+        for n in 0..=3 {
+            assert!(moved(Screen::Overview, n).is_empty());
+            let i = items(Screen::Agent, &[], false, &moved(Screen::Agent, n));
+            assert!(!ids(&i).contains(&SETTINGS.to_string()), "{n}");
+        }
+        // Five registered: Settings last, after a separator.
+        let m = moved(Screen::Agent, 4);
+        assert_eq!(
+            ids(&items(Screen::Agent, &[], false, &m)),
+            [READ_ALOUD, "---", SETTINGS]
+        );
+        assert_eq!(
+            ids(&items(Screen::Overview, &[], false, &m)),
+            [SETTINGS],
+            "nothing else: no separator"
+        );
+        // Six: the last plugin icon above it, under its label.
+        let m = moved(Screen::Overview, 5);
+        let planning = entry("dev.flankr.plugins.planning", "Planning", "plans");
+        let i = items(Screen::Overview, &[planning], false, &m);
+        assert_eq!(
+            ids(&i),
+            [
+                "dev.flankr.plugins.planning/plans",
+                "---",
+                "dev.flankr.plugins.i4/go",
+                SETTINGS
+            ]
+        );
+        assert_eq!(i[2].label, "Icon go");
+        assert_eq!(i[3].label, copy::MENU_SETTINGS.text);
     }
 
     #[test]
@@ -437,6 +558,15 @@ mod tests {
                 item: "plans".into()
             })
         );
+        assert_eq!(
+            Choice::parse("app/popup/dev.flankr.plugins.planning/plans/plan/20261028_04_X"),
+            Some(Choice::Popup {
+                ns: "dev.flankr.plugins.planning".into(),
+                item: "plans".into(),
+                id: "plan/20261028_04_X".into()
+            })
+        );
+        assert_eq!(Choice::parse("app/popup/ns/item"), None);
         assert_eq!(Choice::parse("app/other"), None);
         assert_eq!(Choice::parse("plans"), None);
     }
@@ -452,7 +582,10 @@ mod tests {
             bottom: 60.0,
         });
         let anchor = Rect::new(980.0, 100.0, 84.0, 84.0);
-        m.open(anchor, items(Screen::Overview, &[], false));
+        m.open(
+            anchor,
+            items(Screen::Overview, &[], false, &moved(Screen::Overview, 4)),
+        );
         assert!(m.is_open());
         // Drawn once, so it has a layout.
         let mut list = DrawList::new();
@@ -465,15 +598,36 @@ mod tests {
         assert_eq!(m.take_choice(), Some(Choice::Settings));
         assert!(!m.is_open());
         // Outside: dismissed, nothing chosen.
-        m.open(anchor, items(Screen::Overview, &[], false));
+        m.open(
+            anchor,
+            items(Screen::Overview, &[], false, &moved(Screen::Overview, 4)),
+        );
         m.touch(2, TouchPhase::Started, 10.0, 2000.0);
         m.touch(2, TouchPhase::Ended, 10.0, 2000.0);
         assert_eq!(m.take_choice(), None);
         assert!(!m.is_open());
         // Back closes it.
-        m.open(anchor, items(Screen::Overview, &[], false));
+        m.open(
+            anchor,
+            items(Screen::Overview, &[], false, &moved(Screen::Overview, 4)),
+        );
         assert!(m.back());
         assert!(!m.back());
+    }
+
+    #[test]
+    fn a_popup_is_refreshed_while_open_only() {
+        let mut m = Menu::new();
+        let anchor = Rect::new(900.0, 100.0, 84.0, 84.0);
+        m.open(anchor, vec![PopupItem::heading("Reading plans…")]);
+        let next = vec![PopupItem::action("a", "A"), PopupItem::action("b", "B")];
+        m.refresh(next.clone());
+        assert_eq!(m.items(), next);
+        m.close();
+        assert!(!m.is_open());
+        m.refresh(vec![PopupItem::action("c", "C")]);
+        assert!(!m.is_open());
+        assert!(m.items().is_empty());
     }
 
     #[test]

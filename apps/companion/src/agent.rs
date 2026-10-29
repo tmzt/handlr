@@ -2342,6 +2342,10 @@ pub struct AgentScreen {
     reply: Option<AgentCard>,
     /// herdr's focus, shown, when it is on another pane than the view's.
     terminal_on: Option<String>,
+    /// Where the title icons begin, from the left: the header's name and
+    /// status are cut short of it (plan 20261028_04, its 22:03 EDT
+    /// amendment). `None`: the ⋮'s left.
+    title_right: Option<f32>,
     /// A history page is on its way: "loading earlier…" at the top.
     loading_earlier: bool,
     /// A page reached the session's first line: "start of session".
@@ -2978,6 +2982,28 @@ impl AgentScreen {
 
     pub fn terminal_on(&self) -> Option<&str> {
         self.terminal_on.as_deref()
+    }
+
+    /// The left of the title icons, `x`: the header's text stops short of
+    /// it.
+    pub fn set_title_right(&mut self, x: f32) {
+        if self.title_right != Some(x) {
+            self.title_right = Some(x);
+            self.dirty = true;
+        }
+    }
+
+    /// `text` cut with … to fit the header from `x` at `px`, short of the
+    /// title icons.
+    fn header_text(&self, text: &str, x: f32, px: f32) -> String {
+        let right = self.title_right.unwrap_or_else(|| self.kebab().rect.x);
+        let max = columns((right - x).max(0.0), px);
+        if text.chars().count() <= max {
+            return text.to_string();
+        }
+        let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+        out.push('\u{2026}');
+        out
     }
 
     /// Whether earlier sections are to be paged in: the flow's top came
@@ -5047,10 +5073,12 @@ impl AgentScreen {
         menu.draw(list, s, theme().fg);
         draw_row(list, ctx, term, &back, [BACK_W * s + PAD * s, back_y]);
         let name_x = 2.0 * BACK_W * s;
-        ctx.draw_text(list, &self.name, [name_x, top], name_px, theme().fg);
+        let name = self.header_text(&self.name, name_x, name_px);
+        ctx.draw_text(list, &name, [name_x, top], name_px, theme().fg);
+        let status = self.header_text(&self.status, name_x, TOOL_PT * s);
         ctx.draw_text(
             list,
-            &self.status,
+            &status,
             [name_x, top + line_h(name_px)],
             TOOL_PT * s,
             theme().dim,
@@ -9608,5 +9636,22 @@ mod tests {
         assert!(k.x > back.x + back.w);
         assert!(k.x + k.w <= h.x + h.w);
         assert!(k.y >= h.y && k.y + k.h <= h.y + h.h + 0.5);
+    }
+
+    #[test]
+    fn the_headers_text_stops_short_of_the_title_icons() {
+        let mut a = screen(conversation(5), vec![], None);
+        let long = "x".repeat(200);
+        let px = 20.0;
+        let k = a.kebab().rect;
+        let x = 100.0;
+        // Short of the ⋮ until told where the icons begin.
+        assert_eq!(a.header_text("claude", x, px), "claude");
+        let cut = a.header_text(&long, x, px);
+        assert!(cut.ends_with('\u{2026}'));
+        assert_eq!(cut.chars().count(), columns(k.x - x, px));
+        a.set_title_right(k.x - 3.0 * k.w);
+        let shorter = a.header_text(&long, x, px);
+        assert_eq!(shorter.chars().count(), columns(k.x - 3.0 * k.w - x, px));
     }
 }

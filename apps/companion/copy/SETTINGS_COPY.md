@@ -675,3 +675,15 @@ The planning plugin's modal and card (decision 3.8, item 7).
 # [Copy] planning_unreadable
 
 - text: The plan could not be read.
+
+The title-bar icons (decision 3.6, with the plan's 2026-10-28 22:03 EDT
+amendment): the planning plugin's popup menu of plans. Settings, when
+it moves into the ⋮ menu, keeps menu_settings.
+
+# [Copy] planning_menu_none
+
+- text: No plans in docs/design
+
+# [Copy] planning_all_plans
+
+- text: All plans…
