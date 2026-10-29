@@ -842,3 +842,28 @@ without arming voice", agreed as proposed. This replaces decision 7's
    `CARD_HOLD` = 500 ms; a `Hold` is started with the time it fires at,
    `CARD_HOLD` for `AgentHit::GeneralAgent` and `AgentHit::Message`, `HOLD`
    for the others.
+
+## Amendment — 2026-10-29 15:09 EDT: a microphone beside the keyboard toggle on the text input cards
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "Add a
+microphone next to the keyboard on the text input cards", agreed as
+proposed. This adds to decision 8's row:
+
+1. **The mic:** on both text input cards (the message card and Gemini's),
+   in the row, immediately left of the keyboard toggle: a 44 × 44 pt
+   target, `AgentHit::PromptMic(PromptKind)`, the record button's mic
+   glyph in `theme().fg`, no background.
+2. **Tap:** hides the soft keyboard (as the toggle's hide does) and
+   switches the card to voice, listening. The text already typed stays in
+   the card; what is said is appended after it, and the card then sends
+   as a dictated card does. No hold.
+3. **Dim:** with the microphone setting off, drawn at `DISABLED_ALPHA`
+   as record is, and its tap does nothing.
+4. **Back to typing:** a tap on the text area or the keyboard toggle
+   switches the card back to typed, keeping the text, as now.
+5. **flankr-companion, additive:** `Input::ContinueByVoice`, on the
+   `#[non_exhaustive]` `Input`: while a typed prompt is open (message or
+   Gemini's), it becomes the same prompt in voice mode with its text kept
+   as its first part, and the gate is armed (`Event::Arm`); with the
+   microphone setting off, or with no typed prompt open, nothing changes.
+   The crate takes the next free patch number at its commit.
