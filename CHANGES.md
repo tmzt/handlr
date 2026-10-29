@@ -3086,3 +3086,46 @@ tag `flankr-companion-v0.5.0`, and the app's mechanical commit after it).
    18:48 EDT amendment's item 5); the app does not yet handle
    `Event::Background` or the switch's replay (a wildcard arm drops them
    until steps 6-8).
+
+## 2026-10-28 20:12 EDT — Plan 20261028_04 (plugins), steps 1-4's departures
+
+Small departures needed to make the plan work, none changing its
+interfaces' intent:
+
+1. Step 1: libflankr_proto also adds `PLUGIN_NS_MAX_BYTES` (128),
+   `PLUGIN_METHOD_MAX_BYTES` (64), `is_plugin_ns()` and
+   `is_plugin_method()`.
+2. Step 2: `PluginCtx` errors also use -32100 (project unavailable), -32102
+   (command failed) and -32103 (read refused) beside the plan's -32101; the
+   host passes `METHOD_NOT_FOUND` and `CANCELLED` through and sends other
+   codes outside -32199..-32100 as `INTERNAL_ERROR`.
+3. Step 2: the host reads `[llm.uses.planning] read` from the raw config,
+   so the rule holds with `[llm]` off.
+4. Step 2: a plugin's task starts only once its `plugin.call` answer is
+   queued, so no notification or result can arrive before it.
+5. Step 2: `PluginInfo.reason` is computed only for "Reading files is
+   off: …"; per-connection reasons such as no open project are not.
+6. Step 2: `plugin.set_enabled` follows a symlinked config to its target and
+   creates a missing one at 0600 with its folders; a config that does not
+   parse is not written.
+7. Step 2: `config.default.toml` leaves out the `source` line (tpt stays
+   undocumented until it is built) and keeps `# commands = false`.
+8. Step 2: `HerdrToolExecutor::current_folder` now calls
+   `project::check_local` and `project::agent_folder`; its messages and
+   their order are unchanged.
+9. Steps 2 and 3 are one commit (`08c56e6`): the built-in registry lists the
+   planning plugin, so neither compiles alone.
+10. Step 3: a file cut at 64 KiB always carries `error: "cut at 64 KiB"`, as
+    amendments may follow the cut; -32110 is returned when no plan file is
+    listed, since a missing folder and an empty one look the same; list
+    items carry `readme.row` and `show` carries `extra`, as in tpt; the
+    front-matter reader skips blank lines and lets plain scalars continue on
+    indented lines; a plugin method named like `plugin.call` is a plugin-local
+    name, not refused.
+11. Step 4 (libcontrols 0.10.3, plan 20261028_06): the agreed variant of 3.6
+    item 3 adds a one-time `Router::attach_popup_menu(id, menu)` before
+    `PopupMenuState::open`; its theme has `shadow` with `shadow_offset`, an
+    optional `heading_color`, and further size and colour fields
+    (`border_thickness`, `item_padding`, separator size, `text_color`,
+    `check_*`, `highlight`, `font_size`, `offset`, `margin`); and
+    `PopupMenuOptions::dismiss` chooses which dismissals apply.
