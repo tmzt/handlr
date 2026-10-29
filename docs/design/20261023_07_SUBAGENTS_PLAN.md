@@ -294,3 +294,17 @@ item 7's tests following this one.
    as a ring or ⊙, the menu's order and headings, the minutes shown past
    5 and not before, one filled radio on the session viewed, and
    choosing a subagent and main.
+
+## Amendment — 2026-10-28 22:03 EDT: the ⊙ is the agent menu, the first title icon
+
+The owner (2026-10-28): "if more than four title icons are registered
+Settings moves to extra menu. agent menu, plan menu (reuse todo icon for
+now), etc. extra menu is always last"; then "yes" to this wording. This
+replaces the 20:46 EDT amendment's item 1 on where the button sits ("just
+left of the ⋮"): the ⊙ is the **agent menu**, the first of the title
+icons of the plugins plan's 2026-10-28 22:03 EDT amendment
+(docs/design/20261028_04_PLUGINS_PLAN.md), registered by the app on the
+agent view while the pane has subagents, left of the plans icon, the
+other plugins' icons and Settings, with the ⋮ always last. It counts
+toward that amendment's four. The 20:51 EDT amendment's icon, radio marks
+and menu stand.
