@@ -255,6 +255,7 @@ impl PluginHost {
                             label: m.label.to_string(),
                             opens: m.opens.as_str().to_string(),
                             screens: m.screens.as_str().to_string(),
+                            icon: m.icon.map(str::to_string),
                         })
                         .collect(),
                     reason: (enabled && !e.read.is_empty() && state.read.is_empty())
@@ -732,6 +733,7 @@ pub(crate) mod tests {
         label: "Test",
         opens: Opens::Card,
         screens: Screens::Overview,
+        icon: None,
     }];
 
     #[async_trait::async_trait]
@@ -850,6 +852,31 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_planning_icon_and_opens_reach_plugin_info() {
+        let item = PluginMenuItem {
+            id: "plans".into(),
+            label: "Plans in this project".into(),
+            opens: "menu".into(),
+            screens: "both".into(),
+            icon: Some("plans".into()),
+        };
+        let app: AppConfig = toml::from_str("").unwrap();
+        let host = PluginHost::new(
+            &app,
+            HostOptions {
+                config_path: None,
+                plugins: Some(vec![Arc::new(crate::plugins::planning::Planning)]),
+                env: Some(CommandEnv::default()),
+                interval: None,
+            },
+        );
+        let infos = host.infos();
+        assert_eq!(infos[0].ns, "dev.flankr.plugins.planning");
+        assert_eq!(infos[0].version, "0.1.1");
+        assert_eq!(infos[0].menu, vec![item]);
+    }
+
+    #[test]
     fn every_plugin_is_listed_off_until_enabled() {
         let e = env("");
         let infos = e.host.infos();
@@ -859,6 +886,7 @@ pub(crate) mod tests {
         assert!(!infos[0].enabled);
         assert_eq!(infos[0].menu[0].opens, "card");
         assert_eq!(infos[0].menu[0].screens, "overview");
+        assert_eq!(infos[0].menu[0].icon, None);
         let e = env(&format!("{ON}[llm.uses.planning]\nread = [\"*.md\"]\n"));
         assert!(e.host.infos()[0].enabled);
         assert_eq!(e.host.infos()[0].reason, None);

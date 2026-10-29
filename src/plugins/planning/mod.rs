@@ -1,4 +1,4 @@
-//! The planning plugin's daemon half, `dev.flankr.plugins.planning@0.1.0`
+//! The planning plugin's daemon half, `dev.flankr.plugins.planning@0.1.1`
 //! (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.8).
 //!
 //! Read-only and off by default. `plans.list` lists the focused project's
@@ -32,8 +32,9 @@ const TPT_SOURCE: bool = false;
 const MENU: [MenuItem; 1] = [MenuItem {
     id: "plans",
     label: "Plans in this project",
-    opens: Opens::Modal,
+    opens: Opens::Menu,
     screens: Screens::Both,
+    icon: Some("plans"),
 }];
 
 const READ: [&str; 3] = ["README.md", "CHANGES.md", "docs/design/*.md"];
@@ -83,7 +84,7 @@ impl Plugin for Planning {
     }
 
     fn version(&self) -> PluginVersion {
-        PluginVersion::Semver("0.1.0")
+        PluginVersion::Semver("0.1.1")
     }
 
     fn menu(&self) -> &'static [MenuItem] {

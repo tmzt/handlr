@@ -218,11 +218,11 @@ async fn hello_lists_the_plugins_and_only_an_approver_switches_one_on() {
         .clone();
     assert_eq!(plugins.len(), 1, "{plugins:?}");
     assert_eq!(plugins[0]["ns"], PLANNING);
-    assert_eq!(plugins[0]["version"], "0.1.0");
+    assert_eq!(plugins[0]["version"], "0.1.1");
     assert_eq!(plugins[0]["enabled"], false);
     assert_eq!(
         plugins[0]["menu"],
-        json!([{"id": "plans", "label": "Plans in this project", "opens": "modal", "screens": "both"}])
+        json!([{"id": "plans", "label": "Plans in this project", "opens": "menu", "screens": "both", "icon": "plans"}])
     );
     let r = viewer
         .call(

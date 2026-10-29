@@ -657,3 +657,13 @@ icons). Strictly additive:
 - **Added:** `PluginMenuItem::opens` documents `"menu"` (a popup menu of the
   device half's items, anchored to the title icon); an app that does not
   know a value opens it as `"modal"`.
+
+## dev.flankr.plugins.planning 0.1.1 — 2026-10-28 (the commit tagged `dev.flankr.plugins.planning-v0.1.1`)
+
+Plan 20261028_04 (plugins), its 2026-10-28 22:03 EDT amendment, item 5.
+Additive:
+
+- **Changed (additive):** the menu item `plans` ("Plans in this project",
+  both screens) gains `icon: "plans"` (☑, a title-bar icon) and
+  `opens: "menu"` (a popup of the ten newest plans and All plans…); an app
+  without `"menu"` opens it as the modal, as in 0.1.0. Methods unchanged.

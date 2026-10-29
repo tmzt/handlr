@@ -89,6 +89,9 @@ impl PluginVersion {
 pub enum Opens {
     Modal,
     Card,
+    /// A popup menu anchored to the item's title icon, with items the
+    /// device half gives (plan 20261028_04, its 22:03 EDT amendment).
+    Menu,
 }
 
 impl Opens {
@@ -96,6 +99,7 @@ impl Opens {
         match self {
             Opens::Modal => "modal",
             Opens::Card => "card",
+            Opens::Menu => "menu",
         }
     }
 }
@@ -118,7 +122,8 @@ impl Screens {
     }
 }
 
-/// One action a plugin adds to the ⋮ menu.
+/// One action a plugin adds to the ⋮ menu, or, with an `icon`, to the
+/// title bar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuItem {
     /// Unique within the plugin, e.g. "plans".
@@ -127,6 +132,9 @@ pub struct MenuItem {
     pub label: &'static str,
     pub opens: Opens,
     pub screens: Screens,
+    /// One of the app's icon names, e.g. "plans" (☑): the item is then a
+    /// title-bar icon, not a ⋮ item.
+    pub icon: Option<&'static str>,
 }
 
 /// A plugin's error, sent as `plugin.result`'s `error`. Plugins use the

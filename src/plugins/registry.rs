@@ -45,6 +45,16 @@ pub fn check(plugins: Vec<Arc<dyn Plugin>>) -> (Vec<Arc<dyn Plugin>>, Vec<String
     (kept, problems)
 }
 
+/// An icon name: 1 to 32 of `a-z`, `0-9` and `_`, starting with a letter.
+/// It names one of the app's own icons; a plugin cannot send a glyph.
+fn is_icon_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
 /// What is wrong with one entry, if anything.
 fn problem(plugin: &dyn Plugin) -> Option<String> {
     let ns = plugin.ns();
@@ -66,6 +76,11 @@ fn problem(plugin: &dyn Plugin) -> Option<String> {
         }
         if !ids.insert(item.id) {
             return Some(format!("{ns} has the menu id {} twice", item.id));
+        }
+        if let Some(icon) = item.icon
+            && !is_icon_name(icon)
+        {
+            return Some(format!("{ns} has a bad icon name {icon:?}"));
         }
     }
     for pattern in plugin.read_patterns() {
@@ -123,5 +138,15 @@ mod tests {
         assert_eq!(problems.len(), 5, "{problems:?}");
         assert!(problems[0].contains("twice"));
         assert!(problems[2].contains("reserved"));
+    }
+
+    #[test]
+    fn icon_names() {
+        for good in ["plans", "a", "agent_menu", "x2"] {
+            assert!(is_icon_name(good), "{good}");
+        }
+        for bad in ["", "Plans", "2x", "_a", "pl-ans", "☑", &"a".repeat(33)] {
+            assert!(!is_icon_name(bad), "{bad}");
+        }
     }
 }

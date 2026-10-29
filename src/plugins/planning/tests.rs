@@ -304,3 +304,17 @@ async fn the_tpt_path_passes_schema_1_through() {
     let err = via_tpt(&c, Some("20261028_09_BAD_PLAN")).await.unwrap_err();
     assert!(err.message.contains("not schema 1"), "{err}");
 }
+
+#[test]
+fn the_plans_item_is_a_title_icon_opening_a_menu() {
+    // 0.1.1 (plan 20261028_04, its 22:03 EDT amendment, item 5).
+    assert_eq!(Planning.version(), PluginVersion::Semver("0.1.1"));
+    let menu = Planning.menu();
+    assert_eq!(menu.len(), 1);
+    assert_eq!(menu[0].id, "plans");
+    assert_eq!(menu[0].label, "Plans in this project");
+    assert_eq!(menu[0].opens, Opens::Menu);
+    assert_eq!(menu[0].opens.as_str(), "menu");
+    assert_eq!(menu[0].screens, Screens::Both);
+    assert_eq!(menu[0].icon, Some("plans"));
+}
