@@ -1,10 +1,13 @@
-//! One timer for every 2 s press in the bottom bar and the input rows
+//! One timer for every held press in the bottom bar and the input rows
 //! (docs/design/20261028_06_BOTTOM_BAR_UPDATE_PLAN.md, decision 7): the
-//! centre (✦ Gemini) and right (record) buttons, and the text input's +.
+//! centre (✦ Gemini) and right (record) buttons, volume, and the text
+//! input's +.
 //!
-//! As the drawer's remote card: [`HOLD`] is 2 s and [`SLOP`] 10 pt. A
-//! release before 2 s is a tap; at 2 s the press fires at once, before the
-//! release, and the release is then no tap. A finger that moves more than
+//! A press fires after its hold ([`hold_for`]): [`CARD_HOLD`], 500 ms, on
+//! the centre and right (the 2026-10-29 14:43 EDT amendment), [`HOLD`],
+//! 2 s, on the others; [`SLOP`] is 10 pt. A release before then is a tap;
+//! at the hold the press fires at once, before the release, and the
+//! release is then no tap. A finger that moves more than
 //! the slop, or a cancelled touch, ends the press with neither. While it is
 //! timed, the screens draw its progress ([`bar`]) along the control's
 //! bottom, with no press colour.
@@ -12,9 +15,9 @@
 //! A press may also be given an earlier step ([`Hold::with_early`]), as
 //! the volume button's 1 s stop while something is being said (the
 //! 2026-10-29 00:43 EDT amendment, item 1): it fires once at that time
-//! ([`Hold::fire_early`]) and the press goes on to the 2 s hold; a release
+//! ([`Hold::fire_early`]) and the press goes on to its hold; a release
 //! after it is no tap. The bar fills over each step in turn: to the early
-//! time, then from it to 2 s.
+//! time, then from it to the hold.
 
 use std::time::Duration;
 
@@ -24,6 +27,9 @@ use crate::agent::AgentHit;
 
 /// How long a press is held to fire.
 pub const HOLD: Duration = Duration::from_secs(2);
+/// How long a press on the centre or right button is held to open its card
+/// typed (the 2026-10-29 14:43 EDT amendment).
+pub const CARD_HOLD: Duration = Duration::from_millis(500);
 /// The volume button's earlier step while something is being said: a 1 s
 /// hold stops it (the 2026-10-29 00:43 EDT amendment, item 1).
 pub const STOP_HOLD: Duration = Duration::from_secs(1);
@@ -38,6 +44,8 @@ pub struct Hold {
     /// The control pressed.
     pub hit: AgentHit,
     start: Duration,
+    /// How long after the start it fires.
+    hold: Duration,
     at: [f32; 2],
     fired: bool,
     moved: bool,
@@ -54,6 +62,7 @@ impl Hold {
             id,
             hit,
             start: now,
+            hold: hold_for(hit),
             at,
             fired: false,
             moved: false,
@@ -63,10 +72,10 @@ impl Hold {
     }
 
     /// The press with an earlier step at `after` from its start (less
-    /// than [`HOLD`]): [`Hold::fire_early`] fires once then, and the press
+    /// than its hold): [`Hold::fire_early`] fires once then, and the press
     /// goes on to the hold.
     pub fn with_early(self, after: Duration) -> Self {
-        debug_assert!(after < HOLD, "the early step comes before the hold");
+        debug_assert!(after < self.hold, "the early step comes before the hold");
         Hold {
             early: Some(after),
             ..self
@@ -100,16 +109,16 @@ impl Hold {
         let held = now.saturating_sub(self.start);
         let (from, to) = match self.early {
             Some(after) if !self.early_fired => (Duration::ZERO, after),
-            Some(after) => (after, HOLD),
-            None => (Duration::ZERO, HOLD),
+            Some(after) => (after, self.hold),
+            None => (Duration::ZERO, self.hold),
         };
         let t = held.saturating_sub(from).as_secs_f32() / (to - from).as_secs_f32();
         Some(t.clamp(0.0, 1.0))
     }
 
-    /// True once, when 2 s have passed unmoved.
+    /// True once, when its hold has passed unmoved.
     pub fn fire(&mut self, now: Duration) -> bool {
-        if self.fired || self.moved || now.saturating_sub(self.start) < HOLD {
+        if self.fired || self.moved || now.saturating_sub(self.start) < self.hold {
             return false;
         }
         self.fired = true;
@@ -136,6 +145,15 @@ impl Hold {
     }
 }
 
+/// How long a press on `hit` is held to fire: [`CARD_HOLD`] for the
+/// centre and right buttons, [`HOLD`] for the others.
+pub fn hold_for(hit: AgentHit) -> Duration {
+    match hit {
+        AgentHit::GeneralAgent | AgentHit::Message => CARD_HOLD,
+        _ => HOLD,
+    }
+}
+
 /// The progress bar of a press on `rect` at `progress` (0..1), at scale
 /// `s`: 3 pt high, inset 6 pt from the control's sides and bottom, filled
 /// left to right (decision 7).
@@ -154,7 +172,7 @@ mod tests {
 
     #[test]
     fn a_release_before_2_s_is_a_tap_and_2_s_fires_once() {
-        let mut h = Hold::start(1, AgentHit::Message, [100.0, 100.0], T0);
+        let mut h = Hold::start(1, AgentHit::Volume, [100.0, 100.0], T0);
         assert_eq!(h.progress(T0), Some(0.0));
         assert_eq!(h.progress(T0 + Duration::from_secs(1)), Some(0.5));
         assert!(!h.fire(T0 + Duration::from_millis(1999)));
@@ -163,6 +181,20 @@ mod tests {
         assert!(!h.fire(T0 + Duration::from_secs(3)), "once");
         assert!(!h.is_tap(), "the release after it fired is no tap");
         assert_eq!(h.progress(T0 + HOLD), None);
+    }
+
+    #[test]
+    fn the_centre_and_right_fire_at_500_ms() {
+        let ms = Duration::from_millis;
+        for hit in [AgentHit::GeneralAgent, AgentHit::Message] {
+            let mut h = Hold::start(1, hit, [100.0, 100.0], T0);
+            assert_eq!(h.progress(T0 + ms(250)), Some(0.5));
+            assert!(!h.fire(T0 + ms(499)));
+            assert!(h.is_tap(), "released before 500 ms: a tap");
+            assert!(h.fire(T0 + CARD_HOLD));
+            assert!(!h.is_tap());
+        }
+        assert_eq!(hold_for(AgentHit::Volume), HOLD);
     }
 
     #[test]

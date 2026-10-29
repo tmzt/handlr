@@ -378,7 +378,7 @@ pub struct App {
     /// keyboard (always on the desktop; on Android once one types).
     keyboard: KeyboardRoute,
     /// A press on the centre or right button, or a typed card's +, timed
-    /// for its 2 s action (plan 20261028_06, decision 7; it replaces the
+    /// for its held action (plan 20261028_06, decision 7; it replaces the
     /// centre's `CenterHold`).
     hold: Option<Hold>,
     /// The shared menu shows the volume menu: its items follow the speak
@@ -2810,7 +2810,7 @@ impl App {
     }
 
     /// The control a touch starting at `(x, y)` presses, on the screen
-    /// shown, if it is one a 2 s hold gives a second action (plan
+    /// shown, if it is one a hold gives a second action (plan
     /// 20261028_06, decisions 7 and 8): the centre while it is ✦ Gemini
     /// (not while Gemini listens, nor the ✕ while dictating), the right
     /// while it is record (not send), a typed card's +, and volume (its
@@ -2845,7 +2845,7 @@ impl App {
         }
     }
 
-    /// A touch starting on a control with a 2 s hold: timed from now.
+    /// A touch starting on a control with a hold: timed from now.
     /// Returns whether it was one.
     fn start_hold(&mut self, touch: &Touch, now: Duration) -> bool {
         let Some(hit) = self.hold_target(touch.x, touch.y) else {
@@ -2865,7 +2865,7 @@ impl App {
     }
 
     /// The rest of a held touch: a move past the slop ends it with neither
-    /// action; the release before 2 s is the control's tap.
+    /// action; the release before its hold is the control's tap.
     fn hold_touch(&mut self, touch: &Touch) {
         let s = self.scale();
         let Some(hold) = self.hold.as_mut() else {
@@ -2884,7 +2884,7 @@ impl App {
         }
     }
 
-    /// A press released before 2 s: the control's tap. Voice starts on the
+    /// A press released before its hold: the control's tap. Voice starts on the
     /// release, no longer on touch-down (decision 7). Volume pressed while
     /// something was being said skips it, the next queued reply following
     /// (the 2026-10-29 00:43 EDT amendment, item 1).
@@ -2914,11 +2914,12 @@ impl App {
         }
     }
 
-    /// A press held for 2 s, fired at once, before the release (decision
-    /// 7): the centre opens Gemini's card pinned with a typed prompt, its
-    /// text area focused and the soft keyboard up, without listening; the
-    /// right opens the message card typed and focused; a + opens its menu,
-    /// and so does volume.
+    /// A press held to its hold, fired at once, before the release
+    /// (decision 7; 500 ms on the centre and right, the 2026-10-29 14:43
+    /// EDT amendment, 2 s on the others): the centre opens Gemini's card
+    /// pinned with a typed prompt, its text area focused and the soft
+    /// keyboard up, without listening; the right opens the message card
+    /// typed and focused; a + opens its menu, and so does volume.
     fn hold_fired(&mut self, hit: AgentHit) {
         log::info!("hold: fired {hit:?}");
         match hit {
@@ -3220,7 +3221,7 @@ impl App {
     /// pairing screen, only a touch's end counts.
     fn touch(&mut self, touch: Touch) {
         let now = self.started.elapsed();
-        // A press timed for its 2 s hold keeps its touch to the end, even
+        // A press timed for its hold keeps its touch to the end, even
         // once its action has opened a menu or a card under the finger.
         if self.hold.is_some_and(|h| h.id == touch.id) {
             self.hold_touch(&touch);
@@ -4440,7 +4441,7 @@ impl MorphApp for App {
 
         let dt = now.saturating_duration_since(self.last_update);
         self.last_update = now;
-        // A 2 s press fires at once (plan 20261028_06, decision 7), and
+        // A held press fires at once (plan 20261028_06, decision 7), and
         // the screens draw its progress while it is timed.
         let elapsed = self.started.elapsed();
         if let Some(hit) = self
@@ -5069,7 +5070,7 @@ pub(crate) mod probe {
         /// 20261028_06).
         pub bar: Vec<(crate::agent::AgentHit, Rect)>,
         pub menu_items: Vec<String>,
-        /// A press timed for its 2 s hold.
+        /// A press timed for its hold.
         pub holding: bool,
         /// The subagents plan, step 5: the title icons by id and place,
         /// the shared menu's items' places while open (as last drawn),
@@ -5344,11 +5345,11 @@ mod tests {
     }
 
     #[test]
-    fn the_2_s_hold_opens_geminis_card_pinned_not_the_overlay() {
+    fn the_500_ms_hold_opens_geminis_card_pinned_not_the_overlay() {
         let start = Duration::from_secs(10);
         let mut hold = Hold::start(1, AgentHit::GeneralAgent, [0.0, 0.0], start);
-        assert!(!hold.fire(start + Duration::from_millis(1999)));
-        assert!(hold.fire(start + crate::controls::hold::HOLD));
+        assert!(!hold.fire(start + Duration::from_millis(499)));
+        assert!(hold.fire(start + crate::controls::hold::CARD_HOLD));
         assert!(!hold.fire(start + Duration::from_secs(3)), "once");
         // What it opens, on either screen: the card pinned, even with
         // nothing said yet, and the overlay closed, even if it was left

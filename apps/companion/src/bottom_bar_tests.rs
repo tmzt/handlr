@@ -27,6 +27,9 @@ const SETTLE: u32 = 8;
 const HOLD: u32 = 36;
 /// Frames for a press past 1 s and short of 2 s, at 15 fps.
 const STOP_HOLD: u32 = 20;
+/// Frames for a press past the centre's and right's 500 ms and short of
+/// 1 s, at 15 fps.
+const CARD_HOLD: u32 = 11;
 
 fn run(script: &str) -> Option<Probe> {
     run_with(script, None)
@@ -165,11 +168,11 @@ fn a_tap_on_the_centre_starts_listening_on_the_release_not_on_touch_down() {
 }
 
 #[test]
-fn a_2_s_press_on_the_centre_opens_geminis_card_typed_without_listening() {
+fn a_500_ms_press_on_the_centre_opens_geminis_card_typed_without_listening() {
     let Some((_, centre, _)) = bar() else { return };
     let [x, y] = centre.center();
     let p = run(&format!(
-        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {CARD_HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
     ))
     .unwrap();
     assert_eq!(
@@ -182,11 +185,11 @@ fn a_2_s_press_on_the_centre_opens_geminis_card_typed_without_listening() {
 }
 
 #[test]
-fn a_2_s_press_on_the_right_opens_the_message_card_typed() {
+fn a_500_ms_press_on_the_right_opens_the_message_card_typed() {
     let Some((_, _, right)) = bar() else { return };
     let [x, y] = right.center();
     let p = run(&format!(
-        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {CARD_HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
     ))
     .unwrap();
     assert_eq!(inputs_with(&p, "StartTextPrompt"), 1, "{:?}", p.inputs);
