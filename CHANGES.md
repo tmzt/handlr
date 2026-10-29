@@ -3420,3 +3420,33 @@ clock. Its content stands.
    swaps the visible frame as keys arrive; the mock does not log custom
    requests, so `pane.send_text` is checked by the driver's unit tests and
    by the fixture result, not the mock's log.
+
+## 2026-10-29 01:30 EDT — Plan 20261029_01 (choice questions), steps 5-6's departures
+
+1. Step 5: `Event::ChoiceAnswered` carries `pane_id` (the notification's
+   agent, matching the open view) and `code: Option<i64>` (each error code's
+   line), which the plan does not name; a failed request's message is
+   `got` as one line; a second Choose while one is in flight is refused
+   locally with `NOT_PERMITTED`; the client's timeout is 20 s, above the
+   plan's 15 s minimum.
+2. Step 5: `view::Shows` has `#[allow(clippy::large_enum_variant)]`, as
+   `AgentCard` grew and boxing it would change the public type.
+3. Step 6: multi-select rows use `PopupItem::toggle` and
+   `PopupRow`/`PopupCell` as the row model, drawn by the agent view
+   itself, since libcontrols' popup menu is a modal layer with private check
+   drawing.
+4. Step 6: the full card has no title line (the chip names the question;
+   the compact bar keeps "<name> is asking"); the spinner is a "Sending…"
+   line with the options greyed.
+5. Step 6: an expanded preview on the pinned card shows as many lines as
+   leave the flow 120 pt, rather than scrolling with the view.
+6. Step 6: a single multi-select question's Done sends without the phone's
+   review (decision 7: a single question skips it; the daemon still drives
+   Claude's own review screen); on a single-select question an Other text
+   moves on or sends as a tap does.
+7. Step 6: the typed card's "Other: <header>" comes from a new
+   `MessagePrompt::label` and `PromptCard::set_label`.
+8. Step 6: a mismatch raises `AlertKind::ChoiceMismatch`.
+9. Not covered by a test: the app's last hop from `ChoiceAction::Send` to
+   `Input::Choose`, and the Other text handed back from the typed card; it
+   is checked in step 7 on the Mac and the S23.
