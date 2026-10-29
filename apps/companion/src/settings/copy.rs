@@ -214,6 +214,7 @@ mod tests {
         assert_eq!(
             found,
             [
+                "CHOICE_COPY.md",
                 "DRAWER_COPY.md",
                 "PAIRING_COPY.md",
                 "PREVIEW_COPY.md",

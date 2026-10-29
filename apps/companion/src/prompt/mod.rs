@@ -114,6 +114,9 @@ impl PromptInput {
 pub struct MessagePrompt {
     pub input: PromptInput,
     pub target: Option<(String, [f32; 4])>,
+    /// A header in place of "Message to <agent>": a choice question's
+    /// "Other: <header>" (plan 20261029_01, decision 8).
+    pub label: Option<String>,
     pub sent: Vec<Sent>,
     pub expanded: bool,
 }
@@ -207,9 +210,10 @@ impl Prompts {
                     self.message.set_expanded(m.expanded);
                 }
                 let target = self.message.set_target(m.target);
+                let label = self.message.set_label(m.label);
                 let sent = self.message.set_sent(&m.sent);
                 let input = self.message.set_input(Some(m.input));
-                opening || target || sent || input
+                opening || target || label || sent || input
             }
             None => {
                 let reply = self.message.set_reply(None);

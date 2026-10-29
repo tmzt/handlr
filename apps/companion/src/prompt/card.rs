@@ -98,6 +98,9 @@ pub struct PromptCard {
     opened: bool,
     /// *Message*: the agent it goes to, as shown, and its session colour.
     target: Option<(String, [f32; 4])>,
+    /// *Message*: a header in place of "Message to <agent>" (a choice
+    /// question's Other text, plan 20261029_01, decision 8).
+    label: Option<String>,
     reply: Option<Reply>,
     input: Option<PromptInput>,
     /// *General agent*: the user's last words, Gemini's newest line, what
@@ -133,6 +136,7 @@ impl PromptCard {
             expanded: false,
             opened: false,
             target: None,
+            label: None,
             reply: None,
             input: None,
             user: None,
@@ -208,6 +212,10 @@ impl PromptCard {
 
     /// The header and its colour (decision 1).
     pub fn header(&self) -> (String, [f32; 4]) {
+        if let (PromptKind::Message, Some(label)) = (self.kind, &self.label) {
+            let colour = self.target.as_ref().map_or(theme().text, |(_, c)| *c);
+            return (label.clone(), colour);
+        }
         match (self.kind, &self.target) {
             (PromptKind::GeneralAgent, _) => (copy::PROMPT_GEMINI.text.to_string(), theme().accent),
             (PromptKind::Message, Some((agent, colour))) => (
@@ -238,6 +246,14 @@ impl PromptCard {
     pub fn set_target(&mut self, target: Option<(String, [f32; 4])>) -> bool {
         let changed = target != self.target;
         self.target = target;
+        changed
+    }
+
+    /// *Message*: the header in place of "Message to <agent>", or none.
+    /// Returns whether it changed.
+    pub fn set_label(&mut self, label: Option<String>) -> bool {
+        let changed = label != self.label;
+        self.label = label;
         changed
     }
 

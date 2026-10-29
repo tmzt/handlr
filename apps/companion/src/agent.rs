@@ -41,7 +41,7 @@ use flankr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
 use flankr_companion::{AgentCard, Bookend, CardKind, Pressure, Shows, Suggestion, ViewSection};
 use flankr_markdown::{DEFAULT_MARKDOWN_THRESHOLD_PCT, Laid, Style, is_markdown, lay_out};
 use libcontrols::{Button, DrawContext, DrawControl, Rect, TextArea};
-use libflankr_proto::common::{Entry, EntryKind, Link, Role, Serial};
+use libflankr_proto::common::{ChoiceSet, Entry, EntryKind, Link, Role, Serial};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 #[cfg(test)]
@@ -54,11 +54,13 @@ use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts, Reply};
 use crate::theme::{theme, with_alpha};
 use crate::ui::Layout;
 
+pub mod choice_card;
 mod input_box;
 pub mod keys_row;
 pub mod link_spans;
 mod notice_line;
 pub mod terminal_view;
+pub use choice_card::{ChoiceAction, ChoiceCard, ChoiceHit};
 use input_box::InputBox;
 pub use keys_row::{KEYS_H, Latch, TermKey};
 pub use terminal_view::{MouseAt, TermAsk, TermState, TermView};
@@ -347,6 +349,8 @@ pub enum AgentHit {
     /// amendment of 2026-10-28 10:42 EDT): its keys go to the pane, and a
     /// tap on it never reaches the terminal or the soft keyboard.
     TermKey(TermKey),
+    /// A tap on a choice question's card (plan 20261029_01, decision 7).
+    Choice(ChoiceHit),
 }
 
 /// A button, in the flow or on the screen.
@@ -418,6 +422,9 @@ pub struct BlockState {
     pub expanded: bool,
     pub sound: bool,
     pub context: Option<String>,
+    /// A live choice question's card: the screen's choice state (plan
+    /// 20261029_01, step 6).
+    pub choice: Option<ChoiceCard>,
 }
 
 impl Default for BlockState {
@@ -427,6 +434,7 @@ impl Default for BlockState {
             expanded: false,
             sound: true,
             context: None,
+            choice: None,
         }
     }
 }
@@ -660,6 +668,10 @@ fn actions(card: &AgentCard) -> Vec<(AgentHit, Cow<'static, str>, [f32; 4])> {
             .collect()
     };
     match (card.kind, card.confirm_id) {
+        // A choice question's card has its own controls, and no record
+        // button or Yes and No: messages are refused while it is open
+        // (plan 20261029_01, decisions 6 and 7).
+        (CardKind::Question, _) if card.choices.is_some() => vec![],
         (CardKind::Approval, Some(id)) => fixed(vec![
             (AgentHit::Approve(id), "Approve", theme().approve),
             (AgentHit::Deny(id), "Deny", theme().deny),
@@ -1379,6 +1391,24 @@ fn lay_out_card(
     if card.live && pinned {
         // Shown at the bottom instead.
         y
+    } else if card.live
+        && let Some(set) = &card.choices
+    {
+        let y = y + 8.0 * s;
+        *flow.card_y.last_mut().expect("pushed") = y;
+        let fresh = ChoiceCard::default();
+        let state = state.choice.as_ref().unwrap_or(&fresh);
+        let h = choice_card::lay_out(
+            set,
+            state,
+            pen.pad,
+            y,
+            pen.text_w,
+            s,
+            choice_card::PREVIEW_LINES,
+            flow,
+        );
+        y + h + 12.0 * s
     } else if card.live {
         let y = y + 8.0 * s;
         *flow.card_y.last_mut().expect("pushed") = y;
@@ -2419,6 +2449,9 @@ pub struct AgentScreen {
     /// The session's colour, 0 to 15, for the header's band (plan
     /// 20261022_03, the L3 amendment of 2026-10-24 15:56 EDT, item 1).
     session_colour: Option<u8>,
+    /// The live choice question's card state (plan 20261029_01, step 6),
+    /// for the set its card carries; empty without one.
+    choice: ChoiceCard,
     /// The height other sessions' cards take above the pinned card.
     cross_h: f32,
     /// The height the pinned prompt cards take, as last laid out.
@@ -2477,6 +2510,9 @@ impl AgentScreen {
         if colour != self.session_colour {
             self.session_colour = colour;
             self.dirty = true;
+            if self.sync_choice() {
+                self.choice_changed();
+            }
         }
     }
 
@@ -2732,6 +2768,7 @@ impl AgentScreen {
             self.pin_saved_expanded = None;
             self.pin_overridden = false;
         }
+        self.sync_choice();
         self.refresh_blocks();
         self.hold(keep);
         self.flow_stale = true;
@@ -2816,11 +2853,16 @@ impl AgentScreen {
         for slot in &mut self.slots {
             let key = slot.serial.to_u64();
             let b = self.blocks.get_mut(&key).expect("a block for each slot");
+            let choice = b
+                .card()
+                .filter(|c| c.live && c.choices.is_some())
+                .map(|_| self.choice.clone());
             let state = BlockState {
                 key,
                 expanded: self.expanded.contains(&key),
                 sound: self.sound,
                 context: contexts.get(&key).cloned().flatten(),
+                choice,
             };
             if b.state != state {
                 b.state = state;
@@ -3281,7 +3323,7 @@ impl AgentScreen {
 
     /// Whether the pinned card's text is longer than its first lines.
     fn pin_is_cut(&self) -> bool {
-        let Some(card) = self.pinned_card() else {
+        let Some(card) = self.pinned_card().filter(|c| c.choices.is_none()) else {
             return false;
         };
         let s = self.scale();
@@ -3320,6 +3362,103 @@ impl AgentScreen {
         } else {
             1.0
         }
+    }
+
+    /// The most lines an expanded preview of the pinned choice card shows
+    /// at width `w` and scale `s` for the card to fit in `room` pixels:
+    /// all of them when it fits, else as many fewer as it is too tall by
+    /// (at least the folded 3).
+    fn choice_preview_max(&self, set: &ChoiceSet, w: f32, s: f32, room: f32) -> usize {
+        let mut probe = Flow::default();
+        let all = choice_card::PREVIEW_LINES;
+        let h = choice_card::lay_out(set, &self.choice, 0.0, 0.0, w, s, all, &mut probe);
+        if h <= room {
+            return all;
+        }
+        let over = ((h - room) / term_h(TOOL_PT * s)).ceil() as usize;
+        let longest = set
+            .questions
+            .get(self.choice.question())
+            .into_iter()
+            .flat_map(|q| &q.options)
+            .filter_map(|o| o.preview.as_deref())
+            .map(|p| p.lines().count())
+            .max()
+            .unwrap_or(0)
+            .min(all);
+        longest
+            .saturating_sub(over)
+            .max(choice_card::PREVIEW_FOLDED)
+    }
+
+    /// The live choice question's set: the pinned card's, else the newest
+    /// live Question card's that has one.
+    fn live_choices(&self) -> Option<&ChoiceSet> {
+        self.pinned_card()
+            .filter(|c| c.live && c.kind == CardKind::Question)
+            .and_then(|c| c.choices.as_ref())
+            .or_else(|| {
+                self.slots.iter().rev().find_map(|slot| {
+                    self.blocks
+                        .get(&slot.serial.to_u64())
+                        .and_then(Block::card)
+                        .filter(|c| c.live && c.kind == CardKind::Question)
+                        .and_then(|c| c.choices.as_ref())
+                })
+            })
+    }
+
+    /// The choice state follows the live choice question: a new set starts
+    /// it again. Its chip takes the session's colour.
+    fn sync_choice(&mut self) -> bool {
+        let set = self.live_choices().cloned();
+        let colour = self.session_colour.map(|c| theme().session(c));
+        let mut changed = self.choice.sync(set.as_ref());
+        if self.choice.colour != colour {
+            self.choice.colour = colour;
+            changed = true;
+        }
+        changed
+    }
+
+    /// The choice state changed: its card is laid out again, in the flow
+    /// and pinned.
+    fn choice_changed(&mut self) {
+        self.refresh_blocks();
+        self.flow_stale = true;
+        self.settle();
+    }
+
+    /// A tap on the choice card: what it asks of the app, if anything.
+    pub fn choose(&mut self, hit: ChoiceHit) -> Option<ChoiceAction> {
+        let set = self.live_choices()?.clone();
+        let action = self.choice.tap(hit, &set);
+        self.choice_changed();
+        action
+    }
+
+    /// The typed card gave back an Other text for the choice card.
+    pub fn other_given(&mut self, text: &str) -> Option<ChoiceAction> {
+        let set = self.live_choices()?.clone();
+        let action = self.choice.other_given(text, &set);
+        self.choice_changed();
+        action
+    }
+
+    /// `choice.answer`'s result or refusal, for the set `id`.
+    pub fn choice_answered(&mut self, id: &str, outcome: &str, got: &[String], code: Option<i64>) {
+        let agent = if self.name.is_empty() {
+            "The agent".to_string()
+        } else {
+            self.name.clone()
+        };
+        self.choice.answered(id, outcome, got, code, &agent);
+        self.choice_changed();
+    }
+
+    /// The choice card's state, as it stands.
+    pub fn choice(&self) -> &ChoiceCard {
+        &self.choice
     }
 
     /// The pinned card, if any.
@@ -3529,19 +3668,39 @@ impl AgentScreen {
                     sound: self.sound,
                 },
             };
-            // The full card, laid out once to know its height.
+            // The full card, laid out once to know its height. A choice
+            // question's card is its own (plan 20261029_01, step 6), its
+            // expanded previews cut to leave the flow 120 pt.
             let mut full = Flow::default();
             let mut targets = self.flow.targets.clone();
-            let h = card_block(
-                card,
-                pad,
-                0.0,
-                l.w - 2.0 * pad,
-                s,
-                form,
-                &mut targets,
-                &mut full,
-            );
+            let room = above - view_top - 120.0 * s;
+            let choice = card
+                .choices
+                .as_ref()
+                .filter(|_| card.live)
+                .map(|set| (set, self.choice_preview_max(set, l.w - 2.0 * pad, s, room)));
+            let h = match choice {
+                Some((set, max)) => choice_card::lay_out(
+                    set,
+                    &self.choice,
+                    pad,
+                    0.0,
+                    l.w - 2.0 * pad,
+                    s,
+                    max,
+                    &mut full,
+                ),
+                None => card_block(
+                    card,
+                    pad,
+                    0.0,
+                    l.w - 2.0 * pad,
+                    s,
+                    form,
+                    &mut targets,
+                    &mut full,
+                ),
+            };
             full_top = above - h;
             if compact {
                 let bar = Rect::new(pad, above - BAR_H * s, l.w - 2.0 * pad, BAR_H * s);
@@ -3577,16 +3736,32 @@ impl AgentScreen {
                 });
             } else {
                 let mut flow = Flow::default();
-                card_block(
-                    card,
-                    pad,
-                    full_top,
-                    l.w - 2.0 * pad,
-                    s,
-                    form,
-                    &mut targets,
-                    &mut flow,
-                );
+                match choice {
+                    Some((set, max)) => {
+                        choice_card::lay_out(
+                            set,
+                            &self.choice,
+                            pad,
+                            full_top,
+                            l.w - 2.0 * pad,
+                            s,
+                            max,
+                            &mut flow,
+                        );
+                    }
+                    None => {
+                        card_block(
+                            card,
+                            pad,
+                            full_top,
+                            l.w - 2.0 * pad,
+                            s,
+                            form,
+                            &mut targets,
+                            &mut flow,
+                        );
+                    }
+                }
                 flow.targets = targets;
                 pin = Some(Pinned {
                     compact: false,
@@ -4227,6 +4402,10 @@ impl AgentScreen {
             } else {
                 for b in &p.flow.buttons {
                     self.hits.push((b.hit, b.rect));
+                }
+                // A choice card's rows, previews and Other.
+                for &(hit, r) in &p.flow.taps {
+                    self.hits.push((hit, r));
                 }
                 for span in &p.flow.links {
                     let rect = link_spans::rect(&p.flow.rows[span.row], span, 0.0);
@@ -5341,6 +5520,7 @@ mod tests {
             points: Vec::new(),
             spoken: None,
             answers: Vec::new(),
+            choices: None,
         }
     }
 
@@ -9741,5 +9921,325 @@ mod tests {
         a.set_title_right(k.x - 3.0 * k.w);
         let shorter = a.header_text(&long, x, px);
         assert_eq!(shorter.chars().count(), columns(k.x - 3.0 * k.w - x, px));
+    }
+
+    // The choice card (plan 20261029_01, step 6), at the S23's 411 pt.
+
+    /// The S23 Ultra: 1080 px across at 411 pt.
+    const S23: Layout = Layout {
+        w: 1080.0,
+        h: 2316.0,
+        scale: 1080.0 / 411.0,
+        top: 80.0,
+        bottom: 40.0,
+    };
+
+    fn choice_set(preview: Option<&str>) -> ChoiceSet {
+        use libflankr_proto::common::{ChoiceOption, ChoiceQuestion};
+        ChoiceSet::new(
+            "toolu_1",
+            vec![
+                ChoiceQuestion::new(
+                    "Colour",
+                    "Which colour should the button be?",
+                    false,
+                    true,
+                    vec![
+                        ChoiceOption::new("Red", "warm, loud", preview.map(str::to_string)),
+                        ChoiceOption::new("Blue", "calm", None),
+                    ],
+                ),
+                ChoiceQuestion::new(
+                    "Extras",
+                    "Which extras?",
+                    true,
+                    true,
+                    vec![
+                        ChoiceOption::new("Nuts", "", None),
+                        ChoiceOption::new("Cream", "whipped", None),
+                    ],
+                ),
+            ],
+            "claude_code/AskUserQuestion",
+        )
+    }
+
+    fn choice_screen(set: ChoiceSet) -> AgentScreen {
+        let mut a = AgentScreen::new();
+        a.set_layout(S23);
+        a.set_session_colour(Some(4));
+        let q = AgentCard {
+            text: set.questions[0].text.clone(),
+            choices: Some(set),
+            ..card(CardKind::Question, 12, true)
+        };
+        flat(&mut a, "blocked", 0, conversation(3), vec![q], Some(0));
+        a
+    }
+
+    fn pin_flow(a: &AgentScreen) -> Flow {
+        a.frame()
+            .pin
+            .as_ref()
+            .expect("the pinned card")
+            .flow
+            .clone()
+    }
+
+    /// The pinned card's tap area or button for `hit`.
+    fn choice_rect(a: &AgentScreen, hit: ChoiceHit) -> Rect {
+        let f = pin_flow(a);
+        f.taps
+            .iter()
+            .find(|(h, _)| *h == AgentHit::Choice(hit))
+            .map(|&(_, r)| r)
+            .or_else(|| {
+                f.buttons
+                    .iter()
+                    .find(|b| b.hit == AgentHit::Choice(hit))
+                    .map(|b| b.rect)
+            })
+            .unwrap_or_else(|| panic!("{hit:?} on the card"))
+    }
+
+    /// Taps `hit` where the card shows it, as the app does.
+    fn tap_choice(a: &mut AgentScreen, hit: ChoiceHit) -> Option<ChoiceAction> {
+        let r = choice_rect(a, hit);
+        assert_eq!(
+            a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5),
+            Some(AgentHit::Choice(hit))
+        );
+        // A whole touch lands on it too.
+        assert_eq!(tap(a, 7, r, Duration::ZERO), Some(AgentHit::Choice(hit)));
+        a.choose(hit)
+    }
+
+    #[test]
+    fn a_two_question_choice_card_at_411_pt() {
+        let mut a = choice_screen(choice_set(None));
+        let s = S23.scale;
+        let p = a.frame().pin.clone().expect("pinned");
+        assert!(!p.compact);
+        assert!(p.rect.x >= 0.0 && p.rect.x + p.rect.w <= S23.w + 0.5);
+        let f = p.flow;
+        let t = texts(&f);
+        // The chip, in capitals on the session's colour, and "1 of 2".
+        let chip = f
+            .rows
+            .iter()
+            .find(|r| r.text == "COLOUR")
+            .expect("the chip");
+        assert!((chip.px - 12.0 * s).abs() < 0.01);
+        assert!(
+            f.fills
+                .iter()
+                .any(|fl| fl.color == theme().session(4) && fl.rect.y <= chip.y)
+        );
+        assert!(t.contains(&"1 of 2".to_string()), "{t:?}");
+        // The question at 15 pt; each option's label, its detail dim.
+        let question = f
+            .rows
+            .iter()
+            .find(|r| r.text.starts_with("Which colour"))
+            .unwrap();
+        assert!((question.px - 15.0 * s).abs() < 0.01);
+        let red = f.rows.iter().find(|r| r.text == "Red").unwrap();
+        assert!((red.px - 15.0 * s).abs() < 0.01 && red.color == theme().fg);
+        let detail = f.rows.iter().find(|r| r.text == "warm, loud").unwrap();
+        assert!((detail.px - 13.0 * s).abs() < 0.01 && detail.color == theme().dim);
+        assert!(detail.y > red.y);
+        assert!(t.contains(&"Other\u{2026}".to_string()));
+        // Rows of 44 pt at least, 8 pt apart.
+        let r0 = choice_rect(&a, ChoiceHit::Option(0));
+        let r1 = choice_rect(&a, ChoiceHit::Option(1));
+        assert!(r0.h >= 44.0 * s - 0.01 && r1.h >= 44.0 * s - 0.01);
+        assert!((r1.y - (r0.y + r0.h) - 8.0 * s).abs() < 0.01);
+        assert!(r0.x + r0.w <= S23.w);
+        // No record button, no Yes and No, no back arrow on the first.
+        assert!(f.buttons.is_empty(), "{:?}", f.buttons);
+        assert!(!t.contains(&BACK_GLYPH.to_string()));
+        // A tap chooses Blue and moves on.
+        assert_eq!(tap_choice(&mut a, ChoiceHit::Option(1)), None);
+        let f = pin_flow(&a);
+        let t = texts(&f);
+        assert!(t.contains(&"EXTRAS".to_string()) && t.contains(&"2 of 2".to_string()));
+        assert!(t.contains(&BACK_GLYPH.to_string()), "the back arrow");
+        // Multi-select: unchecked toggles, and Done disabled.
+        assert_eq!(
+            f.rows
+                .iter()
+                .filter(|r| r.text == choice_card::UNCHECKED && r.mono)
+                .count(),
+            3,
+            "Nuts, Cream and Other"
+        );
+        let done = f
+            .buttons
+            .iter()
+            .find(|b| b.hit == AgentHit::Choice(ChoiceHit::Done))
+            .unwrap();
+        assert_ne!(done.bg, theme().approve, "disabled with nothing checked");
+        assert_eq!(tap_choice(&mut a, ChoiceHit::Done), None);
+        assert_eq!(a.choice().question(), 1);
+        // A tap toggles; Done is enabled and moves on to the review.
+        assert_eq!(tap_choice(&mut a, ChoiceHit::Option(1)), None);
+        let f = pin_flow(&a);
+        assert_eq!(
+            f.rows
+                .iter()
+                .filter(|r| r.text == choice_card::CHECKED)
+                .count(),
+            1
+        );
+        let done = f
+            .buttons
+            .iter()
+            .find(|b| b.hit == AgentHit::Choice(ChoiceHit::Done))
+            .unwrap();
+        assert_eq!(done.bg, theme().approve);
+        assert_eq!(tap_choice(&mut a, ChoiceHit::Done), None);
+        let f = pin_flow(&a);
+        let t = texts(&f);
+        assert!(t.contains(&"Colour: Blue".to_string()), "{t:?}");
+        assert!(t.contains(&"Extras: Cream".to_string()), "{t:?}");
+        let labels: Vec<&str> = f.buttons.iter().map(|b| b.label.as_ref()).collect();
+        assert_eq!(labels, ["Back", "Submit"]);
+        // Submit gives the answers with the right indexes.
+        let sent = tap_choice(&mut a, ChoiceHit::Submit);
+        assert_eq!(
+            sent,
+            Some(ChoiceAction::Send {
+                id: "toolu_1".into(),
+                answers: vec![
+                    libflankr_proto::common::ChoiceAnswer {
+                        picked: vec![1],
+                        other: None
+                    },
+                    libflankr_proto::common::ChoiceAnswer {
+                        picked: vec![1],
+                        other: None
+                    },
+                ],
+            })
+        );
+        // Sending: greyed, with its line; the result's line after.
+        assert!(texts(&pin_flow(&a)).contains(&"Sending\u{2026}".to_string()));
+        a.choice_answered("toolu_1", "no_result", &[], None);
+        assert!(texts(&pin_flow(&a)).contains(&"Not answered: finish on the Mac".to_string()));
+        a.choice_answered("toolu_1", "mismatch", &["Colour: Red".into()], None);
+    }
+
+    #[test]
+    fn a_single_single_select_question_sends_on_its_tap() {
+        let mut set = choice_set(None);
+        set.questions.truncate(1);
+        let mut a = choice_screen(set);
+        let t = texts(&pin_flow(&a));
+        assert!(!t.iter().any(|l| l.ends_with(" of 1")), "no counter");
+        let sent = tap_choice(&mut a, ChoiceHit::Option(0));
+        assert!(
+            matches!(&sent, Some(ChoiceAction::Send { answers, .. }) if answers.len() == 1 && answers[0].picked == [0]),
+            "{sent:?}"
+        );
+        assert!(!a.choice().in_review());
+    }
+
+    #[test]
+    fn other_opens_the_typed_card_and_its_text_shows_in_the_row() {
+        let mut a = choice_screen(choice_set(None));
+        let open = tap_choice(&mut a, ChoiceHit::Other);
+        assert_eq!(
+            open,
+            Some(ChoiceAction::Other {
+                label: "Other: Colour".into(),
+                text: String::new()
+            })
+        );
+        // The typed card takes the label in place of "Message to …".
+        a.set_dictation(Some(MessagePrompt {
+            input: crate::prompt::PromptInput::typed("/compact"),
+            target: Some(("Claude".into(), theme().session(4))),
+            label: Some("Other: Colour".into()),
+            ..Default::default()
+        }));
+        assert_eq!(a.prompts().message().header().0, "Other: Colour");
+        a.set_dictation(None);
+        // `/` first: refused on the card, with its line.
+        assert_eq!(a.other_given("/compact"), None);
+        assert!(texts(&pin_flow(&a)).contains(&"An answer can't start with /".to_string()));
+        assert_eq!(a.choice().question(), 0);
+        // Given: in quotes in the row (seen on going back), and on to the next.
+        assert_eq!(a.other_given("teal"), None);
+        assert_eq!(a.choice().question(), 1);
+        a.choose(ChoiceHit::Back);
+        assert!(texts(&pin_flow(&a)).contains(&"\u{201c}teal\u{201d}".to_string()));
+    }
+
+    #[test]
+    fn a_preview_folds_to_three_monospace_lines_and_expands() {
+        let preview = (1..=10)
+            .map(|i| format!("fn line_{i}()"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut a = choice_screen(choice_set(Some(&preview)));
+        let mono = |a: &AgentScreen| -> Vec<String> {
+            pin_flow(a)
+                .rows
+                .iter()
+                .filter(|r| r.mono && r.text.starts_with("fn line_"))
+                .map(|r| r.text.clone())
+                .collect()
+        };
+        assert_eq!(
+            mono(&a),
+            ["fn line_1()", "fn line_2()", "fn line_3()\u{2026}"]
+        );
+        assert_eq!(tap_choice(&mut a, ChoiceHit::Preview(0)), None);
+        assert_eq!(mono(&a).len(), 10, "expanded whole");
+        tap_choice(&mut a, ChoiceHit::Preview(0));
+        assert_eq!(mono(&a).len(), 3, "folded again");
+        // A tap on the row still chooses.
+        tap_choice(&mut a, ChoiceHit::Option(0));
+        assert_eq!(a.choice().question(), 1);
+    }
+
+    #[test]
+    fn the_check_marks_are_on_the_terminal_faces_symbol_page() {
+        use libmsdf::font::{FontAtlas, NOTO_SANS_MONO_ATLAS, TERMINAL_SYMBOLS_ATLAS};
+        let text = FontAtlas::from_bytes(NOTO_SANS_MONO_ATLAS).expect("parses");
+        let page = FontAtlas::from_bytes(TERMINAL_SYMBOLS_ATLAS).expect("parses");
+        let shaper = TerminalShaper::new(&text, &page).expect("the atlases agree");
+        for glyph in [choice_card::CHECKED, choice_card::UNCHECKED, BACK_GLYPH] {
+            let line = shaper.line(glyph, GlyphStyle::Regular);
+            let glyphs: Vec<u16> = line
+                .segments
+                .iter()
+                .flat_map(|g| g.run.glyphs.iter().map(|x| x.glyph_id))
+                .collect();
+            assert!(
+                !glyphs.is_empty() && glyphs.iter().all(|&id| id != 0),
+                "{glyph}: {glyphs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_choice_question_card_in_the_flow_has_no_record_or_yes_and_no() {
+        let set = choice_set(None);
+        let c = AgentCard {
+            text: set.questions[0].text.clone(),
+            choices: Some(set),
+            ..card(CardKind::Question, 0, true)
+        };
+        assert!(actions(&c).is_empty());
+        // Not pinned: laid out in the flow with its rows.
+        let flow = lay_out_block(&Shows::Card(c), false, false, S23.w, S23.scale);
+        assert!(flow.rows.iter().any(|r| r.text == "Red"));
+        assert!(
+            flow.taps
+                .iter()
+                .any(|(h, _)| *h == AgentHit::Choice(ChoiceHit::Option(0)))
+        );
+        assert!(!flow.buttons.iter().any(|b| b.hit == AgentHit::Reply));
     }
 }

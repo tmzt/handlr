@@ -116,7 +116,7 @@ use libmsdf::font::{
 };
 
 use crate::agent::{
-    AgentHit, AgentScreen, TermAsk, TermKey, TermState, Terminal, TerminalSessions,
+    AgentHit, AgentScreen, ChoiceAction, TermAsk, TermKey, TermState, Terminal, TerminalSessions,
 };
 use crate::controls::Hold;
 use crate::controls::square_button::Volume;
@@ -312,6 +312,10 @@ pub struct App {
     pending: Vec<String>,
     /// The message being dictated, while the mode is on.
     dictation: Option<Dictation>,
+    /// The typed card is taking a choice question's Other text (plan
+    /// 20261029_01, decision 8), headed with this label: its send gives
+    /// the text back to the choice card, and nothing is sent.
+    choice_other: Option<String>,
     /// The agent view, while it is open.
     agent: Option<AgentScreen>,
     /// Something is being said.
@@ -979,6 +983,24 @@ impl App {
                 }
             }
             Event::PluginResult(r) => self.plugin_calls(|p| p.result(r)),
+            // A choice question's answer came back (plan 20261029_01):
+            // its card's line, if its view is still open.
+            Event::ChoiceAnswered {
+                id,
+                pane_id,
+                outcome,
+                got,
+                code,
+            } => {
+                log::info!("choice answer: {outcome} {code:?}");
+                if let Some(agent) = self
+                    .agent
+                    .as_mut()
+                    .filter(|_| pane_id.is_empty() || self.agent_pane.as_deref() == Some(&pane_id))
+                {
+                    agent.choice_answered(&id, &outcome, &got, code);
+                }
+            }
             Event::PluginNotify(n) => self.plugin_calls(|p| p.notify(n)),
             Event::Agents(agents) => {
                 self.agents = agents;
@@ -1016,6 +1038,9 @@ impl App {
                     self.set_listening(false);
                 } else if d.general_agent {
                     self.set_listening(d.mode == PromptMode::Voice);
+                }
+                if !d.active || d.general_agent {
+                    self.choice_other = None;
                 }
                 self.dictation = d.active.then_some(d);
                 self.overview.invalidate();
@@ -1802,6 +1827,7 @@ impl App {
         MessagePrompt {
             input: prompt_input(d),
             target,
+            label: self.choice_other.clone(),
             sent: session.map(|s| s.sent.clone()).unwrap_or_default(),
             expanded: session.is_some_and(|s| s.expanded),
         }
@@ -2444,6 +2470,48 @@ impl App {
         self.overview.settings_changed();
     }
 
+    /// A typed card's send: the message is submitted; or, while the card
+    /// takes a choice question's Other text, the text goes back to the
+    /// choice card and the typed card closes with nothing sent (plan
+    /// 20261029_01, decision 8).
+    fn submit_prompt(&mut self) {
+        self.keyboard.close();
+        let other = self
+            .choice_other
+            .is_some()
+            .then(|| self.dictation.as_ref().filter(|d| !d.general_agent))
+            .flatten()
+            .map(|d| d.text.clone());
+        let Some(text) = other else {
+            self.send(Input::Submit);
+            return;
+        };
+        log::info!("choice card: an Other text, {} bytes", text.len());
+        self.choice_other = None;
+        self.send(Input::Clear);
+        let action = self.agent.as_mut().and_then(|a| a.other_given(&text));
+        self.choice_action(action);
+    }
+
+    /// What a tap on the choice card asks: `choice.answer` sent, or the
+    /// typed card opened for the Other text with its label and the text
+    /// given before.
+    fn choice_action(&mut self, action: Option<ChoiceAction>) {
+        match action {
+            Some(ChoiceAction::Send { id, answers }) => {
+                log::info!("choice card: sending {} answer(s)", answers.len());
+                self.send(Input::Choose { id, answers });
+            }
+            Some(ChoiceAction::Other { label, text }) => {
+                self.choice_other = Some(label);
+                self.send(Input::StartTextPrompt);
+                self.send(Input::SetText(text));
+                self.focus_prompt(PromptKind::Message);
+            }
+            None => {}
+        }
+    }
+
     /// A tap on one of the agent view's controls, or the overview's.
     fn agent_hit(&mut self, hit: AgentHit) {
         log::info!("companion: agent_hit: {hit:?}");
@@ -2593,9 +2661,11 @@ impl App {
             // hold opens the menu.
             AgentHit::Volume => self.toggle_mute(),
             // Sent or cancelled: the keyboard goes with the prompt.
-            AgentHit::Submit => {
-                self.keyboard.close();
-                self.send(Input::Submit);
+            AgentHit::Submit => self.submit_prompt(),
+            // The choice card (plan 20261029_01, step 6).
+            AgentHit::Choice(hit) => {
+                let action = self.agent.as_mut().and_then(|a| a.choose(hit));
+                self.choice_action(action);
             }
             AgentHit::Scratch => self.send(Input::Scratch),
             AgentHit::Clear => {
@@ -4031,6 +4101,7 @@ impl MorphApp for App {
             agents: Vec::new(),
             pending: Vec::new(),
             dictation: None,
+            choice_other: None,
             agent: None,
             speaking: false,
             voices: None,
@@ -4430,10 +4501,7 @@ impl MorphApp for App {
             libmorph::TextInputEvent::Changed(text) => {
                 self.send(Input::SetText(text.clone()));
             }
-            libmorph::TextInputEvent::Action(_) => {
-                self.keyboard.close();
-                self.send(Input::Submit);
-            }
+            libmorph::TextInputEvent::Action(_) => self.submit_prompt(),
             // The card and its text stay; a tap shows it again.
             libmorph::TextInputEvent::Dismissed => self.keyboard.dismiss(),
             _ => {}

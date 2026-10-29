@@ -103,6 +103,9 @@ pub enum AlertKind {
     Question,
     Approval,
     Finished,
+    /// A choice question's answer that the agent recorded differently
+    /// from what was tapped (plan 20261029_01, decision 7).
+    ChoiceMismatch,
 }
 
 /// A question, an approval or a finished turn, while flankr is not on
@@ -247,6 +250,20 @@ impl Model {
                     self.confirm = None;
                 }
             }
+            Event::ChoiceAnswered {
+                pane_id,
+                outcome,
+                got,
+                ..
+            } if outcome == "mismatch" => {
+                if let Some(agent) = self.agents.iter().find(|a| &a.pane_id == pane_id) {
+                    let line = copy::CHOICE_MISMATCH_ALERT
+                        .fill(None, &[("answers", &got.join("; "))])
+                        .trim()
+                        .to_string();
+                    alerts.push(self.alert(AlertKind::ChoiceMismatch, agent, &line));
+                }
+            }
             Event::Unpaired { .. } => *self = Model::default(),
             Event::Remotes(rows) => {
                 self.names = rows
@@ -312,6 +329,14 @@ impl Model {
             AlertKind::Question => State::Question(line.to_string()),
             AlertKind::Approval => State::Approval(line.to_string()),
             AlertKind::Finished => State::Done(line.to_string()),
+            AlertKind::ChoiceMismatch => {
+                return Alert {
+                    kind,
+                    pane_id: agent.pane_id.clone(),
+                    title: agent_name(agent),
+                    text: one_line(line),
+                };
+            }
         };
         Alert {
             kind,
@@ -753,6 +778,30 @@ mod tests {
             .map(str::trim_start)
             .collect();
         assert_eq!(joined, SERVICE_REASON);
+    }
+
+    #[test]
+    fn a_choice_answer_recorded_differently_is_an_alert() {
+        let mut m = Model::default();
+        m.apply(
+            &Event::Agents(vec![named("w1:p1", "Claude", asking("Which colour?"))]),
+            0,
+        );
+        let mismatch = |outcome: &str, pane: &str| Event::ChoiceAnswered {
+            id: "toolu_1".into(),
+            pane_id: pane.into(),
+            outcome: outcome.into(),
+            got: vec!["Colour: Red".into()],
+            code: None,
+        };
+        let alerts = m.apply(&mismatch("mismatch", "w1:p1"), 0);
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].kind, AlertKind::ChoiceMismatch);
+        assert_eq!(alerts[0].pane_id, "w1:p1");
+        assert_eq!(alerts[0].text, "Recorded a different answer: Colour: Red");
+        // Answered, or another pane's: none.
+        assert!(m.apply(&mismatch("answered", "w1:p1"), 0).is_empty());
+        assert!(m.apply(&mismatch("mismatch", "w9:p9"), 0).is_empty());
     }
 
     fn rows(active: u8) -> Vec<flankr_companion::RemoteInfo> {
