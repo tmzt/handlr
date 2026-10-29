@@ -27,10 +27,18 @@ const SETTLE: u32 = 8;
 const HOLD: u32 = 36;
 
 fn run(script: &str) -> Option<Probe> {
+    run_with(script, None)
+}
+
+/// As [`run`], from `settings` as `settings.toml` when given.
+fn run_with(script: &str, settings: Option<&str>) -> Option<Probe> {
     let dir = tempfile::tempdir().unwrap();
     let keys = dir.path().join("keys");
     let data = dir.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
+    if let Some(text) = settings {
+        std::fs::write(data.join("settings.toml"), text).unwrap();
+    }
     let run = ScriptRun {
         spec: libmorph::libdevice::GALAXY_S24,
         out: OutDir::Exact(dir.path().join("out")),
@@ -186,11 +194,45 @@ fn a_move_of_11_pt_cancels_both() {
 }
 
 #[test]
-fn a_tap_on_volume_opens_its_menu_of_the_two_options() {
+fn a_tap_on_volume_mutes_and_unmutes_without_its_menu() {
+    let Some((volume, _, _)) = bar() else { return };
+    let [x, y] = volume.center();
+    let tap = format!("touch 5 start {x} {y}\nframes 2\ntouch 5 end {x} {y}\nframes 4\n");
+    // Both options on: muting stops what is said and tells the client
+    // both are off; no menu opens.
+    let on = "speak_coding = true\nspeak_gemini = true\n";
+    let p = run_with(&format!("frames {SETTLE}\n{tap}"), Some(on)).unwrap();
+    assert!(p.drawer.menu_items.is_empty(), "{:?}", p.drawer.menu_items);
+    assert_eq!(inputs_with(&p, "Skip"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "ReadAloud(false)"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "speak_gemini: false"), 1, "{:?}", p.inputs);
+    // A second tap unmutes: both come back, and nothing is skipped.
+    let p = run_with(&format!("frames {SETTLE}\n{tap}{tap}"), Some(on)).unwrap();
+    assert_eq!(inputs_with(&p, "Skip"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
+    let last = p
+        .inputs
+        .iter()
+        .rfind(|i| i.starts_with("Settings"))
+        .unwrap();
+    assert!(last.contains("speak_gemini: true"), "{last}");
+    assert!(p.drawer.menu_items.is_empty());
+    // Muted in the file, kept across restarts: a tap unmutes.
+    let p = run_with(
+        &format!("frames {SETTLE}\n{tap}"),
+        Some("speak_coding = true\nmuted = true\n"),
+    )
+    .unwrap();
+    assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
+}
+
+#[test]
+fn a_2_s_press_on_volume_opens_its_menu_of_the_two_options() {
     let Some((volume, _, _)) = bar() else { return };
     let [x, y] = volume.center();
     let p = run(&format!(
-        "frames {SETTLE}\ntouch 5 start {x} {y}\ntouch 5 end {x} {y}\nframes 4\n"
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
     ))
     .unwrap();
     assert_eq!(
@@ -199,4 +241,17 @@ fn a_tap_on_volume_opens_its_menu_of_the_two_options() {
         "{:?}",
         p.inputs
     );
+    assert_eq!(
+        inputs_with(&p, "Skip"),
+        0,
+        "a hold is no tap: {:?}",
+        p.inputs
+    );
+    // Released early: a tap, which mutes, and no menu.
+    let p = run(&format!(
+        "frames {SETTLE}\ntouch 5 start {x} {y}\nframes 4\n"
+    ))
+    .unwrap();
+    assert!(p.drawer.holding, "timed for its hold");
+    assert!(p.drawer.menu_items.is_empty());
 }

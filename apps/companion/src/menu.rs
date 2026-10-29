@@ -176,21 +176,26 @@ fn speak_item(id: &'static str, label: &str, on: bool, enabled: bool) -> PopupIt
 /// coding responses*, *Speak agent (Gemini) responses* (dim while
 /// `gemini_offered` is not: the general agent off or not offered), and,
 /// while `speaking`, a separator and Skip, last, nearest the finger.
+/// While `muted` (the 2026-10-29 00:26 EDT amendment, item 3), both speak
+/// items are dim with their checks kept, showing what unmuting brings
+/// back, and there is no Skip.
 pub fn volume_items(
     speak_coding: bool,
     speak_gemini: bool,
     gemini_offered: bool,
     speaking: bool,
+    muted: bool,
 ) -> Vec<PopupItem> {
     let mut out = vec![
-        speak_item(SPEAK_CODING, copy::SPEAK_CODING.text, speak_coding, true),
+        speak_item(SPEAK_CODING, copy::SPEAK_CODING.text, speak_coding, !muted),
         speak_item(
             SPEAK_GEMINI,
             copy::SPEAK_GEMINI.text,
             speak_gemini,
-            gemini_offered,
+            gemini_offered && !muted,
         ),
     ];
+    let speaking = speaking && !muted;
     if speaking {
         out.push(PopupItem::separator());
         out.push(PopupItem::action(SKIP, copy::MENU_SKIP.text));
@@ -562,7 +567,7 @@ mod tests {
 
     #[test]
     fn the_volume_menu_checks_each_option_and_skips_only_while_speaking() {
-        let i = volume_items(false, true, true, false);
+        let i = volume_items(false, true, true, false, false);
         assert_eq!(ids(&i), [SPEAK_CODING, SPEAK_GEMINI]);
         assert_eq!(i[0].label, "Speak coding responses");
         assert_eq!(i[1].label, "Speak agent (Gemini) responses");
@@ -570,9 +575,9 @@ mod tests {
         assert!(i[0].enabled && i[1].enabled);
         assert_eq!(i[0].kind, libcontrols::PopupItemKind::Toggle);
         // Gemini's dim without the general agent.
-        assert!(!volume_items(true, true, false, false)[1].enabled);
+        assert!(!volume_items(true, true, false, false, false)[1].enabled);
         // Speaking: a separator and Skip, last.
-        let i = volume_items(true, false, true, true);
+        let i = volume_items(true, false, true, true, false);
         assert_eq!(ids(&i), [SPEAK_CODING, SPEAK_GEMINI, "---", SKIP]);
         assert_eq!(i[3].label, "Skip");
         assert_eq!(
@@ -583,6 +588,12 @@ mod tests {
             Choice::toggled(SPEAK_GEMINI, false),
             Some(Choice::SpeakGemini(false))
         );
+        // Muted: both dim with their checks kept, and no Skip while
+        // speaking.
+        let i = volume_items(true, false, true, true, true);
+        assert_eq!(ids(&i), [SPEAK_CODING, SPEAK_GEMINI]);
+        assert_eq!((i[0].checked, i[1].checked), (Some(true), Some(false)));
+        assert!(!i[0].enabled && !i[1].enabled);
         assert_eq!(Choice::toggled(SKIP, true), None);
         assert_eq!(Choice::parse(SKIP), Some(Choice::Skip));
     }
@@ -610,7 +621,7 @@ mod tests {
             bottom: 40.0,
         });
         let anchor = Rect::new(24.0, 1600.0, 104.0, 104.0);
-        m.open(anchor, volume_items(false, true, true, true));
+        m.open(anchor, volume_items(false, true, true, true, false));
         let mut list = DrawList::new();
         m.draw(&mut list, &DrawContext::default());
         let last = m.item_rect(3).expect("laid out");
@@ -629,6 +640,26 @@ mod tests {
         m.touch(2, TouchPhase::Ended, x, y);
         assert_eq!(m.take_choice(), Some(Choice::Skip));
         assert!(!m.is_open());
+    }
+
+    #[test]
+    fn muted_the_speak_items_take_no_taps() {
+        let mut m = Menu::new();
+        m.set_layout(Layout {
+            w: 822.0,
+            h: 1800.0,
+            scale: 2.0,
+            top: 80.0,
+            bottom: 40.0,
+        });
+        let anchor = Rect::new(24.0, 1600.0, 104.0, 104.0);
+        m.open(anchor, volume_items(true, true, true, false, true));
+        m.draw(&mut DrawList::new(), &DrawContext::default());
+        let [x, y] = m.item_rect(0).expect("laid out").center();
+        m.touch(1, TouchPhase::Started, x, y);
+        m.touch(1, TouchPhase::Ended, x, y);
+        assert_eq!(m.take_choice(), None);
+        assert_eq!(m.items()[0].checked, Some(true), "the check is kept");
     }
 
     #[test]

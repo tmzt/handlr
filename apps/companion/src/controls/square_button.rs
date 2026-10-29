@@ -153,10 +153,28 @@ pub(crate) fn plus_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4
     list.push_line([cx, cy - half], [cx, cy + half], t, color);
 }
 
-/// The volume glyph's sound waves (plan 20261028_06, decision 4).
+/// The volume button's state (plan 20261028_06, decision 4, and its
+/// 2026-10-29 00:26 EDT amendment): muted, and either speak option on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Volume {
+    /// The tap's mute, above both options.
+    pub muted: bool,
+    /// *Speak coding responses* or *Speak agent (Gemini) responses* on.
+    pub on: bool,
+}
+
+impl Volume {
+    /// The glyph's colour: dim while muted, full strength otherwise.
+    pub fn color(self) -> [f32; 4] {
+        if self.muted { theme().dim } else { theme().fg }
+    }
+}
+
+/// The volume glyph's sound waves (plan 20261028_06, decision 4, as its
+/// 2026-10-29 00:26 EDT amendment replaces it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waves {
-    /// Both options off: no arcs, and a ✕.
+    /// Muted, or both options off: no arcs.
     Off,
     /// Either option on: two arcs.
     Two,
@@ -170,9 +188,10 @@ impl Waves {
     /// dingbats.
     pub const STEP_MS: u128 = 300;
 
-    /// The waves for the options `on`, while `speaking`, at the time now.
-    pub fn now(on: bool, speaking: bool) -> Self {
-        if !on {
+    /// The waves for `volume`, while `speaking`, at the time now: none
+    /// while muted or with both options off.
+    pub fn now(volume: Volume, speaking: bool) -> Self {
+        if volume.muted || !volume.on {
             return Waves::Off;
         }
         if !speaking {
@@ -202,8 +221,9 @@ impl Waves {
 /// the box's width across its middle ± 0.22 of its height, a cone to 0.46
 /// at ± 0.5 and its mouth; with `waves`, arcs centred on the mouth of
 /// radii 0.22 and 0.40 of the width from -50° to +50°, six segments each;
-/// off, a ✕ in their place. No atlas glyph: libmsdf's Material subset has
-/// no `volume_up`, and 🔊 is not in the emoji set.
+/// [`Waves::Off`], the plain speaker (the 2026-10-29 00:26 EDT amendment
+/// drops the ✕). No atlas glyph: libmsdf's Material subset has no
+/// `volume_up`, and 🔊 is not in the emoji set.
 pub(crate) fn volume_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4], waves: Waves) {
     let b = glyph_box(rect);
     let t = 1.8 * s;
@@ -225,11 +245,6 @@ pub(crate) fn volume_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32;
     list.push_line([r, top], [mouth, y(-0.5)], t, color);
     list.push_line([r, bottom], [mouth, y(0.5)], t, color);
     list.push_line([mouth, y(-0.5)], [mouth, y(0.5)], t, color);
-    if waves == Waves::Off {
-        list.push_line([x(0.62), y(-0.28)], [x(0.90), y(0.28)], t, color);
-        list.push_line([x(0.62), y(0.28)], [x(0.90), y(-0.28)], t, color);
-        return;
-    }
     for radius in [0.22, 0.40].into_iter().take(waves.arcs()) {
         let rad = radius * b.w;
         let point = |deg: f32| {
@@ -303,9 +318,9 @@ pub(crate) fn list_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4
 }
 
 /// Draws `b` at `rect`: the take-a-message button as a white record dot on
-/// blue, the volume button as its glyph (bright with waves when
-/// `volume_on`, stepping while `speaking`), and the rest as labelled
-/// buttons. A button the settings turn off (plan
+/// blue, the volume button as its glyph (dim while `volume` is muted,
+/// with waves while an option is on, stepping while `speaking`), and the
+/// rest as labelled buttons. A button the settings turn off (plan
 /// 20261024_02, decision 4) is drawn at 35%, showing nothing live.
 pub struct SquareButton;
 
@@ -319,13 +334,13 @@ impl SquareButton {
         b: &FlowButton,
         rect: Rect,
         s: f32,
-        volume_on: bool,
+        volume: Volume,
         speaking: bool,
         recording: bool,
     ) {
         let enabled = settings::allows(b.hit);
         Self::draw_enabled(
-            list, ctx, term, b, rect, s, volume_on, speaking, recording, enabled,
+            list, ctx, term, b, rect, s, volume, speaking, recording, enabled,
         );
     }
 
@@ -338,7 +353,7 @@ impl SquareButton {
         b: &FlowButton,
         rect: Rect,
         s: f32,
-        volume_on: bool,
+        volume: Volume,
         speaking: bool,
         recording: bool,
         enabled: bool,
@@ -349,7 +364,7 @@ impl SquareButton {
         } else {
             (false, false)
         };
-        Self::draw_live(list, ctx, term, b, rect, s, volume_on, speaking, recording);
+        Self::draw_live(list, ctx, term, b, rect, s, volume, speaking, recording);
         if !enabled {
             settings::dim_since(list, start);
         }
@@ -363,7 +378,7 @@ impl SquareButton {
         b: &FlowButton,
         rect: Rect,
         s: f32,
-        volume_on: bool,
+        volume: Volume,
         speaking: bool,
         recording: bool,
     ) {
@@ -397,10 +412,11 @@ impl SquareButton {
             }
             AgentHit::Volume => {
                 fill(list, rect, b.bg, 10.0 * s);
-                // Bright with waves while either option is on, stepping
-                // while something is said; dim with a ✕ while both are off.
-                let color = if volume_on { theme().fg } else { theme().dim };
-                volume_glyph(list, rect, s, color, Waves::now(volume_on, speaking));
+                // Muted: the plain speaker, dim. Unmuted: full strength,
+                // with waves while either option is on, stepping while
+                // something is said (the 2026-10-29 00:26 EDT amendment).
+                let waves = Waves::now(volume, speaking);
+                volume_glyph(list, rect, s, volume.color(), waves);
             }
             // A summary card's replay: the play glyph alone, dim.
             AgentHit::Replay(_) => {
@@ -447,5 +463,56 @@ impl SquareButton {
             }
             _ => button(list, ctx, &b.label, rect, b.bg, s),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn glyph(volume: Volume, speaking: bool) -> DrawList {
+        let mut list = DrawList::new();
+        let rect = Rect::new(0.0, 0.0, 104.0, 104.0);
+        volume_glyph(
+            &mut list,
+            rect,
+            2.0,
+            volume.color(),
+            Waves::now(volume, speaking),
+        );
+        list
+    }
+
+    #[test]
+    fn muted_the_speaker_is_plain_and_dim_and_unmuted_full_strength_with_waves() {
+        let on = Volume {
+            muted: false,
+            on: true,
+        };
+        let off = Volume {
+            muted: false,
+            on: false,
+        };
+        let muted = Volume {
+            muted: true,
+            on: true,
+        };
+        // The plain speaker: its body's four lines and the cone's three.
+        let plain = glyph(off, false).instances.len();
+        assert_eq!(plain, glyph(muted, false).instances.len());
+        // No ✕ with both options off, nor waves while speaking.
+        assert_eq!(Waves::now(off, true), Waves::Off);
+        assert_eq!(Waves::now(muted, true), Waves::Off);
+        assert_eq!(Waves::now(muted, false), Waves::Off);
+        // Two arcs of six segments while an option is on.
+        assert_eq!(glyph(on, false).instances.len(), plain + 12);
+        assert_eq!(Waves::now(on, false), Waves::Two);
+        assert!(matches!(Waves::now(on, true), Waves::Speaking(_)));
+        // Dim while muted, full strength otherwise, whatever the options.
+        assert_eq!(muted.color(), theme().dim);
+        assert_eq!(on.color(), theme().fg);
+        assert_eq!(off.color(), theme().fg);
+        let colors = |l: &DrawList| l.instances.iter().map(|i| i.color).collect::<Vec<_>>();
+        assert!(colors(&glyph(off, false)).iter().all(|c| *c == theme().fg));
     }
 }

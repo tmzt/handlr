@@ -118,6 +118,7 @@ use crate::agent::{
     AgentHit, AgentScreen, TermAsk, TermKey, TermState, Terminal, TerminalSessions,
 };
 use crate::controls::Hold;
+use crate::controls::square_button::Volume;
 use crate::drawer::{AppDrawer, DrawerHit, DrawerTouch};
 use crate::keys::VaultKeyStore;
 use crate::markdown_view::{CodeFace, Face, Faces};
@@ -1309,10 +1310,13 @@ impl App {
         }
     }
 
-    /// Whether either speak option is on: the volume glyph's waves (plan
-    /// 20261028_06, decision 4).
-    fn volume_on(&self) -> bool {
-        self.settings.speak_coding || self.settings.speak_gemini
+    /// The volume glyph's state: muted, and either speak option on (plan
+    /// 20261028_06, decision 4, and its 2026-10-29 00:26 EDT amendment).
+    fn volume(&self) -> Volume {
+        Volume {
+            muted: self.settings.muted,
+            on: self.settings.speak_coding || self.settings.speak_gemini,
+        }
     }
 
     /// The volume menu's items as things are now (plan 20261028_06,
@@ -1323,11 +1327,30 @@ impl App {
             self.settings.speak_gemini,
             settings::general_agent_on(),
             self.speaking,
+            self.settings.muted,
         )
     }
 
-    /// A tap on the volume button: its menu opens anchored to it, above
-    /// the bar.
+    /// A tap on the volume button (the 2026-10-29 00:26 EDT amendment of
+    /// plan 20261028_06, item 1): mutes or unmutes, kept in
+    /// `settings.toml`. Muting stops what is being said at once, as Skip
+    /// does; neither speak option changes, and the client is told as if
+    /// both were off while muted.
+    fn toggle_mute(&mut self) {
+        let muted = !self.settings.muted;
+        log::info!("volume: muted {muted}");
+        if muted {
+            self.send(Input::Skip);
+        }
+        let settings = Settings {
+            muted,
+            ..self.settings.clone()
+        };
+        self.apply_settings(settings);
+    }
+
+    /// A 2 s hold on the volume button (item 2): its menu opens anchored
+    /// to it, above the bar.
     fn open_volume_menu(&mut self) {
         let anchor = if let Some(agent) = &self.agent {
             agent.rect_of(AgentHit::Volume)
@@ -1574,7 +1597,7 @@ impl App {
         agent.name = name;
         agent.set_scrollbar(self.settings.scrollbar);
         agent.set_sound(self.settings.sound);
-        agent.set_volume(self.volume_on());
+        agent.set_volume(self.volume());
         agent.set_speaking(self.speaking);
         let ga_listening = self.dictation.as_ref().is_some_and(|d| {
             d.active && d.general_agent && d.mode == flankr_companion::PromptMode::Voice
@@ -2079,7 +2102,7 @@ impl App {
             self.service = Service::Off;
         }
         let voice_changed = settings.voice != self.settings.voice;
-        let coding_changed = settings.speak_coding != self.settings.speak_coding;
+        let coding_changed = settings.read_aloud() != self.settings.read_aloud();
         self.settings = settings.clone();
         settings::set_current(settings.clone());
         if voice_changed {
@@ -2094,9 +2117,10 @@ impl App {
         }
         self.send(Input::Settings(settings.to_client()));
         // *Speak coding responses* is the client's read aloud (plan
-        // 20261028_06, decision 6), from the volume menu or Settings.
+        // 20261028_06, decision 6), from the volume menu or Settings; off
+        // while muted.
         if coding_changed {
-            self.send(Input::ReadAloud(settings.speak_coding));
+            self.send(Input::ReadAloud(settings.read_aloud()));
         }
         // *Appearance* and the theme rows apply at once.
         self.apply_theme();
@@ -2306,7 +2330,7 @@ impl App {
         settings::set_current(self.settings.clone());
         self.apply_voice();
         self.send(Input::Settings(self.settings.to_client()));
-        self.send(Input::ReadAloud(self.settings.speak_coding));
+        self.send(Input::ReadAloud(self.settings.read_aloud()));
         self.overview.settings_changed();
     }
 
@@ -2449,8 +2473,9 @@ impl App {
                     self.links.push(url);
                 }
             }
-            // The volume button: its menu (plan 20261028_06, decision 3).
-            AgentHit::Volume => self.open_volume_menu(),
+            // The volume button's tap: mute or unmute (plan 20261028_06,
+            // the 2026-10-29 00:26 EDT amendment); its hold opens the menu.
+            AgentHit::Volume => self.toggle_mute(),
             // Sent or cancelled: the keyboard goes with the prompt.
             AgentHit::Submit => {
                 self.keyboard.close();
@@ -2499,7 +2524,8 @@ impl App {
     /// shown, if it is one a 2 s hold gives a second action (plan
     /// 20261028_06, decisions 7 and 8): the centre while it is ✦ Gemini
     /// (not while Gemini listens, nor the ✕ while dictating), the right
-    /// while it is record (not send), and a typed card's +.
+    /// while it is record (not send), a typed card's +, and volume (its
+    /// 2026-10-29 00:26 EDT amendment).
     fn hold_target(&self, x: f32, y: f32) -> Option<AgentHit> {
         if self.pairing.adding || self.settings_screen.is_some() {
             return None;
@@ -2518,6 +2544,9 @@ impl App {
         });
         match hit {
             AgentHit::GeneralAgent if !listening && live => Some(hit),
+            // Volume's tap mutes; its hold opens its menu (the 2026-10-29
+            // 00:26 EDT amendment, item 2).
+            AgentHit::Volume if live => Some(hit),
             // Typing needs no microphone: the right button's hold opens
             // the typed message card even while record is dim (CHANGES.md
             // departure; its tap still needs the microphone).
@@ -2574,7 +2603,8 @@ impl App {
     /// A press held for 2 s, fired at once, before the release (decision
     /// 7): the centre opens Gemini's card pinned with a typed prompt, its
     /// text area focused and the soft keyboard up, without listening; the
-    /// right opens the message card typed and focused; a + opens its menu.
+    /// right opens the message card typed and focused; a + opens its menu,
+    /// and so does volume.
     fn hold_fired(&mut self, hit: AgentHit) {
         log::info!("hold: fired {hit:?}");
         match hit {
@@ -2587,6 +2617,7 @@ impl App {
                 self.focus_prompt(PromptKind::Message);
             }
             AgentHit::PromptAttach(kind) => self.open_attach_menu(kind),
+            AgentHit::Volume => self.open_volume_menu(),
             _ => {}
         }
     }
@@ -3360,7 +3391,7 @@ impl App {
         });
         // Typing's tools and the volume glyph (plan 20261028_06).
         let tools = self.input_tools();
-        let volume_on = self.volume_on();
+        let volume = self.volume();
         // The prompt cards' inputs (plan 20261027_03): a message to a
         // session, and a typed prompt to Gemini.
         let message = self
@@ -3415,7 +3446,7 @@ impl App {
             }));
             o.set_dictation(message.clone());
             o.set_gemini_input(gemini.clone());
-            o.set_volume(volume_on, self.speaking);
+            o.set_volume(volume, self.speaking);
             o.set_input_tools(tools);
         }
 
@@ -3426,7 +3457,7 @@ impl App {
         if let Some(agent) = &mut self.agent {
             agent.set_keys_row(keys_row);
             agent.set_input_tools(tools);
-            agent.set_volume(volume_on);
+            agent.set_volume(volume);
             agent.set_layout(layout);
             agent.set_general_agent_listening(ga_listening);
             agent.set_dictation(message);
@@ -3935,7 +3966,7 @@ impl MorphApp for App {
                 companion.send(Input::Settings(app.settings.to_client()));
                 // *Speak coding responses*, kept across restarts (plan
                 // 20261028_06, decision 6).
-                companion.send(Input::ReadAloud(app.settings.speak_coding));
+                companion.send(Input::ReadAloud(app.settings.read_aloud()));
                 app.companion = Some(companion);
             }
             Err(e) => {

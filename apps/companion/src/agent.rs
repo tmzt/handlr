@@ -48,6 +48,7 @@ use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 use libmsdf::font::TerminalSource;
 use libmsdf::font::{GlyphStyle, TerminalShaper};
 
+use crate::controls::square_button::Volume;
 use crate::controls::{ControlRow, RowState, SquareButton};
 use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts, Reply};
 use crate::theme::{theme, with_alpha};
@@ -2320,9 +2321,9 @@ pub struct AgentScreen {
     /// The view's own prompt cards (plan 20261027_03, decision 1): Gemini's
     /// and the message card, and their overlay.
     prompts: Prompts,
-    /// Either speak option is on: the volume glyph is bright, with waves
-    /// (plan 20261028_06, decision 4).
-    volume_on: bool,
+    /// The volume glyph's state: muted, and either speak option on (plan
+    /// 20261028_06, decision 4, and its 2026-10-29 00:26 EDT amendment).
+    volume: Volume,
     /// A 2 s press timed on a control of the bar or the card's row, and
     /// its progress: its bar is drawn along the control's bottom
     /// (decision 7).
@@ -3201,17 +3202,17 @@ impl AgentScreen {
             .filter(|_| !self.prompts.message().is_expanded())
     }
 
-    /// The volume button's state: bright with waves while either speak
-    /// option is on, dim with a ✕ while both are off.
-    pub fn set_volume(&mut self, on: bool) {
-        if on != self.volume_on {
-            self.volume_on = on;
+    /// The volume button's state: dim and plain while muted; full
+    /// strength otherwise, with waves while either speak option is on.
+    pub fn set_volume(&mut self, volume: Volume) {
+        if volume != self.volume {
+            self.volume = volume;
             self.dirty = true;
         }
     }
 
-    pub fn volume_on(&self) -> bool {
-        self.volume_on
+    pub fn volume(&self) -> Volume {
+        self.volume
     }
 
     /// The press being timed on `hit`, and its progress, for its bar.
@@ -5017,7 +5018,7 @@ impl AgentScreen {
                     b,
                     rect,
                     s,
-                    self.volume_on,
+                    self.volume,
                     self.speaking,
                     recording,
                 );
@@ -5148,7 +5149,7 @@ impl AgentScreen {
                 b,
                 b.rect,
                 s,
-                self.volume_on,
+                self.volume,
                 self.speaking,
                 recording,
             );
@@ -5169,7 +5170,7 @@ impl AgentScreen {
                     b,
                     b.rect,
                     s,
-                    self.volume_on,
+                    self.volume,
                     self.speaking,
                     recording,
                 );
@@ -5203,7 +5204,7 @@ impl AgentScreen {
                 b,
                 b.rect,
                 s,
-                self.volume_on,
+                self.volume,
                 self.speaking,
                 recording,
                 self.live(b.hit),
@@ -5282,6 +5283,12 @@ pub(crate) fn button(
 mod tests {
     use super::*;
     use libflankr_proto::common::Answer;
+
+    /// Unmuted, an option on.
+    const ON: Volume = Volume {
+        muted: false,
+        on: true,
+    };
 
     const PHONE: Layout = Layout {
         w: 1080.0,
@@ -6451,9 +6458,9 @@ mod tests {
         assert!(row[0].rect.y + row[0].rect.h <= a.frame().buttons[0].rect.y);
         // The volume button redraws when it changes, and keeps its place.
         a.draw(&mut DrawList::new(), &DrawContext::default(), None);
-        a.set_volume(true);
+        a.set_volume(ON);
         assert!(a.draw(&mut DrawList::new(), &DrawContext::default(), None));
-        assert!(a.volume_on());
+        assert_eq!(a.volume(), ON);
         let r = row[0].rect;
         assert_eq!(
             a.hit(r.x + 5.0, r.y + 5.0),
@@ -7551,7 +7558,7 @@ mod tests {
     #[test]
     fn the_volume_glyph_redraws_while_speaking_and_when_it_stops() {
         let mut a = screen(conversation(3), vec![], None);
-        a.set_volume(true);
+        a.set_volume(ON);
         a.draw(&mut DrawList::new(), &DrawContext::default(), None);
         a.set_speaking(true);
         assert!(a.draw(&mut DrawList::new(), &DrawContext::default(), None));
@@ -9057,7 +9064,7 @@ mod tests {
         use crate::settings::{self, DISABLED_ALPHA, Settings};
         let cards = vec![card(CardKind::Question, 3, true)];
         let mut a = screen(conversation(3), cards, Some(0));
-        a.set_volume(true);
+        a.set_volume(ON);
         let tap = |a: &mut AgentScreen, r: Rect| {
             a.touch(1, TouchPhase::Started, r.x + 5.0, r.y + 5.0, Duration::ZERO);
             a.touch(1, TouchPhase::Ended, r.x + 5.0, r.y + 5.0, MS)

@@ -47,6 +47,7 @@ use crate::agent::{
     ACTION_H, AgentHit, BUTTON_H, Fill, Flow, FlowButton, PAD, Row, Terminal, columns, fill, line_h,
 };
 use crate::controls::scroll::Touched;
+use crate::controls::square_button::Volume;
 use crate::controls::{ControlRow, RowState, SquareButton};
 use crate::drawer::Menu;
 use crate::prompt::{MessagePrompt, PromptInput, PromptTouched, Prompts};
@@ -127,9 +128,9 @@ pub struct Overview {
     /// asks.
     message: Option<MessagePrompt>,
     card: Option<Panel>,
-    /// Either speak option is on: the volume glyph bright, with waves
-    /// (plan 20261028_06, decision 4).
-    volume_on: bool,
+    /// The volume glyph's state: muted, and either speak option on (plan
+    /// 20261028_06, decision 4, and its 2026-10-29 00:26 EDT amendment).
+    volume: Volume,
     speaking: bool,
     /// A 2 s press timed on a control, and its progress (decision 7).
     hold: Option<(AgentHit, f32)>,
@@ -176,7 +177,7 @@ impl Overview {
             prompts: Prompts::new(),
             message: None,
             card: None,
-            volume_on: false,
+            volume: Volume::default(),
             speaking: false,
             hold: None,
             headings: Vec::new(),
@@ -273,12 +274,12 @@ impl Overview {
         }
     }
 
-    /// The volume button: either speak option on, and something being
-    /// said (its waves step). The same menu as the agent view's opens
+    /// The volume button: muted, either speak option on, and something
+    /// being said (its waves step). The same menu as the agent view's opens
     /// from it (plan 20261028_06, open question 6).
-    pub fn set_volume(&mut self, on: bool, speaking: bool) {
-        if (on, speaking) != (self.volume_on, self.speaking) {
-            self.volume_on = on;
+    pub fn set_volume(&mut self, volume: Volume, speaking: bool) {
+        if (volume, speaking) != (self.volume, self.speaking) {
+            self.volume = volume;
             self.speaking = speaking;
             self.dirty = true;
         }
@@ -653,7 +654,7 @@ impl Overview {
         self.grid.draw(list, ctx, self.shader_panels);
         self.prompts.draw_pinned(list, ctx);
         let recording = self.prompts.message_open();
-        let volume_on = self.volume_on;
+        let volume = self.volume;
         let draw_button = |list: &mut DrawList, b: &FlowButton| {
             SquareButton::draw_enabled(
                 list,
@@ -662,7 +663,7 @@ impl Overview {
                 b,
                 b.rect,
                 s,
-                volume_on,
+                volume,
                 self.speaking,
                 recording,
                 settings::allows_on_overview(b.hit),
@@ -833,6 +834,12 @@ mod tests {
     use super::*;
     use crate::overview::agent_card::tests::{agent, asking};
     use crate::prompt::{PromptKind, PromptOverlay};
+
+    /// Unmuted, an option on.
+    const ON: Volume = Volume {
+        muted: false,
+        on: true,
+    };
 
     const PHONE: Layout = Layout {
         w: 1080.0,
@@ -1489,7 +1496,7 @@ mod tests {
     #[test]
     fn controls_the_settings_turn_off_are_dim_and_take_no_taps() {
         let mut o = overview(2);
-        o.set_volume(true, false);
+        o.set_volume(ON, false);
         let ctx = DrawContext::default();
         let play = o.rect_of(AgentHit::Volume).unwrap();
         let record = o.rect_of(AgentHit::Message).unwrap();

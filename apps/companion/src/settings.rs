@@ -68,6 +68,11 @@ pub struct Settings {
     /// *Speak agent (Gemini) responses*: Gemini's `turn.say` lines spoken;
     /// on by default, as they always were.
     pub speak_gemini: bool,
+    /// The volume button's mute (plan 20261028_06, its 2026-10-29 00:26
+    /// EDT amendment): above both speak options, which keep their values;
+    /// muted, the client is told as if both were off. No Settings row;
+    /// off by default.
+    pub muted: bool,
     /// *Microphone*.
     pub microphone: bool,
     /// *General agent (Gemini)*.
@@ -160,6 +165,7 @@ impl Default for Settings {
             ding: true,
             speak_coding: false,
             speak_gemini: true,
+            muted: false,
             microphone: true,
             general_agent: true,
             tab_follows_focus: false,
@@ -185,6 +191,8 @@ struct SettingsFile {
     speak_coding: bool,
     #[serde(default = "on")]
     speak_gemini: bool,
+    #[serde(default)]
+    muted: bool,
     #[serde(default = "on")]
     microphone: bool,
     #[serde(default = "on")]
@@ -261,8 +269,14 @@ impl Settings {
             microphone: self.microphone,
             general_agent: self.general_agent,
             tab_follows_focus: self.tab_follows_focus,
-            speak_gemini: self.speak_gemini,
+            speak_gemini: self.speak_gemini && !self.muted,
         }
+    }
+
+    /// *Speak coding responses* as the client's read aloud
+    /// (`Input::ReadAloud`): off while muted.
+    pub fn read_aloud(&self) -> bool {
+        self.speak_coding && !self.muted
     }
 
     /// `settings.toml` in `dir`. Missing or unreadable, the defaults; an
@@ -297,6 +311,7 @@ impl Settings {
             ding: file.ding,
             speak_coding: file.speak_coding,
             speak_gemini: file.speak_gemini,
+            muted: file.muted,
             microphone: file.microphone,
             general_agent: file.general_agent,
             tab_follows_focus: file.tab_follows_focus,
@@ -321,6 +336,7 @@ impl Settings {
             ding: self.ding,
             speak_coding: self.speak_coding,
             speak_gemini: self.speak_gemini,
+            muted: self.muted,
             microphone: self.microphone,
             general_agent: self.general_agent,
             tab_follows_focus: self.tab_follows_focus,
@@ -578,6 +594,26 @@ mod tests {
     }
 
     #[test]
+    fn muted_is_kept_and_tells_the_client_both_options_are_off() {
+        // Off by default and in a file without it.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!Settings::default().muted);
+        std::fs::write(dir.path().join(FILE), "speak_coding = true\n").unwrap();
+        let s = Settings::load(dir.path());
+        assert!(!s.muted && s.read_aloud() && s.to_client().speak_gemini);
+        // Muted: both options keep their values, kept across restarts,
+        // and the client hears neither.
+        let m = Settings { muted: true, ..s };
+        m.save(dir.path()).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
+        assert!(text.contains("muted = true"), "{text}");
+        let m = Settings::load(dir.path());
+        assert!(m.muted && m.speak_coding && m.speak_gemini);
+        assert!(!m.read_aloud());
+        assert!(!m.to_client().speak_gemini);
+    }
+
+    #[test]
     fn tab_follows_focus_reaches_the_client() {
         assert!(!Settings::default().to_client().tab_follows_focus);
         let s = Settings {
@@ -596,6 +632,7 @@ mod tests {
             ding: true,
             speak_coding: true,
             speak_gemini: false,
+            muted: true,
             microphone: false,
             general_agent: false,
             tab_follows_focus: true,
