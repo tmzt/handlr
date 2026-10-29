@@ -22,6 +22,7 @@
 //! from typed lines.
 
 pub mod activity;
+pub mod blob;
 pub mod client;
 pub mod cross;
 pub mod keys;
@@ -38,6 +39,7 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
+pub use blob::{Attachment, PREVIEW_CACHE_MAX, PreviewCache};
 pub use client::{
     CACHED_VIEWS, DICTATION_SILENCE, DRAWER_LIST_INTERVAL, DeviceCodeFallback, Dictation,
     DictationPhase, Event, Input, Pressure, PromptMode, Settings, Speaker, Suggestion,
@@ -86,6 +88,12 @@ pub struct CompanionConfig {
     /// How long the device-code fallback waits for its code to be added
     /// ([`PAIRING_WINDOW`]; shorter in tests).
     pub pairing_window: Duration,
+    /// The app's cache directory (libmorph's `cache_dir()`): files and
+    /// `git` output fetched over the link are kept in its
+    /// `libmobile-share/` ([`PreviewCache`]; plan 20261028_05, decision
+    /// 6.4). `None`: `data_dir`'s `cache/`, else the system's temp folder.
+    /// Added in 0.5.4.
+    pub cache_dir: Option<PathBuf>,
 }
 
 impl CompanionConfig {
@@ -102,7 +110,17 @@ impl CompanionConfig {
             dictation_silence: DICTATION_SILENCE,
             data_dir: None,
             pairing_window: PAIRING_WINDOW,
+            cache_dir: None,
         }
+    }
+
+    /// Where the preview cache's `libmobile-share/` goes: `cache_dir`,
+    /// else `data_dir`'s `cache/`, else the system's temp folder.
+    pub(crate) fn preview_cache_dir(&self) -> PathBuf {
+        self.cache_dir
+            .clone()
+            .or_else(|| self.data_dir.as_ref().map(|d| d.join("cache")))
+            .unwrap_or_else(|| std::env::temp_dir().join("flankr-companion"))
     }
 }
 

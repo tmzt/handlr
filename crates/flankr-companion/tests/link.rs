@@ -1273,12 +1273,13 @@ fn removing_the_active_remote_moves_to_the_most_recently_paired() {
             daemon: true
         }
     );
-    // b is in use now, and connected to.
+    // b is in use now, and connected to. The list comes as the remote is
+    // removed, before b's replay; c may have connected already.
     servers[1].next_seen();
-    expect_connected(&c);
     let rows = expect_remotes(&c, "b online", |rows| {
         rows.len() == 2 && rows[0].id == b.id && rows[0].online
     });
+    expect_connected(&c);
     assert!(!rows[1].active);
     assert_eq!(stored(&dir).active, Some(b.id));
     assert!(!key_exists(&dir, &a.key_name));

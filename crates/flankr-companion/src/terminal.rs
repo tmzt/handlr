@@ -203,6 +203,14 @@ impl Terminals {
             .is_some_and(|s| s.open && s.armed_for.is_some())
     }
 
+    /// The session's terminal id while it is open and armed, for
+    /// `terminal.paste` (plan 20261028_05, the 23:43 EDT amendment).
+    pub(crate) fn armed_id(&self, session: &str) -> Option<u32> {
+        let book = self.lock();
+        let t = book.sessions.get(session)?;
+        t.terminal_id.filter(|_| t.is_armed && t.wanted)
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, Book> {
         self.book.lock().unwrap_or_else(|e| e.into_inner())
     }

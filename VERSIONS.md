@@ -720,3 +720,22 @@ amendment, item 4. Strictly additive (a variant on the `#[non_exhaustive]`
   read (for its summary or its turn) and every held spoken notice is
   dropped, so nothing follows it. Replies that come after are read as
   usual. `Input::Skip` is unchanged: it stops only the current one.
+
+## flankr-companion 0.5.4 — 2026-10-29 (the commit tagged `flankr-companion-v0.5.4`)
+
+Plan 20261028_05 (binary transfers), step 7, and its 23:43 EDT amendment,
+item 2. Strictly additive (`Input` and `Event` are `#[non_exhaustive]`; a
+field appended to `CompanionConfig`, which has `new`):
+
+- **Added:** `Input::AttachImage`, `DetachImage`, `RetryImage`,
+  `RequestFile`, `RequestGit`, `CancelTransfer`, `TerminalPasteText`,
+  `TerminalPasteImages`.
+- **Added:** `Event::TransferStarted`, `TransferProgress`, `ImageReady`,
+  `FileReady`, `TransferFailed`, `Attachments`, `Blob`.
+- **Added:** `State::set_preview_cache`, `blob`, `attachments`, `binary`,
+  `binary_written`, `take_binary`; `CompanionConfig::cache_dir`;
+  `blob::{Attachment, PreviewCache, PREVIEW_CACHE_MAX, PREVIEW_CACHE_FOLDER,
+  token}`.
+- Submit sends `agents.send` `parts` when the draft names uploaded images;
+  link kind 2 is read and written (two-queue writer).
+- Takes libflankr_blob 0.1.0 (new dependency).

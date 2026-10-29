@@ -1,6 +1,6 @@
 [package]
 name = "flankr-companion"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 description = "The companion client: connection, sessions, keys and turn logic, without audio"
 
@@ -8,6 +8,9 @@ description = "The companion client: connection, sessions, keys and turn logic, 
 libflankr_proto = { path = "../libflankr_proto", features = ["link"] }
 # The terminal mode's frames and Screen (plan 20261027_07, step 4).
 libflankr_term = { path = "../libflankr_term" }
+# Binary transfers over the link's kind 2: the encoding, the transfer
+# state machines, codes and `ReadPattern` (plan 20261028_05, step 7).
+libflankr_blob = { path = "../libflankr_blob" }
 # Replies read aloud when the daemon does not say how (plan 20261023_05, A5).
 flankr-speech = { path = "../flankr-speech" }
 serde = { version = "1", features = ["derive"] }

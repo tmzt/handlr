@@ -78,7 +78,17 @@
 //! The link is read with `recv`, by kind (plan 20261027_07, step 4): a
 //! JSON-RPC message goes to the state as before, and a terminal frame to
 //! [`State::terminal_frame`], which shows it on its terminal's screen and
-//! acknowledges it. Terminal bytes count like any other message's.
+//! acknowledges it. Terminal bytes count like any other message's. A
+//! binary message (kind 2, docs/design/20261028_05_BINARY_FILES_PLAN.md)
+//! goes to [`State::binary`], and what the state has to send of kind 2 is
+//! taken with [`State::take_binary`] after each of its outputs.
+//!
+//! Each connection's writer is its own task with two queues (decision
+//! 4.5): control (JSON-RPC and every kind-2 message but CHUNK) and bulk
+//! (CHUNKs). It drains control first and takes one CHUNK only when
+//! control is empty, so a JSON-RPC message waits at most one CHUNK; each
+//! CHUNK written is reported back ([`State::binary_written`]), which is
+//! how a transfer keeps at most two queued.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -280,9 +290,10 @@ enum LinkConn {
     Waiting(tokio::time::Instant),
     /// An attempt is on its way.
     Connecting(JoinHandle<()>),
-    /// Connected: its sending half, and the task reading it.
+    /// Connected: its writer's queues, and the task reading it. The
+    /// writer task ends once the queues are dropped and drained.
     Open {
-        write: Writer,
+        write: WriteQueue,
         reader: JoinHandle<()>,
     },
 }
@@ -329,6 +340,12 @@ enum Wire {
     },
     /// Connection `generation` closed.
     Closed { key: LinkKey, generation: u64 },
+    /// Connection `generation`'s writer wrote a CHUNK of this transfer.
+    Written {
+        key: LinkKey,
+        generation: u64,
+        transfer: u32,
+    },
 }
 
 /// A pairing in progress beside the open connection (decision 10): a
@@ -439,6 +456,94 @@ impl Writer {
             }
         }
         Ok(())
+    }
+}
+
+impl Writer {
+    /// Sends one kind-2 message, on the link only: the socket carries no
+    /// kind 2 (decision 3.2), so one for it is dropped.
+    async fn send_binary(&mut self, message: &[u8], bytes: &AtomicU64) -> Result<(), String> {
+        match self {
+            Writer::Unix(_) => {
+                log::warn!("a binary message for the local socket dropped");
+            }
+            Writer::Link(write) => {
+                write
+                    .send_binary(message)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                bytes.fetch_add(message.len() as u64, Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// What goes on a writer's control queue.
+enum Control {
+    Json(Vec<u8>),
+    Binary(Vec<u8>),
+}
+
+/// A connection's writer queues (decision 4.5): control first, then one
+/// CHUNK (with its transfer) when control is empty.
+struct WriteQueue {
+    control: UnboundedSender<Control>,
+    bulk: UnboundedSender<(Vec<u8>, u32)>,
+}
+
+impl WriteQueue {
+    /// Starts `write`'s task. A failed write reports the connection
+    /// closed; each CHUNK written is reported as [`Wire::Written`].
+    fn spawn(
+        mut write: Writer,
+        bytes: Arc<AtomicU64>,
+        wire: UnboundedSender<Wire>,
+        key: LinkKey,
+        generation: u64,
+    ) -> WriteQueue {
+        let (control, mut control_rx) = tokio::sync::mpsc::unbounded_channel::<Control>();
+        let (bulk, mut bulk_rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, u32)>();
+        tokio::spawn(async move {
+            let mut control_open = true;
+            let mut bulk_open = true;
+            while control_open || bulk_open {
+                let result = tokio::select! {
+                    biased;
+                    m = control_rx.recv(), if control_open => match m {
+                        Some(Control::Json(m)) => write.send(&m, &bytes).await,
+                        Some(Control::Binary(m)) => write.send_binary(&m, &bytes).await,
+                        None => {
+                            control_open = false;
+                            continue;
+                        }
+                    },
+                    m = bulk_rx.recv(), if bulk_open => match m {
+                        Some((m, transfer)) => {
+                            let r = write.send_binary(&m, &bytes).await;
+                            if r.is_ok() {
+                                let _ = wire.send(Wire::Written {
+                                    key,
+                                    generation,
+                                    transfer,
+                                });
+                            }
+                            r
+                        }
+                        None => {
+                            bulk_open = false;
+                            continue;
+                        }
+                    },
+                };
+                if let Err(e) = result {
+                    log::debug!("writing to the daemon: {e}");
+                    let _ = wire.send(Wire::Closed { key, generation });
+                    return;
+                }
+            }
+        });
+        WriteQueue { control, bulk }
     }
 }
 
@@ -557,6 +662,7 @@ impl Net {
             };
             let mut state = State::with_terminals(self.config.client.clone(), terminals);
             state.set_dictation_silence(self.config.dictation_silence);
+            state.set_preview_cache(self.config.preview_cache_dir());
             if let Some(settings) = self.settings {
                 state.input(Input::Settings(settings));
             }
@@ -1625,6 +1731,11 @@ impl Net {
                 };
                 let outputs = match message {
                     Message::Terminal(frame) => slot.state.terminal_frame(&frame),
+                    Message::Binary(message) => {
+                        let mut outputs = slot.state.input(tick);
+                        outputs.extend(slot.state.binary(&message));
+                        outputs
+                    }
                     Message::Json(message) => match serde_json::from_slice::<Incoming>(&message) {
                         Ok(message) => {
                             let mut outputs = slot.state.input(tick);
@@ -1652,6 +1763,17 @@ impl Net {
                     self.offline(key);
                 }
             }
+            Wire::Written {
+                key,
+                generation,
+                transfer,
+            } => {
+                let Some(slot) = self.slot_mut(key).filter(|s| s.generation == generation) else {
+                    return;
+                };
+                let outputs = slot.state.binary_written(transfer);
+                self.pending.push_back((key, outputs));
+            }
         }
     }
 
@@ -1668,7 +1790,7 @@ impl Net {
             return;
         };
         let (messages_tx, mut messages) = tokio::sync::mpsc::unbounded_channel();
-        let (reader, mut write, first) = match conn {
+        let (reader, write, first) = match conn {
             Conn::Unix(stream, hello) => {
                 let (read, write) = stream.into_split();
                 (
@@ -1715,20 +1837,11 @@ impl Net {
             }
             let _ = wire.send(Wire::Closed { key, generation });
         });
-        let failed = match first {
-            Some(hello) => match write.send(&hello, &bytes).await {
-                Ok(()) => false,
-                Err(e) => {
-                    log::debug!("writing to the daemon: {e}");
-                    true
-                }
-            },
-            None => false,
-        };
-        slot.conn = LinkConn::Open { write, reader };
-        if failed {
-            self.offline(key);
+        let write = WriteQueue::spawn(write, bytes, self.wire_tx.clone(), key, generation);
+        if let Some(hello) = first {
+            let _ = write.control.send(Control::Json(hello));
         }
+        slot.conn = LinkConn::Open { write, reader };
     }
 
     /// Stores a `session_id` that `hello` changed in `key`'s record.
@@ -1760,6 +1873,33 @@ impl Net {
     async fn flush(&mut self) {
         while let Some((key, outputs)) = self.pending.pop_front() {
             self.carry_out(key, outputs).await;
+            self.send_binary(key);
+        }
+    }
+
+    /// Queues what `key`'s state has to send of kind 2: CHUNKs on the bulk
+    /// queue, the rest on control. Dropped while the link is not open (the
+    /// state ends its transfers when it hears so).
+    fn send_binary(&mut self, key: LinkKey) {
+        let Some(slot) = self.slot_mut(key) else {
+            return;
+        };
+        let messages = slot.state.take_binary();
+        if messages.is_empty() {
+            return;
+        }
+        let LinkConn::Open { write, .. } = &slot.conn else {
+            log::debug!(
+                "not connected: {} binary message(s) dropped",
+                messages.len()
+            );
+            return;
+        };
+        for (message, chunk_of) in messages {
+            let _ = match chunk_of {
+                Some(transfer) => write.bulk.send((message, transfer)).is_ok(),
+                None => write.control.send(Control::Binary(message)).is_ok(),
+            };
         }
     }
 
@@ -1803,18 +1943,15 @@ impl Net {
                     continue;
                 }
             };
-            let bytes = Arc::clone(&self.bytes);
             let Some(slot) = self.slot_mut(key) else {
                 continue;
             };
-            let LinkConn::Open { write, .. } = &mut slot.conn else {
+            let LinkConn::Open { write, .. } = &slot.conn else {
                 log::debug!("not connected: a message to the daemon dropped");
                 continue;
             };
-            if let Err(e) = write.send(&message, &bytes).await {
-                log::debug!("writing to the daemon: {e}");
-                self.offline(key);
-            }
+            // A writer that failed has reported the connection closed.
+            let _ = write.control.send(Control::Json(message));
         }
     }
 }

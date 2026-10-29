@@ -264,6 +264,44 @@ pub enum Input {
     /// written, or the list as it was, with [`Event::Error`], when it was
     /// refused. Added in 0.5.1.
     SetPluginEnabled { ns: String, enabled: bool },
+    /// Attach an image (PNG, JPEG, WebP or GIF, `mime` as its bytes say)
+    /// to the message for the open agent view's session
+    /// (docs/design/20261028_05_BINARY_FILES_PLAN.md, decisions 9.2-9.3):
+    /// it takes the lowest free number N, 1-4, and its `images` upload
+    /// starts at once. [`Event::Attachments`] lists it; the app puts its
+    /// token `[image N]` in the text ([`Input::SetText`]). Once the token
+    /// has been in the text, taking it out detaches the image. Refused
+    /// with [`Event::Error`] when the daemon takes no images, four are
+    /// attached, or the bytes are not the type or over the cap. Added in
+    /// 0.5.3.
+    AttachImage { bytes: Vec<u8>, mime: String },
+    /// The ✕ on image N: it goes, with its token in the text; an upload in
+    /// flight is cancelled. Added in 0.5.4.
+    DetachImage(u8),
+    /// A tap on image N's failed upload: it starts again. Added in 0.5.4.
+    RetryImage(u8),
+    /// Fetch `path` (relative to the session's project, as `read_file`
+    /// takes it) from the daemon's `files` for the preview (decision 6.1):
+    /// [`Event::TransferStarted`], then [`Event::TransferProgress`] and
+    /// [`Event::FileReady`], or [`Event::TransferFailed`]. `session` is
+    /// the agent view's pane. Added in 0.5.4.
+    RequestFile { session: String, path: String },
+    /// Fetch a `git` output (`show <rev>`, `diff <rev>..<rev>`, `diff`,
+    /// each optionally `-- <path>`; decision 6.5) for the session, as
+    /// [`Input::RequestFile`] does. Added in 0.5.4.
+    RequestGit { session: String, request: String },
+    /// Cancel transfer `id` (an [`Event::TransferStarted`]'s): a download
+    /// ends with [`Event::TransferFailed`] without a line; an image's
+    /// upload is detached. Added in 0.5.4.
+    CancelTransfer(u32),
+    /// Paste `text` into the open agent view's armed terminal
+    /// (`terminal.paste`; the 23:43 EDT amendment, item 2). Added in 0.5.4.
+    TerminalPasteText(String),
+    /// Paste the paths of these attached images (by number, uploaded for
+    /// the open agent view's session) into its armed terminal
+    /// (`terminal.paste`): once pasted they are used up and go. Added in
+    /// 0.5.3.
+    TerminalPasteImages(Vec<u8>),
 }
 
 /// A grade of memory pressure (plan 20261022_03, the L3 amendment of
@@ -796,6 +834,60 @@ pub enum Event {
     PluginResult(wire::PluginResult),
     /// A plugin's notification during a call. Added in 0.5.1.
     PluginNotify(wire::PluginNotify),
+    /// A transfer started (docs/design/20261028_05_BINARY_FILES_PLAN.md):
+    /// its id, for the events that follow and [`Input::CancelTransfer`];
+    /// its namespace (`files`, `git` or `images`), session and request
+    /// (an image's is `image N`). Added in 0.5.4.
+    TransferStarted {
+        id: u32,
+        ns: String,
+        session: String,
+        request: String,
+    },
+    /// `done` of `size` bytes: received, for a download; written by the
+    /// phone's writer, for an upload. Added in 0.5.4.
+    TransferProgress {
+        id: u32,
+        done: u64,
+        size: u64,
+    },
+    /// Image N is uploaded: the daemon holds it, and the message can be
+    /// sent. Added in 0.5.4.
+    ImageReady {
+        n: u8,
+    },
+    /// A file or `git` output arrived, verified, and is in the preview
+    /// cache at `path` ([`PreviewCache`](crate::PreviewCache)): `mime` is
+    /// `text/markdown`, `text/plain`, `text/x-diff` or an image's, `name`
+    /// the path as the daemon resolved it (for `git`, the request as it
+    /// normalised it). Also when the cache already held it. Added in 0.5.4.
+    FileReady {
+        id: u32,
+        path: std::path::PathBuf,
+        mime: String,
+        name: String,
+        size: u64,
+    },
+    /// A transfer ended without its file or upload: the daemon's code
+    /// (decision 4.6) and the line to show, `None` for the codes that show
+    /// none (`cancelled`). Added in 0.5.4.
+    TransferFailed {
+        id: u32,
+        code: u16,
+        line: Option<String>,
+    },
+    /// The images attached to the message, in number order, whenever one
+    /// is attached, starts uploading, is ready, fails or goes. Added in
+    /// 0.5.3.
+    Attachments(Vec<crate::blob::Attachment>),
+    /// What the daemon offers of binary transfers (`hello`'s or
+    /// `server.capabilities`' `blob`): given after [`Event::Connected`] (and
+    /// in a replay) only when the daemon offers them, so an app takes
+    /// [`Event::Connected`] and [`Event::Disconnected`] as `None` until it
+    /// comes. The preview's links and the + follow it. Always `Some` from
+    /// this client; an `Option` so a later one may withdraw it. Added in
+    /// 0.5.4.
+    Blob(Option<wire::BlobInfo>),
 }
 
 impl Eq for Event {}
@@ -1091,6 +1183,10 @@ enum Sent {
     PluginSetEnabled {
         ns: String,
     },
+    /// `terminal.paste` into this session's terminal, of these images.
+    TerminalPaste {
+        images: Vec<u8>,
+    },
 }
 
 /// The most `session.content` requests in flight at once.
@@ -1342,6 +1438,8 @@ pub struct State {
     /// The plugin calls with an `id` sent on this connection whose
     /// `plugin.result` has not come, as `(ns, id)`.
     plugin_waiting: Vec<(String, u64)>,
+    /// Binary transfers (plan 20261028_05, step 7).
+    blobs: crate::blob::Blobs,
 }
 
 /// A refresh running (plan 20261022_03, the L3 amendment of 2026-10-24
@@ -1789,7 +1887,60 @@ impl State {
             retry_in_ms: 0,
             plugins: Vec::new(),
             plugin_waiting: Vec::new(),
+            blobs: crate::blob::Blobs::new(),
         }
+    }
+
+    /// Keeps the files fetched over the link in `cache_dir`'s
+    /// `libmobile-share/` ([`PreviewCache`](crate::PreviewCache)). Without
+    /// it, the system's temp folder's `flankr-companion/`. Added in 0.5.4.
+    pub fn set_preview_cache(&mut self, cache_dir: std::path::PathBuf) {
+        self.blobs
+            .set_cache(crate::blob::PreviewCache::new(&cache_dir));
+    }
+
+    /// What the daemon offers of binary transfers on this connection:
+    /// `None` offline, before `hello`, and from a daemon (or a local
+    /// socket) without them. Added in 0.5.4.
+    pub fn blob(&self) -> Option<&wire::BlobInfo> {
+        self.blobs.info()
+    }
+
+    /// The images attached to the message, as [`Event::Attachments`]
+    /// gives them. Added in 0.5.4.
+    pub fn attachments(&self) -> Vec<crate::blob::Attachment> {
+        self.blobs.attachments()
+    }
+
+    /// A message of the link's binary kind (kind 2) came. One whose header
+    /// cannot be read closes the connection (plan 20261028_05, decision
+    /// 4.1). Added in 0.5.4.
+    pub fn binary(&mut self, bytes: &[u8]) -> Vec<Output> {
+        let mut out = Vec::new();
+        self.last_heard = self.now;
+        self.ping_sent = None;
+        if let Err(why) = self.blobs.on_binary(bytes, self.now, &mut out) {
+            log::warn!("closing the connection: {why}");
+            out.push(Output::Close(why));
+        }
+        out
+    }
+
+    /// The writer wrote one of `transfer`'s CHUNKs: its progress, and the
+    /// next CHUNK queued (at most two at a time, decision 4.5). Added in
+    /// 0.5.3.
+    pub fn binary_written(&mut self, transfer: u32) -> Vec<Output> {
+        let mut out = Vec::new();
+        self.blobs.written(transfer, self.now, &mut out);
+        out
+    }
+
+    /// The kind-2 messages to send, in order, each with `Some(transfer)`
+    /// when it is a CHUNK for the writer's bulk queue (decision 4.5). The
+    /// driver takes them after carrying out each batch of outputs. Added
+    /// in 0.5.3.
+    pub fn take_binary(&mut self) -> Vec<(Vec<u8>, Option<u32>)> {
+        self.blobs.take()
     }
 
     /// Sets the phone's local time of day, for reading clock times in a
@@ -1847,6 +1998,7 @@ impl State {
     pub fn connected(&mut self) -> Vec<Output> {
         self.link = Link::Greeting;
         self.sent.clear();
+        self.blobs.connected();
         self.last_heard = self.now;
         self.ping_sent = None;
         let params = wire::HelloParams {
@@ -1891,6 +2043,9 @@ impl State {
         events.push(Event::Cache {
             bytes: self.cache_bytes(),
         });
+        if let Some(blob) = self.blobs.info() {
+            events.push(Event::Blob(Some(blob.clone())));
+        }
         // Last, so the app's plugin views follow this remote's list.
         events.push(Event::Plugins(self.plugins.clone()));
         events
@@ -2107,6 +2262,8 @@ impl State {
         }
         // Terminals are opened again on the next connection.
         self.terminals.update(|b| ((), b.disconnected()));
+        // Downloads fail; uploads start again on the next connection.
+        self.blobs.disconnected(&mut out);
         // The next connection's first list is given, changed or not.
         self.listing = false;
         self.listed = false;
@@ -2207,6 +2364,7 @@ impl State {
             Input::StartTextPrompt => self.start_text_prompt(&mut out),
             Input::StartGeneralAgentPrompt(mode) => self.start_general_agent_prompt(mode, &mut out),
             Input::SetText(text) => {
+                self.blobs.text_changed(&text, &mut out);
                 if let Some(d) = self.dictation.as_mut() {
                     d.parts = if text.is_empty() {
                         Vec::new()
@@ -2368,6 +2526,42 @@ impl State {
                 },
                 &mut out,
             ),
+            Input::AttachImage { bytes, mime } => match self.view.as_ref() {
+                Some(v) => {
+                    let pane = v.pane_id.clone();
+                    self.blobs.attach(&pane, bytes, &mime, self.now, &mut out);
+                }
+                None => out.push(event(Event::Error(
+                    "Open a session to attach an image.".to_string(),
+                ))),
+            },
+            Input::DetachImage(n) => {
+                if self.blobs.detach(n, &mut out) {
+                    self.drop_token(n, &mut out);
+                }
+            }
+            Input::RetryImage(n) => self.blobs.retry(n, self.now, &mut out),
+            Input::RequestFile { session, path } => {
+                self.blobs.request(
+                    libflankr_blob::NS_FILES,
+                    &session,
+                    &path,
+                    self.now,
+                    &mut out,
+                );
+            }
+            Input::RequestGit { session, request } => {
+                self.blobs.request(
+                    libflankr_blob::NS_GIT,
+                    &session,
+                    &request,
+                    self.now,
+                    &mut out,
+                );
+            }
+            Input::CancelTransfer(id) => self.blobs.cancel(id, &mut out),
+            Input::TerminalPasteText(text) => self.terminal_paste(Some(text), Vec::new(), &mut out),
+            Input::TerminalPasteImages(images) => self.terminal_paste(None, images, &mut out),
             Input::SetPluginEnabled { ns, enabled } => {
                 if self.online() {
                     let params = wire::PluginSetEnabledParams {
@@ -2387,6 +2581,81 @@ impl State {
         }
         self.show_cards(&mut out);
         self.gate(out)
+    }
+
+    /// Image `n`'s token goes from the draft, with a space beside it.
+    fn drop_token(&mut self, n: u8, out: &mut Vec<Output>) {
+        let token = crate::blob::token(n);
+        let Some(d) = self.dictation.as_mut() else {
+            return;
+        };
+        let text = d.text();
+        if !text.contains(&token) {
+            return;
+        }
+        let mut cut = text.replacen(&format!(" {token} "), " ", 1);
+        if cut == text {
+            cut = text.replacen(&format!(" {token}"), "", 1);
+        }
+        if cut == text {
+            cut = text.replacen(&format!("{token} "), "", 1);
+        }
+        if cut == text {
+            cut = text.replacen(&token, "", 1);
+        }
+        d.parts = if cut.is_empty() {
+            Vec::new()
+        } else {
+            vec![cut]
+        };
+        self.show_dictation(out);
+    }
+
+    /// `terminal.paste` of `text` or of the attached `images` into the open
+    /// agent view's armed terminal (plan 20261028_05, the 23:43 EDT
+    /// amendment, item 2).
+    fn terminal_paste(&mut self, text: Option<String>, images: Vec<u8>, out: &mut Vec<Output>) {
+        let Some(pane) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
+            out.push(event(Event::Error("No session is open.".to_string())));
+            return;
+        };
+        let terminal_id = if !self.online() {
+            Err("I'm not connected to flankr.".to_string())
+        } else {
+            self.terminals
+                .armed_id(&pane)
+                .ok_or_else(|| "The terminal is not open for typing.".to_string())
+        };
+        let refs = if images.is_empty() {
+            Ok(Vec::new())
+        } else {
+            self.blobs.references(&images, &pane)
+        };
+        let text = match text {
+            Some(t) if t.len() > common::TERMINAL_PASTE_TEXT_MAX => Err(format!(
+                "At most {} bytes can be pasted at once.",
+                common::TERMINAL_PASTE_TEXT_MAX
+            )),
+            Some(t) if t.is_empty() => Err("Nothing to paste.".to_string()),
+            t => Ok(t),
+        };
+        match (terminal_id, refs, text) {
+            (Ok(terminal_id), Ok(images_refs), Ok(text)) => {
+                let params = common::TerminalPasteParams {
+                    terminal_id,
+                    text,
+                    images: images_refs,
+                };
+                out.push(self.request(
+                    methods::TERMINAL_PASTE,
+                    params,
+                    Sent::TerminalPaste { images },
+                ));
+            }
+            (Err(why), _, _) | (_, Err(why), _) | (_, _, Err(why)) => {
+                out.push(event(Event::Error(why)));
+            }
+        }
     }
 
     /// Sends `call` as `plugin.call`, or refuses it at once: offline, with
@@ -3472,6 +3741,7 @@ impl State {
     fn tick(&mut self, now: Duration, out: &mut Vec<Output>) {
         self.now = self.now.max(now);
         self.keep_alive(out);
+        self.blobs.tick(self.now, out);
         if self
             .unpairing
             .is_some_and(|(at, _)| self.now >= at + UNPAIR_WAIT)
@@ -3641,6 +3911,8 @@ impl State {
         if self.dictation.take().is_some() {
             self.show_dictation(out);
         }
+        // The images go with the card (decision 9.5).
+        self.blobs.clear(out);
     }
 
     fn scratch(&mut self, out: &mut Vec<Output>) {
@@ -3748,6 +4020,20 @@ impl State {
         }
         let target = d.target.clone().expect("checked above");
         let text = d.text();
+        // Images in the text go as `parts` (plan 20261028_05, decision
+        // 9.4), once every one is uploaded.
+        let parts = match self.blobs.parts(&text, &target.pane_id) {
+            Some(Err(why)) => {
+                out.push(event(Event::Say(why)));
+                self.show_dictation(out);
+                return;
+            }
+            Some(Ok(parts)) => Some(parts),
+            None => None,
+        };
+        let Some(d) = self.dictation.as_mut() else {
+            return;
+        };
         d.phase = DictationPhase::Submitting;
         d.own_approval = true;
         log::info!(
@@ -3764,6 +4050,10 @@ impl State {
             "kind": common::SendKind::Message,
             "handle": message_handle(&target, &text),
         });
+        if let Some(parts) = parts {
+            params["text"] = serde_json::json!("");
+            params["parts"] = serde_json::json!(parts);
+        }
         // The Submit button is the approval (plan 20261023_02, the 13:25
         // EDT amendment); a submit by silence keeps its own approval.
         if by_button {
@@ -4248,6 +4538,14 @@ impl State {
                     self.terminal_acts(acts, out);
                 }
                 Sent::TerminalClose => log::debug!("terminal.close: {message}"),
+                Sent::TerminalPaste { .. } => {
+                    let line = if error.code == libflankr_proto::envelope::codes::METHOD_NOT_FOUND {
+                        "This flankr can't paste into the terminal.".to_string()
+                    } else {
+                        format!("terminal.paste: {message}")
+                    };
+                    out.push(event(Event::Error(line)));
+                }
                 Sent::TerminalArm(session) => {
                     let acts = self.terminals.update(|b| b.armed(&session, Err(message)));
                     self.terminal_acts(acts, out);
@@ -4337,6 +4635,7 @@ impl State {
                 self.terminal_acts(acts, out);
             }
             Sent::TerminalClose => {}
+            Sent::TerminalPaste { images } => self.blobs.used(&images, out),
             Sent::TerminalArm(session) => {
                 let secs = parse::<common::TerminalInputArmResult>(result)
                     .map(|r| r.expires_in_s)
@@ -4394,6 +4693,8 @@ impl State {
                     self.set_llm(llm, out);
                     // The plugins; an older daemon has none.
                     self.set_plugins(hello.plugins.unwrap_or_default(), out);
+                    // Binary transfers, if offered: uploads waiting start.
+                    self.blobs.hello(hello.blob, self.now, out);
                     // The terminal mode, if offered: what was open opens
                     // again (plan 20261027_07, step 4).
                     let acts = self.terminals.update(|b| b.set_info(hello.terminal));
@@ -4448,6 +4749,8 @@ impl State {
             }
             Sent::Message => match parse::<common::AgentsSendResult>(result) {
                 Ok(common::AgentsSendResult::Pending { confirm_id, .. }) => {
+                    // The daemon used the images' references.
+                    self.blobs.clear(out);
                     if let Some(d) = self.dictation.as_mut() {
                         d.phase = DictationPhase::Confirming;
                         d.confirm_id = Some(confirm_id);
@@ -4458,7 +4761,10 @@ impl State {
                     }
                     self.show_dictation(out);
                 }
-                Ok(common::AgentsSendResult::Sent) => self.message_resolved("sent", out),
+                Ok(common::AgentsSendResult::Sent) => {
+                    self.blobs.clear(out);
+                    self.message_resolved("sent", out);
+                }
                 Err(e) => {
                     out.push(event(Event::Error(format!(
                         "a bad agents.send result: {e}"
@@ -5026,6 +5332,9 @@ impl State {
                     }
                     if let Some(plugins) = c.plugins {
                         self.set_plugins(plugins, out);
+                    }
+                    if let Some(blob) = c.blob {
+                        self.blobs.capabilities(blob, self.now, out);
                     }
                 }
             }
