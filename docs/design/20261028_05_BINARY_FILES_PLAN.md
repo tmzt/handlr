@@ -1136,3 +1136,105 @@ implementation.
 - **The planning plugin's plan rows and amendment list** opening `files`
   and `git` previews (10.1), proposed to that plan when `main-plugins`
   lands.
+
+## Amendment — 2026-10-28 21:29 EDT: attachments in a grid, paths by paste, permissions, conversion and the Photos setting
+
+Agreed with the owner on 2026-10-28, in order: "images can be added as
+small thumbnails above the text as attachments"; "the tokens are fine
+but the actual images are kept together in a small grid with x to remove
+in top right (like a message app)"; "what's allow_messages? if these are
+connected to a sent message the same permission applies, token can also
+be used with herdr if the protocol matches (using a path instead of
+paste)"; "should we convert heic to png and bake rotation?"; "what about
+screenshots?"; "this can be an option with selectable label (convert
+photos to jpeg) (send unmodified)"; then "yes" to the whole of this
+wording. It answers section 15's questions 1-6 and replaces the text
+named in each item.
+
+1. **A grid of attachments (replaces 9.2's chip row; answers question
+   4).** The `[image N]` tokens stay in the text as 9.2 says. The images
+   themselves are kept together in a small grid above the text, as a
+   messaging app shows attachments: up to 4 square thumbnails of 64 dp,
+   in one row of up to 4 (two rows of 2 when the card is narrower than
+   4 × 64 dp plus gaps), each with its number in the bottom-left corner
+   and an ✕ in its top-right corner. The ✕ removes the image and its
+   token; deleting a token from the text removes its image. 9.3's
+   progress ring, ✓ and ! are drawn on the thumbnail. No libcontrols
+   change is needed; inline thumbnails in the `TextArea` are not wanted.
+2. **Each token is replaced in place, by a paste where herdr allows it
+   (adds to 7.3).** When the daemon's herdr attachment matches (endpoint
+   generation 1, herdr protocol 22, plan 20261027_08), the composed
+   message is delivered in order: each text run as today, and each
+   image's path as a herdr `Paste { text }` client message on the
+   attachment, so herdr pastes it (bracketed when the pane has bracketed
+   paste on) and an agent that turns a pasted image path into an
+   attachment (Claude Code's `[Image #N]`) does so; then the submit key as
+   today. The path is flankr's own file in its protected folder (5.2);
+   herdr's `ClipboardImage` (which would stage a second copy in herdr's
+   folder) is not used. Without a matching attachment (an older herdr,
+   such as 0.8.0), the path is typed in place of its token, as 7.3 says.
+3. **A leading image is quoted (answers question 2).** 7.4 stands: when
+   the message starts with a token, that path is written in double
+   quotes, in a typed message and in a paste alike.
+4. **Images need `allow_messages` (replaces 7.2's first bullet; answers
+   question 1).** Images are part of a sent message, so the message's
+   permission applies: every send with images, image-only or not, needs
+   the agent's entry, reach and `allow_messages`. An image-only send does
+   not need `allow_arbitrary_commands`. The user's text is checked as 7.2's
+   second bullet says, and the daemon still inserts the paths after the
+   checks (7.3), so `/` is not loosened for the user's text.
+5. **EXIF (answers question 3).** Nothing is stripped on its own: a
+   file sent unchanged keeps its EXIF. A converted photo (item 7) is
+   re-encoded and carries none, so its location goes with it. 14's EXIF
+   risk stands for files sent unchanged.
+6. **Decoding through Android (replaces 10.4's decoders; answers
+   question 5).** The app adds no `zune-jpeg`, `image-webp` or `gif`.
+   Thumbnails, the preview's images and conversion decode through
+   Android's `ImageDecoder` (it applies the EXIF orientation and reads
+   HEIC/HEIF), and conversion encodes with `Bitmap.compress`, both through
+   the libmobile share-and-view plan this plan already depends on, which
+   gains `decode_image(bytes, max_side) -> Rgba` and
+   `encode_image(rgba, Jpeg { quality } | Png) -> Vec<u8>`. The desktop
+   build previews PNG only, through the `png` crate it already has.
+7. **Conversion on the phone, before upload (new).** Under **Convert
+   photos to JPEG** (item 8's default):
+   - **PNG stays PNG**, so screenshots arrive as taken: a PNG under the
+     20 MiB cap is sent byte for byte at full size (an S23 Ultra
+     screenshot, 1440 × 3088, is about 1-3 MB); a PNG over the cap is
+     scaled down by halves until it fits and stays PNG, never JPEG.
+   - **A photo is converted** when it is HEIC or HEIF, has an EXIF
+     orientation other than 1, or is longer than 2048 px on its long
+     side: decoded with the rotation applied, scaled to at most 2048 px on
+     the long side, and encoded as JPEG at quality 90, or PNG when it has
+     transparency. The 2048 px limit is for photos only.
+   - **A JPEG or WebP** with no rotation, at most 2048 px and under the
+     cap, is sent byte for byte.
+   - **A GIF** is never re-encoded (its animation is kept); one over the
+     cap is refused with `TOO_LARGE` and its line.
+   - The daemon is unchanged: it checks the first bytes against the four
+     types (5.3), never sees HEIC, and never decodes or rewrites an image.
+8. **The Photos setting (new).** Settings → Device gains a **Photos** row
+   with a libcontrols `SelectableLabel` choosing between **Convert photos
+   to JPEG** (default) and **Send unmodified**, with an ⓘ:
+   - **Send unmodified:** every PNG, JPEG, WebP or GIF is sent byte for
+     byte, its rotation tag and EXIF included; one over 20 MiB is refused
+     with `TOO_LARGE` instead of scaled. A HEIC or HEIF photo, which no
+     agent reads and the daemon refuses, is still converted, losslessly
+     to PNG with its rotation applied; the ⓘ says so.
+   - The choice is the phone's own (each device keeps its own), stored
+     with the app's other device settings, and read when an image is
+     attached; the copy is in `apps/companion/copy/SETTINGS_COPY.md`. It
+     is entered in the settings plan's living section
+     (docs/design/20261024_02_SETTINGS_SCREEN_PLAN.md) by its own
+     amendment.
+9. **No images to the general agent (answers question 6).** Not in this
+   plan; a later plan may let it see an attached image.
+
+Step 9 (the app's attaching) covers items 1, 7 and 8; its tests add the
+grid's layout, the ✕ and token removal both ways, each conversion rule
+with fixture images (a PNG screenshot unchanged, a PNG over the cap
+scaled and still PNG, a rotated JPEG and a HEIC converted, a GIF over the
+cap refused) and both settings. Step 6 (`agents.send` with `parts`)
+covers items 2-4; its tests add an image-only send refused with
+`allow_messages = false`, and paste delivery over herdr's mock
+attachment beside typed delivery without one.
