@@ -184,6 +184,16 @@ struct Args {
     data: Option<PathBuf>,
 }
 
+/// Whether the client's `event` is handed to the audio. Muted, no
+/// [`Event::Say`] is: every voice the app gives (a read-aloud reply, a
+/// spoken notice, a confirmation or question, a dictation's read-back, a
+/// Gemini line) comes to it as a `Say`. Sounds that are not speech (the
+/// ding) and the rest follow *All sound* in the client, as before (plan
+/// 20261028_06, the 2026-10-29 00:52 EDT amendment, item 1).
+fn reaches_audio(muted: bool, event: &Event) -> bool {
+    !(muted && matches!(event, Event::Say(_)))
+}
+
 /// Seconds as a silence: a positive number, else `None`.
 fn parse_silence(text: &str) -> Option<Duration> {
     text.trim()
@@ -758,8 +768,24 @@ impl App {
     }
 
     fn on_event(&mut self, event: Event) {
-        if let Some(audio) = &mut self.audio {
-            audio.handle(&event);
+        if reaches_audio(self.settings.muted, &event) {
+            #[cfg(test)]
+            if let Some(action) = flankr_audio::pump::action(&event) {
+                probe::audio(&action);
+            }
+            if let Some(audio) = &mut self.audio {
+                audio.handle(&event);
+            }
+        } else {
+            // Muted, a `Say` is dropped, not held (plan 20261028_06, the
+            // 2026-10-29 00:52 EDT amendment, item 2). It counts as said
+            // at once, so what waits for the speaker to finish (a
+            // dictation's read-back, held notices) goes on; while the
+            // speaker is still stopping, its own end does that.
+            log::info!("say: dropped, muted");
+            if !self.speaking {
+                self.send(Input::Speaking(false));
+            }
         }
         match event {
             Event::Connected { server } => {
@@ -2160,7 +2186,9 @@ impl App {
     /// any `Say` is, and only while *All sound* is on. Anything being said,
     /// as the last step's preview, is cut off first.
     fn preview_voice(&mut self) {
-        if !self.settings.sound {
+        // Muted, no voice plays, the preview included (plan 20261028_06,
+        // the 00:52 EDT amendment).
+        if !self.settings.sound || self.settings.muted {
             return;
         }
         let Some(audio) = &mut self.audio else {
@@ -2578,8 +2606,10 @@ impl App {
         log::info!("hold: pressed {hit:?}");
         let mut hold = Hold::start(touch.id, hit, [touch.x, touch.y], now);
         // Volume pressed while something is being said: its 1 s stop
-        // comes first (the 2026-10-29 00:43 EDT amendment, item 1).
-        if hit == AgentHit::Volume && self.speaking {
+        // comes first (the 2026-10-29 00:43 EDT amendment, item 1). Muted,
+        // nothing is said, so a press always unmutes or opens the menu
+        // (the 00:52 EDT amendment, item 3).
+        if hit == AgentHit::Volume && self.speaking && !self.settings.muted {
             hold = hold.with_early(crate::controls::hold::STOP_HOLD);
         }
         self.hold = Some(hold);
@@ -4647,6 +4677,9 @@ pub(crate) mod probe {
         pub frames: Vec<(super::Shown, bool, bool)>,
         /// The inputs the app sent the client, in order, as `{:?}`.
         pub inputs: Vec<String>,
+        /// What the app handed the audio, in order, as `{:?}` of its
+        /// `flankr_audio::Action` (`Speak(..)`, `Chime`, ...).
+        pub audio: Vec<String>,
         /// The drawer as last updated: shown, its cards' and rows' places
         /// when open, the rows' panes, the ≡ of the screen shown, and the
         /// pane of the agent view open.
@@ -4753,6 +4786,10 @@ pub(crate) mod probe {
 
     pub fn input(input: &flankr_companion::Input) {
         PROBE.with(|p| p.borrow_mut().inputs.push(format!("{input:?}")));
+    }
+
+    pub fn audio(action: &flankr_audio::Action) {
+        PROBE.with(|p| p.borrow_mut().audio.push(format!("{action:?}")));
     }
 
     pub fn drawer(app: &super::App) {
@@ -4899,6 +4936,24 @@ pub(crate) mod probe {
 mod tests {
     use super::*;
     use crate::prompt::{CardState, PromptOverlay};
+
+    #[test]
+    fn muted_no_say_reaches_the_audio_and_the_rest_does() {
+        // Every voice comes as a `Say`: a reply, a notice, a confirmation,
+        // a read-back, a Gemini line.
+        let say = Event::Say("Approve running the tests?".into());
+        assert!(!reaches_audio(true, &say));
+        assert!(reaches_audio(false, &say));
+        for e in [
+            Event::Ding,
+            Event::StopSpeaking,
+            Event::Arm,
+            Event::Vocabulary(vec!["herdr".into()]),
+        ] {
+            assert!(reaches_audio(true, &e), "{e:?}");
+            assert!(reaches_audio(false, &e), "{e:?}");
+        }
+    }
 
     #[test]
     fn the_2_s_hold_opens_geminis_card_pinned_not_the_overlay() {

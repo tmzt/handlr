@@ -12,7 +12,7 @@ use libcontrols::Rect;
 use libmorph::script::{OutDir, Script, ScriptRun};
 use libmorph::{GpuError, MorphError};
 
-use flankr_companion::{Event, RemoteId, RemoteInfo};
+use flankr_companion::{Event, RemoteId, RemoteInfo, Speaker};
 
 use super::App;
 use super::probe::{self, Probe};
@@ -44,6 +44,17 @@ fn run_speaking(script: &str) -> Option<Probe> {
 }
 
 fn run_full(script: &str, settings: Option<&str>, speaking: bool) -> Option<Probe> {
+    run_events(script, settings, speaking, Vec::new())
+}
+
+/// As [`run_full`], `events` also given as the client's on the update
+/// after the sessions'.
+fn run_events(
+    script: &str,
+    settings: Option<&str>,
+    speaking: bool,
+    events: Vec<Event>,
+) -> Option<Probe> {
     let dir = tempfile::tempdir().unwrap();
     let keys = dir.path().join("keys");
     let data = dir.path().join("data");
@@ -92,6 +103,9 @@ fn run_full(script: &str, settings: Option<&str>, speaking: bool) -> Option<Prob
         },
     );
     probe::inject(READY, Event::Agents(Vec::new()));
+    for event in events {
+        probe::inject(READY + 1, event);
+    }
     let script = Script::parse(script).unwrap();
     match libmorph::script::run::<App>(&script, run) {
         Err(MorphError::Gpu(GpuError::Adapter(error))) => {
@@ -325,6 +339,97 @@ fn while_speaking_a_2_s_press_on_volume_stops_then_opens_its_menu() {
     .unwrap();
     assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
+    assert!(
+        p.drawer.menu_items.iter().any(|i| i == menu::SPEAK_CODING),
+        "{:?}",
+        p.drawer.menu_items
+    );
+}
+
+/// What the client asks to say, as each kind comes: a read-aloud reply, a
+/// spoken notice, a confirmation's prompt and a Gemini line; and the ding.
+fn voices_and_a_ding() -> Vec<Event> {
+    vec![
+        Event::Say("The tests pass.".into()),
+        Event::Say("Claude in flankr is done.".into()),
+        Event::Confirm {
+            confirm_id: 7,
+            text: "Approve running the tests?".into(),
+            label: None,
+            phrase: "run the tests".into(),
+            command: "cargo test".into(),
+            agent: "claude".into(),
+            project: None,
+        },
+        Event::Say("Approve running the tests?".into()),
+        Event::Conversation {
+            speaker: Speaker::Gemini,
+            text: "Opening flankr.".into(),
+        },
+        Event::Say("Opening flankr.".into()),
+        Event::Ding,
+    ]
+}
+
+#[test]
+fn muted_nothing_is_spoken_and_the_ding_still_plays() {
+    let on = "speak_coding = true\nspeak_gemini = true\n";
+    let muted = "speak_coding = true\nspeak_gemini = true\nmuted = true\n";
+    let script = format!("frames {SETTLE}\n");
+    // Unmuted, each is handed to the audio, the ding as a chime.
+    let Some(p) = run_events(&script, Some(on), false, voices_and_a_ding()) else {
+        return;
+    };
+    let speak = |p: &Probe| p.audio.iter().filter(|a| a.starts_with("Speak")).count();
+    assert_eq!(speak(&p), 4, "{:?}", p.audio);
+    assert_eq!(p.audio.iter().filter(|a| *a == "Chime").count(), 1);
+    // Muted: none is spoken, each counts as said at once, and the ding
+    // still plays.
+    let p = run_events(&script, Some(muted), false, voices_and_a_ding()).unwrap();
+    assert_eq!(speak(&p), 0, "{:?}", p.audio);
+    assert_eq!(p.audio, ["Chime"], "{:?}", p.audio);
+    assert_eq!(inputs_with(&p, "Speaking(false)"), 4, "{:?}", p.inputs);
+    // The confirmation's card is still shown.
+    assert!(p.drawer.card.is_some(), "{:?}", p.drawer.card);
+}
+
+#[test]
+fn muted_a_press_on_volume_unmutes_or_opens_the_menu_even_while_speaking() {
+    let Some((volume, _, _)) = bar() else { return };
+    let [x, y] = volume.center();
+    let muted = Some("speak_coding = true\nmuted = true\n");
+    // A tap, the client reporting speech: it unmutes and skips nothing.
+    let p = run_full(
+        &format!(
+            "frames {SETTLE}\ntouch 5 start {x} {y}\nframes 2\ntouch 5 end {x} {y}\nframes 4\n"
+        ),
+        muted,
+        true,
+    )
+    .unwrap();
+    assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
+    // Held past 1 s: no stop, still timed for the menu.
+    let p = run_full(
+        &format!("frames {SETTLE}\ntouch 5 start {x} {y}\nframes {STOP_HOLD}\n"),
+        muted,
+        true,
+    )
+    .unwrap();
+    assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
+    assert!(p.drawer.holding, "timed for the menu");
+    // Held 2 s: the menu opens, nothing stopped, still muted.
+    let p = run_full(
+        &format!(
+            "frames {SETTLE}\ntouch 5 start {x} {y}\nframes {HOLD}\ntouch 5 end {x} {y}\nframes 4\n"
+        ),
+        muted,
+        true,
+    )
+    .unwrap();
+    assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 0, "{:?}", p.inputs);
     assert!(
         p.drawer.menu_items.iter().any(|i| i == menu::SPEAK_CODING),
         "{:?}",
