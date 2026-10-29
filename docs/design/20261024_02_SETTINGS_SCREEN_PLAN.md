@@ -426,3 +426,11 @@ on 2026-10-28. A new entry for the living list of sections and rows (the
    menu's Read aloud.
 3. The copy is in `apps/companion/copy/SETTINGS_COPY.md` (`speak_coding`,
    `speak_gemini`).
+
+## Amendment — 2026-10-29 00:26 EDT: mute is a device setting without a row (living section)
+
+docs/design/20261028_06_BOTTOM_BAR_UPDATE_PLAN.md, its 2026-10-29 00:26 EDT amendment: the
+speaker button's tap mutes or unmutes; `muted` (default false) is kept in
+`settings.toml` beside `speak_coding` and `speak_gemini`. Sound's two speak
+rows (the 00:18 EDT amendment's item 1) stay; while muted they keep their
+values. There is no Mute row.
