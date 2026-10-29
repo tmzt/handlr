@@ -1,7 +1,7 @@
 ---
 title: The bottom bar updated, with a volume menu, tap or hold on the centre and right, and the keyboard toggle and + in the text input
 date: 2026-10-28
-status: Draft
+status: In implementation
 covers:
   - "The bottom bar of the agent view (four evenly spaced buttons: volume,
     terminal switch, centre, right) and of the overview (three: volume,
@@ -731,3 +731,10 @@ the + on the message card and the terminal + need the binary files plan
 (a Draft) and stay hidden until the daemon offers `images`; the terminal
 paste needs that plan's amendment, which the owner has not yet agreed.
 The status stays `Draft` until the first implementing commit (Rule 1.5).
+
+## Amendment — 2026-10-29 00:01 EDT: implementation started; the document is now immutable
+
+Implementation starts with this amendment, in the commit of step 2
+(flankr-companion 0.5.2, `Settings::speak_gemini`) on `wt-bottom-bar`:
+`status` is `In implementation`, and the body above is frozen (AGENTS.md
+Rule 1.5). Departures are recorded in `CHANGES.md`.

@@ -667,3 +667,14 @@ Additive:
   both screens) gains `icon: "plans"` (☑, a title-bar icon) and
   `opens: "menu"` (a popup of the ten newest plans and All plans…); an app
   without `"menu"` opens it as the modal, as in 0.1.0. Methods unchanged.
+
+## flankr-companion 0.5.2 — 2026-10-29 (the commit tagged `flankr-companion-v0.5.2`)
+
+Plan 20261028_06 (the bottom bar updated), step 2. Strictly additive (a
+field appended to `Settings`, which has `Default`):
+
+- **Added:** `Settings::speak_gemini` (`bool`, `true` by default),
+  *Speak agent (Gemini) responses*: off, a `turn.say` for the running turn
+  still gives `Event::Conversation` (the card shows the line) but no
+  `Event::Say`. What is being said is not cut off; `Input::Skip` does that.
+  *Speak coding responses* stays `Input::ReadAloud`.

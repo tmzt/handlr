@@ -307,6 +307,11 @@ pub struct Settings {
     /// `client.options` (plan 20261024_02, the 2026-10-27 11:27 EDT
     /// amendment; plan 20261027_04, step 6).
     pub tab_follows_focus: bool,
+    /// *Speak agent (Gemini) responses*, on by default: off, a `turn.say`
+    /// still gives [`Event::Conversation`] (the card shows the line) but
+    /// no [`Event::Say`] (plan 20261028_06, decision 6). What is being
+    /// said is not cut off; [`Input::Skip`] does that.
+    pub speak_gemini: bool,
 }
 
 impl Default for Settings {
@@ -317,6 +322,7 @@ impl Default for Settings {
             microphone: true,
             general_agent: true,
             tab_follows_focus: false,
+            speak_gemini: true,
         }
     }
 }
@@ -2633,12 +2639,14 @@ impl State {
             return;
         }
         log::info!(
-            "settings: sound {}, ding {}, microphone {}, general agent {}, tab follows focus {}",
+            "settings: sound {}, ding {}, microphone {}, general agent {}, tab follows focus {}, \
+             speak gemini {}",
             settings.sound,
             settings.ding,
             settings.microphone,
             settings.general_agent,
-            settings.tab_follows_focus
+            settings.tab_follows_focus,
+            settings.speak_gemini
         );
         if before.sound && !settings.sound {
             // Nothing more is read: what waits is dropped, and what is
@@ -4941,7 +4949,12 @@ impl State {
                             speaker: Speaker::Gemini,
                             text: say.text.clone(),
                         }));
-                        out.push(event(Event::Say(say.text)));
+                        // Spoken only while *Speak agent (Gemini)
+                        // responses* is on (plan 20261028_06, decision 6);
+                        // `sound` gates it downstream.
+                        if self.settings.speak_gemini {
+                            out.push(event(Event::Say(say.text)));
+                        }
                     } else {
                         log::debug!("dropping a late turn.say for turn {}", say.turn_id);
                     }
@@ -5692,6 +5705,28 @@ mod tests {
         // Idle again: the next utterance is a new turn.
         let next = start(&mut s, "and codex");
         assert_eq!(next.params["turn_id"], 2);
+    }
+
+    #[test]
+    fn a_say_with_speak_gemini_off_is_shown_but_not_spoken() {
+        let mut s = online();
+        s.input(Input::Settings(Settings {
+            speak_gemini: false,
+            ..Settings::default()
+        }));
+        s.input(Input::Tap);
+        start(&mut s, "what is claude doing");
+        let out = s.incoming(note(
+            "turn.say",
+            json!({"turn_id": 1, "seq": 0, "text": "Claude is running the tests."}),
+        ));
+        assert_eq!(
+            events(&out),
+            vec![Event::Conversation {
+                speaker: Speaker::Gemini,
+                text: "Claude is running the tests.".into()
+            }]
+        );
     }
 
     #[test]
@@ -9095,6 +9130,7 @@ mod tests {
             microphone,
             general_agent,
             tab_follows_focus: false,
+            speak_gemini: true,
         })
     }
 
@@ -9109,7 +9145,8 @@ mod tests {
                 ding: true,
                 microphone: true,
                 general_agent: true,
-                tab_follows_focus: false
+                tab_follows_focus: false,
+                speak_gemini: true
             }
         );
     }
