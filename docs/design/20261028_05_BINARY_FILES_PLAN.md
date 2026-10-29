@@ -1279,3 +1279,51 @@ rest of 10.3 stands.
 6. **Later, not this plan:** the agent view moves onto the same libcontrols
    `Scrollbar`, keeping its Finished-card labels, by its own amendment or
    plan.
+
+## Amendment — 2026-10-28 23:43 EDT: the + of the bottom bar plan, terminal.paste, and the version numbers
+
+The owner (2026-10-28): "yes, agree to the binary files amendment", to
+the amendment the bottom bar plan
+(docs/design/20261028_06_BOTTOM_BAR_UPDATE_PLAN.md, its decision on the
+terminal + and its interface block) asks of this plan. It replaces the
+text named in each item.
+
+1. **The paperclip is the bottom bar plan's + (replaces 9.1's Attach
+   paperclip).** The message card's attach control is the + at the left of
+   the card's new row: a tap opens the media chooser, a 2 s hold opens a
+   `PopupMenu` with **Paste text** and **Attach image…**, as that plan's
+   decision 8 says. The terminal keys row has the same + at its left. Both
+   are hidden while the daemon does not offer `images` (`BlobInfo`). 9.2's
+   tokens and grid (the 21:29 EDT amendment, item 1) are unchanged.
+2. **A terminal paste beside `agents.send`'s `parts` (adds to section 7).**
+   `terminal.paste { terminal_id, text | images }` as the bottom bar plan's
+   interface block gives it (`TerminalPasteParams`, one of `text` and 1-4
+   `images` references, result `{}`; `NOT_PERMITTED`, `UNKNOWN_AGENT`,
+   `HERDR_UNAVAILABLE`, `INVALID_PARAMS`; an older daemon's
+   `METHOD_NOT_FOUND` shown as "This flankr can't paste into the
+   terminal."):
+   - the daemon pastes the images' paths, joined by single spaces, as one
+     herdr `Paste { text }` on the terminal's attachment (bracketed when
+     the pane has bracketed paste on), else as literal keystrokes in
+     64-byte batches; the references are consumed as a send consumes them;
+   - text is at most 8192 bytes of UTF-8, `\r\n` and lone `\r` made
+     `\n`, other control characters but `\t` and `\n` refused, and a
+     multi-line text refused without the attachment;
+   - it needs what `terminal.input` needs (`[terminal] input`, the
+     agent's `terminal_input`, a principal that may approve, the terminal
+     opened on this connection, the live arm), not `allow_messages` or
+     `allow_arbitrary_commands`; it is logged as a `terminal_input` notice
+     of kind `paste` with the agent and the byte count, never the text or
+     paths;
+   - flankr-companion gains `Input::TerminalPasteText(String)` and
+     `Input::TerminalPasteImages(Vec<u8>)` on the `#[non_exhaustive]`
+     `Input`.
+   Steps 1 (libflankr_proto: `TERMINAL_PASTE`, `TerminalPasteParams`), 6
+   (the daemon's handler beside `agents.send`'s `parts`) and 7 (the
+   client's inputs) carry it.
+3. **Version numbers (replaces section 13's table and steps 1 and 7's
+   numbers).** `libflankr_proto` 0.5.3 went to the plugins plan's title
+   icons and flankr-companion may take 0.5.2 for the bottom bar plan's
+   `speak_gemini`: each crate here takes the next free patch number when
+   its step is committed (libflankr_proto 0.5.4 as of this amendment), by
+   release order, and its VERSIONS.md entry names the number it took.
