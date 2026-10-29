@@ -3469,3 +3469,49 @@ The plan table of the 2026-10-28 23:14 EDT amendment and those after it.
    PST, UTC/GMT/Z and ±HH:MM understood; an unknown zone as UTC; a date
    alone as its midnight); ties by file name, the later first; a plan with
    no readable time last.
+
+## 2026-10-29 02:14 EDT — Plan 20261023_07 (subagents), steps 1-4's departures
+
+1. Step 1 (decision 1): a subagent not marked `finished` in its meta is
+   finished once its transcript has gone unwritten for `SUBAGENT_LIVE`
+   (60 s), whether its meta is there or not, rather than after the 5 s
+   `Located::quiet`. That way `children` agrees with `subagents_running`
+   (plan 20261028_03, 3.12), and a subagent waiting on a long tool call
+   is not shown as finished. `Child` also has `started` (the first entry's
+   time, else the file's creation time; the 17:47 EDT amendment, item 5).
+2. Step 1: every line of a subagent's own transcript is `isSidechain`,
+   which the main reader skips. Such a transcript (`agent-<id>.jsonl` in a
+   `subagents` directory) is read by `claude::ClaudeChild`. `ClaudeCode::read_back`
+   and the hub's tailers (`Sessions::line_reader_at`) pick that reader by
+   the transcript's path.
+3. Step 1: the short name's stop words include determiners, verbs of
+   being, the plan words (`phase`, `task`, `amendment` and the rest) and
+   the task verbs (`explore`, `review`, `find` and the like) as well as the
+   amendment's list. Any word with no letter in it is dropped as a number.
+   A word "in capitals" is two characters or more whose letters are all
+   upper case (`README`, `S23`).
+4. Step 2: the release is libflankr_proto's next patch after 0.5.5 (the
+   crate was renamed from libhandlr_proto). `ChildInfo` also has
+   `started_by` (the parent's `Agent` call id), which decision 4's link
+   needs. `session.subscribe` takes `child` too, because decision 2 names
+   it "when built" and it has now been built.
+5. Step 3: a subagent is read with its own status: `done` once finished,
+   else `working`. It is given as `session.peek`'s `status` and as its
+   subscription's status, because herdr's status is the parent's. Its
+   description is redacted and cut to `TURN_TEXT_MAX`. A `child` the
+   session lacks is `UNKNOWN_AGENT`, as is any `child` when the session
+   files are not on the daemon's machine. Summaries of a subagent's
+   replies are cached separately from its pane's. A list re-reads a
+   subagent's turn only when its transcript or finished state has changed.
+6. Step 4: since this plan was written, the agent view has moved to
+   subscriptions (plan 20261023_03), so a subagent's view subscribes with
+   `child` rather than peeking. `Input::CloseChild` is the Back to the
+   parent. Like closed views, the parent's view and each subagent's view
+   are cached across switches. Each switch asks for `agents.list`, as
+   opening a view does. While the view's agent has a subagents reader
+   (`subagents_running` present), the list is polled every
+   `LIST_INTERVAL` so `children` stays current.
+7. Step 4 (decision 5): in a subagent's view, `Input::Respond` sends
+   nothing and `Input::Choose` fails with `NOT_PERMITTED`. `Output`
+   carries `#[allow(clippy::large_enum_variant)]`, because
+   `Event::AgentView` grew and boxing it would change the public type.
