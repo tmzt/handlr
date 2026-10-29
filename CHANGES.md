@@ -3592,3 +3592,18 @@ Step 5 (the app), on flankr-companion 0.5.6, with the 2026-10-28 20:46,
    plan table into the daemon's reader.
 9. `flankr prompt` lists the plugin tools; the general agent's clients for
    an earlier profile are dropped when a new one is built.
+
+## 2026-10-29 03:21 EDT — Plan 20261023_07 (subagents), the 03:11 EDT amendment's departures
+
+1. The All agents modal shows a running subagent's whole minutes at any age
+   (`3m`), not only past 5: item 2 says "its minutes", and the past-5 rule
+   is stated for the menu only. A subagent with no known start shows none.
+2. The modal repeats the menu's Running and Finished headings between its
+   groups.
+3. A row's description line is left out when it equals the shown name;
+   the main row has no description and no state.
+4. ⦿ and ⊙ in the modal are drawn as the libcontrols radio style draws them
+   (ring and dot), not as terminal-face glyphs.
+5. The modal reuses the plugin modal's frame and look through shared helpers
+   factored out of `plugins/modal.rs` (no change for plugin modals), not a
+   libcontrols `ModalDialog`.
