@@ -4246,6 +4246,18 @@ impl AgentScreen {
             .or_else(|| self.prompts.rect_of(hit))
     }
 
+    /// The ⋮ at the header's right (plan 20261028_04, decision 3.6, item
+    /// 1), on the name's line.
+    pub fn kebab(&self) -> crate::menu::Kebab {
+        let s = self.scale();
+        crate::menu::Kebab::place(
+            self.layout.w - PAD * s * 0.5,
+            self.layout.top,
+            HEADER_H * s,
+            s,
+        )
+    }
+
     pub fn frame(&self) -> &Frame {
         &self.frame
     }
@@ -9573,5 +9585,16 @@ mod tests {
             !flow.fills.iter().any(|f| f.color == theme().input),
             "plain text card should not have code block shaded panels"
         );
+    }
+
+    #[test]
+    fn the_kebab_is_at_the_headers_right_clear_of_back() {
+        let a = screen(conversation(5), vec![], None);
+        let k = a.kebab().rect;
+        let back = a.rect_of(AgentHit::Back).unwrap();
+        let h = a.frame().header;
+        assert!(k.x > back.x + back.w);
+        assert!(k.x + k.w <= h.x + h.w);
+        assert!(k.y >= h.y && k.y + k.h <= h.y + h.h + 0.5);
     }
 }

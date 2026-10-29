@@ -38,6 +38,13 @@
 //!   collapsible fingerprint, Remove and Close), and a removal shows
 //!   *Removing…* in its confirm modal until the daemon answers, then
 //!   closes, or says it was removed on this phone only until closed;
+//! - **Plugins** (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.9):
+//!   one [`PluginRow`] per plugin the daemon in use lists: its name with
+//!   an ⓘ for its description, its version (or why the app can't show it)
+//!   under it, and a toggle that asks the daemon to write
+//!   `[plugins."<ns>"] enabled`, with a spinner until the daemon's list
+//!   settles it; a refusal opens a notice. With none listed, the one
+//!   standard row *This flankr has no plugins.*;
 //! - **Device**, last: *Clear cache (n MB)* in the normal text colour,
 //!   with no confirmation (the 12:12 EDT amendment), then *Delete data* in
 //!   red, behind a confirming modal ([`Confirm`]). *Unpair this device* is
@@ -77,6 +84,7 @@ use super::danger_row::DangerRow;
 use super::info::{self, INFO_PART, InfoModal};
 use super::link_row::{ACTION_PART, LinkRow};
 use super::option_row::OptionRow;
+use super::plugin_row::PluginRow;
 use super::remote_details::{DetailsModal, DetailsState};
 use super::remote_row::{REMOVE_PART, RemoteRow};
 use super::toggle_row::ToggleRow;
@@ -84,6 +92,8 @@ use super::voice;
 use super::{Settings, dim_since, scrollbar_label, step_scrollbar};
 use crate::agent::{PAD, Row, Terminal, draw_row, fill, line_h, term_h};
 use crate::markdown_view::{self, Faces, MarkdownView};
+use crate::menu::Kebab;
+use crate::plugins::Availability;
 use crate::theme::{self, theme};
 use crate::ui::Layout;
 
@@ -127,11 +137,12 @@ pub enum Section {
     Notifications,
     Battery,
     Remotes,
+    Plugins,
     Device,
 }
 
 impl Section {
-    const ALL: [Section; 8] = [
+    const ALL: [Section; 9] = [
         Section::Sound,
         Section::Voice,
         Section::Display,
@@ -139,6 +150,7 @@ impl Section {
         Section::Notifications,
         Section::Battery,
         Section::Remotes,
+        Section::Plugins,
         Section::Device,
     ];
 
@@ -151,6 +163,7 @@ impl Section {
             Section::Notifications => copy::SECTION_NOTIFICATIONS.text,
             Section::Battery => copy::SECTION_BATTERY.text,
             Section::Remotes => copy::SECTION_REMOTES.text,
+            Section::Plugins => copy::SECTION_PLUGINS.text,
             Section::Device => copy::SECTION_DEVICE.text,
         }
     }
@@ -168,6 +181,8 @@ enum Info {
     Vendor,
     Appearance,
     Remotes,
+    /// The plugin row at this index: its description.
+    Plugin(usize),
 }
 
 impl Info {
@@ -182,6 +197,7 @@ impl Info {
             Info::Vendor => copy::SAMSUNG_BATTERY,
             Info::Appearance => copy::APPEARANCE,
             Info::Remotes => copy::REMOTES,
+            Info::Plugin(_) => copy::PLUGIN_INFO,
         }
     }
 }
@@ -211,7 +227,24 @@ pub enum SettingsHit {
     DeleteData,
     /// *Clear cache*, with something cached: the cached sessions go.
     ClearCache,
+    /// A plugin's toggle (plan 20261028_04, decision 3.9): the row shows a
+    /// spinner until [`SettingsScreen::set_plugins`].
+    SetPluginEnabled { ns: String, enabled: bool },
 }
+
+/// A plugin as Settings → Plugins shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginShown {
+    pub ns: String,
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub enabled: bool,
+    pub availability: Availability,
+}
+
+/// The most plugin rows: the daemon's built-ins.
+pub const PLUGIN_ROWS: usize = 8;
 
 /// An arrow's step: forward for the right one.
 fn step(action: ControlAction) -> Option<bool> {
@@ -249,6 +282,8 @@ enum Asking {
     Delete,
     /// An ⓘ's explanation.
     Info(Info),
+    /// A notice: a plugin's toggle refused ([`SettingsScreen::notice`]).
+    Notice,
 }
 
 /// What a tap in the open modal can be, besides its close controls.
@@ -291,6 +326,8 @@ impl Asking {
             Asking::Info(Info::Vendor) => "info_vendor",
             Asking::Info(Info::Appearance) => "info_appearance",
             Asking::Info(Info::Remotes) => "info_remotes",
+            Asking::Info(Info::Plugin(_)) => "info_plugin",
+            Asking::Notice => "notice",
         }
     }
 }
@@ -322,6 +359,10 @@ struct Nodes {
     remotes: Vec<NodeId>,
     /// *No remotes paired*, shown with none.
     remotes_empty: NodeId,
+    /// [`PLUGIN_ROWS`] rows, those past the list hidden.
+    plugins: Vec<NodeId>,
+    /// *This flankr has no plugins.*, shown with none.
+    plugins_empty: NodeId,
     clear_cache: NodeId,
     delete: NodeId,
 }
@@ -488,6 +529,15 @@ pub struct SettingsScreen {
     device: String,
     /// The cached sessions' size, in bytes, for *Clear cache (n MB)*.
     cache: u64,
+    /// The daemon's plugins, as Settings → Plugins shows them.
+    plugins: Vec<PluginShown>,
+    /// The toggles asked for and not yet settled, by `ns`: the value
+    /// asked, shown with a spinner.
+    plugin_pending: Vec<(String, bool)>,
+    /// The spinner's turn, 0 to 1.
+    spin: f32,
+    /// The open notice's text.
+    notice: String,
     /// The open modal, and its Cancel and action buttons (an ⓘ's: OK
     /// twice).
     asking: Option<(Asking, NodeId, NodeId)>,
@@ -538,6 +588,10 @@ impl SettingsScreen {
             targets: Vec::new(),
             device: "this phone".to_string(),
             cache: 0,
+            plugins: Vec::new(),
+            plugin_pending: Vec::new(),
+            spin: 0.0,
+            notice: String::new(),
             asking: None,
             modal_text: None,
             pending: None,
@@ -823,6 +877,59 @@ impl SettingsScreen {
         }
     }
 
+    /// The daemon's plugins (`Event::Plugins`): shown as they are now,
+    /// which settles every toggle waiting.
+    pub fn set_plugins(&mut self, plugins: Vec<PluginShown>) {
+        self.plugin_pending.clear();
+        self.plugins = plugins;
+        self.plugins.truncate(PLUGIN_ROWS);
+        if self.nodes.is_some() {
+            self.place();
+        }
+        // An open description follows its plugin, or closes with it.
+        if let Some((Asking::Info(Info::Plugin(i)), ..)) = self.asking {
+            if i < self.plugins.len() {
+                self.open(Asking::Info(Info::Plugin(i)));
+            } else {
+                self.close_modal();
+            }
+        }
+    }
+
+    /// Whether a plugin's toggle waits for the daemon.
+    pub fn plugin_pending(&self) -> bool {
+        !self.plugin_pending.is_empty()
+    }
+
+    /// A toggle waiting was refused (`Event::Error` before the list):
+    /// `reason` opens as a notice.
+    pub fn plugin_failed(&mut self, reason: &str) {
+        let Some((ns, _)) = self.plugin_pending.first() else {
+            return;
+        };
+        let name = self
+            .plugins
+            .iter()
+            .find(|p| &p.ns == ns)
+            .map_or(ns.as_str(), |p| p.name.as_str());
+        self.notice = copy::PLUGIN_TOGGLE_FAILED.fill(
+            None,
+            &[("name", name), ("reason", reason.trim_end_matches('.'))],
+        );
+        self.open(Asking::Notice);
+    }
+
+    /// The ⋮ at the title's right (plan 20261028_04, decision 3.6, item 1).
+    pub fn kebab(&self) -> Kebab {
+        let s = self.scale();
+        Kebab::place(
+            self.layout.w - PAD * s * 0.5,
+            self.layout.top,
+            HEADER_H * s,
+            s,
+        )
+    }
+
     pub fn set_layout(&mut self, layout: Layout) {
         if layout != self.layout || self.nodes.is_none() {
             self.layout = layout;
@@ -959,6 +1066,16 @@ impl SettingsScreen {
                 ..RemoteRow::new(s)
             },
         );
+        let plugins = (0..PLUGIN_ROWS)
+            .map(|_| router.add(under, PluginRow::new(s)))
+            .collect();
+        let plugins_empty = router.add(
+            under,
+            PluginRow {
+                placeholder: Some(copy::PLUGINS_EMPTY.text),
+                ..PluginRow::new(s)
+            },
+        );
         let clear_cache = router.add(
             under,
             DangerRow::new(&clear_cache_label(self.cache), s).with_color(theme().fg),
@@ -998,6 +1115,8 @@ impl SettingsScreen {
             remotes_title,
             remotes,
             remotes_empty,
+            plugins,
+            plugins_empty,
             clear_cache,
             delete,
         });
@@ -1035,6 +1154,10 @@ impl SettingsScreen {
             (n.alerts_note, alerts_note.map(|t| self.note(t))),
         ];
         let remotes = &self.remotes;
+        let plugins = &self.plugins;
+        let pending = &self.plugin_pending;
+        let spin = self.spin;
+        let faces = self.faces.clone();
         let router = &mut self.router;
         let show = |router: &mut Router, id: NodeId, on: bool| {
             router.set_flags(id, NodeFlags::HIDDEN, !on);
@@ -1228,6 +1351,56 @@ impl SettingsScreen {
                         Rect::new(0.0, y, w, 0.0)
                     };
                     if let Some(r) = router.get_mut::<RemoteRow>(n.remotes_empty) {
+                        r.rect = rect;
+                    }
+                }
+                Section::Plugins => {
+                    for (i, &id) in n.plugins.iter().enumerate() {
+                        let shown = plugins.get(i);
+                        show(router, id, shown.is_some());
+                        let rect = if shown.is_some() {
+                            row(&mut y)
+                        } else {
+                            Rect::new(0.0, y, w, 0.0)
+                        };
+                        let label_w = shown.map_or(0.0, |p| {
+                            markdown_view::measure(
+                                faces.as_deref(),
+                                &p.name,
+                                Style::Regular,
+                                LABEL_PT * s,
+                            )
+                        });
+                        if let Some(r) = router.get_mut::<PluginRow>(id) {
+                            r.rect = rect;
+                            r.label_w = label_w;
+                            r.phase = spin;
+                            if let Some(p) = shown {
+                                let usable = p.availability == Availability::Usable;
+                                let asked = pending.iter().find(|(ns, _)| *ns == p.ns);
+                                r.name = p.name.clone();
+                                r.second = match p.availability {
+                                    Availability::Usable => p.version.clone(),
+                                    Availability::NeedsNewerApp => {
+                                        copy::PLUGIN_NEEDS_APP.text.to_string()
+                                    }
+                                    Availability::NeedsNewerFlankr => {
+                                        copy::PLUGIN_NEEDS_FLANKR.text.to_string()
+                                    }
+                                };
+                                r.on = asked.map_or(p.enabled && usable, |(_, on)| *on);
+                                r.enabled = usable;
+                                r.pending = asked.is_some();
+                            }
+                        }
+                    }
+                    show(router, n.plugins_empty, plugins.is_empty());
+                    let rect = if plugins.is_empty() {
+                        row(&mut y)
+                    } else {
+                        Rect::new(0.0, y, w, 0.0)
+                    };
+                    if let Some(r) = router.get_mut::<PluginRow>(n.plugins_empty) {
                         r.rect = rect;
                     }
                 }
@@ -1494,6 +1667,12 @@ impl SettingsScreen {
                 (n.remotes_title, Info::Remotes),
             ]
             .into_iter()
+            .chain(
+                n.plugins
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &id)| (id, Info::Plugin(i))),
+            )
             .find(|(id, _)| *id == target)
             .map(|(_, info)| info)?;
             self.explain(info);
@@ -1592,6 +1771,17 @@ impl SettingsScreen {
                 self.open_details(id);
             }
             return None;
+        } else if let Some(i) = n.plugins.iter().position(|&id| id == target) {
+            let p = self.plugins.get(i)?;
+            if p.availability != Availability::Usable
+                || self.plugin_pending.iter().any(|(ns, _)| *ns == p.ns)
+            {
+                return None;
+            }
+            let (ns, enabled) = (p.ns.clone(), !p.enabled);
+            self.plugin_pending.push((ns.clone(), enabled));
+            self.place();
+            return Some(SettingsHit::SetPluginEnabled { ns, enabled });
         } else if target == n.delete {
             self.ask(Asking::Delete);
             return None;
@@ -1720,6 +1910,13 @@ impl SettingsScreen {
                 let m = self.info_modal(info);
                 Some((m.dialog, m.ok, m.ok, m.text))
             }
+            Asking::Notice => Some(confirm(Confirm::notice(
+                viewport,
+                &self.notice,
+                Some(copy::OK.text),
+                s,
+                faces,
+            ))),
         };
         self.close_modal();
         let Some((dialog, cancel, action, text)) = built else {
@@ -1792,6 +1989,26 @@ impl SettingsScreen {
     fn info_modal(&self, info: Info) -> InfoModal {
         let copy = info.copy();
         let vendor = self.vendor.as_deref();
+        // A plugin's description, as its daemon half gives it.
+        if let Info::Plugin(i) = info
+            && let Some(p) = self.plugins.get(i)
+        {
+            let body = copy::PLUGIN_INFO.fill(
+                vendor,
+                &[
+                    ("description", &p.description),
+                    ("ns", &p.ns),
+                    ("version", &p.version),
+                ],
+            );
+            return InfoModal::new(
+                self.modal_viewport(),
+                &p.name,
+                &body,
+                self.scale(),
+                self.faces.clone(),
+            );
+        }
         let mut body = copy.body(vendor);
         // Without the daemon's general agent: why, and where to turn it on.
         let llm = super::llm();
@@ -1895,6 +2112,18 @@ impl SettingsScreen {
     pub fn tick(&mut self, dt: Duration) -> bool {
         let dt = dt.as_secs_f32();
         self.watch_battery(dt);
+        // The spinner of a toggle waiting turns once a second.
+        if !self.plugin_pending.is_empty() {
+            self.spin = (self.spin + dt).rem_euclid(1.0);
+            if let Some(n) = &self.nodes {
+                for &id in &n.plugins {
+                    if let Some(r) = self.router.get_mut::<PluginRow>(id) {
+                        r.phase = self.spin;
+                    }
+                }
+            }
+            self.dirty = true;
+        }
         let moved = self.router.advance(dt) | self.modals.advance(dt);
         if moved {
             self.dirty = true;
@@ -2193,6 +2422,7 @@ mod tests {
                 Section::Background,
                 Section::Notifications,
                 Section::Remotes,
+                Section::Plugins,
                 Section::Device
             ]
         );
@@ -2676,7 +2906,9 @@ mod tests {
         let order: Vec<Section> = s.sections().into_iter().map(|(x, _)| x).collect();
         let at = |x| order.iter().position(|&o| o == x).unwrap();
         assert_eq!(at(Section::Remotes), at(Section::Battery) + 1);
-        assert_eq!(at(Section::Device), at(Section::Remotes) + 1);
+        // Plugins between it and Device (plan 20261028_04, decision 3.9).
+        assert_eq!(at(Section::Plugins), at(Section::Remotes) + 1);
+        assert_eq!(at(Section::Device), at(Section::Plugins) + 1);
         assert_eq!(Section::Remotes.title(), "REMOTES");
 
         s.set_remotes(vec![remote(1, true, false), remote(2, false, false)]);
@@ -3206,7 +3438,9 @@ mod tests {
         assert_eq!(clear_cache_label(0), "Clear cache (0 MB)");
         assert_eq!(clear_cache_label(2_621_440), "Clear cache (2.5 MB)");
         assert_eq!(clear_cache_label(15 * 1024 * 1024), "Clear cache (15 MB)");
+        // Tall enough that Device is on screen unscrolled, under Plugins.
         let mut s = plain();
+        s.set_layout(Layout { h: 3200.0, ..PHONE });
         // Empty: shown, and does nothing.
         let empty = s.row_rect("Clear cache (0 MB)").unwrap();
         let delete = s.row_rect("Delete data").unwrap();
@@ -3706,5 +3940,139 @@ mod tests {
         assert_eq!(copy::SOUND.label(), "All sound");
         assert_eq!(Section::Sound.title(), "SOUND");
         assert_eq!(BATTERY_UPDATE, "Battery settings need an app update");
+    }
+
+    // Settings → Plugins (plan 20261028_04, decision 3.9).
+
+    fn planning(enabled: bool, availability: Availability) -> PluginShown {
+        PluginShown {
+            ns: "dev.flankr.plugins.planning".into(),
+            name: "Planning".into(),
+            description: "Lists this project's plans.".into(),
+            version: "0.1.0".into(),
+            enabled,
+            availability,
+        }
+    }
+
+    /// Tall enough that Plugins is on screen unscrolled.
+    fn tall() -> SettingsScreen {
+        let mut s = plain();
+        s.set_layout(Layout { h: 3200.0, ..PHONE });
+        s
+    }
+
+    impl SettingsScreen {
+        /// The Plugins section's rows shown: their two lines, on, enabled,
+        /// pending, and rect.
+        fn plugin_rows(&self) -> Vec<PluginRow> {
+            let n = self.nodes.as_ref().unwrap();
+            n.plugins
+                .iter()
+                .chain([&n.plugins_empty])
+                .filter(|&&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
+                .filter_map(|&id| self.router.get::<PluginRow>(id).cloned())
+                .collect()
+        }
+    }
+
+    #[test]
+    fn no_plugins_is_one_standard_row() {
+        let s = tall();
+        let rows = s.plugin_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].placeholder, Some(copy::PLUGINS_EMPTY.text));
+        assert_eq!(copy::PLUGINS_EMPTY.text, "This flankr has no plugins.");
+        assert_eq!(Section::Plugins.title(), "PLUGINS");
+    }
+
+    #[test]
+    fn a_plugins_row_toggles_with_a_spinner_until_the_list_settles_it() {
+        let mut s = tall();
+        s.set_plugins(vec![planning(false, Availability::Usable)]);
+        let rows = s.plugin_rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].name.as_str(), rows[0].second.as_str()),
+            ("Planning", "0.1.0")
+        );
+        assert!(!rows[0].on && rows[0].enabled && !rows[0].pending);
+        let [x, y] = [
+            rows[0].rect.x + rows[0].rect.w - 60.0,
+            rows[0].rect.center()[1],
+        ];
+        assert_eq!(
+            tap(&mut s, x, y),
+            Some(SettingsHit::SetPluginEnabled {
+                ns: "dev.flankr.plugins.planning".into(),
+                enabled: true
+            })
+        );
+        let rows = s.plugin_rows();
+        assert!(
+            rows[0].pending && rows[0].on,
+            "the spinner, at the value asked"
+        );
+        assert!(s.plugin_pending());
+        // A second tap while it waits does nothing.
+        assert_eq!(tap(&mut s, x, y), None);
+        // The daemon's list settles it.
+        s.set_plugins(vec![planning(true, Availability::Usable)]);
+        let rows = s.plugin_rows();
+        assert!(!rows[0].pending && rows[0].on);
+        assert!(!s.plugin_pending());
+    }
+
+    #[test]
+    fn a_refused_toggle_opens_a_notice() {
+        let mut s = tall();
+        s.set_plugins(vec![planning(false, Availability::Usable)]);
+        let r = s.plugin_rows()[0].rect;
+        tap(&mut s, r.x + r.w - 60.0, r.center()[1]);
+        s.plugin_failed("This principal may not approve (-32007)");
+        assert_eq!(s.open_modal(), Some(Asking::Notice));
+        assert!(
+            s.modal_text().contains("Planning was not changed"),
+            "{}",
+            s.modal_text()
+        );
+        // Nothing waits: no notice.
+        let mut s = tall();
+        s.plugin_failed("x");
+        assert_eq!(s.open_modal(), None);
+    }
+
+    #[test]
+    fn a_plugin_the_app_cant_show_is_disabled_with_why_and_its_info_opens() {
+        let mut s = tall();
+        s.set_plugins(vec![
+            planning(true, Availability::NeedsNewerApp),
+            PluginShown {
+                ns: "dev.flankr.plugins.other".into(),
+                ..planning(false, Availability::NeedsNewerFlankr)
+            },
+        ]);
+        let rows = s.plugin_rows();
+        assert_eq!(rows[0].second, copy::PLUGIN_NEEDS_APP.text);
+        assert_eq!(rows[1].second, copy::PLUGIN_NEEDS_FLANKR.text);
+        assert!(rows.iter().all(|r| !r.enabled && !r.on));
+        let r = rows[0].rect;
+        assert_eq!(tap(&mut s, r.x + r.w - 60.0, r.center()[1]), None);
+        // The ⓘ: its description, its package name.
+        let [ix, iy] = rows[0].info_rect().center();
+        tap(&mut s, ix, iy);
+        assert_eq!(s.open_modal(), Some(Asking::Info(Info::Plugin(0))));
+        let text = s.modal_text();
+        assert!(text.contains("Lists this project's plans."), "{text}");
+        assert!(text.contains("dev.flankr.plugins.planning"), "{text}");
+    }
+
+    #[test]
+    fn the_kebab_is_at_the_titles_right() {
+        let s = plain();
+        let k = s.kebab();
+        assert!(k.rect.x + k.rect.w <= PHONE.w);
+        assert!(k.rect.y >= PHONE.top && k.rect.y + k.rect.h <= s.viewport().y + 0.5);
+        assert!(k.rect.x > s.back_rect().x + s.back_rect().w);
     }
 }
