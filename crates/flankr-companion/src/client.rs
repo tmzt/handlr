@@ -142,6 +142,16 @@ pub enum Input {
     /// step 4), tapped: its `sends` sent confirmed, or the message card
     /// opened with its `starts`.
     Suggested(common::Answer),
+    /// A choice question's answers, from its card (plan 20261029_01, step
+    /// 5): `choice.answer` for the open view's pane, `id` the card's
+    /// [`common::ChoiceSet::id`] and one answer per question, in order. A
+    /// tap is the confirmation. [`Event::ChoiceAnswered`] follows, with the
+    /// result or the refusal; with no view open or offline, at once as
+    /// `failed`. Added in 0.5.5.
+    Choose {
+        id: String,
+        answers: Vec<common::ChoiceAnswer>,
+    },
     /// The play button: read the agent's new replies aloud, or stop. Only
     /// its prose is read, never tool calls, their output or code blocks.
     ReadAloud(bool),
@@ -888,6 +898,23 @@ pub enum Event {
     /// this client; an `Option` so a later one may withdraw it. Added in
     /// 0.5.4.
     Blob(Option<wire::BlobInfo>),
+    /// A choice question's answer ([`Input::Choose`]) came back (plan
+    /// 20261029_01, step 5): `outcome` is `answered` (the card goes),
+    /// `mismatch` (`got` is what the agent recorded, one line per
+    /// question), `no_result` (the keys went, but the agent wrote no
+    /// result in time), or `failed`: the daemon refused it, the link
+    /// closed, or no answer came in [`CHOICE_ANSWER_WAIT`]; `got` is then
+    /// the reason, one line, and `code` the daemon's error code when it
+    /// gave one (`CHOICE_STALE`, `CHOICE_UNSUPPORTED`, `SCREEN_MISMATCH`,
+    /// `NOT_PERMITTED`, …). Added in 0.5.5.
+    ChoiceAnswered {
+        id: String,
+        /// The pane it was for; empty when no view was open.
+        pane_id: String,
+        outcome: String,
+        got: Vec<String>,
+        code: Option<i64>,
+    },
 }
 
 impl Eq for Event {}
@@ -944,6 +971,13 @@ pub const PING_WAIT_RESUME: Duration = Duration::from_secs(3);
 /// How long `link.unpair` may go unanswered before the pairing is
 /// forgotten anyway.
 pub const UNPAIR_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a `choice.answer` may go unanswered before its card is told it
+/// failed (plan 20261029_01, step 5: at least 15 s). The daemon checks the
+/// screen for up to 1 s before each question and the review, waits 150 ms
+/// between keys, and then up to `CHOICE_RESULT_WAIT_S` (5 s) for the
+/// agent's result: four questions with Other text come to about 12 s.
+pub const CHOICE_ANSWER_WAIT: Duration = Duration::from_secs(20);
 
 /// Whether an utterance answers a confirmation with approval: the whole
 /// utterance is "approve" or "approved", in any case, ignoring punctuation
@@ -1135,6 +1169,8 @@ enum Sent {
     History(u64),
     /// `agents.send` of a suggested response: its label and its text.
     Respond(String, String),
+    /// `choice.answer` of the choice set with this id, for this pane.
+    Choose(String, String),
     /// `speech.summarize` of the reply being read with this serial.
     Summarize(u64),
     /// `client.options`, with read aloud as it was then.
@@ -1410,6 +1446,9 @@ pub struct State {
     /// A `link.unpair` for the active remote is on its way, since this
     /// time.
     unpairing: Option<(Duration, RemoteId)>,
+    /// A `choice.answer` on its way: its request id, its choice set's id,
+    /// its pane and when it was sent ([`CHOICE_ANSWER_WAIT`]).
+    choosing: Option<(Id, String, String, Duration)>,
     /// Panes whose finished turn the agent view has dinged: the list's
     /// next stopped turn for them is the same one, and is not dinged again.
     dinged: HashSet<String>,
@@ -1876,6 +1915,7 @@ impl State {
             settings: Settings::default(),
             llm: wire::LlmInfo::available(),
             unpairing: None,
+            choosing: None,
             dinged: HashSet::new(),
             cross: crate::cross::Cross::default(),
             closed: VecDeque::new(),
@@ -2007,7 +2047,18 @@ impl State {
             client: self.client.clone(),
             session_id: self.session_id.clone(),
         };
-        vec![self.request(methods::HELLO, params, Sent::Hello)]
+        let mut out = Vec::new();
+        // A new connection answers nothing of the last one's.
+        if let Some((_, id, pane_id, _)) = self.choosing.take() {
+            out.push(event(choice_failed(
+                id,
+                pane_id,
+                "the connection closed".to_string(),
+                None,
+            )));
+        }
+        out.push(self.request(methods::HELLO, params, Sent::Hello));
+        out
     }
 
     /// The terminals, as the app reads them.
@@ -2260,6 +2311,16 @@ impl State {
                 "the connection closed",
             ))));
         }
+        // A choice answer on its way gets none: the card is told, and its
+        // choices stay for another try.
+        if let Some((_, id, pane_id, _)) = self.choosing.take() {
+            out.push(event(choice_failed(
+                id,
+                pane_id,
+                "the connection closed".to_string(),
+                None,
+            )));
+        }
         // Terminals are opened again on the next connection.
         self.terminals.update(|b| ((), b.disconnected()));
         // Downloads fail; uploads start again on the next connection.
@@ -2410,6 +2471,7 @@ impl State {
             } => self.answer_id(confirm_id, approve, &mut out),
             Input::Respond(response) => self.respond(response, &mut out),
             Input::Suggested(answer) => self.suggested(answer, &mut out),
+            Input::Choose { id, answers } => self.choose(id, answers, &mut out),
             Input::Background(on) => self.set_background(on, &mut out),
             Input::Skip => {
                 if self.speaking {
@@ -3002,11 +3064,13 @@ impl State {
         };
         // The live question card offers its pending question's answers
         // (plan 20261027_06, step 4).
+        // A choice question's card carries its choices the same way (plan
+        // 20261029_01, step 5).
         let mut sections = sections;
         if let Some(q) = v
             .pending_question
             .as_ref()
-            .filter(|q| !q.answers.is_empty())
+            .filter(|q| !q.answers.is_empty() || q.choices.is_some())
         {
             for section in &mut sections {
                 if let crate::view::Shows::Card(c) = &mut section.shows
@@ -3015,6 +3079,7 @@ impl State {
                     && c.text == q.text
                 {
                     c.answers = q.answers.clone();
+                    c.choices = q.choices.clone();
                 }
             }
         }
@@ -3750,6 +3815,24 @@ impl State {
             log::warn!("unpairing: no answer in time; forgetting the pairing here");
             out.push(Output::Remove { id, daemon: false });
         }
+        if self
+            .choosing
+            .as_ref()
+            .is_some_and(|(_, _, _, at)| self.now >= *at + CHOICE_ANSWER_WAIT)
+            && let Some((request, id, pane_id, _)) = self.choosing.take()
+        {
+            log::warn!("choice.answer: no answer in time");
+            self.sent.remove(&request);
+            out.push(event(choice_failed(
+                id,
+                pane_id,
+                format!(
+                    "no answer from the daemon in {} s",
+                    CHOICE_ANSWER_WAIT.as_secs()
+                ),
+                None,
+            )));
+        }
         if let Some(by_button) = d_waiting(&self.dictation).filter(|_| !self.unheard()) {
             self.submit(by_button, out);
         }
@@ -4153,6 +4236,103 @@ impl State {
             common::SendKind::Message
         };
         self.send_response(pane_id, &answer.label, text, kind, answer.answers, out);
+    }
+
+    /// A choice question's answers (plan 20261029_01, step 5):
+    /// `choice.answer` for the open view's pane. A tap is the confirmation;
+    /// the daemon checks the rest. One at a time: a second while one is on
+    /// its way is refused here, as the daemon would.
+    fn choose(&mut self, id: String, answers: Vec<common::ChoiceAnswer>, out: &mut Vec<Output>) {
+        let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
+            out.push(event(choice_failed(
+                id,
+                String::new(),
+                "no session is open".to_string(),
+                None,
+            )));
+            return;
+        };
+        if !self.online() {
+            out.push(event(choice_failed(
+                id,
+                pane_id,
+                "offline".to_string(),
+                None,
+            )));
+            return;
+        }
+        if self.choosing.is_some() {
+            out.push(event(choice_failed(
+                id,
+                pane_id,
+                "an answer is already on its way".to_string(),
+                Some(libflankr_proto::envelope::codes::NOT_PERMITTED),
+            )));
+            return;
+        }
+        log::info!(
+            "choice.answer: {} answer(s) for {id} in {pane_id}",
+            answers.len()
+        );
+        let params = common::ChoiceAnswerParams {
+            pane_id: pane_id.clone(),
+            id: id.clone(),
+            answers,
+        };
+        let sent = Sent::Choose(id.clone(), pane_id.clone());
+        let request = self.request(methods::CHOICE_ANSWER, params, sent);
+        if let Output::Send(r) = &request {
+            self.choosing = Some((r.id.clone(), id, pane_id, self.now));
+        }
+        out.push(request);
+    }
+
+    /// `choice.answer`'s result for the set `id`. Answered, the question's
+    /// card goes at once, as an answered text question's does.
+    fn choice_answered(
+        &mut self,
+        id: String,
+        pane_id: String,
+        result: Value,
+        out: &mut Vec<Output>,
+    ) {
+        let (outcome, got) = match parse::<common::ChoiceAnswerResult>(result) {
+            Ok(common::ChoiceAnswerResult::Answered) => {
+                if let Some(v) = self.view.as_mut()
+                    && let Some(q) = v
+                        .pending_question
+                        .as_ref()
+                        .filter(|q| q.choices.as_ref().is_some_and(|c| c.id == id))
+                {
+                    v.replied_to = Some(q.ts.clone());
+                }
+                self.recompute_view(out);
+                ("answered", Vec::new())
+            }
+            Ok(common::ChoiceAnswerResult::Mismatch { got }) => ("mismatch", got),
+            Ok(common::ChoiceAnswerResult::NoResult) => ("no_result", Vec::new()),
+            Ok(other) => {
+                log::warn!("choice.answer: a result this client does not know: {other:?}");
+                ("no_result", Vec::new())
+            }
+            Err(e) => {
+                out.push(event(choice_failed(
+                    id,
+                    pane_id,
+                    format!("a bad choice.answer result: {e}"),
+                    None,
+                )));
+                return;
+            }
+        };
+        log::info!("choice.answer: {outcome}");
+        out.push(event(Event::ChoiceAnswered {
+            id,
+            pane_id,
+            outcome: outcome.to_string(),
+            got,
+            code: None,
+        }));
     }
 
     /// Sends `text` to `pane_id` as a tapped response labelled `label`,
@@ -4591,6 +4771,16 @@ impl State {
                     log::info!("dictation: focus {target:?}: {message}");
                     out.push(event(Event::Say(format!("I couldn't focus {target}."))));
                 }
+                Sent::Choose(id, pane_id) => {
+                    log::info!("choice.answer: {message}");
+                    self.choosing = None;
+                    out.push(event(choice_failed(
+                        id,
+                        pane_id,
+                        error.message.clone(),
+                        Some(error.code),
+                    )));
+                }
                 Sent::Respond(label, text) => {
                     // Not sent: the card comes back and the input goes.
                     if let Some(v) = self.view.as_mut() {
@@ -4772,6 +4962,10 @@ impl State {
                     self.message_resolved("failed", out);
                 }
             },
+            Sent::Choose(id, pane_id) => {
+                self.choosing = None;
+                self.choice_answered(id, pane_id, result, out);
+            }
             Sent::Respond(_, text) => match parse::<common::AgentsSendResult>(result) {
                 Ok(common::AgentsSendResult::Pending { confirm_id, .. }) => {
                     let queued = self.confirms.iter().any(|c| c.id == confirm_id);
@@ -5850,6 +6044,18 @@ pub fn plugin_refusal(input: &Input) -> Option<Vec<Event>> {
 
 fn event(e: Event) -> Output {
     Output::Event(e)
+}
+
+/// [`Event::ChoiceAnswered`] for an answer that did not go through: its
+/// reason, and the daemon's code when it gave one.
+fn choice_failed(id: String, pane_id: String, reason: String, code: Option<i64>) -> Event {
+    Event::ChoiceAnswered {
+        id,
+        pane_id,
+        outcome: "failed".to_string(),
+        got: vec![reason],
+        code,
+    }
 }
 
 fn parse<T: DeserializeOwned>(value: Value) -> Result<T, serde_json::Error> {
@@ -8366,6 +8572,295 @@ mod tests {
         };
         let (_, cards, _) = crate::view::flatten_view(&sections, pinned);
         assert!(cards.iter().all(|c| c.answers.is_empty()));
+    }
+
+    /// A choice question (plan 20261029_01) as the daemon gives it: the
+    /// `AskUserQuestion` call at line 2, its live Question card at slot 128
+    /// with the first question's text, and the pending question with its
+    /// choices. `card_text` stands for the card's text, to test the match.
+    fn choosing(card_text: &str) -> Value {
+        let choices = json!({
+            "id": "toolu_01abc", "source": "claude_code/AskUserQuestion",
+            "questions": [
+                {"header": "Colour", "text": "Which colour?", "other": true,
+                 "options": [{"label": "Red", "detail": "warm"}, {"label": "Blue"}]},
+                {"header": "Extras", "text": "Which extras?", "multi": true, "other": true,
+                 "options": [{"label": "Nuts"}, {"label": "Cream", "preview": "a\nb"}]}
+            ]
+        });
+        json!({
+            "session_id": "s1", "matched": "id",
+            "sections": [
+                {"serial": serial(1, 0), "kind": "turn", "entries": [
+                    {"ts": "1", "role": "user", "kind": "text", "summary": "go"}]},
+                {"serial": serial(2, 0), "kind": "tool", "entries": [
+                    {"ts": "2", "role": "assistant", "kind": "tool_use",
+                     "summary": "AskUserQuestion {}", "call_id": "toolu_01abc"}]},
+                {"serial": serial(2, 128), "kind": "card", "card": {
+                    "card": "question", "live": true, "title": "Claude is asking",
+                    "text": card_text}}
+            ],
+            "pending_question": {"text": "Which colour?", "ts": "2", "choices": choices}
+        })
+    }
+
+    /// Online with the view of w2:pZ open on a choice question whose card
+    /// reads `card_text`.
+    fn viewing_choices(card_text: &str) -> State {
+        let mut s = online();
+        s.input(Input::Tick(secs(100.0)));
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        let list = requests(&out, "agents.list")[0].clone();
+        s.incoming(response(
+            list.id,
+            json!({"agents": [agent_info("w2:pZ", "blocked")]}),
+        ));
+        let session = choosing(card_text);
+        let delivery = json!({"subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+            "reset": true, "session": {"session_id": "s1", "matched": "id"}, "reason": null,
+            "sections": session["sections"], "status": "blocked",
+            "pending_question": session["pending_question"]});
+        let sub = requests(&out, "session.subscribe")[0].id.clone();
+        s.incoming(response(
+            sub,
+            json!({"subscription_id": 1, "delivery": delivery}),
+        ));
+        s
+    }
+
+    fn live_question(s: &State) -> Option<crate::view::AgentCard> {
+        let Some(Event::AgentView {
+            sections, pinned, ..
+        }) = s.agent_view()
+        else {
+            panic!("a view");
+        };
+        let (_, cards, _) = crate::view::flatten_view(&sections, pinned);
+        cards
+            .into_iter()
+            .find(|c| c.kind == crate::view::CardKind::Question && c.live)
+    }
+
+    fn choice_answered(out: &[Output]) -> Vec<(String, String, Vec<String>, Option<i64>)> {
+        events(out)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::ChoiceAnswered {
+                    id,
+                    pane_id,
+                    outcome,
+                    got,
+                    code,
+                } => {
+                    assert!(pane_id == "w2:pZ" || pane_id.is_empty(), "{pane_id}");
+                    Some((id, outcome, got, code))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn two_answers() -> Vec<common::ChoiceAnswer> {
+        vec![
+            common::ChoiceAnswer {
+                picked: vec![1],
+                ..Default::default()
+            },
+            common::ChoiceAnswer {
+                picked: vec![0],
+                other: Some("sprinkles".into()),
+            },
+        ]
+    }
+
+    #[test]
+    fn the_live_question_card_carries_its_choices_while_its_text_matches() {
+        let s = viewing_choices("Which colour?");
+        let card = live_question(&s).expect("the live card");
+        let set = card.choices.expect("its choices");
+        assert_eq!(set.id, "toolu_01abc");
+        assert_eq!(set.source, "claude_code/AskUserQuestion");
+        assert_eq!(set.questions.len(), 2);
+        assert_eq!(set.questions[0].header, "Colour");
+        assert_eq!(set.questions[0].options[0].detail, "warm");
+        assert!(set.questions[1].multi && set.questions[1].other);
+        assert_eq!(set.questions[1].options[1].preview.as_deref(), Some("a\nb"));
+        assert!(card.answers.is_empty(), "a choice question has no answers");
+        // A card that is not the pending question's: no choices.
+        let s = viewing_choices("Something else?");
+        let card = live_question(&s).expect("the live card");
+        assert!(card.choices.is_none());
+        // Every other card has none.
+        let s = viewing("idle", asking());
+        assert!(live_question(&s).expect("a card").choices.is_none());
+    }
+
+    #[test]
+    fn an_older_daemons_question_has_no_choices_and_behaves_as_today() {
+        let s = viewing("idle", asking());
+        let card = live_question(&s).expect("a card");
+        assert!(card.choices.is_none() && card.answers.is_empty());
+        // Yes still answers it with a message.
+        let mut s = viewing("idle", asking());
+        let out = s.input(Input::Respond(Suggestion::Yes));
+        assert_eq!(requests(&out, "agents.send").len(), 1);
+        assert!(requests(&out, "choice.answer").is_empty());
+    }
+
+    #[test]
+    fn choose_sends_choice_answer_with_the_views_pane() {
+        let mut s = viewing_choices("Which colour?");
+        let out = s.input(Input::Choose {
+            id: "toolu_01abc".into(),
+            answers: two_answers(),
+        });
+        let sent = requests(&out, "choice.answer");
+        assert_eq!(sent.len(), 1, "{out:?}");
+        assert_eq!(
+            sent[0].params,
+            json!({"pane_id": "w2:pZ", "id": "toolu_01abc", "answers": [
+                {"picked": [1]}, {"picked": [0], "other": "sprinkles"}]})
+        );
+        assert!(choice_answered(&out).is_empty(), "nothing yet");
+        // A second while the first is on its way is refused here.
+        let out = s.input(Input::Choose {
+            id: "toolu_01abc".into(),
+            answers: two_answers(),
+        });
+        assert!(requests(&out, "choice.answer").is_empty());
+        let got = choice_answered(&out);
+        assert_eq!(got[0].1, "failed");
+        assert_eq!(
+            got[0].3,
+            Some(libflankr_proto::envelope::codes::NOT_PERMITTED)
+        );
+    }
+
+    #[test]
+    fn each_choice_result_gives_its_event() {
+        let answer = |result: Value| {
+            let mut s = viewing_choices("Which colour?");
+            let out = s.input(Input::Choose {
+                id: "toolu_01abc".into(),
+                answers: two_answers(),
+            });
+            let id = requests(&out, "choice.answer")[0].id.clone();
+            let out = s.incoming(response(id, result));
+            (s, out)
+        };
+        // Answered: the event, and the card goes at once.
+        let (s, out) = answer(json!({"status": "answered"}));
+        assert_eq!(
+            choice_answered(&out),
+            [("toolu_01abc".into(), "answered".into(), vec![], None)]
+        );
+        assert!(live_question(&s).is_none(), "the card goes");
+        // Mismatch: what the agent recorded; the card stays until the
+        // session says otherwise.
+        let (s, out) = answer(json!({"status": "mismatch", "got": ["Colour: Red"]}));
+        assert_eq!(
+            choice_answered(&out),
+            [(
+                "toolu_01abc".into(),
+                "mismatch".into(),
+                vec!["Colour: Red".to_string()],
+                None
+            )]
+        );
+        assert!(live_question(&s).is_some());
+        // No result: the card stays, with its choices.
+        let (s, out) = answer(json!({"status": "no_result"}));
+        assert_eq!(choice_answered(&out)[0].1, "no_result");
+        assert!(live_question(&s).unwrap().choices.is_some());
+        // A result this client cannot read: failed, with why.
+        let (_, out) = answer(json!({"status": 7}));
+        let got = choice_answered(&out);
+        assert_eq!(got[0].1, "failed");
+        assert!(got[0].2[0].contains("choice.answer"), "{got:?}");
+    }
+
+    #[test]
+    fn a_refused_choice_gives_failed_with_its_code_and_message() {
+        for code in [
+            libflankr_proto::envelope::codes::CHOICE_STALE,
+            libflankr_proto::envelope::codes::CHOICE_UNSUPPORTED,
+            libflankr_proto::envelope::codes::SCREEN_MISMATCH,
+            libflankr_proto::envelope::codes::NOT_PERMITTED,
+        ] {
+            let mut s = viewing_choices("Which colour?");
+            let out = s.input(Input::Choose {
+                id: "toolu_01abc".into(),
+                answers: two_answers(),
+            });
+            let id = requests(&out, "choice.answer")[0].id.clone();
+            let out = s.incoming(Incoming::Response(Response::err(
+                Some(id),
+                libflankr_proto::ErrorObject::new(code, "question 2 did not appear"),
+            )));
+            assert_eq!(
+                choice_answered(&out),
+                [(
+                    "toolu_01abc".into(),
+                    "failed".into(),
+                    vec!["question 2 did not appear".to_string()],
+                    Some(code)
+                )]
+            );
+            // The card stays live with its choices for another try.
+            assert!(live_question(&s).unwrap().choices.is_some());
+            // And another answer may go.
+            let out = s.input(Input::Choose {
+                id: "toolu_01abc".into(),
+                answers: two_answers(),
+            });
+            assert_eq!(requests(&out, "choice.answer").len(), 1);
+        }
+    }
+
+    #[test]
+    fn a_choice_with_no_answer_in_time_or_a_closed_link_fails() {
+        let mut s = viewing_choices("Which colour?");
+        let out = s.input(Input::Choose {
+            id: "toolu_01abc".into(),
+            answers: two_answers(),
+        });
+        let id = requests(&out, "choice.answer")[0].id.clone();
+        // The daemon may take 15 s: nothing yet.
+        assert!(choice_answered(&s.input(Input::Tick(secs(115.0)))).is_empty());
+        let out = s.input(Input::Tick(secs(120.0)));
+        let got = choice_answered(&out);
+        assert_eq!(got[0].1, "failed");
+        assert!(got[0].2[0].contains("20 s"), "{got:?}");
+        assert!(CHOICE_ANSWER_WAIT >= Duration::from_secs(15));
+        // A late answer is no one's.
+        assert!(
+            choice_answered(&s.incoming(response(id, json!({"status": "answered"})))).is_empty()
+        );
+        // The link closing: failed at once.
+        let mut s = viewing_choices("Which colour?");
+        s.input(Input::Choose {
+            id: "toolu_01abc".into(),
+            answers: two_answers(),
+        });
+        let got = choice_answered(&s.disconnected(1000));
+        assert_eq!(got[0].1, "failed");
+        assert_eq!(got[0].2, ["the connection closed"]);
+        // With no view open, or offline: failed, nothing sent.
+        let mut s = online();
+        let out = s.input(Input::Choose {
+            id: "x".into(),
+            answers: vec![],
+        });
+        assert!(requests(&out, "choice.answer").is_empty());
+        assert_eq!(choice_answered(&out)[0].1, "failed");
+        let mut s = viewing_choices("Which colour?");
+        s.disconnected(1000);
+        let out = s.input(Input::Choose {
+            id: "toolu_01abc".into(),
+            answers: two_answers(),
+        });
+        assert!(sent(&out).is_empty());
+        assert_eq!(choice_answered(&out)[0].2, ["offline"]);
     }
 
     #[test]

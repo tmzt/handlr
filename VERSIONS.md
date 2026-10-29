@@ -762,3 +762,22 @@ Plan 20261029_01 (choice questions), step 1. Strictly additive:
 - **Added:** `envelope::codes::CHOICE_STALE` (-32040),
   `CHOICE_UNSUPPORTED` (-32041) and `SCREEN_MISMATCH` (-32042);
   `codes::ALL` is unchanged.
+
+## flankr-companion 0.5.5 — 2026-10-29 (the commit tagged `flankr-companion-v0.5.5`)
+
+Plan 20261029_01 (choice questions), step 5. Strictly additive (a field
+appended to `AgentCard`; a variant each on the `#[non_exhaustive]` `Input`
+and `Event`):
+
+- **Added:** `AgentCard::choices` (`Option<ChoiceSet>`): a live Question
+  card's choices, from its pending question, while its text is that
+  question's; `None` for every other card and from an older daemon.
+- **Added:** `Input::Choose { id, answers }`: `choice.answer` for the open
+  view's pane; one at a time.
+- **Added:** `Event::ChoiceAnswered { id, pane_id, outcome, got, code }`:
+  `answered` (the card goes at once), `mismatch` (`got`: what the agent
+  recorded), `no_result`, or `failed` (`got`: the reason; `code`: the
+  daemon's error code when it gave one), also for a closed link or no
+  answer in `CHOICE_ANSWER_WAIT`.
+- **Added:** `client::CHOICE_ANSWER_WAIT` (20 s).
+- Takes libflankr_proto 0.5.5.

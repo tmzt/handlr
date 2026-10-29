@@ -21,7 +21,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use libflankr_proto::common::{Answer, CardBody, Entry, EntryKind, Link, Role, Section, Serial};
+use libflankr_proto::common::{
+    Answer, CardBody, ChoiceSet, Entry, EntryKind, Link, Role, Section, Serial,
+};
 pub use libflankr_proto::common::{CardKind, SectionKind, Slot};
 
 /// A card as the view shows it.
@@ -55,6 +57,11 @@ pub struct AgentCard {
     /// (plan 20261027_06, step 4). Empty from an older daemon: the app
     /// then offers its own.
     pub answers: Vec<Answer>,
+    /// A live Question card's choices, from its pending question, when it
+    /// is a choice question (plan 20261029_01, step 5): answered with
+    /// [`crate::Input::Choose`], not with messages. `None` for every other
+    /// card and from an older daemon.
+    pub choices: Option<ChoiceSet>,
 }
 
 impl AgentCard {
@@ -116,6 +123,9 @@ pub fn is_user_said(e: &Entry) -> bool {
 }
 
 /// What one section of the view shows: its entries, or its card.
+// A card is the large variant (with its choices, plan 20261029_01); boxing
+// it would change the public type, and a view holds few sections' worth.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Shows {
     Entries(Vec<Entry>),
@@ -652,6 +662,7 @@ fn card_of(body: &CardBody, at: usize) -> AgentCard {
         points: body.points.clone(),
         spoken: body.spoken.clone(),
         answers: Vec::new(),
+        choices: None,
     }
 }
 
