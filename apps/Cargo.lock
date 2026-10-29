@@ -561,6 +561,7 @@ dependencies = [
  "getrandom 0.2.17",
  "libc",
  "libcontrols",
+ "libflankr_blob",
  "libflankr_proto",
  "libflankr_term",
  "libmorph",
@@ -568,6 +569,7 @@ dependencies = [
  "libmsdf",
  "libtypedmd",
  "log",
+ "png",
  "semver",
  "serde",
  "serde_json",
@@ -1131,11 +1133,12 @@ dependencies = [
 
 [[package]]
 name = "flankr-companion"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "base64 0.22.1",
  "flankr-speech",
  "libc",
+ "libflankr_blob",
  "libflankr_proto",
  "libflankr_term",
  "log",
@@ -1653,6 +1656,13 @@ dependencies = [
  "security-framework",
  "toml 1.1.8+spec-1.1.0",
  "zeroize",
+]
+
+[[package]]
+name = "libflankr_blob"
+version = "0.1.0"
+dependencies = [
+ "sha2",
 ]
 
 [[package]]

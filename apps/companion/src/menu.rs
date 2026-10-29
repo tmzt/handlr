@@ -46,6 +46,9 @@ pub const SKIP: &str = "app/skip";
 /// The + menu's (decision 8 and the 23:39 EDT amendment).
 pub const PASTE_TEXT: &str = "app/paste_text";
 pub const ATTACH_IMAGE: &str = "app/attach_image";
+/// The agent view's **Show uncommitted changes** (plan 20261028_05,
+/// decision 10.1).
+pub const SHOW_CHANGES: &str = "app/show_changes";
 /// A held card's Unpin; the card's index follows the slash.
 pub const UNPIN: &str = "app/unpin/";
 
@@ -66,6 +69,8 @@ pub enum Choice {
     /// chooser.
     PasteText,
     AttachImage,
+    /// The session's `git diff` in the preview.
+    ShowChanges,
     Plugin {
         ns: String,
         item: String,
@@ -98,6 +103,7 @@ impl Choice {
             SKIP => Some(Choice::Skip),
             PASTE_TEXT => Some(Choice::PasteText),
             ATTACH_IMAGE => Some(Choice::AttachImage),
+            SHOW_CHANGES => Some(Choice::ShowChanges),
             _ => {
                 if let Some(i) = id.strip_prefix(UNPIN) {
                     return i.parse().ok().map(Choice::Unpin);
@@ -161,6 +167,24 @@ pub fn items(_screen: Screen, plugins: &[MenuEntry], moved: &[Icon]) -> Vec<Popu
         }
         out.extend(moved);
     }
+    out
+}
+
+/// `items` with **Show uncommitted changes** first when `changes` (the
+/// agent view, with the daemon serving `git`), apart from the rest by a
+/// separator.
+pub fn with_changes(items: Vec<PopupItem>, changes: bool) -> Vec<PopupItem> {
+    if !changes {
+        return items;
+    }
+    let mut out = vec![PopupItem::action(
+        SHOW_CHANGES,
+        copy::MENU_SHOW_CHANGES.text,
+    )];
+    if !items.is_empty() {
+        out.push(PopupItem::separator());
+    }
+    out.extend(items);
     out
 }
 
@@ -596,6 +620,17 @@ mod tests {
         assert!(!i[0].enabled && !i[1].enabled);
         assert_eq!(Choice::toggled(SKIP, true), None);
         assert_eq!(Choice::parse(SKIP), Some(Choice::Skip));
+    }
+
+    #[test]
+    fn show_uncommitted_changes_comes_first_while_git_is_served() {
+        let base = items(Screen::Agent, &[], &moved(Screen::Agent, 9));
+        assert_eq!(with_changes(base.clone(), false), base);
+        let i = with_changes(base.clone(), true);
+        assert_eq!(i[0].label, "Show uncommitted changes");
+        assert_eq!(Choice::parse(SHOW_CHANGES), Some(Choice::ShowChanges));
+        assert_eq!(i.len(), base.len() + 1 + usize::from(!base.is_empty()));
+        assert_eq!(ids(&with_changes(Vec::new(), true)), [SHOW_CHANGES]);
     }
 
     #[test]

@@ -78,6 +78,7 @@ pub mod overview;
 #[cfg(all(test, not(target_os = "android")))]
 mod pairing_scan_tests;
 pub mod plugins;
+pub mod preview;
 pub mod prompt;
 pub mod remotes;
 pub mod scanner;
@@ -440,6 +441,11 @@ pub struct App {
     plugins: Plugins,
     /// The open plugin modal's scroll and touch.
     plugin_modal: plugins::modal::ModalView,
+    /// The built-in preview (plan 20261028_05, step 8), the GPU quad of
+    /// its image, and what the daemon offers of binary transfers.
+    preview: preview::Preview,
+    image_quad: Option<preview::gpu::ImageQuad>,
+    blob: Option<libflankr_proto::companion::BlobInfo>,
     /// The title bars' ⋮ menu (step 7), and a touch that came down on a
     /// title icon or the ⋮ (the plan's 22:03 EDT amendment).
     menu: Menu,
@@ -787,8 +793,21 @@ impl App {
                 self.send(Input::Speaking(false));
             }
         }
+        // The preview's transfer, if it is its.
+        self.preview.on_event(&event);
         match event {
+            // What the daemon offers of binary transfers comes after
+            // Connected, when it offers them (flankr-companion 0.5.4).
+            Event::Blob(blob) => {
+                log::info!(
+                    "blob: {}",
+                    blob.as_ref()
+                        .map_or("none".to_string(), |b| b.namespaces.join(", "))
+                );
+                self.blob = blob;
+            }
             Event::Connected { server } => {
+                self.blob = None;
                 log::info!("link: connected to {server}");
                 self.link = format!("connected to {server}");
                 self.online = true;
@@ -797,6 +816,7 @@ impl App {
             }
             Event::Disconnected { retry_in_ms } => {
                 self.online = false;
+                self.blob = None;
                 // The drawer's list says when the next try is, once one
                 // has failed.
                 self.retry_in = (retry_in_ms > 0).then(|| retry_in_ms.div_ceil(1000));
@@ -1019,6 +1039,10 @@ impl App {
                 held_newer,
                 bookends,
             } => {
+                // Paths and commit hashes as preview links (plan
+                // 20261028_05, decision 10.1).
+                let mut sections = sections;
+                self.linker().augment(&mut sections);
                 if let Some(agent) = &mut self.agent {
                     agent.set_loading(loading);
                     agent.set_typed(typed);
@@ -1322,7 +1346,52 @@ impl App {
     }
 
     fn menu_items(&self, screen: PluginScreen, bar: &Bar) -> Vec<libcontrols::PopupItem> {
-        menu::items(screen, &self.plugins.menu(screen), &bar.moved)
+        let items = menu::items(screen, &self.plugins.menu(screen), &bar.moved);
+        // Show uncommitted changes, while the daemon serves `git` (plan
+        // 20261028_05, decision 10.1).
+        let changes = screen == PluginScreen::Agent && self.linker().git();
+        menu::with_changes(items, changes)
+    }
+
+    /// What makes the open view's preview links: its session's folder and
+    /// the daemon's `blob`.
+    fn linker(&self) -> preview::Linker {
+        let cwd = self
+            .agent_pane
+            .as_ref()
+            .and_then(|p| self.agents.iter().find(|a| &a.pane_id == p))
+            .and_then(|a| a.cwd.as_deref());
+        preview::Linker::new(self.blob.as_ref(), cwd)
+    }
+
+    /// Opens the preview of `target` for the open view's session.
+    fn open_preview(&mut self, target: preview::Target) {
+        let Some(pane) = self.agent_pane.clone() else {
+            return;
+        };
+        let project = self
+            .agents
+            .iter()
+            .find(|a| a.pane_id == pane)
+            .and_then(|a| a.project.clone());
+        self.preview.set_visibility(self.settings.scrollbar);
+        let input = self.preview.open(target, &pane, project.as_deref());
+        self.send(input);
+    }
+
+    /// Closes the preview, cancelling a transfer still on its way.
+    fn close_preview(&mut self) {
+        if let Some(id) = self.preview.pending_transfer() {
+            self.send(Input::CancelTransfer(id));
+        }
+        self.preview.close();
+        self.image_quad_clear();
+    }
+
+    fn image_quad_clear(&mut self) {
+        if let Some(q) = &mut self.image_quad {
+            q.clear();
+        }
     }
 
     /// The ⋮ was tapped: its menu opens below it.
@@ -1570,6 +1639,7 @@ impl App {
             // request): not built yet, and the item shows only with the
             // daemon's `images`.
             Choice::AttachImage => log::info!("attach image: not built yet"),
+            Choice::ShowChanges => self.open_preview(preview::Target::Git("diff".into())),
             Choice::Settings => {
                 if self.settings_screen.is_none() {
                     self.open_settings();
@@ -1895,6 +1965,7 @@ impl App {
     /// Closes the agent view, back to the overview.
     fn close_agent(&mut self) {
         self.remember_prompts();
+        self.close_preview();
         // Leaving the view closes its terminal; the session still shows it
         // when opened again.
         if let (Some(agent), Some(pane)) = (&self.agent, &self.agent_pane)
@@ -2502,14 +2573,18 @@ impl App {
                 }
             }
             AgentHit::Link(index) => {
-                // Opened at the end of the touch, with the context.
+                // Opened at the end of the touch, with the context; a
+                // path or a commit opens the preview.
                 if let Some(url) = self
                     .agent
                     .as_ref()
                     .and_then(|a| a.link(index))
                     .map(|l| l.url.clone())
                 {
-                    self.links.push(url);
+                    match preview::Target::parse(&url) {
+                        Some(target) => self.open_preview(target),
+                        None => self.links.push(url),
+                    }
                 }
             }
             // The volume button's tap while nothing is said: mute or
@@ -2985,6 +3060,26 @@ impl App {
             self.menu_chosen();
             return;
         }
+        // The preview, over the agent view, takes every touch while open.
+        if self.preview.is_open() {
+            let layout = self.layout;
+            let pending = self.preview.pending_transfer();
+            match self
+                .preview
+                .touch(&layout, (touch.id, touch.phase, touch.x, touch.y), now)
+            {
+                Some(preview::PreviewHit::Closed) => {
+                    if let Some(id) = pending {
+                        self.send(Input::CancelTransfer(id));
+                    }
+                    self.image_quad_clear();
+                }
+                Some(preview::PreviewHit::Send(input)) => self.send(input),
+                Some(preview::PreviewHit::Link(url)) => self.links.push(url),
+                None => {}
+            }
+            return;
+        }
         if self.plugins.modal().is_some() && !self.pairing.adding {
             let layout = self.layout;
             let calls = self.plugin_modal.touch(
@@ -3219,6 +3314,11 @@ impl App {
         }
         if back && self.plugins.modal().is_some() {
             self.plugins.close_modal();
+            return KeyStatus::Handled;
+        }
+        // Then the preview.
+        if back && self.preview.is_open() {
+            self.close_preview();
             return KeyStatus::Handled;
         }
         // Back (Escape on the desktop) closes the drawer, and is taken.
@@ -3981,6 +4081,9 @@ impl MorphApp for App {
             updates: 0,
             plugins: Plugins::builtin(),
             plugin_modal: Default::default(),
+            preview: preview::Preview::new(Some(std::sync::Arc::clone(&faces))),
+            image_quad: None,
+            blob: None,
             menu: Menu::new(),
             title_touch: None,
             popup: None,
@@ -4003,6 +4106,9 @@ impl MorphApp for App {
                 config.voice = args.voice.clone();
                 // Each remote's state.redb (plan 20261028_01, decision 14).
                 config.data_dir = ctx.data_dir().map(std::path::Path::to_path_buf);
+                // The preview cache, where libmobile's share provider will serve
+                // it (plan 20261028_05, step 7).
+                config.cache_dir = ctx.cache_dir().map(std::path::Path::to_path_buf);
                 // Tests: the app's own (temporary) data directory.
                 #[cfg(test)]
                 {
@@ -4175,6 +4281,7 @@ impl MorphApp for App {
         } else {
             self.overview.tick(dt);
         }
+        self.preview.tick(dt);
         if self.plugins.modal().is_some() && self.plugin_modal.tick(dt, self.scale()) {
             self.overview.invalidate();
             if let Some(agent) = &mut self.agent {
@@ -4362,7 +4469,8 @@ impl MorphApp for App {
         // Another session's card changed: the screen under it draws again.
         let cards_changed = self.session_cards.take_dirty();
         // The ⋮ menu, a plugin's modal or card changed: the same.
-        let overlay_changed = self.plugins.take_dirty() | self.menu.take_dirty();
+        let overlay_changed =
+            self.plugins.take_dirty() | self.menu.take_dirty() | self.preview.take_dirty();
         // Another screen drew over the list: the one shown now draws it all.
         if self.shown != Some(shown) || cards_changed || overlay_changed {
             self.shown = Some(shown);
@@ -4440,6 +4548,10 @@ impl MorphApp for App {
             let layout = self.layout;
             self.plugin_modal
                 .draw(&self.plugins, &layout, &draw, &mut self.list);
+            // The preview over the agent view (plan 20261028_05, step 8).
+            if shown == Shown::Agent {
+                self.preview.draw(&layout, &draw, &mut self.list);
+            }
             self.menu.draw(&mut self.list, &draw);
         }
         let (w, h) = frame.size;
@@ -4621,6 +4733,18 @@ impl App {
                 &self.fonts,
                 0.0,
             );
+        }
+        // The preview's image, over the list in its body (plan 20261028_05,
+        // decision 10.3).
+        if shown == Shown::Agent {
+            let layout = self.layout;
+            if let Some((generation, img, rect, clip)) = self.preview.image(&layout) {
+                let quad = self.image_quad.get_or_insert_with(|| {
+                    preview::gpu::ImageQuad::new(ctx.device(), ctx.surface_format())
+                });
+                quad.upload(ctx.device(), ctx.queue(), generation, img);
+                quad.draw(ctx.device(), ctx.queue(), frame.view, (w, h), rect, clip);
+            }
         }
     }
 }

@@ -49,6 +49,11 @@ flankr-markdown = { path = "../../crates/flankr-markdown" }
 # PopupMenu open (0.10.6, `PopupItem::toggle`, `PopupMenuEvent::Toggled`),
 # for the volume menu (plan 20261028_06, decision 3). On the same libmsdf.
 libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "1d813a1ff785d42f164eb004616fee3c3ef54c6a" }
+# The preview (plan 20261028_05, step 8): libflankr_blob's `ReadPattern`
+# for the transcript's path links, and PNG decoding on the desktop (the
+# 21:29 EDT amendment, item 6), at the version flankr-companion uses.
+libflankr_blob = { path = "../../crates/libflankr_blob" }
+png = "0.18"
 # The device halves' supported daemon versions, in Cargo's caret meaning
 # (plan 20261028_04, 3.4 item 3); the version already in Cargo.lock.
 semver = "1.0.28"

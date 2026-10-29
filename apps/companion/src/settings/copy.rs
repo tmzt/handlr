@@ -213,7 +213,12 @@ mod tests {
         found.sort();
         assert_eq!(
             found,
-            ["DRAWER_COPY.md", "PAIRING_COPY.md", "SETTINGS_COPY.md"]
+            [
+                "DRAWER_COPY.md",
+                "PAIRING_COPY.md",
+                "PREVIEW_COPY.md",
+                "SETTINGS_COPY.md"
+            ]
         );
     }
 }
