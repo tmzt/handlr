@@ -738,3 +738,28 @@ Implementation starts with this amendment, in the commit of step 2
 (flankr-companion 0.5.2, `Settings::speak_gemini`) on `wt-bottom-bar`:
 `status` is `In implementation`, and the body above is frozen (AGENTS.md
 Rule 1.5). Departures are recorded in `CHANGES.md`.
+
+## Amendment — 2026-10-29 00:26 EDT: the speaker is a mute toggle; its menu on a 2 s hold
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "tapping
+speaker should be a mute toggle, with menu items disabled and checked
+status retained (monochrome icon)"; then "yes, write it and build" to the
+lead's wording. This replaces the volume button's tap (decision 3: a tap
+opens the menu) and its glyph states (the dim speaker with an ✕ when both
+options are off); the menu's items, their toggles and Skip stand.
+
+1. **A tap mutes or unmutes.** Muting stops anything being spoken at once
+   (as Skip does) and sits above both Speak options: neither is changed.
+2. **The menu opens on a 2 s hold**, with the same filling bar as the
+   centre and right buttons (`controls/hold.rs`, `HOLD` 2 s, `SLOP` 10 pt).
+3. **While muted**, the menu's two Speak items are drawn disabled with their
+   checks kept, so the menu shows what unmuting brings back; Skip is not
+   shown, since nothing is speaking.
+4. **The glyph.** Muted: the plain speaker, monochrome and dim, no waves.
+   Unmuted: the speaker at full strength, with waves for the options that
+   are on (none when both are off), stepping every 300 ms while speaking.
+5. **Kept across restarts**: `muted` is a device setting in
+   `settings.toml` (default false), beside `speak_coding` and
+   `speak_gemini`; Settings → Sound gets no row for it. Muted, the app
+   speaks nothing whatever the two options say; the client is told as if
+   both were off.
