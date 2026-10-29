@@ -62,3 +62,6 @@ env/
 .pyre/
 .pytype/
 
+
+# A separate build folder for the main checkout while worktrees build
+/target-main
