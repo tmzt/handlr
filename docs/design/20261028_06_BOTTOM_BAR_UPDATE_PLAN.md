@@ -696,3 +696,22 @@ and the binary files plan's amendment steps.
 6. **The volume menu on the overview.** The same menu; *Speak coding
    responses* there reads the view being followed, as play does now.
    Recommended: yes.
+
+## Amendment — 2026-10-28 23:39 EDT: a + on Gemini's card, for Paste text now
+
+The owner (2026-10-28): "we can include the paste option on Gemini card,
+with the plan later to support images as well". This answers open
+question 3 the other way from its recommendation, and replaces the text
+card row's "the + on the message card only":
+
+1. **Gemini's typed card gets the + too**, in the same place in its new
+   row. Until the general agent takes images, a tap on it opens its menu
+   directly (there is nothing to attach), and the menu holds only
+   **Paste text**, inserted at the cursor; a 2 s hold does the same.
+2. **Images later.** When a later plan lets the general agent see an
+   attached image (the binary files plan's 21:29 EDT amendment, item 9),
+   Gemini's + takes the message card's behaviour: a tap opens the media
+   chooser and the hold's menu adds **Attach image…**. Nothing of that is
+   built by this plan.
+3. Paste text stays disabled until libmorph's `clipboard_text` is
+   released, as on the message card.
