@@ -1044,3 +1044,22 @@ choosing a plan) stands.
    `NN mm/dd title · status` with NN and mm/dd zero-padded, sorted as in
    item 2.
 4. **The modal's list** (All plans…) uses the same columns and order.
+
+## Amendment — 2026-10-28 23:14 EDT: the plan table's statuses abbreviated
+
+The owner (2026-10-28): "but abbrv status (Impl, Sucd, Draft)"; then, to
+the lead's table of abbreviations, "Succd". This replaces the previous
+amendment's item 1 on the status column (the full status, and "the word
+before (by"): the column shows the status abbreviated, in the dim colour:
+
+| Status | Shown |
+|---|---|
+| `Draft` | Draft |
+| `Hold` | Hold |
+| `In implementation` | InImpl |
+| `Implemented` | Impl |
+| `Superseded (by …)` | Succd |
+| `Retired (by …)` | Rtrd |
+
+Any other status is cut to its first five letters. The modal's list
+(item 4) uses the same abbreviations.
