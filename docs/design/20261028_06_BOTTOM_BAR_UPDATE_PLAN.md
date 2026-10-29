@@ -786,3 +786,22 @@ clearing below; its items 2-5 stand.
 4. **flankr-companion, additive:** `Input::StopReading` stops the current
    reply and clears the queued replies and notices; the 1 s stop and mute
    both send it. The crate takes the next free patch number at its commit.
+
+## Amendment — 2026-10-29 00:52 EDT: mute stops all voice output
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "no, mute
+stops all voice output", correcting the build's choice (CHANGES.md, the
+00:49 EDT addendum, item 2) that muted, the client could still say
+confirmations and notices. This adds to the 00:26 and 00:43 EDT
+amendments:
+
+1. **Muted, nothing is spoken**: no read-aloud reply, no spoken notice, no
+   spoken confirmation or question, no dictation read-back, no Gemini line,
+   whatever the Speak options say. Sounds that are not speech (the done
+   ding, the record chimes) follow *All sound* as before.
+2. Muting stops what is being said and clears the queue (the 00:43 EDT
+   amendment, item 3); while muted, anything the client asks to say is
+   dropped, not held for later.
+3. Since nothing speaks while muted, a press on the speaker while muted
+   always unmutes (a tap) or opens the menu (a 2 s hold); the
+   skip-and-stop of the 00:43 EDT amendment applies only while unmuted.
