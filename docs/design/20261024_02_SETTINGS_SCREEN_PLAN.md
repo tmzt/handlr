@@ -408,3 +408,21 @@ selectable label (convert photos to jpeg) (send unmodified)", then
    still converted to PNG.
 2. The choice belongs to the phone, stored with the device settings.
 3. The copy is in `apps/companion/copy/SETTINGS_COPY.md`.
+
+## Amendment — 2026-10-29 00:18 EDT: the two speak rows in Sound (living section)
+
+Plan 20261028_06 (the bottom bar updated), decision 6, approved by the owner
+on 2026-10-28. A new entry for the living list of sections and rows (the
+2026-10-28 13:03 EDT amendment):
+
+1. **Sound gains two toggle rows after *Ding when an agent is done***:
+   **Speak coding responses** (off by default; the agent's replies read
+   aloud) and **Speak agent (Gemini) responses** (on by default; Gemini's
+   lines spoken). Both are inactive while *All sound* is off; the second is
+   also inactive while the general agent is off or not offered.
+2. They are device settings in `settings.toml` (`speak_coding`,
+   `speak_gemini`), kept across restarts, the same values as the volume
+   menu's two items. They replace the in-memory read-aloud toggle and the ⋮
+   menu's Read aloud.
+3. The copy is in `apps/companion/copy/SETTINGS_COPY.md` (`speak_coding`,
+   `speak_gemini`).
