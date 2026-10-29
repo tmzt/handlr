@@ -805,3 +805,8 @@ amendments:
 3. Since nothing speaks while muted, a press on the speaker while muted
    always unmutes (a tap) or opens the menu (a 2 s hold); the
    skip-and-stop of the 00:43 EDT amendment applies only while unmuted.
+
+## Amendment — 2026-10-29 00:52 EDT: correction to the previous amendment's citation
+
+The previous amendment cites "CHANGES.md, the 00:49 EDT addendum"; the
+addendum is headed 2026-10-29 00:50 EDT. Nothing else changes.
