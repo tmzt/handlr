@@ -1755,3 +1755,12 @@ modifiers for ime button press".
    `alt+<printable>` and `ctrl+alt+<key>` as well as today's
    `ctrl+<a-z>`; `ctrl+c`, `ctrl+d`, `ctrl+z` and `ctrl+\` still need
    the agent's `terminal_signals`.
+
+## Amendment — 2026-10-29 00:18 EDT: L3, the bottom bar as plan 20261028_06 has it (living section L3)
+
+The owner approved docs/design/20261028_06_BOTTOM_BAR_UPDATE_PLAN.md on
+2026-10-28. Its decision 13 names the L3 entries it supersedes (the 16:02 EDT
+play and skip bullets, the 11:40 EDT centre placement, the 16:15 EDT
+keyboard-glyph amendment, the 00:47 EDT terminal-only keyboard glyph, and the
+10:42 EDT amendment's item 3); for the agent view's bottom row, the text
+card's row and the terminal keys row, that plan is the reference from here.
