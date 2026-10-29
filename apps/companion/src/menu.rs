@@ -19,13 +19,16 @@
 //! The same menu offers **Unpin** for a plugin card held for 2 s on the
 //! overview ([`UNPIN`]), is a plugin's popup menu for an `opens: "menu"`
 //! title icon ([`crate::plugins::POPUP`]), the volume button's menu
-//! ([`volume_items`]) and the text input's + menu ([`attach_items`]).
+//! ([`volume_items`]), the text input's + menu ([`attach_items`]) and the
+//! agent view's agent menu (the subagents plan's ⊙,
+//! [`crate::agent::subagent_menu`]), the one menu drawn with radio marks
+//! ([`Menu::open_radio`]).
 
 use std::sync::Arc;
 
 use libcontrols::{
-    DrawContext, ModalStack, ModalState, MouseButton, MouseEvent, PopupItem, PopupMenu,
-    PopupMenuEvent, PopupMenuOptions, PopupMenuState, PopupRow, Rect, Router,
+    DrawContext, ModalStack, ModalState, MouseButton, MouseEvent, PopupItem, PopupMarkStyle,
+    PopupMenu, PopupMenuEvent, PopupMenuOptions, PopupMenuState, PopupRow, Rect, Router,
 };
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
@@ -83,6 +86,9 @@ pub enum Choice {
         item: String,
         id: String,
     },
+    /// The agent menu: show the main agent (`None`) or the subagent with
+    /// this id (the subagents plan, the 20:46 EDT amendment, item 4).
+    Session(Option<String>),
 }
 
 impl Choice {
@@ -105,6 +111,9 @@ impl Choice {
             ATTACH_IMAGE => Some(Choice::AttachImage),
             SHOW_CHANGES => Some(Choice::ShowChanges),
             _ => {
+                if let Some(session) = crate::agent::subagent_menu::parse(id) {
+                    return Some(Choice::Session(session));
+                }
                 if let Some(i) = id.strip_prefix(UNPIN) {
                     return i.parse().ok().map(Choice::Unpin);
                 }
@@ -299,6 +308,10 @@ pub struct Menu {
     layout: Layout,
     touch: Option<(u64, [f32; 2])>,
     dirty: bool,
+    /// The mark column's style: checks, or the agent menu's radio marks
+    /// (libcontrols 0.10.7). Per menu in libcontrols, so the menu is
+    /// attached again when it changes.
+    marks: PopupMarkStyle,
 }
 
 impl Default for Menu {
@@ -316,6 +329,7 @@ impl Menu {
             layout: Layout::default(),
             touch: None,
             dirty: false,
+            marks: PopupMarkStyle::Check,
         };
         menu.build();
         menu
@@ -338,7 +352,7 @@ impl Menu {
             self.layout = layout;
             self.build();
             if let Some(rows) = open {
-                self.open_rows(self.state.anchor(), rows);
+                self.show(self.state.anchor(), rows);
             }
         }
     }
@@ -377,6 +391,11 @@ impl Menu {
             .check_width(28.0 * s)
             .check_size(14.0 * s)
             .check_thickness(2.0 * s)
+            .marks(self.marks)
+            .radio_radius(6.0 * s)
+            .radio_thickness(1.5 * s)
+            .radio_dot_radius(3.0 * s)
+            .radio_empty_dot_radius(1.25 * s)
             .corner_radius(10.0 * s)
             .offset(4.0 * s)
             .margin(8.0 * s)
@@ -399,6 +418,33 @@ impl Menu {
     /// Opens it below `anchor` with `rows`: items, with cells in shared
     /// columns or not (a plugin's popup, such as the plan table).
     pub fn open_rows(&mut self, anchor: Rect, rows: Vec<PopupRow>) {
+        self.set_marks(PopupMarkStyle::Check);
+        self.show(anchor, rows);
+    }
+
+    /// Opens it below `anchor` with `items`, their marks drawn as radio
+    /// marks: ⦿ on the item checked, ⊙ on the others (the agent menu; the
+    /// subagents plan's 20:51 EDT amendment, items 2 and 4).
+    pub fn open_radio(&mut self, anchor: Rect, items: Vec<PopupItem>) {
+        self.set_marks(PopupMarkStyle::Radio);
+        self.show(anchor, items.into_iter().map(PopupRow::from).collect());
+    }
+
+    /// The mark style its items are drawn with.
+    pub fn marks(&self) -> PopupMarkStyle {
+        self.marks
+    }
+
+    fn set_marks(&mut self, marks: PopupMarkStyle) {
+        if marks != self.marks {
+            self.state.close();
+            let _ = self.state.take_events();
+            self.marks = marks;
+            self.build();
+        }
+    }
+
+    fn show(&mut self, anchor: Rect, rows: Vec<PopupRow>) {
         if rows.is_empty() {
             return;
         }
@@ -819,6 +865,66 @@ mod tests {
         );
         assert!(m.back());
         assert!(!m.back());
+    }
+
+    /// The subagents plan, the 20:51 EDT amendment: the agent menu is
+    /// drawn with radio marks, the other menus with checks; choosing main
+    /// or a subagent names it.
+    #[test]
+    fn the_agent_menu_has_radio_marks_and_chooses_a_session() {
+        use crate::agent::subagent_menu::{self, tests::NOW, tests::children};
+        let mut m = Menu::new();
+        m.set_layout(Layout {
+            w: 1080.0,
+            h: 2340.0,
+            scale: 2.0,
+            top: 80.0,
+            bottom: 60.0,
+        });
+        let anchor = Rect::new(660.0, 100.0, 84.0, 84.0);
+        m.open_radio(anchor, subagent_menu::items(&children(), Some("a1"), NOW));
+        assert_eq!(m.marks(), PopupMarkStyle::Radio);
+        assert!(m.is_open());
+        m.draw(&mut DrawList::new(), &DrawContext::default());
+        let r = m.item_rect(0).expect("laid out");
+        assert!(r.y >= anchor.y + anchor.h, "below its ⊙");
+        // main.
+        let [x, y] = r.center();
+        m.touch(1, TouchPhase::Started, x, y);
+        m.touch(1, TouchPhase::Ended, x, y);
+        assert_eq!(m.take_choice(), Some(Choice::Session(None)));
+        assert!(!m.is_open());
+        // The finished one, under its heading.
+        let items = subagent_menu::items(&children(), None, NOW);
+        let at = items
+            .iter()
+            .position(|i| i.label == "libtypedmd licences")
+            .unwrap();
+        m.open_radio(anchor, items);
+        m.draw(&mut DrawList::new(), &DrawContext::default());
+        let [x, y] = m.item_rect(at).unwrap().center();
+        m.touch(2, TouchPhase::Started, x, y);
+        m.touch(2, TouchPhase::Ended, x, y);
+        assert_eq!(m.take_choice(), Some(Choice::Session(Some("c3".into()))));
+        // A heading chooses nothing.
+        m.open_radio(anchor, subagent_menu::items(&children(), None, NOW));
+        m.draw(&mut DrawList::new(), &DrawContext::default());
+        let [x, y] = m.item_rect(1).unwrap().center();
+        m.touch(3, TouchPhase::Started, x, y);
+        m.touch(3, TouchPhase::Ended, x, y);
+        assert_eq!(m.take_choice(), None);
+        // The ⋮ menu after it: checks again.
+        m.close();
+        m.open(anchor, volume_items(true, false, true, false, false));
+        assert_eq!(m.marks(), PopupMarkStyle::Check);
+        assert_eq!(
+            Choice::parse("app/agent/child/a1"),
+            Some(Choice::Session(Some("a1".into())))
+        );
+        assert_eq!(
+            Choice::parse(subagent_menu::MAIN),
+            Some(Choice::Session(None))
+        );
     }
 
     #[test]

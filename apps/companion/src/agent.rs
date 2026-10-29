@@ -41,7 +41,7 @@ use flankr_companion::view::{SectionKind, Slot as OutlineSlot, ViewWindow};
 use flankr_companion::{AgentCard, Bookend, CardKind, Pressure, Shows, Suggestion, ViewSection};
 use flankr_markdown::{DEFAULT_MARKDOWN_THRESHOLD_PCT, Laid, Style, is_markdown, lay_out};
 use libcontrols::{Button, DrawContext, DrawControl, Rect, TextArea};
-use libflankr_proto::common::{ChoiceSet, Entry, EntryKind, Link, Role, Serial};
+use libflankr_proto::common::{ChildInfo, ChoiceSet, Entry, EntryKind, Link, Role, Serial};
 use libmorph::TouchPhase;
 use libmsdf::drawlist::{AtlasRef, DrawList, SdfInstance, SdfKind};
 #[cfg(test)]
@@ -59,6 +59,8 @@ mod input_box;
 pub mod keys_row;
 pub mod link_spans;
 mod notice_line;
+pub mod subagent_link;
+pub mod subagent_menu;
 pub mod terminal_view;
 pub use choice_card::{ChoiceAction, ChoiceCard, ChoiceHit};
 use input_box::InputBox;
@@ -351,6 +353,23 @@ pub enum AgentHit {
     TermKey(TermKey),
     /// A tap on a choice question's card (plan 20261029_01, decision 7).
     Choice(ChoiceHit),
+    /// A subagent's link in the parent's flow (the subagents plan,
+    /// decision 4): open it. Its index in the view's children.
+    Child(usize),
+}
+
+/// Whether `hit` answers the live card: drawn inactive, and taking no
+/// taps, while a subagent is shown (the subagents plan, decision 5). The
+/// record button is not one: it sends to the parent pane.
+pub fn is_answer(hit: AgentHit) -> bool {
+    matches!(
+        hit,
+        AgentHit::Approve(_)
+            | AgentHit::Deny(_)
+            | AgentHit::Answer { .. }
+            | AgentHit::Suggest(_)
+            | AgentHit::Choice(_)
+    )
 }
 
 /// A button, in the flow or on the screen.
@@ -425,6 +444,9 @@ pub struct BlockState {
     /// A live choice question's card: the screen's choice state (plan
     /// 20261029_01, step 6).
     pub choice: Option<ChoiceCard>,
+    /// Its calls that started a subagent, drawn as links to it (the
+    /// subagents plan, decision 4).
+    pub subagents: Vec<subagent_link::SubagentLink>,
 }
 
 impl Default for BlockState {
@@ -435,6 +457,7 @@ impl Default for BlockState {
             sound: true,
             context: None,
             choice: None,
+            subagents: Vec::new(),
         }
     }
 }
@@ -1514,10 +1537,12 @@ fn lay_out_resolved_summary(
 /// Lays out entry `e` at `y` into `flow`, after an entry that
 /// `previous_compacts`, a tool call or diff folded unless `expanded`; the
 /// y after it.
+#[allow(clippy::too_many_arguments)]
 fn lay_out_entry(
     e: &Entry,
     previous_compacts: bool,
     expanded: bool,
+    link: Option<&subagent_link::SubagentLink>,
     y: f32,
     pen: Pen,
     targets: &mut Vec<Link>,
@@ -1525,6 +1550,26 @@ fn lay_out_entry(
 ) -> f32 {
     let s = pen.s;
     let mut y = y;
+    if let Some(link) = link {
+        // The call that started a subagent: one line, a tap opens it.
+        y += 2.0 * s;
+        flow.entry_y.push(y);
+        let px = TOOL_PT * s;
+        let lh = term_h(px);
+        flow.rows.push(Row {
+            text: one_line(&link.line(), pen.cols(TOOL_PT)),
+            x: pen.pad,
+            y,
+            px,
+            color: theme().fg,
+            mono: true,
+        });
+        flow.taps.push((
+            AgentHit::Child(link.child),
+            Rect::new(0.0, y - 2.0 * s, pen.width, lh + 4.0 * s),
+        ));
+        return y + lh;
+    }
     if let Some(origin) = e.origin.as_deref() {
         // Context: one dim line or two, after an amber dot.
         if NoticeLine::repeats(e, previous_compacts) {
@@ -1675,7 +1720,16 @@ pub fn lay_out_flow_in(
             .checked_sub(1)
             .and_then(|p| entries.get(p))
             .is_some_and(NoticeLine::compacts);
-        y = lay_out_entry(e, previous_compacts, false, y, pen, &mut targets, &mut flow);
+        y = lay_out_entry(
+            e,
+            previous_compacts,
+            false,
+            None,
+            y,
+            pen,
+            &mut targets,
+            &mut flow,
+        );
         prune(&mut flow, at, top, y);
     }
     flow.height = y + 16.0 * s;
@@ -1719,18 +1773,22 @@ pub fn lay_out_block_as(
         Shows::Entries(entries) => {
             let mut targets = link_spans::targets(entries.iter().map(|e| &e.links[..]));
             let mut previous_compacts = after_compact;
-            for e in entries {
+            for (i, e) in entries.iter().enumerate() {
+                let link = state.subagents.iter().find(|l| l.entry == i);
                 y = lay_out_entry(
                     e,
                     previous_compacts,
                     state.expanded,
+                    link,
                     y,
                     pen,
                     &mut targets,
                     &mut flow,
                 );
                 previous_compacts = NoticeLine::compacts(e);
-                folds |= e.origin.is_none() && entry_lines(e, false, |pt| pen.cols(pt)).2;
+                folds |= link.is_none()
+                    && e.origin.is_none()
+                    && entry_lines(e, false, |pt| pen.cols(pt)).2;
             }
             flow.targets = targets;
         }
@@ -2452,6 +2510,10 @@ pub struct AgentScreen {
     /// The live choice question's card state (plan 20261029_01, step 6),
     /// for the set its card carries; empty without one.
     choice: ChoiceCard,
+    /// The subagent shown instead of the main session, by its id, and the
+    /// pane's subagents as last listed (the subagents plan, step 5).
+    child: Option<String>,
+    children: Vec<ChildInfo>,
     /// The height other sessions' cards take above the pinned card.
     cross_h: f32,
     /// The height the pinned prompt cards take, as last laid out.
@@ -2857,12 +2919,17 @@ impl AgentScreen {
                 .card()
                 .filter(|c| c.live && c.choices.is_some())
                 .map(|_| self.choice.clone());
+            let subagents = match &b.shows {
+                Shows::Entries(entries) => subagent_link::links(entries, &self.children),
+                _ => Vec::new(),
+            };
             let state = BlockState {
                 key,
                 expanded: self.expanded.contains(&key),
                 sound: self.sound,
                 context: contexts.get(&key).cloned().flatten(),
                 choice,
+                subagents,
             };
             if b.state != state {
                 b.state = state;
@@ -3026,6 +3093,65 @@ impl AgentScreen {
             row.text = marker.to_string();
         }
         self.settle();
+    }
+
+    /// The subagent shown (`None`: the main session) and the pane's
+    /// subagents, running first (the subagents plan, step 5). The flow's
+    /// links to them follow their state, and the header names the one
+    /// shown.
+    pub fn set_children(&mut self, child: Option<String>, children: Vec<ChildInfo>) {
+        if child == self.child && children == self.children {
+            return;
+        }
+        if child != self.child {
+            log::info!(
+                "agent view: showing {}",
+                child
+                    .as_deref()
+                    .map_or("the main session", |_| "a subagent")
+            );
+        }
+        self.child = child;
+        self.children = children;
+        let keep = self.keep_anchors();
+        self.refresh_blocks();
+        self.hold(keep);
+        self.flow_stale = true;
+        self.settle();
+        self.dirty = true;
+    }
+
+    /// The subagent shown, by its id; `None` for the main session.
+    pub fn child(&self) -> Option<&str> {
+        self.child.as_deref()
+    }
+
+    /// The pane's subagents, as last listed.
+    pub fn children(&self) -> &[ChildInfo] {
+        &self.children
+    }
+
+    /// The header's text (decision 3): the agent's name, and while a
+    /// subagent is shown, "<parent> › <description>".
+    pub fn title(&self) -> String {
+        let Some(id) = &self.child else {
+            return self.name.clone();
+        };
+        let info = self.children.iter().find(|c| &c.id == id);
+        let what = info
+            .map(|c| c.description.trim())
+            .filter(|d| !d.is_empty())
+            .map_or_else(
+                || info.map_or(id.as_str(), subagent_menu::name).to_string(),
+                str::to_string,
+            );
+        format!("{} \u{203a} {what}", self.name)
+    }
+
+    /// A subagent is shown: it takes no input from the pane, so its
+    /// question's answers are drawn inactive (decision 5).
+    pub fn answers_inactive(&self) -> bool {
+        self.child.is_some()
     }
 
     /// herdr's focus, when it is on another pane than the view's: a dim
@@ -4353,7 +4479,8 @@ impl AgentScreen {
     /// status. Those that belong to a card are in it: a question's yes and
     /// no, an approval's own buttons. None while working or dictating.
     pub fn suggestions(&self) -> Vec<Suggestion> {
-        if self.dictating() || self.status == "working" {
+        // A subagent takes no responses (decision 5).
+        if self.dictating() || self.status == "working" || self.answers_inactive() {
             return Vec::new();
         }
         // Continue after something broke at once; after a finished turn,
@@ -4400,12 +4527,17 @@ impl AgentScreen {
             } else if p.compact {
                 self.hits.push((AgentHit::Pin, p.rect));
             } else {
+                let inactive = self.answers_inactive();
                 for b in &p.flow.buttons {
-                    self.hits.push((b.hit, b.rect));
+                    if !(inactive && is_answer(b.hit)) {
+                        self.hits.push((b.hit, b.rect));
+                    }
                 }
                 // A choice card's rows, previews and Other.
                 for &(hit, r) in &p.flow.taps {
-                    self.hits.push((hit, r));
+                    if !(inactive && is_answer(hit)) {
+                        self.hits.push((hit, r));
+                    }
                 }
                 for span in &p.flow.links {
                     let rect = link_spans::rect(&p.flow.rows[span.row], span, 0.0);
@@ -4422,8 +4554,12 @@ impl AgentScreen {
             return;
         }
         let v = self.frame.viewport;
+        let inactive = self.answers_inactive();
         for b in &self.flow.buttons {
             let rect = Rect::new(b.rect.x, v.y + b.rect.y - self.offset, b.rect.w, b.rect.h);
+            if inactive && is_answer(b.hit) {
+                continue;
+            }
             if rect.y >= v.y && rect.y + rect.h <= v.y + v.h {
                 self.hits.push((b.hit, rect));
             }
@@ -5187,9 +5323,11 @@ impl AgentScreen {
                 link_spans::draw(list, ctx, term, r, &spans, [r.x, r.y + dy]);
             }
         }
+        let inactive = self.answers_inactive();
         for b in &self.flow.buttons {
             if visible(b.rect.y, b.rect.h) {
                 let rect = Rect::new(b.rect.x, b.rect.y + dy, b.rect.w, b.rect.h);
+                let start = list.instances.len();
                 SquareButton::draw(
                     list,
                     ctx,
@@ -5201,6 +5339,9 @@ impl AgentScreen {
                     self.speaking,
                     recording,
                 );
+                if inactive && is_answer(b.hit) {
+                    crate::settings::dim_since(list, start);
+                }
             }
         }
         if self.slots.is_empty() {
@@ -5287,7 +5428,7 @@ impl AgentScreen {
         menu.draw(list, s, theme().fg);
         draw_row(list, ctx, term, &back, [BACK_W * s + PAD * s, back_y]);
         let name_x = 2.0 * BACK_W * s;
-        let name = self.header_text(&self.name, name_x, name_px);
+        let name = self.header_text(&self.title(), name_x, name_px);
         ctx.draw_text(list, &name, [name_x, top], name_px, theme().fg);
         let status = self.header_text(&self.status, name_x, TOOL_PT * s);
         ctx.draw_text(
@@ -5341,7 +5482,10 @@ impl AgentScreen {
                 let spans = link_spans::of_row(&p.flow, i);
                 link_spans::draw(list, ctx, term, r, &spans, [r.x, r.y]);
             }
+            // A subagent's answers, inactive (decision 5).
+            let inactive = self.answers_inactive();
             for b in &p.flow.buttons {
+                let start = list.instances.len();
                 SquareButton::draw(
                     list,
                     ctx,
@@ -5353,6 +5497,9 @@ impl AgentScreen {
                     self.speaking,
                     recording,
                 );
+                if inactive && is_answer(b.hit) {
+                    crate::settings::dim_since(list, start);
+                }
             }
         }
         if let Some(j) = &self.frame.jump {
@@ -10241,5 +10388,114 @@ mod tests {
                 .any(|(h, _)| *h == AgentHit::Choice(ChoiceHit::Option(0)))
         );
         assert!(!flow.buttons.iter().any(|b| b.hit == AgentHit::Reply));
+    }
+
+    /// The subagents plan, decision 4 and step 5: the `Agent` call that
+    /// started a subagent is one line, "⎿ <description> (running)", and a
+    /// tap on it is that subagent's.
+    #[test]
+    fn an_agent_call_links_to_its_subagent_and_a_tap_opens_it() {
+        use subagent_link::tests::agent_call;
+        use subagent_menu::tests::children;
+        let mut entries = conversation(1);
+        entries.push(agent_call("Build the overview screen plan"));
+        entries.push(agent_call("Build the libtypedmd licences plan"));
+        let mut a = screen(entries, Vec::new(), None);
+        let calls = |a: &AgentScreen| {
+            a.flow()
+                .rows
+                .iter()
+                .filter(|r| r.text.starts_with("> Agent"))
+                .count()
+        };
+        let links = |a: &AgentScreen| -> Vec<String> {
+            a.flow()
+                .rows
+                .iter()
+                .filter(|r| r.text.starts_with(subagent_link::LEAD))
+                .map(|r| r.text.clone())
+                .collect()
+        };
+        // Without subagents, the dim one-liners.
+        assert_eq!(calls(&a), 2);
+        assert!(a.rect_of(AgentHit::Child(0)).is_none());
+        a.set_children(None, children());
+        assert_eq!(calls(&a), 0);
+        assert_eq!(
+            links(&a),
+            [
+                "\u{23bf} Build the overview screen plan (running)",
+                "\u{23bf} Build the libtypedmd licences plan (finished)",
+            ]
+        );
+        // On one line each, in the fg colour, at the tool size.
+        for r in a
+            .flow()
+            .rows
+            .iter()
+            .filter(|r| r.text.starts_with('\u{23bf}'))
+        {
+            assert_eq!(r.color, theme().fg);
+            assert!(r.mono);
+        }
+        // Each a tap of its own, on its line.
+        for i in [0, 2] {
+            let r = a.rect_of(AgentHit::Child(i)).expect("the link's tap");
+            assert_eq!(a.hit(r.x + 10.0, r.y + r.h * 0.5), Some(AgentHit::Child(i)));
+        }
+        // The first finishes: its line says so.
+        let mut kids = children();
+        kids[0].finished = true;
+        a.set_children(None, kids);
+        assert_eq!(
+            links(&a)[0],
+            "\u{23bf} Build the overview screen plan (finished)"
+        );
+        // The subagents gone: the calls again.
+        a.set_children(None, Vec::new());
+        assert_eq!(calls(&a), 2);
+    }
+
+    /// Decisions 3 and 5: a subagent shown is named in the header after
+    /// its parent, and its question's answers are inactive; the record
+    /// button still takes a message, to the parent.
+    #[test]
+    fn a_subagent_shown_is_in_the_header_and_its_answers_are_inactive() {
+        use subagent_menu::tests::children;
+        let mut a = screen(
+            conversation(1),
+            vec![card(CardKind::Question, 4, true)],
+            Some(0),
+        );
+        let (yes, no) = (
+            AgentHit::Suggest(Suggestion::Yes),
+            AgentHit::Suggest(Suggestion::No),
+        );
+        assert_eq!(a.title(), "Claude");
+        assert!(a.rect_of(yes).is_some() && a.rect_of(no).is_some());
+        let dimmed = |a: &mut AgentScreen| {
+            let mut list = DrawList::new();
+            a.invalidate();
+            a.draw(&mut list, &DrawContext::default(), None);
+            let mut faded = theme().approve;
+            faded[3] *= crate::settings::DISABLED_ALPHA;
+            list.instances.iter().any(|i| i.color == faded)
+        };
+        assert!(!dimmed(&mut a));
+        a.set_children(Some("a1".into()), children());
+        assert_eq!(a.title(), "Claude \u{203a} Build the overview screen plan");
+        assert!(a.answers_inactive());
+        assert_eq!(a.rect_of(yes), None);
+        assert_eq!(a.rect_of(no), None);
+        assert!(a.rect_of(AgentHit::Reply).is_some(), "record still");
+        assert!(dimmed(&mut a), "Yes drawn inactive");
+        assert!(a.suggestions().is_empty());
+        // An id no longer listed: named by it.
+        a.set_children(Some("gone".into()), Vec::new());
+        assert_eq!(a.title(), "Claude \u{203a} gone");
+        // Back on the main session: live again.
+        a.set_children(None, children());
+        assert_eq!(a.title(), "Claude");
+        assert!(a.rect_of(yes).is_some());
     }
 }

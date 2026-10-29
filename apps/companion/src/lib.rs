@@ -84,6 +84,8 @@ pub mod remotes;
 pub mod scanner;
 pub mod session_cards;
 pub mod settings;
+#[cfg(all(test, not(target_os = "android")))]
+mod subagents_tests;
 pub mod terminal_keys;
 pub mod theme;
 pub mod titlebar;
@@ -382,6 +384,9 @@ pub struct App {
     /// The shared menu shows the volume menu: its items follow the speak
     /// options and speaking while it is open (decision 3).
     volume_menu: bool,
+    /// The shared menu shows the agent menu (the subagents plan's ⊙): its
+    /// items follow the subagents and their minutes while it is open.
+    agent_menu: bool,
     /// The shared menu shows a typed card's + menu, for that card
     /// (decision 8).
     attach_menu: Option<PromptKind>,
@@ -1063,12 +1068,18 @@ impl App {
                 held_end,
                 held_newer,
                 bookends,
+                child,
+                children,
             } => {
                 // Paths and commit hashes as preview links (plan
                 // 20261028_05, decision 10.1).
                 let mut sections = sections;
                 self.linker().augment(&mut sections);
                 if let Some(agent) = &mut self.agent {
+                    // The subagent shown and the pane's subagents (the
+                    // subagents plan, step 5), before the sections, so
+                    // their links are laid out once.
+                    agent.set_children(child, children);
                     agent.set_loading(loading);
                     agent.set_typed(typed);
                     agent.set_terminal_on(terminal_on);
@@ -1337,11 +1348,61 @@ impl App {
     }
 
     /// Whether the agent menu (the subagents plan's ⊙,
-    /// docs/design/20261023_07_SUBAGENTS_PLAN.md) is registered: on the
-    /// agent view while its pane has subagents. The app has no subagent
-    /// list yet, so it never is; this is the hook that plan fills in.
+    /// docs/design/20261023_07_SUBAGENTS_PLAN.md, the 22:03 EDT
+    /// amendment) is registered: on the agent view while its pane has
+    /// subagents.
     fn agent_menu_registered(&self) -> bool {
-        false
+        self.agent
+            .as_ref()
+            .is_some_and(|a| !a.children().is_empty())
+    }
+
+    /// The agent menu's items as things are now: main, the running and the
+    /// finished subagents, the session viewed with the filled radio.
+    fn agent_menu_items(&self) -> Vec<libcontrols::PopupItem> {
+        let Some(agent) = &self.agent else {
+            return Vec::new();
+        };
+        crate::agent::subagent_menu::items(
+            agent.children(),
+            agent.child(),
+            crate::agent::subagent_menu::now(),
+        )
+    }
+
+    /// The agent menu at `anchor`, its ⊙ (the 20:46 EDT amendment, item
+    /// 3): below it, with radio marks.
+    fn open_agent_menu(&mut self, anchor: libcontrols::Rect) {
+        let items = self.agent_menu_items();
+        if items.len() < 2 {
+            return;
+        }
+        self.popup = None;
+        self.volume_menu = false;
+        self.attach_menu = None;
+        self.agent_menu = true;
+        self.menu.open_radio(anchor, items);
+    }
+
+    /// Shows the main session (`None`) or the subagent `child` in the
+    /// agent view, unless it is the one shown (the subagents plan, step 5).
+    fn show_session(&mut self, child: Option<String>) {
+        let Some(agent) = &self.agent else {
+            return;
+        };
+        if agent.child() == child.as_deref() {
+            return;
+        }
+        match child {
+            Some(id) => {
+                log::info!("agent view: open a subagent");
+                self.send(Input::OpenChild(id));
+            }
+            None => {
+                log::info!("agent view: back to the main session");
+                self.send(Input::CloseChild);
+            }
+        }
     }
 
     /// The title bar of the screen shown, with its menu's screen: the
@@ -1426,6 +1487,7 @@ impl App {
             self.popup = None;
             self.volume_menu = false;
             self.attach_menu = None;
+            self.agent_menu = false;
             self.menu.open(bar.kebab.rect, items);
         }
     }
@@ -1494,6 +1556,7 @@ impl App {
         let items = self.volume_items();
         self.popup = None;
         self.attach_menu = None;
+        self.agent_menu = false;
         self.volume_menu = true;
         self.menu.open(anchor, items);
     }
@@ -1534,6 +1597,7 @@ impl App {
         let images = kind == PromptKind::Message && self.input_tools().images;
         self.popup = None;
         self.volume_menu = false;
+        self.agent_menu = false;
         self.attach_menu = Some(kind);
         self.menu.open(anchor, menu::attach_items(images, has_text));
     }
@@ -1618,9 +1682,8 @@ impl App {
                     self.open_settings();
                 }
             }
-            // The subagents plan's menu, once it registers (see
-            // `agent_menu_registered`).
-            titlebar::Source::AgentMenu => {}
+            // The subagents plan's menu (the 20:46 EDT amendment).
+            titlebar::Source::AgentMenu => self.open_agent_menu(anchor),
             titlebar::Source::Plugin { ns, item, opens } => {
                 if opens == "menu" {
                     self.open_plugin_menu(&ns, &item, anchor);
@@ -1639,6 +1702,7 @@ impl App {
     fn open_plugin_menu(&mut self, ns: &str, item: &str, anchor: libcontrols::Rect) {
         let (calls, rows) = self.plugins.open_menu(ns, item);
         if !rows.is_empty() {
+            self.agent_menu = false;
             self.menu.open_rows(anchor, rows);
             self.popup = Some((ns.to_string(), item.to_string()));
         }
@@ -1684,6 +1748,10 @@ impl App {
                 self.plugin_calls(|p| p.menu_chosen(&ns, &item, &id));
             }
             Choice::Unpin(i) => self.plugins.unpin(i),
+            Choice::Session(child) => {
+                self.agent_menu = false;
+                self.show_session(child);
+            }
         }
     }
 
@@ -2589,6 +2657,18 @@ impl App {
                 self.send(Input::StartDictation);
             }
             AgentHit::Menu => self.open_drawer(),
+            // A subagent's link in the flow (the subagents plan, decision
+            // 4).
+            AgentHit::Child(i) => {
+                let id = self
+                    .agent
+                    .as_ref()
+                    .and_then(|a| a.children().get(i))
+                    .map(|c| c.id.clone());
+                if let Some(id) = id {
+                    self.show_session(Some(id));
+                }
+            }
             AgentHit::Approve(confirm_id) => self.answer(confirm_id, true),
             AgentHit::Deny(confirm_id) => self.answer(confirm_id, false),
             AgentHit::Expand => {
@@ -3491,9 +3571,14 @@ impl App {
             self.send(Input::SetText(text));
             return KeyStatus::Handled;
         }
-        // The system Back closes the agent view.
+        // The system Back returns from a subagent to its parent (the
+        // subagents plan, decision 3), else closes the agent view.
         if self.agent.is_some() && back {
-            self.close_agent();
+            if self.agent.as_ref().is_some_and(|a| a.child().is_some()) {
+                self.show_session(None);
+            } else {
+                self.close_agent();
+            }
             return KeyStatus::Handled;
         }
         if !self.field_focused {
@@ -4130,6 +4215,7 @@ impl MorphApp for App {
             keyboard: KeyboardRoute::new(cfg!(not(target_os = "android"))),
             hold: None,
             volume_menu: false,
+            agent_menu: false,
             attach_menu: None,
             attach_wanted: None,
             paste_wanted: None,
@@ -4341,9 +4427,19 @@ impl MorphApp for App {
         if !self.menu.is_open() {
             self.volume_menu = false;
             self.attach_menu = None;
+            self.agent_menu = false;
         } else if self.volume_menu {
             let items = self.volume_items();
             self.menu.refresh(items);
+        } else if self.agent_menu {
+            // Its subagents and their minutes as they change; closed when
+            // the view or its last subagent goes.
+            let items = self.agent_menu_items();
+            if items.len() < 2 {
+                self.menu.close();
+            } else {
+                self.menu.refresh(items);
+            }
         }
         if let Some(screen) = &mut self.settings_screen {
             screen.tick(dt);
@@ -4909,6 +5005,15 @@ pub(crate) mod probe {
         pub menu_items: Vec<String>,
         /// A press timed for its 2 s hold.
         pub holding: bool,
+        /// The subagents plan, step 5: the title icons by id and place,
+        /// the shared menu's items' places while open (as last drawn),
+        /// the agent view's header text, the subagent it shows, and its
+        /// flow's links to subagents, by child index.
+        pub title_icons: Vec<(String, Rect)>,
+        pub menu_rects: Vec<Rect>,
+        pub agent_title: Option<String>,
+        pub agent_child: Option<String>,
+        pub child_links: Vec<(usize, Rect)>,
     }
 
     /// When an injected event is given.
@@ -5039,6 +5144,27 @@ pub(crate) mod probe {
                 .map(|i| i.id.as_str().to_string())
                 .collect(),
             holding: app.hold.is_some(),
+            title_icons: app
+                .title_bar()
+                .map(|(bar, _)| bar.icons.iter().map(|(i, r)| (i.id(), *r)).collect())
+                .unwrap_or_default(),
+            menu_rects: (0..app.menu.items().len())
+                .filter_map(|i| app.menu.item_rect(i))
+                .collect(),
+            agent_title: app.agent.as_ref().map(|a| a.title()),
+            agent_child: app
+                .agent
+                .as_ref()
+                .and_then(|a| a.child().map(str::to_string)),
+            child_links: app
+                .agent
+                .as_ref()
+                .map(|a| {
+                    (0..a.children().len())
+                        .filter_map(|i| a.rect_of(crate::agent::AgentHit::Child(i)).map(|r| (i, r)))
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         PROBE.with(|p| p.borrow_mut().drawer = probe);
     }

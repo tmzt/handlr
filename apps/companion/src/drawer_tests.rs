@@ -67,6 +67,7 @@ fn agent(pane: &str, tab: u32) -> AgentInfo {
         }),
         idle_ms: Some(120_000),
         subagents_running: None,
+        children: Vec::new(),
         summary: None,
     }
 }

@@ -308,6 +308,7 @@ pub(crate) mod tests {
             turn,
             idle_ms: None,
             subagents_running: None,
+            children: Vec::new(),
             summary: None,
         }
     }

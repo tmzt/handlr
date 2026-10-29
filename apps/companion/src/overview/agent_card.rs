@@ -16,10 +16,16 @@
 //! A card that needs input (a question, or a flankr confirmation pending
 //! for the pane) says so on itself, with an outline and its label in the
 //! same colour: amber for an approval, blue for a question. It never moves.
+//!
+//! Subagents (docs/design/20261023_07_SUBAGENTS_PLAN.md, decision 6): the
+//! state line ends "· N running" while any runs, and a subagent that is
+//! asking makes the card need input as a question of the agent's own
+//! does, its state line naming it ("Asking · overview screen") and its
+//! question under it.
 
 use flankr_companion::CardKind;
 use libcontrols::{DrawContext, Rect};
-use libflankr_proto::common::{AgentInfo, Turn};
+use libflankr_proto::common::{AgentInfo, ChildInfo, Turn};
 use libmsdf::drawlist::{DrawList, SdfInstance, SdfKind};
 
 use crate::agent::{Fill, Flow, Row, accent, columns, fill, line_h, one_line, wrap_hard};
@@ -176,11 +182,33 @@ impl AgentCard<'_> {
             None
         } else if self.approval {
             Some(NeedsInput::Approval)
-        } else if matches!(self.agent.turn, Some(Turn::Asking { .. })) {
+        } else if self.asking() {
             Some(NeedsInput::Question)
         } else {
             None
         }
+    }
+
+    /// The agent or one of its subagents asks a question.
+    fn asking(&self) -> bool {
+        matches!(self.agent.turn, Some(Turn::Asking { .. })) || self.asking_child().is_some()
+    }
+
+    /// The subagent whose question the card shows: the first asking, while
+    /// the agent itself does not ask.
+    pub fn asking_child(&self) -> Option<&ChildInfo> {
+        if matches!(self.agent.turn, Some(Turn::Asking { .. })) {
+            return None;
+        }
+        self.agent
+            .children
+            .iter()
+            .find(|c| matches!(c.turn, Some(Turn::Asking { .. })))
+    }
+
+    /// How many of its subagents are running.
+    pub fn running(&self) -> usize {
+        self.agent.children.iter().filter(|c| !c.finished).count()
     }
 
     /// The outline's colour: amber for approval, periwinkle for asking,
@@ -220,13 +248,29 @@ impl AgentCard<'_> {
         parts.join(" \u{b7} ")
     }
 
-    /// The state line and its colour.
+    /// The state line and its colour, with "· N running" while any of
+    /// its subagents runs.
     pub fn state(&self) -> (String, [f32; 4]) {
         if self.terminal_only() {
             return ("Terminal".to_string(), theme().dim);
         }
+        let (mut state, colour) = self.turn_state();
+        let running = self.running();
+        if running > 0 {
+            state.push_str(&format!(" \u{b7} {running} running"));
+        }
+        (state, colour)
+    }
+
+    fn turn_state(&self) -> (String, [f32; 4]) {
         if let Some(need) = self.needs_input() {
-            return (need.label().to_string(), need.colour());
+            let mut label = need.label().to_string();
+            if need == NeedsInput::Question
+                && let Some(c) = self.asking_child()
+            {
+                label.push_str(&format!(" \u{b7} {}", crate::agent::subagent_menu::name(c)));
+            }
+            return (label, need.colour());
         }
         match &self.agent.turn {
             Some(Turn::Stopped { .. }) => ("Stopped".to_string(), theme().green),
@@ -242,6 +286,9 @@ impl AgentCard<'_> {
         if self.terminal_only() {
             let cwd = self.agent.cwd.as_deref().filter(|c| !c.is_empty())?;
             return Some((cwd, theme().dim, 1));
+        }
+        if let Some(Turn::Asking { question }) = self.asking_child().and_then(|c| c.turn.as_ref()) {
+            return Some((question, theme().fg, Self::QUESTION_LINES));
         }
         match self.agent.turn.as_ref()? {
             Turn::Asking { question } => Some((question, theme().fg, Self::QUESTION_LINES)),
@@ -298,7 +345,7 @@ impl AgentCard<'_> {
             }
         }
         let mut buttons = Vec::new();
-        if !self.terminal_only() && matches!(self.agent.turn, Some(Turn::Asking { .. })) {
+        if !self.terminal_only() && self.asking() {
             ty += 6.0 * s;
             let (bw, bh) = (Self::BUTTON_W * s, Self::BUTTON_H * s);
             for (i, label) in ["Yes", "No"].into_iter().enumerate() {
@@ -364,6 +411,7 @@ pub(crate) mod tests {
             turn,
             idle_ms: None,
             subagents_running: None,
+            children: Vec::new(),
             summary: None,
         }
     }
@@ -587,6 +635,64 @@ pub(crate) mod tests {
         });
         assert_eq!(again.band.unwrap().color, theme().session(index));
         crate::theme::testing::use_theme("dark_gray");
+    }
+
+    /// The subagents plan, decision 6.
+    #[test]
+    fn running_subagents_are_counted_and_an_asking_one_needs_input() {
+        use crate::agent::subagent_menu::tests::children;
+        let mut a = agent(
+            "p1",
+            "w1",
+            17,
+            Some(Turn::Working {
+                line: "Agent overview screen".to_string(),
+            }),
+        );
+        a.children = children();
+        let c = lay(AgentCard {
+            agent: &a,
+            approval: false,
+        });
+        assert_eq!(
+            &texts(&c)[1..],
+            ["Working \u{b7} 2 running", "Agent overview screen"]
+        );
+        assert_eq!(c.outline, None);
+        // All finished: no count.
+        for k in &mut a.children {
+            k.finished = true;
+        }
+        let c = lay(AgentCard {
+            agent: &a,
+            approval: false,
+        });
+        assert_eq!(texts(&c)[1], "Working");
+        // A running subagent asks: the card needs input, naming it, with
+        // its question and the inactive Yes and No.
+        a.children = children();
+        a.children[1].turn = asking("Shall I read the S23's log?");
+        let c = lay(AgentCard {
+            agent: &a,
+            approval: false,
+        });
+        let blue = accent(CardKind::Question);
+        assert_eq!(
+            &texts(&c)[1..],
+            [
+                "Asking \u{b7} spoken summaries \u{b7} 2 running",
+                "Shall I read the S23's log?"
+            ]
+        );
+        assert_eq!(c.outline, Some((blue, c.rect)));
+        assert_eq!(c.buttons.len(), 2);
+        // The agent's own question comes first.
+        a.turn = asking("Push it?");
+        let c = lay(AgentCard {
+            agent: &a,
+            approval: false,
+        });
+        assert_eq!(&texts(&c)[1..], ["Asking \u{b7} 2 running", "Push it?"]);
     }
 
     #[test]

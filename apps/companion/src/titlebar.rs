@@ -32,8 +32,25 @@ use crate::theme::theme;
 pub const MAX_ICONS: usize = 4;
 /// The planning plugin's icon, from the terminal face's symbol page.
 pub const PLANS_GLYPH: &str = "\u{2611}";
-/// The agent menu's icon (plan 20261023_07), from the terminal face.
+/// The agent menu's icon (plan 20261023_07), from the terminal face
+/// when it has it ([`has_glyph`]); until then a plain ring of its size
+/// (the plan's 20:51 EDT amendment, item 1).
 pub const AGENT_MENU_GLYPH: &str = "\u{2299}";
+
+/// Whether the terminal face draws every character of `text`: from its
+/// text atlas or its symbol page, none as the missing glyph.
+pub fn has_glyph(term: &Terminal, text: &str) -> bool {
+    term.shaper
+        .line(text, libmsdf::font::GlyphStyle::Regular)
+        .segments
+        .iter()
+        .all(|seg| seg.run.glyphs.iter().all(|g| g.glyph_id != 0))
+}
+
+/// The ring drawn for ⊙ while the face lacks it: its outer radius and its
+/// stroke, in points, about the glyph's size at 24 px.
+pub const RING_RADIUS: f32 = 8.5;
+pub const RING_STROKE: f32 = 2.0;
 
 /// What an icon is drawn as.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -254,7 +271,25 @@ pub fn draw_icon(
     };
     match glyph {
         Glyph::Plans => symbol(list, PLANS_GLYPH),
-        Glyph::AgentMenu => symbol(list, AGENT_MENU_GLYPH),
+        Glyph::AgentMenu => match term.filter(|t| has_glyph(t, AGENT_MENU_GLYPH)) {
+            Some(_) => symbol(list, AGENT_MENU_GLYPH),
+            None => {
+                let outer = RING_RADIUS * s;
+                let inner = outer - RING_STROKE * s;
+                fill(
+                    list,
+                    Rect::new(cx - outer, cy - outer, 2.0 * outer, 2.0 * outer),
+                    color,
+                    outer,
+                );
+                fill(
+                    list,
+                    Rect::new(cx - inner, cy - inner, 2.0 * inner, 2.0 * inner),
+                    under,
+                    inner,
+                );
+            }
+        },
         Glyph::Settings => Gear { rect }.draw_in(list, color, under),
         Glyph::Letter(c) => {
             let outer = 11.0 * s;
@@ -397,6 +432,78 @@ mod tests {
         assert_eq!(
             ids(&moved),
             ["dev.flankr.plugins.p4/go", "dev.flankr.plugins.p5/go", s]
+        );
+    }
+
+    /// The subagents plan's 20:51 EDT amendment, item 1: ⊙ from the
+    /// terminal face when it has it, else a plain ring of its size, in the
+    /// title's text colour; no count.
+    #[test]
+    fn the_agent_menu_is_the_empty_dot_or_a_plain_ring() {
+        use libmsdf::drawlist::AtlasSet;
+        use libmsdf::font::TerminalShaper;
+        use libmsdf::font::{FontAtlas, NOTO_SANS_MONO_ATLAS, TERMINAL_SYMBOLS_ATLAS};
+        let ctx = DrawContext::default();
+        let r = Rect::new(0.0, 0.0, 84.0, 84.0);
+        let text = FontAtlas::from_bytes(NOTO_SANS_MONO_ATLAS).expect("parses");
+        let page = FontAtlas::from_bytes(TERMINAL_SYMBOLS_ATLAS).expect("parses");
+        let shaper = TerminalShaper::new(&text, &page).expect("the atlases agree");
+        let mut set = AtlasSet::new();
+        let (t, p) = (set.register(text).unwrap(), set.register(page).unwrap());
+        let term = Terminal {
+            shaper: &shaper,
+            text: set.atlas(t).unwrap(),
+            symbols: set.atlas(p).unwrap(),
+            px_range: 4.0,
+        };
+        assert!(has_glyph(&term, PLANS_GLYPH), "☑ is on the face");
+        // The subagent link's lead (the subagents plan, decision 4).
+        assert!(has_glyph(&term, "\u{23bf}"), "⎿ is on the face");
+        let ring = |list: &DrawList| {
+            assert_eq!(list.instances.len(), 2, "two discs, no glyph");
+            assert_eq!(list.instances[0].color, theme().text);
+            assert_eq!(list.instances[1].color, theme().bg);
+            let (outer, inner) = (list.instances[0].size[0], list.instances[1].size[0]);
+            assert_eq!(outer, 2.0 * RING_RADIUS * 2.0);
+            assert_eq!(inner, 2.0 * (RING_RADIUS - RING_STROKE) * 2.0);
+        };
+        let mut list = DrawList::new();
+        draw_icon(
+            &mut list,
+            &ctx,
+            Some(&term),
+            &Glyph::AgentMenu,
+            r,
+            2.0,
+            theme().text,
+            theme().bg,
+        );
+        if has_glyph(&term, AGENT_MENU_GLYPH) {
+            // The glyph, in the text colour.
+            assert!(!list.lower_with(&set).draws.is_empty());
+            assert!(list.instances.iter().all(|i| i.color == theme().text));
+        } else {
+            eprintln!("U+2299 is not on the terminal face at this libmsdf: a ring");
+            ring(&list);
+        }
+        // Without the terminal face: the ring.
+        let mut list = DrawList::new();
+        draw_icon(
+            &mut list,
+            &ctx,
+            None,
+            &Glyph::AgentMenu,
+            r,
+            2.0,
+            theme().text,
+            theme().bg,
+        );
+        ring(&list);
+        // Hidden with no subagents: not registered.
+        assert!(
+            registered(Screen::Agent, false, &[])
+                .iter()
+                .all(|i| i.source != Source::AgentMenu)
         );
     }
 
