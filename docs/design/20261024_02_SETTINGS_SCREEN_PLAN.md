@@ -365,3 +365,21 @@ amendment's item 1 default: a remote's default nickname is the base
 hostname alone; `:port` is added only when two or more listed remotes
 would otherwise show the same nickname (then each of them shows
 `host:port`), whatever the port.
+
+## Amendment — 2026-10-28 21:29 EDT: Photos, converted or unmodified (living section)
+
+docs/design/20261028_05_BINARY_FILES_PLAN.md, its 2026-10-28 21:29 EDT amendment, item 8,
+agreed with the owner on 2026-10-28 ("this can be an option with
+selectable label (convert photos to jpeg) (send unmodified)", then
+"yes"). A new entry for the living list of sections and rows (the
+2026-10-28 13:03 EDT amendment):
+
+1. **A Photos row in the Device section**, a standard row with a
+   `SelectableLabel` choosing between **Convert photos to JPEG** (the
+   default) and **Send unmodified**, and an ⓘ that explains both: the
+   first keeps PNGs (screenshots) as they are and turns HEIC, rotated or
+   large photos into JPEG at 2048 px, dropping their location data; the
+   second sends files byte for byte, EXIF included, except HEIC, which is
+   still converted to PNG.
+2. The choice belongs to the phone, stored with the device settings.
+3. The copy is in `apps/companion/copy/SETTINGS_COPY.md`.
