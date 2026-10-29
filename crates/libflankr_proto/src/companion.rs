@@ -274,19 +274,29 @@ pub struct PluginInfo {
     pub reason: Option<String>,
 }
 
-/// One action a plugin adds to the ⋮ menu.
+/// One action a plugin adds to the ⋮ menu, or, with an
+/// [`icon`](Self::icon), to the title bar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginMenuItem {
     /// Unique within the plugin.
     pub id: String,
+    /// Shown in the ⋮ menu, and for a title icon when it moves there.
     #[serde(default)]
     pub label: String,
-    /// `"modal"` or `"card"`.
+    /// `"modal"`, `"card"` or `"menu"` (a popup menu of items the device
+    /// half gives, anchored to the title icon). An app that does not know
+    /// a value opens it as `"modal"`.
     #[serde(default)]
     pub opens: String,
     /// `"overview"`, `"agent"` or `"both"`.
     #[serde(default)]
     pub screens: String,
+    /// One of the app's own icon names (e.g. `"plans"`, the ☑): the item
+    /// is a title-bar icon rather than a ⋮ item. A plugin cannot send its
+    /// own glyph; an app draws an unknown name as the label's first letter
+    /// in a ring. Left off the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 /// `plugin.set_enabled`'s params.
@@ -473,6 +483,7 @@ mod tests {
                 label: "Plans in this project".into(),
                 opens: "modal".into(),
                 screens: "both".into(),
+                icon: None,
             }],
             reason: None,
         }
@@ -821,6 +832,45 @@ mod tests {
         assert_eq!(serde_json::to_value(&c).unwrap(), json!({"plugins": []}));
         let back: ServerCapabilities = serde_json::from_value(json!({"plugins": []})).unwrap();
         assert_eq!(back.plugins, Some(vec![]));
+    }
+
+    #[test]
+    fn plugin_menu_item_icon() {
+        // With an icon: written, and read back.
+        let item = PluginMenuItem {
+            id: "plans".into(),
+            label: "Plans in this project".into(),
+            opens: "menu".into(),
+            screens: "both".into(),
+            icon: Some("plans".into()),
+        };
+        round_trip(item.clone());
+        assert_eq!(
+            serde_json::to_value(&item).unwrap(),
+            json!({"id": "plans", "label": "Plans in this project", "opens": "menu",
+                   "screens": "both", "icon": "plans"})
+        );
+        // Without one: left off the wire.
+        let plain = PluginMenuItem { icon: None, ..item };
+        round_trip(plain.clone());
+        assert!(serde_json::to_value(&plain).unwrap().get("icon").is_none());
+        // An older daemon's item has no `icon`: None.
+        let old: PluginMenuItem = serde_json::from_value(json!({
+            "id": "plans", "label": "Plans in this project", "opens": "modal", "screens": "both"
+        }))
+        .unwrap();
+        assert_eq!(old.icon, None);
+        assert_eq!(old.opens, "modal");
+        // And a PluginInfo carrying both kinds round trips.
+        let mut info = planning_info();
+        info.menu.push(PluginMenuItem {
+            id: "plans_icon".into(),
+            label: "Plans".into(),
+            opens: "menu".into(),
+            screens: "both".into(),
+            icon: Some("plans".into()),
+        });
+        round_trip(info);
     }
 
     #[test]

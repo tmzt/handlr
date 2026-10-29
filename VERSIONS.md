@@ -645,3 +645,15 @@ are `#[non_exhaustive]`):
   for a remote not in use are refused (plugins act on the remote in use
   only).
 - libflankr_proto 0.5.1 → 0.5.2 (semver-compatible).
+
+## libflankr_proto 0.5.3 — 2026-10-28 (the commit tagged `libflankr_proto-v0.5.3`)
+
+Plan 20261028_04 (plugins), its 2026-10-28 22:03 EDT amendment (title-bar
+icons). Strictly additive:
+
+- **Added:** `PluginMenuItem::icon` (`Option<String>`), appended, defaulted
+  when absent and left off the wire when `None`: one of the app's icon
+  names (e.g. `"plans"`); an item with an icon is a title-bar icon.
+- **Added:** `PluginMenuItem::opens` documents `"menu"` (a popup menu of the
+  device half's items, anchored to the title icon); an app that does not
+  know a value opens it as `"modal"`.
