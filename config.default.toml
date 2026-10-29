@@ -192,8 +192,15 @@ terminal_input = false
 # where [llm.uses.planning] `read` and its own patterns both match, and
 # `commands` can only narrow (or, `false`, switch off) the commands it
 # declares.
+# An enabled plugin also offers the general agent its read-only tools,
+# named `<short name>_<tool>` (e.g. `planning_plans_list`), through the
+# same reads and commands. `agent_tools = false` offers none; `"all"` also
+# offers the tools that change something, each run only after you approve
+# it out loud.
 # The planning plugin lists this project's plans and their amendments,
-# from docs/design. Read-only.
+# from docs/design. Read-only; its tools are planning_plans_list and
+# planning_plan_show.
 # [plugins."dev.flankr.plugins.planning"]
 # enabled = true
 # commands = false
+# agent_tools = true
