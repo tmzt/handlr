@@ -1063,3 +1063,11 @@ before (by"): the column shows the status abbreviated, in the dim colour:
 
 Any other status is cut to its first five letters. The modal's list
 (item 4) uses the same abbreviations.
+
+## Amendment — 2026-10-28 23:15 EDT: the status column at 0.8 of the row's text size
+
+The owner (2026-10-28): "and 0.8 fontsize", of the plan table's
+abbreviated statuses. Adds to the previous amendment: the status column
+is drawn at 0.8 of the row's text size, in the dim colour, vertically
+centred on the row; the other columns keep the row's size. The same holds
+in the modal's list.
