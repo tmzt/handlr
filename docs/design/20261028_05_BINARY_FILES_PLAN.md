@@ -1327,3 +1327,23 @@ text named in each item.
    `speak_gemini`: each crate here takes the next free patch number when
    its step is committed (libflankr_proto 0.5.4 as of this amendment), by
    release order, and its VERSIONS.md entry names the number it took.
+
+## Amendment — 2026-10-28 23:48 EDT: approved; what is built now and what waits
+
+The owner approved the plan on 2026-10-28 ("approve and build the binary
+files plan"), as amended. Built now: steps 1-6 (libflankr_proto, the new
+libflankr_blob, and the daemon's link kind 2, `images` store, `files`,
+`git` and `agents.send` `parts` with `terminal.paste`), then steps 7-8
+(flankr-companion's transfers and the app's preview with its path and
+hash links, and the libcontrols Scrollbar with bookmarks per the 23:00 EDT
+amendment). Waiting, because they need libmobile calls whose plan (the
+share-and-view plan named in 10.6, with `decode_image`/`encode_image` of
+the 21:29 EDT amendment, item 6) is not yet written or approved, and
+libmobile's media-request plan, still a Draft: step 9 (attaching images:
+the chooser, conversion, the Photos setting), the preview's share icon
+(hidden until the calls exist, as step 8 says), and the preview's images
+on Android (shown on the desktop through the `png` crate; on Android an
+image preview says it needs a newer app until `decode_image` lands).
+Versions follow release order at each step's commit (the 23:43 EDT
+amendment, item 3). The status stays `Draft` until step 1's commit,
+which sets `In implementation` (Rule 1.5).
