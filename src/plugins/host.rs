@@ -8,6 +8,12 @@
 //! `plugin.result` on the calling connection only, tagged with the
 //! plugin's own namespace. `[plugins]` is read again when the config file
 //! changes, and `plugin.set_enabled` writes `enabled` into it.
+//!
+//! The general agent's plugin tools (the plan's 02:10 EDT amendment of
+//! 2026-10-29) are offered from the same state: an enabled plugin's
+//! read-only tools unless its `agent_tools = false`, and the others too
+//! with `agent_tools = "all"`. A tool call runs through the plugin's
+//! [`PluginCtx`] with the same limits as `plugin.call`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,10 +32,11 @@ use tokio::task::AbortHandle;
 
 use super::command::{self, CommandEnv};
 use super::ctx::{self, Commands, CtxParts, PluginCtx, ProjectLookup};
-use super::{Plugin, PluginError};
+use super::{Plugin, PluginError, ToolSpec, agent_tool_name};
 use crate::config::AppConfig;
 use crate::core::principal::Principal;
-use crate::llm::ReadPattern;
+use crate::llm::{AgentToolSource, ReadPattern};
+use crate::reasoning::AgentTool;
 use crate::watch_files::FileWatcher;
 
 /// At most this many plugin calls run at once on one connection.
@@ -70,6 +77,65 @@ pub struct Caller {
     /// Fires once the `plugin.call` answer is written; the plugin starts
     /// after it, so its notifications and result follow the answer.
     pub answered: Option<oneshot::Receiver<()>>,
+}
+
+/// Who calls a plugin's tool for the general agent: the turn's
+/// principal and current agent, and the lookup of its folder.
+#[derive(Clone)]
+pub struct AgentToolCaller {
+    pub principal: Principal,
+    /// The conversation's current agent.
+    pub pane: Option<String>,
+    pub lookup: Arc<dyn ProjectLookup>,
+}
+
+/// `[plugins."<ns>"] agent_tools` (the 02:10 EDT amendment, item 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentToolsSetting {
+    /// `false`: none of its tools.
+    Off,
+    /// `true`, or left out: its read-only tools.
+    ReadOnly,
+    /// `"all"`: every tool, those that change something confirmed.
+    All,
+}
+
+impl AgentToolsSetting {
+    /// The setting in a plugin's table; anything else is logged and read
+    /// as the default.
+    pub fn of(table: Option<&toml::Value>, ns: &str) -> AgentToolsSetting {
+        match table.and_then(|t| t.get("agent_tools")) {
+            None | Some(toml::Value::Boolean(true)) => AgentToolsSetting::ReadOnly,
+            Some(toml::Value::Boolean(false)) => AgentToolsSetting::Off,
+            Some(toml::Value::String(s)) if s == "all" => AgentToolsSetting::All,
+            Some(other) => {
+                log::warn!(
+                    "[plugins.\"{ns}\"] agent_tools = {other} is not true, false or \"all\"; \
+                     read-only tools only"
+                );
+                AgentToolsSetting::ReadOnly
+            }
+        }
+    }
+
+    fn offers(self, tool: &ToolSpec) -> bool {
+        match self {
+            AgentToolsSetting::Off => false,
+            AgentToolsSetting::ReadOnly => tool.read_only,
+            AgentToolsSetting::All => true,
+        }
+    }
+}
+
+/// A plugin tool the general agent is offered now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedTool {
+    pub ns: &'static str,
+    /// The plugin's name, e.g. "Planning".
+    pub plugin: &'static str,
+    /// The tool's own name, without the prefix.
+    pub tool: &'static str,
+    pub read_only: bool,
 }
 
 /// One connection's running plugin calls.
@@ -318,7 +384,8 @@ impl PluginHost {
             .and_then(|v| v.as_array())
             .map(|list| parse_read(list.iter().filter_map(|v| v.as_str())))
             .unwrap_or_default();
-        if plugins != state.plugins {
+        let table_changed = plugins != state.plugins;
+        if table_changed {
             log::info!(
                 "[plugins] {} changed; reading [plugins] again",
                 path.display()
@@ -333,6 +400,10 @@ impl PluginHost {
         state.read = read;
         let infos = self.infos_of(&state);
         drop(state);
+        if table_changed {
+            let tools: Vec<String> = self.agent_tools().into_iter().map(|t| t.name).collect();
+            log::info!("[plugins] the general agent's plugin tools: {tools:?}");
+        }
         self.infos.send_if_modified(|old| {
             let changed = *old != infos;
             if changed {
@@ -418,30 +489,14 @@ impl PluginHost {
             ));
         };
         let plugin = Arc::clone(&entry.plugin);
-        let (table, read, on) = {
-            let state = self.state.lock().unwrap();
-            if !enabled(&state.plugins, plugin.ns()) {
-                return Err(ErrorObject::new(
-                    codes::PLUGIN_DISABLED,
-                    format!(
-                        "{} is off; turn it on in Settings → Plugins.",
-                        plugin.name()
-                    ),
-                ));
-            }
-            let table = match state.plugins.get(plugin.ns()) {
-                Some(toml::Value::Table(t)) => t.clone(),
-                _ => toml::Table::new(),
-            };
-            let names = command::narrow(plugin.ns(), plugin.commands(), table.get("commands"));
-            let on: Vec<_> = plugin
-                .commands()
-                .iter()
-                .zip(&entry.binaries)
-                .filter(|(spec, _)| names.contains(&spec.name))
-                .map(|(spec, binary)| (spec, binary.clone()))
-                .collect();
-            (table, state.read.clone(), on)
+        let Some((table, read, on)) = self.settings_of(entry) else {
+            return Err(ErrorObject::new(
+                codes::PLUGIN_DISABLED,
+                format!(
+                    "{} is off; turn it on in Settings → Plugins.",
+                    plugin.name()
+                ),
+            ));
         };
         let size = serde_json::to_vec(&call.params)
             .map(|v| v.len())
@@ -544,6 +599,144 @@ impl PluginHost {
         Ok(PluginAccepted {})
     }
 
+    /// An enabled plugin's table, the configured `read`, and the commands
+    /// left on; `None` while it is off.
+    #[allow(clippy::type_complexity)]
+    fn settings_of(
+        &self,
+        entry: &Entry,
+    ) -> Option<(
+        toml::Table,
+        Vec<ReadPattern>,
+        Vec<(&'static super::CommandSpec, Option<PathBuf>)>,
+    )> {
+        let plugin = &entry.plugin;
+        let state = self.state.lock().unwrap();
+        if !enabled(&state.plugins, plugin.ns()) {
+            return None;
+        }
+        let table = match state.plugins.get(plugin.ns()) {
+            Some(toml::Value::Table(t)) => t.clone(),
+            _ => toml::Table::new(),
+        };
+        let names = command::narrow(plugin.ns(), plugin.commands(), table.get("commands"));
+        let on: Vec<_> = plugin
+            .commands()
+            .iter()
+            .zip(&entry.binaries)
+            .filter(|(spec, _)| names.contains(&spec.name))
+            .map(|(spec, binary)| (spec, binary.clone()))
+            .collect();
+        Some((table, state.read.clone(), on))
+    }
+
+    /// The tools offered now, each with its entry: enabled plugins only,
+    /// as their `agent_tools` allows.
+    fn offered(&self) -> Vec<(&Entry, &ToolSpec)> {
+        let state = self.state.lock().unwrap();
+        let mut out = Vec::new();
+        for entry in &self.entries {
+            let ns = entry.plugin.ns();
+            if !enabled(&state.plugins, ns) {
+                continue;
+            }
+            let setting = AgentToolsSetting::of(state.plugins.get(ns), ns);
+            for tool in entry.plugin.tools() {
+                if setting.offers(tool) {
+                    out.push((entry, tool));
+                }
+            }
+        }
+        out
+    }
+
+    /// The offered tool the general agent calls `name`, if there is one.
+    pub fn agent_tool(&self, name: &str) -> Option<OfferedTool> {
+        self.offered()
+            .into_iter()
+            .find(|(e, t)| agent_tool_name(e.plugin.ns(), t.name) == name)
+            .map(|(e, t)| OfferedTool {
+                ns: e.plugin.ns(),
+                plugin: e.plugin.name(),
+                tool: t.name,
+                read_only: t.read_only,
+            })
+    }
+
+    /// Runs the general agent's tool `name` (the 02:10 EDT amendment,
+    /// item 4): offered now, through the plugin's [`PluginCtx`] for the
+    /// caller's current agent, its args and answer at most 256 KiB, in at
+    /// most [`CALL_TIMEOUT`]. A tool that changes something must have been
+    /// confirmed by the caller first.
+    pub async fn run_agent_tool(
+        &self,
+        name: &str,
+        args: Value,
+        caller: AgentToolCaller,
+    ) -> Result<Value, PluginError> {
+        let found = self
+            .offered()
+            .into_iter()
+            .find(|(e, t)| agent_tool_name(e.plugin.ns(), t.name) == name)
+            .map(|(e, t)| (Arc::clone(&e.plugin), e.read.clone(), t.name));
+        let Some((plugin, plugin_read, tool)) = found else {
+            return Err(PluginError::new(
+                codes::METHOD_NOT_FOUND,
+                format!("No plugin offers the tool {name} now."),
+            ));
+        };
+        let entry = self.entry(plugin.ns()).expect("an offered tool's plugin");
+        let Some((table, read, on)) = self.settings_of(entry) else {
+            return Err(PluginError::new(
+                codes::PLUGIN_DISABLED,
+                format!("{} is off.", plugin.name()),
+            ));
+        };
+        let size = serde_json::to_vec(&args)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX);
+        if size > PLUGIN_MAX_BYTES {
+            return Err(PluginError::new(
+                codes::PLUGIN_TOO_LARGE,
+                "The tool's arguments are over 256 KiB.",
+            ));
+        }
+        let ns = plugin.ns();
+        let parts = CtxParts {
+            ns,
+            principal: caller.principal,
+            pane: caller.pane,
+            lookup: caller.lookup,
+            read,
+            plugin_read,
+            commands: Commands {
+                on,
+                env: self.env.clone(),
+            },
+            config: table,
+            notifier: None,
+        };
+        log::info!("plugin {ns}: the general agent's tool {name}");
+        let outcome = tokio::time::timeout(CALL_TIMEOUT, async {
+            let ctx = PluginCtx::build(parts).await;
+            plugin.run_tool(tool, args, &ctx).await
+        })
+        .await
+        .unwrap_or_else(|_| Err(timed_out()));
+        let value = outcome.inspect_err(|e| log::info!("plugin {ns}: tool {name}: {e}"))?;
+        let size = serde_json::to_vec(&value)
+            .map(|v| v.len())
+            .unwrap_or(usize::MAX);
+        if size > PLUGIN_MAX_BYTES {
+            log::warn!("plugin {ns}: tool {name}'s answer is {size} bytes; refused");
+            return Err(PluginError::new(
+                codes::PLUGIN_TOO_LARGE,
+                "The plugin's answer is over 256 KiB.",
+            ));
+        }
+        Ok(value)
+    }
+
     /// `plugin.set_enabled`: `[plugins."<ns>"] enabled` written, then read
     /// again, so subscribers hear the new list.
     pub fn set_enabled(
@@ -585,6 +778,20 @@ impl PluginHost {
         Ok(PluginSetEnabledResult {
             enabled: params.enabled,
         })
+    }
+}
+
+impl AgentToolSource for PluginHost {
+    /// The offered tools, in the registry's order and each plugin's own.
+    fn agent_tools(&self) -> Vec<AgentTool> {
+        self.offered()
+            .into_iter()
+            .map(|(e, t)| AgentTool {
+                name: agent_tool_name(e.plugin.ns(), t.name),
+                description: t.description.to_string(),
+                params: t.params.to_string(),
+            })
+            .collect()
     }
 }
 
@@ -716,16 +923,44 @@ pub(crate) mod tests {
     use tokio::sync::mpsc;
 
     /// The test plugin, `dev.flankr.plugins.test` unless named otherwise.
+    /// Its general agent tools: `echo`, `big` and `project` (read-only)
+    /// and `write`, which changes something and counts its runs.
     pub(crate) struct TestPlugin {
         ns: &'static str,
+        tools: Vec<ToolSpec>,
+        pub(crate) writes: Arc<AtomicUsize>,
     }
 
     impl TestPlugin {
         pub(crate) fn named(ns: &str) -> Self {
+            Self::with_tools(ns, test_tools())
+        }
+
+        pub(crate) fn with_tools(ns: &str, tools: Vec<ToolSpec>) -> Self {
             TestPlugin {
                 ns: Box::leak(ns.to_string().into_boxed_str()),
+                tools,
+                writes: Arc::new(AtomicUsize::new(0)),
             }
         }
+    }
+
+    pub(crate) fn tool(name: &'static str, read_only: bool) -> ToolSpec {
+        ToolSpec {
+            name,
+            description: "A test tool.",
+            params: json!({"type": "object", "properties": {}}),
+            read_only,
+        }
+    }
+
+    fn test_tools() -> Vec<ToolSpec> {
+        vec![
+            tool("echo", true),
+            tool("big", true),
+            tool("project", true),
+            tool("write", false),
+        ]
     }
 
     const MENU: [MenuItem; 1] = [MenuItem {
@@ -780,6 +1015,27 @@ pub(crate) mod tests {
                     Ok(json!("notified"))
                 }
                 "project" => Ok(json!(ctx.project()?.name)),
+                other => Err(PluginError::no_method(other)),
+            }
+        }
+        fn tools(&self) -> &[ToolSpec] {
+            &self.tools
+        }
+        async fn run_tool(
+            &self,
+            name: &str,
+            args: Value,
+            ctx: &PluginCtx,
+        ) -> Result<Value, PluginError> {
+            match name {
+                "echo" => Ok(args),
+                // Over the general agent's 64 KiB, under the 256 KiB cap.
+                "big" => Ok(Value::String("€".repeat(30 * 1024))),
+                "project" => Ok(json!(ctx.project()?.name)),
+                "write" => {
+                    self.writes.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!("written"))
+                }
                 other => Err(PluginError::no_method(other)),
             }
         }
@@ -1164,5 +1420,111 @@ pub(crate) mod tests {
         std::fs::write(&e.config, "[plugins\n").unwrap();
         assert!(!e.host.check(true));
         assert!(e.host.infos()[0].enabled);
+    }
+
+    fn tool_names(host: &PluginHost) -> Vec<String> {
+        host.agent_tools().into_iter().map(|t| t.name).collect()
+    }
+
+    #[test]
+    fn agent_tools_are_offered_as_the_setting_allows() {
+        // Off: none.
+        let e = env("");
+        assert!(tool_names(&e.host).is_empty());
+        // On: the read-only ones, namespaced, in the plugin's order.
+        let e = env(ON);
+        assert_eq!(
+            tool_names(&e.host),
+            ["test_echo", "test_big", "test_project"]
+        );
+        let echo = &e.host.agent_tools()[0];
+        assert_eq!(echo.description, "A test tool.");
+        assert_eq!(
+            serde_json::from_str::<Value>(&echo.params).unwrap(),
+            json!({"type": "object", "properties": {}})
+        );
+        assert!(e.host.agent_tool("test_write").is_none());
+        let found = e.host.agent_tool("test_echo").unwrap();
+        assert_eq!(
+            (found.plugin, found.tool, found.read_only),
+            ("Test", "echo", true)
+        );
+        // `true` is the default; `false` offers none; "all" every one.
+        let e = env(&format!("{ON}agent_tools = true\n"));
+        assert_eq!(tool_names(&e.host).len(), 3);
+        let e = env(&format!("{ON}agent_tools = false\n"));
+        assert!(tool_names(&e.host).is_empty());
+        let e = env(&format!("{ON}agent_tools = \"all\"\n"));
+        assert_eq!(
+            tool_names(&e.host),
+            ["test_echo", "test_big", "test_project", "test_write"]
+        );
+        assert!(!e.host.agent_tool("test_write").unwrap().read_only);
+        // Anything else is the default.
+        let e = env(&format!("{ON}agent_tools = \"everything\"\n"));
+        assert_eq!(tool_names(&e.host).len(), 3);
+    }
+
+    #[test]
+    fn a_reload_changes_the_tools_offered() {
+        let e = env(ON);
+        assert_eq!(tool_names(&e.host).len(), 3);
+        std::fs::write(&e.config, format!("{ON}agent_tools = \"all\"\n")).unwrap();
+        e.host.check(true);
+        assert_eq!(tool_names(&e.host).len(), 4);
+        std::fs::write(&e.config, "").unwrap();
+        e.host.check(true);
+        assert!(tool_names(&e.host).is_empty());
+    }
+
+    fn tool_caller(pane: Option<&str>) -> AgentToolCaller {
+        let root = std::env::temp_dir().display().to_string();
+        AgentToolCaller {
+            principal: Principal::local("t"),
+            pane: pane.map(str::to_string),
+            lookup: Arc::new(FakeLookup(vec![("p".into(), "claude".into(), root)])),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tools_run_through_the_plugins_ctx() {
+        let e = env(ON);
+        let echoed = e
+            .host
+            .run_agent_tool("test_echo", json!({"x": 1}), tool_caller(None))
+            .await
+            .unwrap();
+        assert_eq!(echoed, json!({"x": 1}));
+        // The project is the caller's current agent's, as for menu calls.
+        let err = e
+            .host
+            .run_agent_tool("test_project", json!({}), tool_caller(None))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, super::super::codes::PROJECT_UNAVAILABLE);
+        assert_eq!(err.message, crate::project::NO_PROJECT);
+        let named = e
+            .host
+            .run_agent_tool("test_project", json!({}), tool_caller(Some("p")))
+            .await
+            .unwrap();
+        assert!(named.is_string());
+        // Not offered (read-only only by default), unknown, or over the
+        // cap: refused.
+        for name in ["test_write", "test_none", "echo"] {
+            let err = e
+                .host
+                .run_agent_tool(name, json!({}), tool_caller(None))
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, codes::METHOD_NOT_FOUND, "{name}");
+        }
+        let big = json!({"x": "y".repeat(PLUGIN_MAX_BYTES)});
+        let err = e
+            .host
+            .run_agent_tool("test_echo", big, tool_caller(None))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, codes::PLUGIN_TOO_LARGE);
     }
 }

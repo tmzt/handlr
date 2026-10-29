@@ -304,8 +304,71 @@ pub fn tool_names(tools: &[Tool]) -> Vec<String> {
         .collect()
 }
 
+/// Every name the general agent's own tools answer to: those it may be
+/// declared, the old names the executor still takes, and herdr's own
+/// tools it passes through. A plugin's tool may not take one (plan
+/// 20261028_04, the 02:10 EDT amendment of 2026-10-29, item 2).
+pub const OWN_TOOL_NAMES: [&str; 14] = [
+    "focus",
+    FOCUS_PROJECT,
+    SEND_AGENT_COMMAND,
+    "watch_pane",
+    "unwatch_pane",
+    LIST_FILES,
+    READ_FILE,
+    RECENT_COMMITS,
+    "run_command",
+    "send_command",
+    "list_panes",
+    "inspect_pane",
+    "send_keys",
+    "manage_layout",
+];
+
+/// A plugin's tool as the general agent is offered it (plan 20261028_04,
+/// the 02:10 EDT amendment of 2026-10-29): its namespaced name, its
+/// description and its parameters' JSON schema, as text so the profile
+/// can be a client's key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AgentTool {
+    pub name: String,
+    pub description: String,
+    /// The JSON schema object, serialised.
+    pub params: String,
+}
+
+impl AgentTool {
+    /// Its Gemini declaration; `None` (logged) when the schema is not a
+    /// JSON object.
+    pub fn declaration(&self) -> Option<FunctionDeclaration> {
+        let params: serde_json::Value = serde_json::from_str(&self.params).ok()?;
+        if !params.is_object() {
+            log::warn!(
+                "tool {}: its parameters are not a JSON object; left out",
+                self.name
+            );
+            return None;
+        }
+        serde_json::from_value(serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "parameters": params,
+        }))
+        .inspect_err(|e| log::warn!("tool {}: {e}; left out", self.name))
+        .ok()
+    }
+}
+
 /// Construct the list of Gemini tool declarations for `herdr` orchestration.
 pub fn declare_gemini_tools_for(set: ToolSet) -> Vec<Tool> {
+    declare_gemini_tools_with(set, &[])
+}
+
+/// [`declare_gemini_tools_for`], then the plugins' tools, in the order
+/// given. The plugins' come last, after every fixed declaration, so what
+/// comes and goes with them is at the end (the 02:10 EDT amendment,
+/// item 7).
+pub fn declare_gemini_tools_with(set: ToolSet, plugin_tools: &[AgentTool]) -> Vec<Tool> {
     let mut functions = vec![
         FunctionDeclaration::new(
             "focus",
@@ -366,6 +429,7 @@ pub fn declare_gemini_tools_for(set: ToolSet) -> Vec<Tool> {
             .with_parameters::<RecentCommitsParams>(),
         );
     }
+    functions.extend(plugin_tools.iter().filter_map(AgentTool::declaration));
     vec![Tool::with_functions(functions)]
 }
 
@@ -457,6 +521,45 @@ mod tests {
         let sample = "Header\n<system_prompt>\nCustom prompt here\n</system_prompt>\nFooter";
         let parsed = parse_system_prompt(sample).expect("should parse tag content");
         assert_eq!(parsed, "Custom prompt here");
+    }
+
+    /// Plan 20261028_04, the 02:10 EDT amendment: the plugins' tools are
+    /// declared last, with their own schema; every declarable own tool is
+    /// in `OWN_TOOL_NAMES`.
+    #[test]
+    fn test_plugin_tools_are_declared_after_the_fixed_ones() {
+        let all = ToolSet {
+            file_tools: true,
+            recent_commits: true,
+        };
+        let fixed = tool_names(&declare_gemini_tools_for(all));
+        for name in &fixed {
+            assert!(OWN_TOOL_NAMES.contains(&name.as_str()), "{name}");
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "A plan."}},
+            "required": ["name"],
+        });
+        let plugin = AgentTool {
+            name: "planning_plan_show".into(),
+            description: "Shows a plan.".into(),
+            params: schema.to_string(),
+        };
+        let tools = declare_gemini_tools_with(all, std::slice::from_ref(&plugin));
+        let names = tool_names(&tools);
+        assert_eq!(names[..fixed.len()], fixed[..]);
+        assert_eq!(names[fixed.len()..], ["planning_plan_show"]);
+        let declared = serde_json::to_value(&tools).unwrap();
+        let last = declared[0]["functionDeclarations"]
+            .as_array()
+            .or_else(|| declared[0]["function_declarations"].as_array())
+            .unwrap()
+            .last()
+            .unwrap()
+            .clone();
+        assert_eq!(last["parameters"], schema);
+        assert_eq!(last["description"], "Shows a plan.");
     }
 
     #[test]

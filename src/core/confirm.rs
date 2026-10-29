@@ -88,6 +88,14 @@ pub trait CommandSink: Send + Sync {
     async fn send(&self, pane_id: &str, command: &str) -> Result<(), String>;
 }
 
+/// What an approved confirmation runs in place of sending its command to
+/// a pane: a plugin tool that changes something (plan 20261028_04, the
+/// 02:10 EDT amendment of 2026-10-29, item 5).
+#[async_trait]
+pub trait ConfirmAction: Send + Sync {
+    async fn run(&self) -> Result<(), String>;
+}
+
 #[async_trait]
 impl CommandSink for HerdrClient {
     async fn send(&self, pane_id: &str, command: &str) -> Result<(), String> {
@@ -806,6 +814,8 @@ struct Entry {
     /// agent's request with its provenance prefix (plan 20261027_05,
     /// decision 5).
     typed: Option<String>,
+    /// Run on approval instead of sending anything to the pane.
+    action: Option<Arc<dyn ConfirmAction>>,
     /// The words the daemon appended to the handle to set it apart, which
     /// are worth more than their class says.
     distinguisher: Option<String>,
@@ -908,6 +918,34 @@ impl Broker {
             handle_info,
             lifetime,
             false,
+            None,
+        )
+    }
+
+    /// A confirmation whose approval runs `action` rather than sending
+    /// `command` to a pane: `command` and `agent` are what the card and
+    /// its question show (a plugin tool and its plugin's name).
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_action(
+        &self,
+        requester: &Principal,
+        pane_id: &str,
+        agent: &str,
+        command: &str,
+        handle_info: Option<&HandleInfo>,
+        lifetime: Lifetime,
+        action: Arc<dyn ConfirmAction>,
+    ) -> Result<u64, ConfirmError> {
+        self.open(
+            requester,
+            pane_id,
+            agent,
+            command,
+            None,
+            handle_info,
+            lifetime,
+            false,
+            Some(action),
         )
     }
 
@@ -932,6 +970,7 @@ impl Broker {
             handle_info,
             lifetime,
             true,
+            None,
         )
     }
 
@@ -958,6 +997,7 @@ impl Broker {
             handle_info,
             lifetime,
             true,
+            None,
         )
     }
 
@@ -972,6 +1012,7 @@ impl Broker {
         handle_info: Option<&HandleInfo>,
         lifetime: Lifetime,
         message: bool,
+        action: Option<Arc<dyn ConfirmAction>>,
     ) -> Result<u64, ConfirmError> {
         let handle = handle_info.map(|h| h.handle.as_str());
         if let Some(h) = handle {
@@ -1007,6 +1048,7 @@ impl Broker {
                 Entry {
                     view: view.clone(),
                     typed: typed.map(str::to_string),
+                    action,
                     distinguisher: handle_info.and_then(|h| h.distinguisher.clone()),
                     token: token.clone(),
                     lifetime,
@@ -1083,7 +1125,7 @@ impl Broker {
         approve: bool,
         nonce: Option<&str>,
     ) -> Result<Outcome, ConfirmError> {
-        let (view, typed) = {
+        let (view, typed, action) = {
             let mut state = self.state.lock().unwrap();
             let entry = state
                 .entries
@@ -1125,7 +1167,11 @@ impl Broker {
             if approve {
                 entry.outcome = Outcome::Approved;
             }
-            (entry.view.clone(), entry.typed.clone())
+            (
+                entry.view.clone(),
+                entry.typed.clone(),
+                entry.action.clone(),
+            )
         };
 
         if !approve {
@@ -1140,7 +1186,11 @@ impl Broker {
             view.pane_id
         );
         let text = typed.as_deref().unwrap_or(&view.command);
-        let (outcome, detail) = match self.sink.send(&view.pane_id, text).await {
+        let done = match &action {
+            Some(action) => action.run().await,
+            None => self.sink.send(&view.pane_id, text).await,
+        };
+        let (outcome, detail) = match done {
             Ok(()) => (Outcome::Sent, None),
             Err(e) => {
                 log::warn!("Confirmation {confirm_id}: sending failed: {e}");

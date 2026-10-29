@@ -21,6 +21,10 @@
 //!   is available, the general agent's client is built with the planning
 //!   prompt's blocks after `PROMPT.md` and its tools; the [`AgentProfile`]
 //!   is part of the client's key, so a change builds the next one anew.
+//! - **Plugin tools** (plan 20261028_04, the 02:10 EDT amendment of
+//!   2026-10-29): the [`AgentToolSource`] (the plugin host) is asked for
+//!   the enabled plugins' tools each time the profile is made, so a
+//!   `[plugins]` reload changes the next client's tools too.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -36,7 +40,8 @@ use super::{
 };
 use crate::config::AppConfig;
 use crate::reasoning::{
-    GeminiReasoningEngine, ReasoningEngine, declare_gemini_tools_for, with_flankr_routes,
+    AgentTool, GeminiReasoningEngine, ReasoningEngine, declare_gemini_tools_with,
+    with_flankr_routes,
 };
 use crate::watch_files::FileWatcher;
 
@@ -95,7 +100,8 @@ impl ClientFactory for GeminiFactory {
                                 &base
                             }
                         };
-                        let mut builder = builder.tools(declare_gemini_tools_for(agent.tools));
+                        let mut builder = builder
+                            .tools(declare_gemini_tools_with(agent.tools, &agent.plugin_tools));
                         if !agent.system_prompt.is_empty() {
                             builder = builder.system_prompt(agent.system_prompt.clone());
                         }
@@ -151,6 +157,12 @@ impl Overrides {
     }
 }
 
+/// Where the general agent's plugin tools come from: the plugin host.
+pub trait AgentToolSource: Send + Sync {
+    /// The tools offered now, in a stable order.
+    fn agent_tools(&self) -> Vec<AgentTool>;
+}
+
 /// The file as last read.
 struct Watched {
     sources: LlmSources,
@@ -174,6 +186,8 @@ pub struct LlmService {
     watched: Mutex<Watched>,
     clients: Mutex<HashMap<ClientKey, Arc<dyn ReasoningEngine>>>,
     info: watch::Sender<LlmInfo>,
+    /// The plugins' tools for the general agent, once the host is set.
+    agent_tools: Mutex<Option<Arc<dyn AgentToolSource>>>,
 }
 
 impl LlmService {
@@ -211,7 +225,13 @@ impl LlmService {
             }),
             clients: Mutex::new(HashMap::new()),
             info: watch::Sender::new(info),
+            agent_tools: Mutex::new(None),
         })
+    }
+
+    /// The general agent is offered `source`'s tools from its next client.
+    pub fn set_agent_tools(&self, source: Arc<dyn AgentToolSource>) {
+        *self.agent_tools.lock().unwrap() = Some(source);
     }
 
     /// The settings in force.
@@ -257,8 +277,16 @@ impl LlmService {
             .ok_or_else(|| "unavailable".to_string())?;
         let agent = (profile == Profile::Agent).then(|| self.agent_profile());
         let key = (target, profile, agent);
-        if let Some(engine) = self.clients.lock().unwrap().get(&key) {
-            return Ok(Arc::clone(engine));
+        {
+            let mut clients = self.clients.lock().unwrap();
+            if let Some(engine) = clients.get(&key) {
+                return Ok(Arc::clone(engine));
+            }
+            // The general agent's clients for another profile (a plugin
+            // reload) are no longer used; a call running on one keeps it.
+            if key.2.is_some() {
+                clients.retain(|(t, p, a), _| !(*t == key.0 && *p == key.1 && a.is_some()));
+            }
         }
         let engine = self.factory.build(&ClientSpec {
             use_,
@@ -289,12 +317,18 @@ impl LlmService {
 
     /// What the general agent's next client is built with: with planning
     /// available, `PROMPT.md` and the planning blocks, and its tools.
+    /// The enabled plugins' tools come after the fixed ones.
     pub fn agent_profile(&self) -> AgentProfile {
-        match self.planning() {
+        let profile = match self.planning() {
             Some((config, prompt)) => AgentProfile::planning(&prompt, &config)
                 .inspect_err(|e| log::warn!("[llm] planning: {e}"))
                 .unwrap_or_else(|_| AgentProfile::base()),
             None => AgentProfile::base(),
+        };
+        let source = self.agent_tools.lock().unwrap().clone();
+        match source {
+            Some(source) => profile.with_plugin_tools(source.agent_tools()),
+            None => profile,
         }
     }
 
@@ -900,7 +934,10 @@ enabled = true
 "#;
 
     fn tools_of(profile: &AgentProfile) -> Vec<String> {
-        crate::reasoning::tool_names(&declare_gemini_tools_for(profile.tools))
+        crate::reasoning::tool_names(&crate::reasoning::declare_gemini_tools_with(
+            profile.tools,
+            &profile.plugin_tools,
+        ))
     }
 
     #[test]
@@ -1024,5 +1061,84 @@ enabled = true
         assert!(service.available(Use::SpokenSummaries).is_ok());
         assert!(service.available(Use::CardSummaries).is_err());
         assert_eq!(service.info(), LlmInfo::available());
+    }
+
+    /// The plugin host's part, set by hand.
+    #[derive(Default)]
+    struct FakeTools(Mutex<Vec<AgentTool>>);
+
+    impl AgentToolSource for FakeTools {
+        fn agent_tools(&self) -> Vec<AgentTool> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    fn agent_tool(name: &str) -> AgentTool {
+        AgentTool {
+            name: name.to_string(),
+            description: "A plugin's tool.".to_string(),
+            params: r#"{"type":"object","properties":{}}"#.to_string(),
+        }
+    }
+
+    /// Plan 20261028_04, the 02:10 EDT amendment: the plugins' tools come
+    /// after every fixed one, and a change builds the next client with
+    /// them, the old one dropped.
+    #[test]
+    fn plugin_tools_follow_the_fixed_ones_and_rebuild_the_client() {
+        let s = setup(&format!("{PLANNING}read = [\"*.md\"]\n"), true);
+        let source = Arc::new(FakeTools::default());
+        s.service.set_agent_tools(source.clone());
+        let fixed = tools_of(&s.service.agent_profile());
+        let prompt = s.service.agent_profile().system_prompt;
+        let first = s
+            .service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &first,
+            &s.service
+                .client(Use::GeneralAgent, Profile::Agent, None)
+                .unwrap()
+        ));
+
+        *source.0.lock().unwrap() = vec![agent_tool("test_echo"), agent_tool("test_big")];
+        let profile = s.service.agent_profile();
+        let tools = tools_of(&profile);
+        assert_eq!(tools[..fixed.len()], fixed[..], "the fixed tools first");
+        assert_eq!(tools[fixed.len()..], ["test_echo", "test_big"]);
+        // The system prompt is the same: only the tools' end changes.
+        assert_eq!(profile.system_prompt, prompt);
+        let next = s
+            .service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert_eq!(s.service.client_count(), 1, "the old client is dropped");
+        assert_eq!(
+            s.factory
+                .agents
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .plugin_tools,
+            profile.plugin_tools
+        );
+        // Gone again: back to the fixed tools.
+        source.0.lock().unwrap().clear();
+        s.service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        assert_eq!(
+            tools_of(s.factory.agents.lock().unwrap().last().unwrap()),
+            fixed
+        );
+        // A schema that isn't an object is left out of the declarations.
+        let mut bad = agent_tool("test_bad");
+        bad.params = "[]".to_string();
+        *source.0.lock().unwrap() = vec![bad, agent_tool("test_echo")];
+        let tools = tools_of(&s.service.agent_profile());
+        assert_eq!(tools[fixed.len()..], ["test_echo"]);
     }
 }

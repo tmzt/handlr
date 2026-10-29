@@ -21,6 +21,7 @@ use crate::core::naming::Names;
 use crate::core::policy;
 use crate::core::principal::Principal;
 use crate::llm::{PlanningConfig, PlanningPrompt};
+use crate::plugins::{AgentToolCaller, HerdrLookup, OfferedTool, PluginHost};
 use crate::project::{MAX_READ_BYTES, ProjectFiles};
 use crate::sessions::context::{self as session_context, AgentContext};
 use crate::sessions::{Sessions, pending};
@@ -102,6 +103,65 @@ pub struct HerdrToolExecutor {
     /// When set, a send to a pane showing a choice question is refused
     /// (plan 20261029_01, decision 6).
     pub sessions: Option<Arc<Sessions>>,
+    /// When set, the enabled plugins' tools are run (plan 20261028_04, the
+    /// 02:10 EDT amendment of 2026-10-29).
+    pub plugins: Option<Arc<PluginHost>>,
+}
+
+/// The most of a plugin tool's answer the model is given: the general
+/// agent's tool-result limit, `read_file`'s 64 KiB.
+pub const MAX_TOOL_RESULT_BYTES: usize = MAX_READ_BYTES;
+
+/// A plugin tool's answer as the model gets it (the 02:10 EDT amendment,
+/// item 4): as text (a string as it is, anything else as compact JSON),
+/// cut at a character boundary to [`MAX_TOOL_RESULT_BYTES`].
+pub fn tool_result_text(value: &serde_json::Value) -> serde_json::Value {
+    let text = match value {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    if text.len() <= MAX_TOOL_RESULT_BYTES {
+        return serde_json::json!({ "text": text });
+    }
+    let mut end = MAX_TOOL_RESULT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    serde_json::json!({
+        "text": &text[..end],
+        "cut": true,
+        "note": format!(
+            "Only the first {} KiB of {} bytes are shown.",
+            MAX_TOOL_RESULT_BYTES / 1024,
+            text.len()
+        ),
+    })
+}
+
+/// A confirmed plugin tool, run on approval (the 02:10 EDT amendment,
+/// item 5).
+struct PluginToolAction {
+    host: Arc<PluginHost>,
+    name: String,
+    args: serde_json::Value,
+    caller: AgentToolCaller,
+}
+
+#[async_trait]
+impl confirm::ConfirmAction for PluginToolAction {
+    async fn run(&self) -> Result<(), String> {
+        let value = self
+            .host
+            .run_agent_tool(&self.name, self.args.clone(), self.caller.clone())
+            .await
+            .map_err(|e| e.message)?;
+        log::info!(
+            "plugin tool {} ran on approval ({} bytes)",
+            self.name,
+            value.to_string().len()
+        );
+        Ok(())
+    }
 }
 
 impl HerdrToolExecutor {
@@ -117,7 +177,102 @@ impl HerdrToolExecutor {
             tab_follows_focus: false,
             planning: None,
             sessions: None,
+            plugins: None,
         }
+    }
+
+    /// Run the enabled plugins' tools from `plugins`.
+    pub fn with_plugins(mut self, plugins: Arc<PluginHost>) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+
+    /// The caller of a plugin tool: this turn's principal and current
+    /// agent.
+    fn tool_caller(&self) -> AgentToolCaller {
+        AgentToolCaller {
+            principal: self.principal.clone(),
+            pane: self.current(),
+            lookup: Arc::new(HerdrLookup::new(self.client.clone())),
+        }
+    }
+
+    /// A plugin's tool (the 02:10 EDT amendment, items 4 and 5): a
+    /// read-only one run at once, its answer as text; one that changes
+    /// something only through a voice-turn confirmation, run when the
+    /// user approves it.
+    async fn execute_plugin_tool(
+        &self,
+        host: &Arc<PluginHost>,
+        tool: OfferedTool,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        if tool.read_only {
+            let value = host
+                .run_agent_tool(name, args.clone(), self.tool_caller())
+                .await
+                .map_err(|e| e.message)?;
+            return Ok(tool_result_text(&value));
+        }
+        let Some(turn) = &self.voice_turn else {
+            log::warn!("Refused the plugin tool {name}: confirmation unavailable");
+            return Err(format!(
+                "Cannot run {name}: it changes something and needs the user's approval, which is unavailable here."
+            ));
+        };
+        let mut shown = format!("{name} {args}");
+        if shown.len() > 200 {
+            let mut end = 200;
+            while !shown.is_char_boundary(end) {
+                end -= 1;
+            }
+            shown.truncate(end);
+            shown.push('…');
+        }
+        let words = name.replace('_', " ");
+        let request = HandleRequest {
+            given: args.get("handle").and_then(|v| v.as_str()),
+            command: &words,
+            agent: tool.plugin,
+            tab_code: None,
+        };
+        let pane_id = self.current().unwrap_or_default();
+        let action: Arc<dyn confirm::ConfirmAction> = Arc::new(PluginToolAction {
+            host: Arc::clone(host),
+            name: name.to_string(),
+            args: args.clone(),
+            caller: self.tool_caller(),
+        });
+        let mut attempt = 0;
+        let priors = turn.broker.word_priors();
+        let (confirm_id, handle) = loop {
+            let pending = turn.broker.pending_handle_infos(&self.principal.id);
+            let settled = confirm::settle_handle(&request, &pending, &priors, confirm::random_word);
+            match turn.broker.request_action(
+                &self.principal,
+                &pane_id,
+                tool.plugin,
+                &shown,
+                Some(&settled),
+                Lifetime::VoiceTurn,
+                Arc::clone(&action),
+            ) {
+                Ok(id) => break (id, settled.handle),
+                Err(ConfirmError::DuplicateHandle(_)) if attempt < 3 => attempt += 1,
+                Err(e) => return Err(e.to_string()),
+            }
+        };
+        log::info!("Confirmation {confirm_id} handle '{handle}' for the plugin tool {name}");
+        turn.log.confirmations.lock().unwrap().push(confirm_id);
+        Ok(serde_json::json!({
+            "status": "awaiting_user_approval",
+            "tool": name,
+            "handle": handle,
+            "note": format!(
+                "Not run yet. Right after your reply, flankr itself asks the user to approve running {name}, and runs it only if they approve. Do not ask for confirmation yourself and do not call {name} again for this; say in a few words that it is waiting for their approval."
+            ),
+        }))
     }
 
     pub fn with_planning(mut self, planning: PlanningConfig) -> Self {
@@ -726,11 +881,17 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
             crate::reasoning::READ_FILE => self.execute_read_file(args).await,
             crate::reasoning::RECENT_COMMITS => self.execute_recent_commits(args).await,
             "focus" => self.execute_focus(name, args).await,
-            _ => self
-                .client
-                .execute_tool_call(name, args)
-                .await
-                .map_err(|e| e.to_string()),
+            _ => {
+                if let Some(host) = &self.plugins
+                    && let Some(tool) = host.agent_tool(name)
+                {
+                    return self.execute_plugin_tool(host, tool, name, args).await;
+                }
+                self.client
+                    .execute_tool_call(name, args)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
         }
     }
 }
@@ -2526,5 +2687,132 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not available"), "got: {err}");
+    }
+
+    fn plugin_host(agent_tools: &str) -> (Arc<PluginHost>, Arc<std::sync::atomic::AtomicUsize>) {
+        let text = format!(
+            "[plugins.\"dev.flankr.plugins.test\"]\nenabled = true\nagent_tools = {agent_tools}\n"
+        );
+        let app: crate::config::AppConfig = toml::from_str(&text).unwrap();
+        let plugin = crate::plugins::host::tests::TestPlugin::named("dev.flankr.plugins.test");
+        let writes = Arc::clone(&plugin.writes);
+        let host = PluginHost::new(
+            &app,
+            crate::plugins::HostOptions {
+                plugins: Some(vec![Arc::new(plugin)]),
+                env: Some(crate::plugins::command::CommandEnv::default()),
+                ..Default::default()
+            },
+        );
+        (host, writes)
+    }
+
+    /// Plan 20261028_04, the 02:10 EDT amendment of 2026-10-29: a plugin's
+    /// read-only tool runs at once on the current project, its answer as
+    /// text cut to 64 KiB; one that changes something opens a voice-turn
+    /// confirmation and runs only when approved; without a voice turn it
+    /// is refused.
+    #[tokio::test]
+    async fn test_plugin_tools_run_read_only_and_confirm_the_others() {
+        use crate::core::confirm::{DEFAULT_TTL, Outcome};
+        use std::sync::atomic::Ordering;
+        let dir = two_projects();
+        let client = project_mock(dir.path()).await;
+        let (host, writes) = plugin_host("\"all\"");
+        let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+        let current = CurrentAgent::default();
+        let executor = voice_executor(&client, &broker, &log, vec![])
+            .with_current_agent(Arc::clone(&current), false)
+            .with_plugins(Arc::clone(&host));
+
+        let echoed = executor
+            .execute_tool("test_echo", &json!({"x": 1}))
+            .await
+            .unwrap();
+        assert_eq!(echoed, json!({"text": "{\"x\":1}"}));
+        // The project is the current agent's, as for the file tools.
+        let err = executor
+            .execute_tool("test_project", &json!({}))
+            .await
+            .unwrap_err();
+        assert_eq!(err, crate::project::NO_PROJECT);
+        *current.lock().unwrap() = Some("p1".to_string());
+        let project = executor
+            .execute_tool("test_project", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(project, json!({"text": "a"}));
+        // Cut at a character boundary: '€' is three bytes.
+        let big = executor.execute_tool("test_big", &json!({})).await.unwrap();
+        assert_eq!(big["cut"], json!(true));
+        assert_eq!(
+            big["text"].as_str().unwrap().len(),
+            MAX_TOOL_RESULT_BYTES - 1
+        );
+        assert!(big["note"].as_str().unwrap().contains("64 KiB"));
+
+        // Changes something: not run until approved.
+        let asked = executor
+            .execute_tool("test_write", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(asked["status"], "awaiting_user_approval");
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        let id = *log.confirmations.lock().unwrap().last().unwrap();
+        let (view, _) = broker.pending(id).unwrap();
+        assert_eq!(view.agent, "Test");
+        assert!(view.command.starts_with("test_write "), "{}", view.command);
+        let outcome = broker
+            .reply(&Principal::local("flankr"), id, true, None)
+            .await
+            .unwrap();
+        assert_eq!(outcome, Outcome::Sent);
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        // Denied: never run.
+        executor
+            .execute_tool("test_write", &json!({}))
+            .await
+            .unwrap();
+        let id = *log.confirmations.lock().unwrap().last().unwrap();
+        broker
+            .reply(&Principal::local("flankr"), id, false, None)
+            .await
+            .unwrap();
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+        // Nothing reached a pane.
+        assert!(command_log(&client).await.is_empty());
+
+        // No voice turn: refused, not run.
+        let plain = HerdrToolExecutor::new(client.clone(), vec![]).with_plugins(Arc::clone(&host));
+        let err = plain
+            .execute_tool("test_write", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("approval"), "{err}");
+        assert_eq!(writes.load(Ordering::SeqCst), 1);
+    }
+
+    /// By default only the read-only tools are offered; a tool not offered
+    /// is not run by the plugin.
+    #[tokio::test]
+    async fn test_a_plugin_tool_not_offered_is_not_run() {
+        use crate::core::confirm::DEFAULT_TTL;
+        use std::sync::atomic::Ordering;
+        let client = HerdrClient::mock();
+        let (host, writes) = plugin_host("true");
+        let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+        let executor =
+            voice_executor(&client, &broker, &log, vec![]).with_plugins(Arc::clone(&host));
+        assert!(
+            executor
+                .execute_tool("test_write", &json!({}))
+                .await
+                .is_err()
+        );
+        assert!(log.confirmations.lock().unwrap().is_empty());
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert!(executor.execute_tool("test_echo", &json!({})).await.is_ok());
     }
 }

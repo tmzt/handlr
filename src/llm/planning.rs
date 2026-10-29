@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use crate::config::LlmUseConfig;
 use crate::prompts::{PLANNING, Prompt, Prompts};
-use crate::reasoning::{ToolSet, default_system_prompt};
+use crate::reasoning::{AgentTool, ToolSet, default_system_prompt};
 
 /// `max_instructions_kb` when the prompt does not set it.
 pub const DEFAULT_MAX_INSTRUCTIONS_KB: usize = 32;
@@ -163,14 +163,24 @@ impl PlanningPrompt {
 pub struct AgentProfile {
     pub system_prompt: String,
     pub tools: ToolSet,
+    /// The enabled plugins' tools (plan 20261028_04, the 02:10 EDT
+    /// amendment of 2026-10-29), declared after the fixed ones.
+    pub plugin_tools: Vec<AgentTool>,
 }
 
 impl AgentProfile {
+    /// This profile with `plugin_tools` in place of its own.
+    pub fn with_plugin_tools(mut self, plugin_tools: Vec<AgentTool>) -> AgentProfile {
+        self.plugin_tools = plugin_tools;
+        self
+    }
+
     /// The general agent without planning: `PROMPT.md` and the base tools.
     pub fn base() -> AgentProfile {
         AgentProfile {
             system_prompt: default_system_prompt().unwrap_or_default(),
             tools: ToolSet::default(),
+            plugin_tools: Vec::new(),
         }
     }
 
@@ -198,6 +208,7 @@ impl AgentProfile {
                 file_tools: config.file_tools(),
                 recent_commits: git,
             },
+            plugin_tools: Vec::new(),
         })
     }
 }

@@ -14,7 +14,8 @@ pub mod service;
 
 pub use planning::{AgentProfile, PlanningConfig, PlanningPrompt, ReadPattern};
 pub use service::{
-    ClientFactory, ClientSpec, GeminiFactory, LlmOptions, LlmService, Overrides, Profile,
+    AgentToolSource, ClientFactory, ClientSpec, GeminiFactory, LlmOptions, LlmService, Overrides,
+    Profile,
 };
 
 use std::collections::BTreeMap;

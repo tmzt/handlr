@@ -9,6 +9,10 @@
 //! [`PluginCtx`]: the general agent's read-only operations with the same
 //! restrictions, and the commands it declares in [`Plugin::commands`].
 //! It never sends anything to an agent pane.
+//!
+//! A plugin may also contribute tools to the general agent
+//! ([`Plugin::tools`], the plan's 02:10 EDT amendment of 2026-10-29),
+//! named `<short name>_<tool>` and run through the same [`PluginCtx`].
 
 pub mod command;
 pub mod ctx;
@@ -18,7 +22,9 @@ pub mod registry;
 
 pub use command::{ArgShape, CommandOutput, CommandSpec};
 pub use ctx::{HerdrLookup, PluginCtx, Project, ProjectLookup};
-pub use host::{CallSlots, Caller, HostOptions, PluginHost};
+pub use host::{
+    AgentToolCaller, AgentToolsSetting, CallSlots, Caller, HostOptions, OfferedTool, PluginHost,
+};
 
 /// A plugin's daemon half (decision 3.1, item 3).
 #[async_trait::async_trait]
@@ -44,6 +50,64 @@ pub trait Plugin: Send + Sync + 'static {
         params: serde_json::Value,
         ctx: &PluginCtx,
     ) -> Result<serde_json::Value, PluginError>;
+    /// The tools it offers the general agent (the 02:10 EDT amendment,
+    /// item 1); none by default. The general agent sees each as
+    /// [`agent_tool_name`]`(ns, tool.name)`.
+    fn tools(&self) -> &[ToolSpec] {
+        &[]
+    }
+    /// Runs one of its [`tools`](Self::tools), by its own `name` (without
+    /// the short-name prefix). `args` is the model's JSON.
+    async fn run_tool(
+        &self,
+        name: &str,
+        _args: serde_json::Value,
+        _ctx: &PluginCtx,
+    ) -> Result<serde_json::Value, PluginError> {
+        Err(PluginError::new(
+            libflankr_proto::envelope::codes::METHOD_NOT_FOUND,
+            format!("This plugin has no tool {name}."),
+        ))
+    }
+}
+
+/// One tool a plugin offers the general agent (the 02:10 EDT amendment,
+/// item 1): a plain description; the plugin's own
+/// [`Plugin::run_tool`] runs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolSpec {
+    /// The plugin-local name, e.g. "plans_list"; the general agent sees
+    /// `planning_plans_list`.
+    pub name: &'static str,
+    /// What the model is told the tool does.
+    pub description: &'static str,
+    /// Its parameters as a JSON schema object, in the subset Gemini's
+    /// function declarations take.
+    pub params: serde_json::Value,
+    /// It only reads. A tool that changes something is offered only with
+    /// `agent_tools = "all"` and runs only after the voice confirmation.
+    pub read_only: bool,
+}
+
+/// A plugin's short name: its namespace's last part (`planning` for
+/// `dev.flankr.plugins.planning`).
+pub fn short_name(ns: &str) -> &str {
+    ns.rsplit('.').next().unwrap_or(ns)
+}
+
+/// What the general agent calls a plugin's tool: `<short name>_<tool>`,
+/// e.g. `planning_plans_list`.
+pub fn agent_tool_name(ns: &str, tool: &str) -> String {
+    format!("{}_{tool}", short_name(ns))
+}
+
+/// A general agent tool's name: `[a-z][a-z0-9_]{0,47}`.
+pub fn is_agent_tool_name(name: &str) -> bool {
+    (1..=48).contains(&name.len())
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// A plugin's version (decision 3.4): a release's semver, or a git hash

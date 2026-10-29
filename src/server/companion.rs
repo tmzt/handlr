@@ -771,7 +771,8 @@ async fn work(
             utterance: Some(text.clone()),
         })
         .with_current_agent(Arc::clone(&session.current_agent), conn.tab_follows_focus())
-        .with_sessions(Arc::clone(&daemon.sessions));
+        .with_sessions(Arc::clone(&daemon.sessions))
+        .with_plugins(Arc::clone(&daemon.plugins));
     let executor = match planning {
         Some((config, _)) => executor.with_planning(config),
         None => executor,

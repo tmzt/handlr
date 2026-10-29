@@ -177,6 +177,9 @@ impl Daemon {
                 ..Default::default()
             },
         );
+        // The general agent is offered the enabled plugins' tools (plan
+        // 20261028_04, the 02:10 EDT amendment of 2026-10-29).
+        llm.set_agent_tools(Arc::clone(&plugins) as Arc<dyn crate::llm::AgentToolSource>);
         // SAFETY: getuid has no preconditions and cannot fail.
         let uid = unsafe { libc::getuid() };
         // The images store's folder: `temp_dir()` read once, here (plan

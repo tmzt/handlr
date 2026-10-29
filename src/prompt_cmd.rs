@@ -10,9 +10,9 @@ use std::path::Path;
 
 use crate::config::AppConfig;
 use crate::core::naming::Names;
-use crate::llm::{self, AgentProfile, KeyEnv, PlanningPrompt, Use, UseState};
+use crate::llm::{self, AgentProfile, AgentToolSource, KeyEnv, PlanningPrompt, Use, UseState};
 use crate::project::ProjectFiles;
-use crate::reasoning::{declare_gemini_tools_for, tool_names};
+use crate::reasoning::{declare_gemini_tools_with, tool_names};
 use crate::transport::HerdrClient;
 
 /// What `flankr prompt` was asked for.
@@ -51,6 +51,10 @@ pub async fn report(
         Ok(prompt) => AgentProfile::planning(prompt, &settings.planning)?,
         Err(_) => AgentProfile::base(),
     };
+    // The enabled plugins' tools, after the fixed ones (plan 20261028_04,
+    // the 02:10 EDT amendment of 2026-10-29).
+    let plugins = crate::plugins::PluginHost::new(config, crate::plugins::HostOptions::default());
+    let profile = profile.with_plugin_tools(plugins.agent_tools());
 
     let mut out = String::new();
     let _ = writeln!(out, "# flankr prompt: {use_name}");
@@ -76,7 +80,10 @@ pub async fn report(
         }
     }
     let _ = writeln!(out, "\n## System prompt\n\n{}", profile.system_prompt);
-    let tools = tool_names(&declare_gemini_tools_for(profile.tools));
+    let tools = tool_names(&declare_gemini_tools_with(
+        profile.tools,
+        &profile.plugin_tools,
+    ));
     let _ = writeln!(out, "\n## Tools\n\n{}", tools.join(", "));
 
     if let Some(agent) = options.agent {
