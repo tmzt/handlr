@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use libcontrols::{
     DrawContext, ModalStack, ModalState, MouseButton, MouseEvent, PopupItem, PopupMenu,
-    PopupMenuEvent, PopupMenuOptions, PopupMenuState, Rect, Router,
+    PopupMenuEvent, PopupMenuOptions, PopupMenuState, PopupRow, Rect, Router,
 };
 use libmorph::TouchPhase;
 use libmsdf::drawlist::DrawList;
@@ -332,13 +332,13 @@ impl Menu {
     /// The screen's size changed: the menu stays inside it.
     pub fn set_layout(&mut self, layout: Layout) {
         if layout != self.layout {
-            let open = self.state.is_open().then(|| self.state.items());
+            let open = self.state.is_open().then(|| self.state.rows());
             self.state.close();
             let _ = self.state.take_events();
             self.layout = layout;
             self.build();
-            if let Some(items) = open {
-                self.open(self.state.anchor(), items);
+            if let Some(rows) = open {
+                self.open_rows(self.state.anchor(), rows);
             }
         }
     }
@@ -362,6 +362,7 @@ impl Menu {
             .border(theme().band)
             .text_color(theme().text)
             .heading_color(theme().dim)
+            .dim_text_color(theme().dim)
             .check_color(theme().accent)
             .separator_color(theme().band)
             .highlight(theme().band)
@@ -372,6 +373,7 @@ impl Menu {
             .min_width(200.0 * s)
             .max_width(320.0 * s)
             .separator_height(9.0 * s)
+            .column_gap(10.0 * s)
             .check_width(28.0 * s)
             .check_size(14.0 * s)
             .check_thickness(2.0 * s)
@@ -391,19 +393,40 @@ impl Menu {
 
     /// Opens it below `anchor` with `items`.
     pub fn open(&mut self, anchor: Rect, items: Vec<PopupItem>) {
-        if items.is_empty() {
+        self.open_rows(anchor, items.into_iter().map(PopupRow::from).collect());
+    }
+
+    /// Opens it below `anchor` with `rows`: items, with cells in shared
+    /// columns or not (a plugin's popup, such as the plan table).
+    pub fn open_rows(&mut self, anchor: Rect, rows: Vec<PopupRow>) {
+        if rows.is_empty() {
             return;
         }
-        self.state.open(anchor, items);
+        self.state.open_rows(anchor, rows);
         self.dirty = true;
     }
 
-    /// While open, its items replaced by `items` (a plugin's popup after
-    /// an answer); unchanged items are left as they are.
+    /// While open, its items replaced by `items` (the volume menu as it
+    /// changes); unchanged items are left as they are.
     pub fn refresh(&mut self, items: Vec<PopupItem>) {
-        if self.state.is_open() && !items.is_empty() && self.state.items() != items {
-            self.state.open(self.state.anchor(), items);
+        self.refresh_rows(items.into_iter().map(PopupRow::from).collect());
+    }
+
+    /// While open, its rows replaced by `rows` (a plugin's popup after an
+    /// answer); unchanged rows are left as they are.
+    pub fn refresh_rows(&mut self, rows: Vec<PopupRow>) {
+        if self.state.is_open() && !rows.is_empty() && self.state.rows() != rows {
+            self.state.open_rows(self.state.anchor(), rows);
             self.dirty = true;
+        }
+    }
+
+    /// The rows shown, while open.
+    pub fn rows(&self) -> Vec<PopupRow> {
+        if self.state.is_open() {
+            self.state.rows()
+        } else {
+            Vec::new()
         }
     }
 
@@ -811,6 +834,30 @@ mod tests {
         m.refresh(vec![PopupItem::action("c", "C")]);
         assert!(!m.is_open());
         assert!(m.items().is_empty());
+    }
+
+    #[test]
+    fn rows_with_cells_are_opened_refreshed_and_kept_across_a_resize() {
+        let mut m = Menu::new();
+        let anchor = Rect::new(900.0, 100.0, 84.0, 84.0);
+        m.open(anchor, vec![PopupItem::heading("Reading plans…")]);
+        let rows = vec![PopupItem::action("p", "Plugins").with_cells(vec![
+                libcontrols::PopupCell::new("4")
+                    .align(libcontrols::TextAlign::Right)
+                    .scale(0.8),
+                libcontrols::PopupCell::new("Plugins").flex(),
+            ])];
+        m.refresh_rows(rows.clone());
+        assert_eq!(m.rows(), rows);
+        m.set_layout(Layout {
+            w: 1200.0,
+            h: 800.0,
+            ..Layout::default()
+        });
+        assert_eq!(m.rows(), rows, "the cells survive a resize");
+        m.close();
+        m.open_rows(anchor, Vec::new());
+        assert!(!m.is_open(), "no rows, no menu");
     }
 
     #[test]

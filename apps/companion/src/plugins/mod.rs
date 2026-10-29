@@ -22,7 +22,7 @@ pub mod card;
 pub mod modal;
 pub mod planning;
 
-use libcontrols::{DrawContext, PopupItem, PopupItemKind, Rect};
+use libcontrols::{DrawContext, PopupItemKind, PopupRow, Rect};
 use libflankr_proto::ErrorObject;
 use libflankr_proto::companion::{PluginInfo, PluginNotify, PluginResult};
 use libmsdf::drawlist::DrawList;
@@ -145,10 +145,11 @@ pub trait DevicePlugin {
     /// (the plan's 22:03 EDT amendment, item 4): its popup menu opens with
     /// [`DevicePlugin::menu`]'s items, and it may send calls now.
     fn menu_opened(&mut self, _item: &str, _out: &mut PluginOut) {}
-    /// The items of `item`'s popup menu, with ids of the half's own; asked
-    /// on opening and again after each answer while it is open. None: the
-    /// app opens the item as a modal instead ([`DevicePlugin::action`]).
-    fn menu(&self, _item: &str) -> Vec<PopupItem> {
+    /// The rows of `item`'s popup menu (items, with cells or not), with
+    /// ids of the half's own; asked on opening and again after each answer
+    /// while it is open. None: the app opens the item as a modal instead
+    /// ([`DevicePlugin::action`]).
+    fn menu(&self, _item: &str) -> Vec<PopupRow> {
         Vec::new()
     }
     /// The item `id` of `item`'s popup menu was chosen; the menu has
@@ -448,10 +449,10 @@ impl Plugins {
     }
 
     /// `ns`'s `item`, an `opens: "menu"` title icon, was tapped: the
-    /// calls its half sends and the popup's items, with ids from
-    /// [`popup_id`]. No items (a half that has no menu for it): it is
-    /// opened as a modal instead, and the items are empty.
-    pub fn open_menu(&mut self, ns: &str, item: &str) -> (Vec<Outgoing>, Vec<PopupItem>) {
+    /// calls its half sends and the popup's rows, with ids from
+    /// [`popup_id`]. No rows (a half that has no menu for it): it is
+    /// opened as a modal instead, and the rows are empty.
+    pub fn open_menu(&mut self, ns: &str, item: &str) -> (Vec<Outgoing>, Vec<PopupRow>) {
         if !self.active(ns) {
             return (Vec::new(), Vec::new());
         }
@@ -465,9 +466,9 @@ impl Plugins {
         (calls, items)
     }
 
-    /// `ns`'s popup items for `item` as they are now, ids prefixed
+    /// `ns`'s popup rows for `item` as they are now, ids prefixed
     /// ([`popup_id`]); none while it is not active.
-    pub fn menu_items(&self, ns: &str, item: &str) -> Vec<PopupItem> {
+    pub fn menu_items(&self, ns: &str, item: &str) -> Vec<PopupRow> {
         if !self.active(ns) {
             return Vec::new();
         }
@@ -476,11 +477,11 @@ impl Plugins {
         };
         h.menu(item)
             .into_iter()
-            .map(|mut i| {
-                if i.kind == PopupItemKind::Action {
-                    i.id = popup_id(ns, item, i.id.as_str()).into();
+            .map(|mut r| {
+                if r.item.kind == PopupItemKind::Action {
+                    r.item.id = popup_id(ns, item, r.item.id.as_str()).into();
                 }
-                i
+                r
             })
             .collect()
     }
@@ -857,9 +858,9 @@ pub(crate) mod tests {
         }
     }
 
-    fn popup_ids(items: &[PopupItem]) -> Vec<String> {
-        items
-            .iter()
+    fn popup_ids(rows: &[PopupRow]) -> Vec<String> {
+        rows.iter()
+            .map(|r| &r.item)
             .map(|i| match i.kind {
                 PopupItemKind::Heading => format!("# {}", i.label),
                 PopupItemKind::Separator => "---".into(),
@@ -913,7 +914,9 @@ pub(crate) mod tests {
         let plan = popup_id(planning::NS, "plans", "plan/20261028_04_PLUGINS_PLAN");
         let all = popup_id(planning::NS, "plans", planning::MENU_ALL);
         assert_eq!(popup_ids(&items), [plan.clone(), "---".into(), all.clone()]);
-        assert_eq!(items[0].label, "Plugins\u{2002}In implementation");
+        assert_eq!(items[0].item.label, "Plugins");
+        let cells: Vec<&str> = items[0].cells.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(cells, ["4", "10/28", "Plugins", "InImpl"]);
         // Its ids parse back to the plugin's own.
         let Some(crate::menu::Choice::Popup { ns, item, id }) = crate::menu::Choice::parse(&plan)
         else {

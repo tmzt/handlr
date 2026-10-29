@@ -1318,8 +1318,8 @@ impl App {
         // A plugin's popup, while open, shows its items as they are now.
         if let Some((ns, item)) = &self.popup {
             if self.menu.is_open() {
-                let items = self.plugins.menu_items(ns, item);
-                self.menu.refresh(items);
+                let rows = self.plugins.menu_items(ns, item);
+                self.menu.refresh_rows(rows);
             } else {
                 self.popup = None;
             }
@@ -1637,9 +1637,9 @@ impl App {
     /// half's items, asked again on each answer while open; a half with
     /// none opens its modal instead.
     fn open_plugin_menu(&mut self, ns: &str, item: &str, anchor: libcontrols::Rect) {
-        let (calls, items) = self.plugins.open_menu(ns, item);
-        if !items.is_empty() {
-            self.menu.open(anchor, items);
+        let (calls, rows) = self.plugins.open_menu(ns, item);
+        if !rows.is_empty() {
+            self.menu.open_rows(anchor, rows);
             self.popup = Some((ns.to_string(), item.to_string()));
         }
         self.plugin_calls(|_| calls);

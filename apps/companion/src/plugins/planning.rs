@@ -2,21 +2,27 @@
 //! (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.8, item 7), for
 //! its daemon half's `0.1` releases.
 //!
+//! - **The plan table** (the plan's 23:14 EDT amendments, "the plan menu
+//!   is a table, by last update" and "the plan table's statuses
+//!   abbreviated", with the 23:15 and 23:16 EDT ones on its sizes): each
+//!   plan is one row of four columns, its **NN** and **mm/dd** from the
+//!   file name, right-aligned, its **title** cut with …, and its
+//!   **status** abbreviated ([`status_abbrev`]) in the dim colour; NN,
+//!   mm/dd and the status at 0.8 of the row's text size, vertically
+//!   centred, the title at full size. Rows are sorted by last update,
+//!   newest first ([`rows_of`]).
 //! - **Plans in this project** (`plans`) opens the modal and calls
-//!   `plans.list`: "Reading plans…", then one row per plan, newest at the
-//!   top: its title on one line, cut with …, and under it the date and the
-//!   front matter's status, with "(README: <status>)" when the README's
-//!   table says otherwise. A row's tap calls `plans.show` and shows the
-//!   plan in place of the list.
+//!   `plans.list`: "Reading plans…", then the plan table. A row's tap
+//!   calls `plans.show` and shows the plan in place of the list.
 //! - **The plan**: a ‹ back to the list and **Pin** on the first line;
-//!   its title, date and status; its `covers` as a short list; then
+//!   its title, date and status, with "(README: <status>)" when the
+//!   README's table says otherwise; its `covers` as a short list; then
 //!   **Amendments**, each its timestamp exactly as written and its
 //!   subject.
 //! - **The ☑ title icon** (`plans` with `opens: "menu"`, the daemon
 //!   half's 0.1.1; the plan's 22:03 EDT amendment, item 5): a popup menu,
 //!   "Reading plans…" as a heading until `plans.list` answers, then the
-//!   ten newest plans by title, each with its status after an en space
-//!   (a `PopupItem` has one label, so the status cannot be dimmed), and
+//!   plan table's first ten rows as `PopupRow`s of `PopupCell`s, and
 //!   **All plans…**, which opens the modal; choosing a plan opens the
 //!   modal on it (`plans.show`).
 //! - **The pinned card**, keyed by the plan's base name: its title, its
@@ -29,7 +35,7 @@
 use std::cell::Cell;
 use std::collections::HashMap;
 
-use libcontrols::{DrawContext, PopupItem, Rect};
+use libcontrols::{DrawContext, PopupCell, PopupItem, PopupRow, Rect, TextAlign};
 use libmsdf::drawlist::DrawList;
 use serde_json::{Value, json};
 
@@ -45,8 +51,7 @@ pub const NS: &str = "dev.flankr.plugins.planning";
 const TITLE_PT: f32 = 16.0;
 const SMALL_PT: f32 = 13.0;
 const HEAD_PT: f32 = 18.0;
-/// A list row's height, a tap target's, and the space between blocks.
-const ROW_H: f32 = 56.0;
+/// A tap target's height, a table row's, and the space between blocks.
 const TAP_H: f32 = 44.0;
 const GAP: f32 = 12.0;
 /// The most `covers` items shown.
@@ -56,6 +61,13 @@ pub const MENU_PLANS: usize = 10;
 /// The popup's characters a line: its 320 pt widest, less its padding,
 /// at its 16 pt, as [`columns`] counts.
 const MENU_COLUMNS: usize = 36;
+/// The NN, mm/dd and status columns' size, times the row's.
+pub const CELL_SCALE: f32 = 0.8;
+/// The modal table's space between columns, in points.
+const COLUMN_GAP: f32 = 10.0;
+/// About how wide a digit or a status letter is, in em, for the modal's
+/// fixed columns: a little over Roboto's digits, so nothing overruns.
+const CELL_EM: f32 = 0.6;
 /// The popup's item ids: a plan's is this and its base name.
 pub const MENU_PLAN: &str = "plan/";
 pub const MENU_ALL: &str = "all";
@@ -69,6 +81,15 @@ pub struct PlanRow {
     pub status: String,
     /// The README's status, when its table says otherwise.
     pub readme_status: Option<String>,
+    /// The sequence within its day, from the file name (`nn` when the
+    /// name has none), without leading zeros.
+    pub nn: String,
+    /// `mm/dd`, from the file name (`date_from_name` when it has none).
+    pub mmdd: String,
+    /// Its last update, in minutes, UTC ([`update_key`]): its newest
+    /// amendment's timestamp, else its front-matter date, else the file
+    /// name's; `None` when none can be read.
+    pub updated: Option<i64>,
 }
 
 /// A plan as `plans.show` gives it, as far as the modal and the card show
@@ -105,12 +126,40 @@ impl PlanRow {
         if title.is_empty() {
             title = base.clone();
         }
+        let date = text(v, "date");
+        let named = name_date(&base).or_else(|| {
+            let d = text(v, "date_from_name");
+            (d.len() == 10).then(|| d.replace('-', ""))
+        });
+        let mmdd = named
+            .as_deref()
+            .map(|d| format!("{}/{}", &d[4..6], &d[6..8]))
+            .unwrap_or_default();
+        let nn = name_nn(&base)
+            .or_else(|| v.get("nn").and_then(Value::as_u64).map(|n| n.to_string()))
+            .unwrap_or_default();
+        let named_dash = named
+            .as_deref()
+            .map(|d| format!("{}-{}-{}", &d[0..4], &d[4..6], &d[6..8]));
+        let updated = [
+            v.get("last_amendment")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            Some(date.clone()),
+            named_dash,
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|t| update_key(&t));
         Some(PlanRow {
             base,
             title,
-            date: text(v, "date"),
+            date,
             status,
             readme_status,
+            nn,
+            mmdd,
+            updated,
         })
     }
 
@@ -129,15 +178,151 @@ impl PlanRow {
     }
 }
 
-/// `plans.list`'s plans, newest first (it gives them oldest first).
+/// The file name's date, `YYYYMMDD`, when it starts `YYYYMMDD_`.
+fn name_date(base: &str) -> Option<String> {
+    let d = base.get(0..8)?;
+    (d.bytes().all(|b| b.is_ascii_digit()) && base.as_bytes().get(8) == Some(&b'_'))
+        .then(|| d.to_string())
+}
+
+/// The file name's NN, `YYYYMMDD_NN_`, without leading zeros.
+fn name_nn(base: &str) -> Option<String> {
+    name_date(base)?;
+    let nn = base.get(9..)?.split('_').next()?;
+    let n: u32 = nn.parse().ok()?;
+    Some(n.to_string())
+}
+
+/// Days from 1970-01-01 to a civil date (Howard Hinnant's
+/// `days_from_civil`).
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// A time zone's offset from UTC, in minutes: the North American
+/// abbreviations the plans are stamped with, UTC, or `+HH:MM`/`-HHMM`.
+fn zone_offset(tz: &str) -> Option<i64> {
+    let hours = match tz {
+        "UTC" | "GMT" | "Z" => 0,
+        "EDT" => -4,
+        "EST" | "CDT" => -5,
+        "CST" | "MDT" => -6,
+        "MST" | "PDT" => -7,
+        "PST" => -8,
+        _ => {
+            let sign = match tz.as_bytes().first()? {
+                b'+' => 1,
+                b'-' => -1,
+                _ => return None,
+            };
+            let digits: String = tz[1..].chars().filter(|c| *c != ':').collect();
+            if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let h: i64 = digits[0..2].parse().ok()?;
+            let m: i64 = digits[2..4].parse().ok()?;
+            return Some(sign * (h * 60 + m));
+        }
+    };
+    Some(hours * 60)
+}
+
+/// A plan's update time as minutes since 1970, UTC, for sorting:
+/// `YYYY-MM-DD`, optionally ` HH:MM` and a zone (an unknown or missing
+/// zone counts as UTC; a date alone is its midnight).
+pub fn update_key(t: &str) -> Option<i64> {
+    let mut parts = t.split_whitespace();
+    let date = parts.next()?;
+    let mut ymd = date.split('-').map(|p| p.parse::<i64>().ok());
+    let (y, m, d) = (ymd.next()??, ymd.next()??, ymd.next()??);
+    if ymd.next().is_some() || !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+        return None;
+    }
+    let mut minutes = days_from_civil(y, m, d) * 1440;
+    if let Some(hm) = parts.next() {
+        let (h, mi) = hm.split_once(':')?;
+        let (h, mi): (i64, i64) = (h.parse().ok()?, mi.parse().ok()?);
+        minutes += h * 60 + mi;
+        if let Some(off) = parts.next().and_then(zone_offset) {
+            minutes -= off;
+        }
+    }
+    Some(minutes)
+}
+
+/// The status column's text (the plan's 23:14 EDT amendment, "the plan
+/// table's statuses abbreviated"): `Draft`, `Hold`, `InImpl`, `Impl`,
+/// `Succd` and `Rtrd`; any other status its first five letters.
+pub fn status_abbrev(status: &str) -> String {
+    let s = status.trim();
+    let shown = match s {
+        "Draft" => "Draft",
+        "Hold" => "Hold",
+        "In implementation" => "InImpl",
+        "Implemented" => "Impl",
+        _ if s.starts_with("Superseded") => "Succd",
+        _ if s.starts_with("Retired") => "Rtrd",
+        _ => return s.chars().take(5).collect(),
+    };
+    shown.to_string()
+}
+
+/// `plans.list`'s plans by last update, newest first; a plan whose time
+/// cannot be read goes last, and ties go by file name, the later first.
 pub fn rows_of(result: &Value) -> Vec<PlanRow> {
     let mut rows: Vec<PlanRow> = result
         .get("plans")
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(PlanRow::from_json).collect())
         .unwrap_or_default();
-    rows.reverse();
+    rows.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.base.cmp(&a.base)));
     rows
+}
+
+/// A plan's popup row: the item, and its four cells (NN and mm/dd
+/// right-aligned, the title taking the room left, the status dim), NN,
+/// mm/dd and the status at [`CELL_SCALE`]. Each column is as wide as its
+/// widest cell, so the rows line up.
+pub fn menu_row(row: &PlanRow) -> PopupRow {
+    PopupItem::action(format!("{MENU_PLAN}{}", row.base), row.title.clone()).with_cells(vec![
+        PopupCell::new(row.nn.clone())
+            .align(TextAlign::Right)
+            .scale(CELL_SCALE),
+        PopupCell::new(row.mmdd.clone())
+            .align(TextAlign::Right)
+            .scale(CELL_SCALE),
+        PopupCell::new(row.title.clone()).flex(),
+        PopupCell::new(status_abbrev(&row.status))
+            .dim(true)
+            .scale(CELL_SCALE),
+    ])
+}
+
+/// The modal table's columns at width `w`, the title's size `px`: each
+/// `[x, width]`, NN, mm/dd, title, status. NN and mm/dd fit their widest
+/// at [`CELL_SCALE`], the status its widest abbreviation, the title the
+/// rest.
+fn table_columns(rows: &[PlanRow], w: f32, px: f32, gap: f32) -> [[f32; 2]; 4] {
+    let small = px * CELL_SCALE;
+    let cw = |n: usize| n as f32 * small * CELL_EM;
+    let widest = |f: &dyn Fn(&PlanRow) -> usize| rows.iter().map(f).max().unwrap_or(0);
+    let nn_w = cw(widest(&|r| r.nn.chars().count()).max(1));
+    let md_w = cw(widest(&|r| r.mmdd.chars().count()));
+    let st_w = cw(widest(&|r| status_abbrev(&r.status).chars().count()));
+    let title_x = nn_w + md_w + 2.0 * gap;
+    let title_w = (w - title_x - st_w - gap).max(0.0);
+    [
+        [0.0, nn_w],
+        [nn_w + gap, md_w],
+        [title_x, title_w],
+        [title_x + title_w + gap, st_w],
+    ]
 }
 
 /// `plans.show`'s plan.
@@ -176,7 +361,7 @@ pub fn plan_of(result: &Value) -> Option<PlanView> {
 enum Page {
     Reading,
     List(Vec<PlanRow>),
-    Plan(PlanView),
+    Plan(Box<PlanView>),
     Failed(String),
 }
 
@@ -220,10 +405,12 @@ enum Ink {
 #[derive(Clone, Debug, PartialEq)]
 struct Line {
     text: String,
+    /// The left edge, or the right edge when `right`.
     x: f32,
     y: f32,
     px: f32,
     ink: Ink,
+    right: bool,
 }
 
 /// A view laid out at one width: its lines, its taps, a separator under
@@ -308,6 +495,7 @@ impl Planning {
                 y: *y,
                 px,
                 ink,
+                right: false,
             });
             *y += line_h(px);
         };
@@ -333,26 +521,31 @@ impl Planning {
                 Ink::Dim,
             ),
             Page::List(rows) => {
-                let row_h = ROW_H * s;
+                let row_h = TAP_H * s;
+                let px = TITLE_PT * s;
+                let small = px * CELL_SCALE;
+                let cols = table_columns(rows, w, px, COLUMN_GAP * s);
                 for r in rows {
                     let top = y;
-                    let mut ly = top + 6.0 * s;
-                    push(
-                        &mut laid,
-                        cut(&r.title, w, TITLE_PT * s),
-                        0.0,
-                        &mut ly,
-                        TITLE_PT * s,
-                        Ink::Text,
-                    );
-                    push(
-                        &mut laid,
-                        cut(&r.subtitle(), w, SMALL_PT * s),
-                        0.0,
-                        &mut ly,
-                        SMALL_PT * s,
-                        Ink::Dim,
-                    );
+                    let cells = [
+                        (r.nn.clone(), small, Ink::Text, true),
+                        (r.mmdd.clone(), small, Ink::Text, true),
+                        (cut(&r.title, cols[2][1], px), px, Ink::Text, false),
+                        (status_abbrev(&r.status), small, Ink::Dim, false),
+                    ];
+                    for ((text, size, ink, right), [x, cw]) in cells.into_iter().zip(cols) {
+                        if text.is_empty() {
+                            continue;
+                        }
+                        laid.lines.push(Line {
+                            text,
+                            x: if right { x + cw } else { x },
+                            y: top + (row_h - line_h(size)) * 0.5,
+                            px: size,
+                            ink,
+                            right,
+                        });
+                    }
                     laid.taps
                         .push((Tap::Row(r.base.clone()), Rect::new(0.0, top, w, row_h)));
                     y = top + row_h;
@@ -442,6 +635,7 @@ impl Planning {
                 y: *y,
                 px,
                 ink,
+                right: false,
             });
             *y += line_h(px);
         };
@@ -470,19 +664,6 @@ impl Planning {
     fn page(&self) -> &Page {
         &self.page
     }
-}
-
-/// A popup row's label: the title, cut with … to leave room, an en space,
-/// then the status.
-pub fn menu_label(row: &PlanRow) -> String {
-    let status = row.status.trim();
-    if status.is_empty() {
-        return cut_to(&row.title, MENU_COLUMNS);
-    }
-    let room = MENU_COLUMNS
-        .saturating_sub(status.chars().count() + 1)
-        .max(12);
-    format!("{}\u{2002}{status}", cut_to(&row.title, room))
 }
 
 /// `text` in at most `max` characters, cut with ….
@@ -526,31 +707,27 @@ impl DevicePlugin for Planning {
         }
     }
 
-    fn menu(&self, item: &str) -> Vec<PopupItem> {
+    fn menu(&self, item: &str) -> Vec<PopupRow> {
         if item != "plans" {
             return Vec::new();
         }
-        let all = PopupItem::action(MENU_ALL, copy::PLANNING_ALL_PLANS.text);
+        let all = PopupItem::action(MENU_ALL, copy::PLANNING_ALL_PLANS.text).into();
         match &self.menu {
-            None => vec![PopupItem::heading(copy::PLANNING_READING.text)],
+            None => vec![PopupItem::heading(copy::PLANNING_READING.text).into()],
             Some(Ok(rows)) if rows.is_empty() => vec![
-                PopupItem::heading(copy::PLANNING_MENU_NONE.text),
-                PopupItem::separator(),
+                PopupItem::heading(copy::PLANNING_MENU_NONE.text).into(),
+                PopupItem::separator().into(),
                 all,
             ],
             Some(Ok(rows)) => {
-                let mut items: Vec<PopupItem> = rows
-                    .iter()
-                    .take(MENU_PLANS)
-                    .map(|r| PopupItem::action(format!("{MENU_PLAN}{}", r.base), menu_label(r)))
-                    .collect();
-                items.push(PopupItem::separator());
+                let mut items: Vec<PopupRow> = rows.iter().take(MENU_PLANS).map(menu_row).collect();
+                items.push(PopupItem::separator().into());
                 items.push(all);
                 items
             }
             Some(Err(why)) => vec![
-                PopupItem::heading(cut_to(why, MENU_COLUMNS)),
-                PopupItem::separator(),
+                PopupItem::heading(cut_to(why, MENU_COLUMNS)).into(),
+                PopupItem::separator().into(),
                 all,
             ],
         }
@@ -599,7 +776,7 @@ impl DevicePlugin for Planning {
                         {
                             *c = CardShows::Plan(p.clone());
                         }
-                        Page::Plan(p)
+                        Page::Plan(Box::new(p))
                     }
                     None => Page::Failed(copy::PLANNING_UNREADABLE.text.to_string()),
                 };
@@ -644,7 +821,12 @@ impl DevicePlugin for Planning {
                 Ink::Dim => theme().dim,
                 Ink::Accent => theme().link,
             };
-            ctx.draw_text(list, &l.text, [rect.x + l.x, rect.y + l.y], l.px, color);
+            let x = if l.right {
+                l.x - ctx.text_advance(&l.text, l.px)
+            } else {
+                l.x
+            };
+            ctx.draw_text(list, &l.text, [rect.x + x, rect.y + l.y], l.px, color);
         }
     }
 
@@ -665,7 +847,8 @@ impl DevicePlugin for Planning {
                 if let Page::Plan(p) = &self.page {
                     let key = p.row.base.clone();
                     if !self.cards.iter().any(|(k, _)| *k == key) {
-                        self.cards.push((key.clone(), CardShows::Plan(p.clone())));
+                        self.cards
+                            .push((key.clone(), CardShows::Plan((**p).clone())));
                     }
                     out.open(ViewKind::Card(key));
                 }
@@ -790,9 +973,11 @@ mod tests {
         assert_eq!(texts(&p, &ViewKind::Modal), [copy::PLANNING_READING.text]);
         answer(&mut p, 1, list_fixture());
         let shown = texts(&p, &ViewKind::Modal);
-        assert_eq!(shown.len(), 4, "{shown:?}");
-        // One line each title, cut.
-        assert!(shown[0].ends_with('\u{2026}') || shown[0].starts_with("Built-in"));
+        // Four cells a row: NN, mm/dd, the title (cut), the status.
+        assert_eq!(shown.len(), 8, "{shown:?}");
+        assert_eq!(shown[..2], ["4", "10/28"]);
+        assert!(shown[2].starts_with("Built-in"));
+        assert_eq!(shown[3], "InImpl");
         // Tap the first row.
         p.laid.set((1000.0, 2.0));
         let mut out = PluginOut::new(2);
@@ -876,13 +1061,22 @@ mod tests {
         assert_eq!(texts(&p, &ViewKind::Modal), [copy::PLANNING_READING.text]);
     }
 
-    fn labels(items: &[PopupItem]) -> Vec<String> {
-        items
-            .iter()
-            .map(|i| match i.kind {
-                libcontrols::PopupItemKind::Heading => format!("# {}", i.label),
+    /// Each row as `id = cells` (or its label), headings `# `.
+    fn labels(rows: &[PopupRow]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match r.item.kind {
+                libcontrols::PopupItemKind::Heading => format!("# {}", r.item.label),
                 libcontrols::PopupItemKind::Separator => "---".into(),
-                _ => format!("{} = {}", i.id.as_str(), i.label),
+                _ if r.cells.is_empty() => format!("{} = {}", r.item.id.as_str(), r.item.label),
+                _ => format!(
+                    "{} = {}",
+                    r.item.id.as_str(),
+                    r.cells
+                        .iter()
+                        .map(|c| c.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" | ")
+                ),
             })
             .collect()
     }
@@ -906,9 +1100,10 @@ mod tests {
         assert_eq!(
             labels(&p.menu("plans")),
             [
-                "plan/20261028_04_PLUGINS_PLAN = Built-in plugins,\u{2026}\u{2002}In implementation"
+                "plan/20261028_04_PLUGINS_PLAN = 4 | 10/28 | Built-in plugins, with a namespaced \
+                 message flow, a title-bar menu and the planning plugin | InImpl"
                     .to_string(),
-                "plan/20261024_02_SETTINGS_SCREEN_PLAN = The settings scre\u{2026}\u{2002}In implementation"
+                "plan/20261024_02_SETTINGS_SCREEN_PLAN = 2 | 10/24 | The settings screen | InImpl"
                     .to_string(),
                 "---".to_string(),
                 format!("all = {}", copy::PLANNING_ALL_PLANS.text),
@@ -932,9 +1127,12 @@ mod tests {
         answer(&mut p, 1, json!({"schema": 1, "plans": plans}));
         let items = p.menu("plans");
         assert_eq!(items.len(), MENU_PLANS + 2);
-        assert_eq!(items[0].id.as_str(), "plan/20261028_12_P12_PLAN");
-        assert_eq!(items[0].label, "Plan 12\u{2002}Draft");
-        assert_eq!(items[9].id.as_str(), "plan/20261028_03_P3_PLAN");
+        assert_eq!(items[0].item.id.as_str(), "plan/20261028_12_P12_PLAN");
+        assert_eq!(
+            labels(&items)[0],
+            "plan/20261028_12_P12_PLAN = 12 | 10/28 | Plan 12 | Draft"
+        );
+        assert_eq!(items[9].item.id.as_str(), "plan/20261028_03_P3_PLAN");
         // An empty list, then an error.
         let mut out = PluginOut::new(2);
         p.menu_opened("plans", &mut out);
@@ -991,5 +1189,200 @@ mod tests {
         p.tap(&ViewKind::Modal, 10.0, 10.0, &mut out);
         assert!(out.calls.is_empty());
         assert!(matches!(p.page(), Page::List(rows) if rows.len() == 2));
+    }
+
+    fn plan(base: &str, date: Option<&str>, last: Option<&str>, status: &str) -> Value {
+        json!({"base": base, "title": base, "status": status,
+               "date": date, "last_amendment": last})
+    }
+
+    #[test]
+    fn rows_are_sorted_by_last_amendment_else_date_else_the_file_names_date() {
+        let result = json!({"schema": 1, "plans": [
+            // Oldest by name, but amended last (23:30 EST is 04:30 UTC).
+            plan("20261001_01_A_PLAN", Some("2026-10-01"), Some("2026-11-02 23:30 EST"), "Draft"),
+            plan("20261102_01_B_PLAN", Some("2026-11-02"), Some("2026-11-03 00:10 EDT"), "Draft"),
+            // No amendment: its front-matter date, a day later than its name.
+            plan("20261020_01_C_PLAN", Some("2026-10-25"), None, "Draft"),
+            // Neither: its file name's date.
+            plan("20261024_02_D_PLAN", None, None, "Draft"),
+            plan("20261024_01_E_PLAN", None, None, "Draft"),
+            // Nothing readable: last.
+            plan("NOTES", None, None, "Draft"),
+        ]});
+        let order: Vec<String> = rows_of(&result).into_iter().map(|r| r.base).collect();
+        assert_eq!(
+            order,
+            [
+                "20261001_01_A_PLAN",
+                "20261102_01_B_PLAN",
+                "20261020_01_C_PLAN",
+                "20261024_02_D_PLAN",
+                "20261024_01_E_PLAN",
+                "NOTES"
+            ]
+        );
+        assert_eq!(
+            update_key("2026-10-28 23:14 EDT"),
+            update_key("2026-10-29 03:14 UTC")
+        );
+        assert_eq!(
+            update_key("2026-10-28 23:14 -04:00"),
+            update_key("2026-10-29 03:14")
+        );
+        assert_eq!(update_key("1970-01-02"), Some(1440));
+        assert_eq!(update_key("not a date"), None);
+        assert_eq!(update_key("2026-13-01"), None);
+    }
+
+    #[test]
+    fn nn_and_mm_dd_come_from_the_file_name_else_the_fields() {
+        let r = PlanRow::from_json(&json!({"base": "20261028_04_PLUGINS_PLAN"})).unwrap();
+        assert_eq!((r.nn.as_str(), r.mmdd.as_str()), ("4", "10/28"));
+        let r = PlanRow::from_json(
+            &json!({"base": "PLUGINS", "nn": 7, "date_from_name": "2026-03-09"}),
+        )
+        .unwrap();
+        assert_eq!((r.nn.as_str(), r.mmdd.as_str()), ("7", "03/09"));
+        assert_eq!(r.updated, update_key("2026-03-09"));
+    }
+
+    #[test]
+    fn statuses_are_abbreviated() {
+        for (status, shown) in [
+            ("Draft", "Draft"),
+            ("Hold", "Hold"),
+            ("In implementation", "InImpl"),
+            ("Implemented", "Impl"),
+            (
+                "Superseded (by [the next](docs/design/20261029_01_X_PLAN.md))",
+                "Succd",
+            ),
+            ("Retired (by 20261029_02_Y_PLAN)", "Rtrd"),
+            ("Approved", "Appro"),
+            ("Open", "Open"),
+            ("  Draft ", "Draft"),
+        ] {
+            assert_eq!(status_abbrev(status), shown, "{status}");
+        }
+    }
+
+    #[test]
+    fn a_popup_row_is_four_cells_with_the_small_ones_at_0_8() {
+        let mut p = Planning::new();
+        let mut out = PluginOut::new(1);
+        p.menu_opened("plans", &mut out);
+        answer(&mut p, 1, list_fixture());
+        let rows = p.menu("plans");
+        let cells = &rows[0].cells;
+        assert_eq!(cells.len(), 4);
+        let [nn, mmdd, title, status] = [&cells[0], &cells[1], &cells[2], &cells[3]];
+        assert_eq!((nn.text.as_str(), nn.align), ("4", TextAlign::Right));
+        assert_eq!(
+            (mmdd.text.as_str(), mmdd.align),
+            ("10/28", TextAlign::Right)
+        );
+        assert_eq!(title.align, TextAlign::Left);
+        assert_eq!(title.width, libcontrols::PopupCellWidth::Flex);
+        assert_eq!(status.text, "InImpl");
+        assert_eq!(status.align, TextAlign::Left);
+        // Sizes: all but the title at 0.8; only the status dim.
+        assert_eq!(
+            [nn.scale, mmdd.scale, title.scale, status.scale],
+            [0.8, 0.8, 1.0, 0.8]
+        );
+        assert_eq!(
+            [nn.dim, mmdd.dim, title.dim, status.dim],
+            [false, false, false, true]
+        );
+        // The other columns size to their widest cell, so they line up.
+        for c in [nn, mmdd, status] {
+            assert_eq!(c.width, libcontrols::PopupCellWidth::Auto);
+        }
+        // Headings and All plans… stay plain labels.
+        assert!(rows.last().unwrap().cells.is_empty());
+    }
+
+    #[test]
+    fn the_popup_lays_its_cells_out_in_shared_columns_cut_and_centred() {
+        let menu = libcontrols::PopupMenu::new(Rect::new(0.0, 0.0, 1000.0, 1000.0))
+            .with_options(libcontrols::PopupMenuOptions::new().max_width(320.0));
+        let state = std::sync::Arc::new(libcontrols::PopupMenuState::new());
+        let menu = menu.with_state(std::sync::Arc::clone(&state));
+        let mut p = Planning::new();
+        let mut out = PluginOut::new(1);
+        p.menu_opened("plans", &mut out);
+        answer(&mut p, 1, list_fixture());
+        state.open_rows(Rect::new(900.0, 0.0, 40.0, 40.0), p.menu("plans"));
+        let ctx = DrawContext::default();
+        let mut list = DrawList::new();
+        libcontrols::DrawControl::draw(&menu, &mut list, &ctx);
+        let layout = state.layout().expect("drawn");
+        assert_eq!(layout.columns.len(), 4);
+        // In order, left to right, inside the frame.
+        for k in 1..4 {
+            assert!(layout.columns[k][0] > layout.columns[k - 1][0]);
+        }
+        let [x, w] = layout.columns[3];
+        assert!(x + w <= layout.frame.x + layout.frame.w);
+        // The long title takes the room left: the menu is at its widest.
+        assert!((layout.frame.w - 320.0).abs() < 0.01, "{}", layout.frame.w);
+    }
+
+    #[test]
+    fn the_modal_table_has_four_columns_with_the_small_ones_at_0_8_centred() {
+        let mut p = Planning::new();
+        let mut out = PluginOut::new(1);
+        p.action("plans", &mut out);
+        answer(&mut p, 1, list_fixture());
+        let (w, s) = (1000.0, 2.0);
+        let laid = p.lay_out(&ViewKind::Modal, w, s);
+        assert_eq!(laid.lines.len(), 8);
+        let row_h = TAP_H * s;
+        let px = TITLE_PT * s;
+        for (i, row) in laid.lines.chunks(4).enumerate() {
+            let top = i as f32 * row_h;
+            let sizes: Vec<f32> = row.iter().map(|l| l.px).collect();
+            assert_eq!(sizes, [px * 0.8, px * 0.8, px, px * 0.8]);
+            assert_eq!(
+                row.iter().map(|l| l.ink).collect::<Vec<_>>(),
+                [Ink::Text, Ink::Text, Ink::Text, Ink::Dim]
+            );
+            assert_eq!(
+                row.iter().map(|l| l.right).collect::<Vec<_>>(),
+                [true, true, false, false]
+            );
+            // Each vertically centred on its row.
+            for l in row {
+                let mid = l.y + line_h(l.px) * 0.5;
+                assert!((mid - (top + row_h * 0.5)).abs() < 0.01, "{l:?}");
+            }
+            // Left to right, inside the width.
+            assert!(row[0].x < row[1].x && row[1].x < row[2].x && row[2].x < row[3].x);
+            assert!(row[3].x + columns_w(&row[3].text, row[3].px) * 1.2 <= w);
+        }
+        // The rows line up: the same edges in each.
+        let xs =
+            |i: usize| -> Vec<f32> { laid.lines[i * 4..i * 4 + 4].iter().map(|l| l.x).collect() };
+        assert_eq!(xs(0), xs(1));
+        // One tap and one rule a row.
+        assert_eq!(laid.taps.len(), 2);
+        assert_eq!(laid.rules, [row_h, 2.0 * row_h]);
+        // A narrow modal cuts the title with … and keeps the rest.
+        let narrow = p.lay_out(&ViewKind::Modal, 300.0, 1.0);
+        assert!(
+            narrow.lines[2].text.ends_with('\u{2026}'),
+            "{:?}",
+            narrow.lines[2]
+        );
+        assert_eq!(narrow.lines[3].text, "InImpl");
+        // The second row taps to its plan.
+        p.laid.set((w, s));
+        let mut out = PluginOut::new(2);
+        p.tap(&ViewKind::Modal, 10.0, row_h + 10.0, &mut out);
+        assert_eq!(
+            out.calls[0].params,
+            json!({"name": "20261024_02_SETTINGS_SCREEN_PLAN"})
+        );
     }
 }
