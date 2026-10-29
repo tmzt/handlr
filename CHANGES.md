@@ -3265,3 +3265,45 @@ Small departures needed to make it work:
    whether the options are on, rather than switching to the ✕.
 7. flankr-audio's `morph` libmorph pin moves with the companion's to 0.5.1,
    since libmorph's `links = "libmorph"` allows one revision in a graph.
+
+## 2026-10-29 00:23 EDT — Plan 20261028_05 (binary transfers), steps 1-6's departures
+
+Small departures needed to make the plan work:
+
+1. Step 1: the link test `reserved_and_extended_kinds_are_bad_frame` changes,
+   as kind 2 is now read by `recv`; and the daemon does not build at the
+   libflankr_proto commit alone (its `HelloResult` and `ServerCapabilities`
+   literals take `blob` in the flankr commit), so the three commits land
+   together.
+2. Decision 4.9's API: `Receiving::chunk` takes `now` (each CHUNK resets the
+   idle timeout); `Step` is spelled out; `try_next`, `owns`, `is_valid`,
+   `Code::line`, `Offer::for_bytes` and the constants are added; the id
+   `0x8000_0000` is invalid too; `Outgoing::Binary` has no `bulk` field,
+   the queue it is on says so.
+3. `TurnOptions::blob_temp` points the images store at a test folder, for
+   tests only; no config key, flag or variable names it.
+4. An image OFFER for a session reached over SSH gets REFUSE
+   `not_permitted` (the agent could not read the daemon's temp folder); an
+   OFFER under `IMAGE_MIN` gets `bad_type`.
+5. `not_a_repository` also matches exit 129, `git diff`'s outside a work
+   tree.
+6. A send with images that was not a tap types the paths when its
+   confirmation is approved; it does not paste them. The references are used
+   up when the confirmation is opened.
+7. On a tap with the herdr attachment up, the whole message goes over the
+   attachment (text as key events, paths as `Paste`, then Enter), so the
+   order holds on one socket (`HerdrAttach::input_pane`); with no terminal
+   open the attachment is often detached, and the line is typed.
+8. `terminal.paste`'s keystroke fallback sends one key per character
+   (`space`, `tab`), at most 64 bytes of text a `send_keys` call; each
+   paste sends a "Pasted into X's terminal." notice.
+9. `agents.send`: any non-empty text after folding is checked with
+   `validate_message`, even punctuation alone; the same reference twice in
+   one send is `NOT_PERMITTED`.
+10. `server.capabilities` carries `blob` only with the existing llm and
+    plugins changes; there is no push when only `read` changes.
+11. Tests differing from section 11: the writer-priority test uses a 3 MiB
+    `files` download (a ping answered before END, at most 2 CHUNKs ahead);
+    the timeout test uses a 300 ms timeout on a stand-in for git; the
+    environment test calls the capped runner with a stand-in path; "a third
+    concurrent run is busy" is not tested (the 2-slot semaphore is in place).
