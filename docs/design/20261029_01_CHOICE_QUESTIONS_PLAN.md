@@ -668,3 +668,15 @@ Order: 1, then 2, 3 and 4 in that order; 5 after 1; 6 after 5; 7 last.
 5. **The untested-version rule.** Drive any version with the screen
    checks (as written), or refuse versions newer than the last one step 7
    confirmed? Recommended: drive and log, as written.
+
+## Amendment — 2026-10-29 00:40 EDT: approved with the open questions' recommendations
+
+The owner approved the plan on 2026-10-29 ("approve the choice questions
+plan with those answers"), the answers being the open questions'
+recommendations: (1) "Chat about this" is offered on the card as
+**Discuss…**, as a follow-up after this plan's steps; (2) no Dismiss button
+that sends Esc; (3) notes on preview questions from the phone later; (4)
+plain messages (`agents.send`, Gemini's sends included) are refused while a
+choice question is open; (5) Claude Code versions not seen yet are driven
+with the screen checks and logged, not refused. The status stays `Draft`
+until the first implementing commit (Rule 1.5).
