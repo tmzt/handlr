@@ -129,6 +129,8 @@ fn expect_connected(c: &Companion) {
         next_event(c),
         Event::Llm(flankr_companion::wire::LlmInfo::available())
     );
+    // No `plugins` either: none.
+    assert_eq!(next_event(c), Event::Plugins(vec![]));
     // The first list answer, `greet`'s.
     assert_eq!(next_event(c), Event::Agents(vec![]));
 }
@@ -235,18 +237,19 @@ fn a_tap_sees_each_event_with_the_bytes_before_the_app_does() {
     let seen = seen.lock().unwrap();
     let events: Vec<&Event> = seen.iter().map(|(e, _)| e).collect();
     // The disconnected events of any attempt before the accept, then the
-    // four the app was given, in the same order.
+    // five the app was given, in the same order.
     let at = events
         .iter()
         .position(|e| matches!(e, Event::Connected { .. }))
         .expect("connected");
     assert!(matches!(events[at + 1], Event::Vocabulary(_)));
     assert!(matches!(events[at + 2], Event::Llm(_)));
-    assert_eq!(events[at + 3], &Event::Agents(vec![]));
-    assert_eq!(events.len(), at + 4);
+    assert_eq!(events[at + 3], &Event::Plugins(vec![]));
+    assert_eq!(events[at + 4], &Event::Agents(vec![]));
+    assert_eq!(events.len(), at + 5);
     // The bytes as they were then: the last is all of them.
-    assert_eq!(seen[at + 3].1, conn.bytes);
-    assert!(seen[at].1 <= seen[at + 3].1);
+    assert_eq!(seen[at + 4].1, conn.bytes);
+    assert!(seen[at].1 <= seen[at + 4].1);
 }
 
 #[test]

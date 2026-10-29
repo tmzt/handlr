@@ -626,3 +626,22 @@ default:
   errors -32110 (no docs/design plans) and -32111 (no plan of that name).
 - **Added:** the menu item `plans` ("Plans in this project", a modal, both
   screens).
+
+## flankr-companion 0.5.1 — 2026-10-28 (the commit tagged `flankr-companion-v0.5.1`)
+
+Plan 20261028_04 (plugins), step 5. Strictly additive (`Input` and `Event`
+are `#[non_exhaustive]`):
+
+- **Added:** `Input::PluginCall { ns, id, method, params, session }` (sent as
+  `plugin.call`; a call refused at once, offline, malformed, over 256 KiB,
+  refused by the daemon or cut off by the connection closing, is answered
+  as `Event::PluginResult` with the error) and
+  `Input::SetPluginEnabled { ns, enabled }` (`plugin.set_enabled`).
+- **Added:** `Event::Plugins(Vec<PluginInfo>)` (after each `hello`, empty
+  from an older daemon; on each `server.capabilities` with `plugins`; after
+  a toggle is answered or refused; last in `State::replay`),
+  `Event::PluginResult(PluginResult)` and `Event::PluginNotify(PluginNotify)`.
+- **Added:** `State::plugins()`; `client::plugin_refusal()`: plugin inputs
+  for a remote not in use are refused (plugins act on the remote in use
+  only).
+- libflankr_proto 0.5.1 → 0.5.2 (semver-compatible).
