@@ -674,7 +674,7 @@ impl PromptCard {
             AgentHit::PromptText(kind) if kind == self.kind => {
                 self.text_area.as_ref().map(|ta| ta.rect)
             }
-            AgentHit::PromptAttach(_) | AgentHit::PromptIme(_) => {
+            AgentHit::PromptAttach(_) | AgentHit::PromptIme(_) | AgentHit::PromptMic(_) => {
                 self.row.as_ref().and_then(|r| r.rect_of(hit, 0.0))
             }
             _ => self.buttons.iter().find(|b| b.hit == hit).map(|b| b.rect),
@@ -839,6 +839,7 @@ mod tests {
         images: false,
         keyboard_up: true,
         physical: false,
+        microphone: true,
     };
 
     #[test]

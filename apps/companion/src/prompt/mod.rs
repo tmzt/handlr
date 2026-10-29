@@ -426,7 +426,9 @@ impl Prompts {
     pub fn rect_of(&self, hit: AgentHit) -> Option<Rect> {
         match hit {
             AgentHit::PromptText(kind) if self.expanded() == Some(kind) => self.overlay.text_rect(),
-            AgentHit::PromptAttach(kind) | AgentHit::PromptIme(kind)
+            AgentHit::PromptAttach(kind)
+            | AgentHit::PromptIme(kind)
+            | AgentHit::PromptMic(kind)
                 if self.overlay.is_open() && self.expanded() == Some(kind) =>
             {
                 self.overlay.row_rect(hit)

@@ -458,6 +458,7 @@ pub fn allows(hit: AgentHit) -> bool {
         | AgentHit::Scratch
         | AgentHit::Clear
         | AgentHit::Suggest(flankr_companion::Suggestion::Discuss)
+        | AgentHit::PromptMic(_)
         | AgentHit::Answer { opens: true, .. } => s.microphone,
         // Hidden while the daemon offers none (plan 20261027_02, decision 9).
         AgentHit::GeneralAgent => llm().general_agent,

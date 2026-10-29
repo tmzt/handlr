@@ -566,6 +566,7 @@ mod tests {
             images: false,
             keyboard_up: true,
             physical: false,
+            microphone: true,
         };
         let before = o.text_rect().unwrap();
         o.set_input(

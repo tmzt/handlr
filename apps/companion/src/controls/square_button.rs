@@ -143,6 +143,35 @@ pub(crate) fn ime_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]
     list.push_line([cx, top + h], [cx + half, top], t, color);
 }
 
+/// A microphone drawn as strokes in `rect`, with no background (the
+/// 2026-10-29 15:09 EDT amendment): a capsule 8 × 13 pt, the holder's U
+/// of radius 7 pt round its lower half, a stem and a base 10 pt wide.
+/// Stroke 1.8 pt. The faces have no microphone character.
+pub(crate) fn mic_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {
+    let [cx, cy] = rect.center();
+    let t = 1.8 * s;
+    crate::agent::fill(
+        list,
+        Rect::new(cx - 4.0 * s, cy - 12.0 * s, 8.0 * s, 13.0 * s),
+        color,
+        4.0 * s,
+    );
+    let (r, top, mid) = (7.0 * s, cy - 6.0 * s, cy - 2.0 * s);
+    list.push_line([cx - r, top], [cx - r, mid], t, color);
+    list.push_line([cx + r, top], [cx + r, mid], t, color);
+    const STEPS: usize = 8;
+    let at = |i: usize| {
+        let a = std::f32::consts::PI * i as f32 / STEPS as f32;
+        [cx + r * a.cos(), mid + r * a.sin()]
+    };
+    for i in 0..STEPS {
+        list.push_line(at(i), at(i + 1), t, color);
+    }
+    let base = cy + 9.0 * s;
+    list.push_line([cx, mid + r], [cx, base], t, color);
+    list.push_line([cx - 5.0 * s, base], [cx + 5.0 * s, base], t, color);
+}
+
 /// A + centred in `rect` (plan 20261028_06, decision 8): two 2 pt strokes
 /// 18 pt long.
 pub(crate) fn plus_glyph(list: &mut DrawList, rect: Rect, s: f32, color: [f32; 4]) {

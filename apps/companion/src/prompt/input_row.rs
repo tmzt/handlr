@@ -1,8 +1,9 @@
 //! The row under a typed card's text box
 //! (docs/design/20261028_06_BOTTOM_BAR_UPDATE_PLAN.md, decision 8 and the
 //! 23:39 EDT amendment): a **+** at its left and the soft keyboard's
-//! show/hide toggle at its right, each a 44 × 44 pt target, 4 pt under the
-//! box. Pinned and in the overlay alike, on both cards.
+//! show/hide toggle at its right, with a microphone left of the toggle (the
+//! 2026-10-29 15:09 EDT amendment), each a 44 × 44 pt target, 4 pt under
+//! the box. Pinned and in the overlay alike, on both cards.
 //!
 //! - The **+** is drawn as two 2 pt strokes 18 pt long in the accent, no
 //!   background. Gemini's card has it for Paste text (the 23:39 EDT
@@ -14,6 +15,9 @@
 //!   while the soft keyboard is up (hide), the glyph alone while it is down
 //!   (show); dim and taking no taps while a physical keyboard types. Not on
 //!   the desktop (11.3), where a physical keyboard always types.
+//! - The **microphone** goes on by voice, the typed text kept; with the
+//!   toggle (a phone only), and dim and taking no taps with the
+//!   microphone setting off.
 //! - The row is not shown when it would be empty.
 
 use libcontrols::Rect;
@@ -21,7 +25,7 @@ use libmsdf::drawlist::DrawList;
 
 use super::PromptKind;
 use crate::agent::AgentHit;
-use crate::controls::square_button::{ime_glyph, plus_glyph};
+use crate::controls::square_button::{ime_glyph, mic_glyph, plus_glyph};
 use crate::settings;
 use crate::theme::theme;
 
@@ -44,6 +48,8 @@ pub struct InputTools {
     pub keyboard_up: bool,
     /// A physical keyboard types: the toggle is dim and takes no taps.
     pub physical: bool,
+    /// The microphone setting is on: the microphone takes taps.
+    pub microphone: bool,
 }
 
 impl InputTools {
@@ -82,8 +88,10 @@ pub struct InputRow {
     kind: PromptKind,
     pub attach: Option<Rect>,
     pub ime: Option<Rect>,
+    pub mic: Option<Rect>,
     keyboard_up: bool,
     ime_live: bool,
+    mic_live: bool,
     scale: f32,
 }
 
@@ -106,8 +114,12 @@ impl InputRow {
             kind,
             attach: tools.attach(kind).then(|| Rect::new(x, y, side, side)),
             ime: tools.ime().then(|| Rect::new(x + w - side, y, side, side)),
+            mic: tools
+                .ime()
+                .then(|| Rect::new(x + w - 2.0 * side, y, side, side)),
             keyboard_up: tools.keyboard_up,
             ime_live: !tools.physical,
+            mic_live: tools.microphone,
             scale: s,
         })
     }
@@ -121,13 +133,14 @@ impl InputRow {
         match hit {
             AgentHit::PromptAttach(k) if k == self.kind => self.attach,
             AgentHit::PromptIme(k) if k == self.kind => self.ime,
+            AgentHit::PromptMic(k) if k == self.kind => self.mic,
             _ => None,
         }
         .map(|r| Self::moved(r, dy))
     }
 
     /// The control at `(x, y)`, the row moved down by `dy`: the +, or the
-    /// toggle unless it is dim.
+    /// toggle or the microphone unless it is dim.
     pub fn hit(&self, x: f32, y: f32, dy: f32) -> Option<AgentHit> {
         if self
             .attach
@@ -141,6 +154,13 @@ impl InputRow {
                 .is_some_and(|r| Self::moved(r, dy).contains([x, y]))
         {
             return Some(AgentHit::PromptIme(self.kind));
+        }
+        if self.mic_live
+            && self
+                .mic
+                .is_some_and(|r| Self::moved(r, dy).contains([x, y]))
+        {
+            return Some(AgentHit::PromptMic(self.kind));
         }
         None
     }
@@ -158,6 +178,13 @@ impl InputRow {
                 settings::dim_since(list, start);
             }
         }
+        if let Some(r) = self.mic {
+            let start = list.instances.len();
+            mic_glyph(list, Self::moved(r, dy), s, theme().fg);
+            if !self.mic_live {
+                settings::dim_since(list, start);
+            }
+        }
     }
 }
 
@@ -170,6 +197,7 @@ mod tests {
         images: false,
         keyboard_up: true,
         physical: false,
+        microphone: true,
     };
 
     #[test]
@@ -209,10 +237,51 @@ mod tests {
     }
 
     #[test]
+    fn the_microphone_is_left_of_the_toggle_and_dim_with_the_microphone_off() {
+        let s = 2.0;
+        for kind in [PromptKind::GeneralAgent, PromptKind::Message] {
+            let r = InputRow::lay_out(kind, 100.0, 500.0, 800.0, s, &PHONE).unwrap();
+            let mic = r.mic.unwrap();
+            assert_eq!(mic, Rect::new(900.0 - 2.0 * 88.0, 500.0, 88.0, 88.0));
+            assert_eq!(
+                r.hit(mic.x + 5.0, mic.y + 5.0, 0.0),
+                Some(AgentHit::PromptMic(kind))
+            );
+            assert_eq!(r.rect_of(AgentHit::PromptMic(kind), 0.0), Some(mic));
+        }
+        let off = InputTools {
+            microphone: false,
+            ..PHONE
+        };
+        let r = InputRow::lay_out(PromptKind::Message, 0.0, 0.0, 800.0, s, &off).unwrap();
+        let mic = r.mic.unwrap();
+        assert_eq!(r.hit(mic.x + 5.0, mic.y + 5.0, 0.0), None);
+        let mut on = DrawList::new();
+        InputRow::lay_out(PromptKind::Message, 0.0, 0.0, 800.0, s, &PHONE)
+            .unwrap()
+            .draw(&mut on, 0.0);
+        let mut dim = DrawList::new();
+        r.draw(&mut dim, 0.0);
+        assert_eq!(on.instances.len(), dim.instances.len());
+        let dimmed = dim
+            .instances
+            .iter()
+            .filter(|i| (i.color[3] - theme().fg[3] * settings::DISABLED_ALPHA).abs() < 1e-6)
+            .count();
+        assert!(dimmed > 0 && dimmed < dim.instances.len(), "only the mic");
+        // The desktop: no microphone, as no toggle.
+        let desktop = InputTools::default();
+        let g = InputRow::lay_out(PromptKind::GeneralAgent, 0.0, 0.0, 800.0, s, &desktop).unwrap();
+        assert!(g.mic.is_none());
+    }
+
+    #[test]
     fn a_physical_keyboard_dims_the_toggle_and_the_desktop_has_geminis_plus_alone() {
         let s = 2.0;
         let physical = InputTools {
             physical: true,
+            // The microphone off too, so the whole row is dim.
+            microphone: false,
             ..PHONE
         };
         let r = InputRow::lay_out(PromptKind::Message, 0.0, 0.0, 800.0, s, &physical).unwrap();

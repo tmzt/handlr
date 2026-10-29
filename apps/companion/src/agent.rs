@@ -342,6 +342,9 @@ pub enum AgentHit {
     /// The soft keyboard's show/hide toggle at the right of a typed card's
     /// row (decision 8).
     PromptIme(crate::prompt::PromptKind),
+    /// The microphone left of the toggle: the typed card goes on by voice
+    /// (the 2026-10-29 15:09 EDT amendment).
+    PromptMic(crate::prompt::PromptKind),
     /// A pinned prompt card's up arrow: expand it (decision 4).
     PromptExpand(crate::prompt::PromptKind),
     /// The overlay's grab bar, or a swipe down on it: collapse it.

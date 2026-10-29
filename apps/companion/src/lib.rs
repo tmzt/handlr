@@ -1632,6 +1632,7 @@ impl App {
                 && !k.dismissed()
                 && !k.physical(),
             physical: k.physical(),
+            microphone: self.settings.microphone,
         }
     }
 
@@ -2659,6 +2660,14 @@ impl App {
                     log::info!("keyboard toggle: show");
                     self.agent_hit(AgentHit::PromptText(kind));
                 }
+            }
+            // The typed card's microphone (the 2026-10-29 15:09 EDT
+            // amendment): the soft keyboard put away and the card goes on
+            // by voice, its text kept. Gemini's listens as its card says.
+            AgentHit::PromptMic(kind) => {
+                log::info!("prompt mic: {kind:?} by voice");
+                self.keyboard.dismiss();
+                self.send(Input::ContinueByVoice);
             }
             // A tap on a card's text area: focused, and the soft keyboard
             // shown (again, if it was dismissed). Gemini's starts a typed
