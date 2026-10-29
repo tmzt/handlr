@@ -3195,3 +3195,13 @@ Small departures needed to make the plan work:
     `tests/link.rs` `removing_the_active_remote_moves_to_the_most_recently_paired`
     fails about 1 run in 6 on `main-terminal` as well ("no remotes list
     where b online within 5 s"), from flankr-companion 0.5.0.
+
+## 2026-10-28 22:03 EDT — Planned: title-bar icons (plan 20261028_04, its 2026-10-28 22:03 EDT amendment)
+
+New planned work on the owner's instruction: title-bar icons registered
+by the app and plugins (the agent menu ⊙, the planning plugin's ☑,
+others, Settings), at most four before the ⋮, which is always last;
+past four, Settings and then the last plugin icons move into the ⋮ menu.
+`PluginMenuItem.icon` (libflankr_proto patch), `opens: "menu"`, and the
+planning plugin 0.1.1's popup of plans. The subagents plan's ⊙ is the
+first of these icons (its 2026-10-28 22:03 EDT amendment).
