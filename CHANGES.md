@@ -3380,3 +3380,43 @@ changes.
 The section headed "2026-10-29 01:11 EDT — Correction to the steps 7-8
 addendum" carries a time typed by hand; it was written at 01:02 EDT by the
 clock. Its content stands.
+
+## 2026-10-29 01:03 EDT — Plan 20261029_01 (choice questions), steps 1-4's departures
+
+1. Step 1, decision 1: `ChoiceSet`, `ChoiceQuestion` and `ChoiceOption`
+   also have `within_bounds()`, and `CHOICE_ID_MAX` (128) names the id's
+   bound the plan gave in a comment, so the reader and a companion check
+   the same bounds (additive). The doc comments say "added with plan
+   20261029_01" rather than a version, the number being set at the commit.
+2. Step 2, decision 4: the reader's `ChoiceOutcome` keeps a structured
+   result's answers as (question text, answer) pairs, and a result with
+   `toolUseResult` null or a string keeps its text, whose
+   `"<q>"="<a>"` pairs are found once the questions are known
+   (`ChoiceOutcome::answers_for`), rather than a `Vec<Option<String>>`
+   built on the result's line, which does not have the questions. A result
+   counts as a choice result only when its text starts `Your questions have
+   been answered:` or `The user answered:`, or, as an error, `The user
+   doesn't want to proceed with this tool use`; and only for a result
+   whose `call_id` is a call with choices.
+3. Step 2: the resolved card's line for a question with no `header` uses
+   the question's text; a question with no recorded answer reads
+   `(no answer)`.
+4. Steps 3 and 4, decision 6: a pane counts as showing a choice question
+   when its newest call with choices has no result and only context after
+   it, whatever herdr's status and the file's quiet (the screen is up from
+   the moment the call is written); `agents.list`'s pending question keeps
+   decision 4's wait. Gemini's sends go through
+   `HerdrToolExecutor::with_sessions`, set for companion turns; with a
+   remote herdr (no session files here) nothing is refused, and
+   `choice.answer` is `CHOICE_STALE`.
+5. Step 4, decision 5: a check that finds the Other row already holding
+   text fails at once, without waiting the second; a second
+   `choice.answer` to a pane while one is being driven is `NOT_PERMITTED`
+   (`Daemon::choice_answering`); the entry and `allow_messages` are
+   checked by a new `policy::check_answer` before the open question is
+   read, each Other text by `policy::check_message`, whose cleaned text is
+   what is typed and compared.
+6. Step 4: the integration tests drive herdr's mock with a script that
+   swaps the visible frame as keys arrive; the mock does not log custom
+   requests, so `pane.send_text` is checked by the driver's unit tests and
+   by the fixture result, not the mock's log.
