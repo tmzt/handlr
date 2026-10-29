@@ -1071,3 +1071,12 @@ abbreviated statuses. Adds to the previous amendment: the status column
 is drawn at 0.8 of the row's text size, in the dim colour, vertically
 centred on the row; the other columns keep the row's size. The same holds
 in the modal's list.
+
+## Amendment — 2026-10-28 23:16 EDT: every column but the title at 0.8
+
+The owner (2026-10-28): "for the status, dates, etc. normal for title".
+This replaces the previous amendment's "the other columns keep the row's
+size": the **NN**, **mm/dd** and **status** columns are all drawn at 0.8
+of the row's text size, vertically centred on the row; only the **title**
+is at the row's full size. The status stays dim. The same holds in the
+modal's list.
