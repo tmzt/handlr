@@ -678,3 +678,24 @@ field appended to `Settings`, which has `Default`):
   still gives `Event::Conversation` (the card shows the line) but no
   `Event::Say`. What is being said is not cut off; `Input::Skip` does that.
   *Speak coding responses* stays `Input::ReadAloud`.
+
+## libflankr_proto 0.5.4 — 2026-10-29 (the commit tagged `libflankr_proto-v0.5.4`)
+
+Plan 20261028_05 (binary transfers), step 1, and its 23:43 EDT amendment,
+item 2. Strictly additive:
+
+- **Added:** link kind 2: `link::KIND_BINARY` (0x2), `Kind::Binary`,
+  `Message::Binary(Vec<u8>)` (both enums `#[non_exhaustive]`),
+  `LinkStream::send_binary` and `LinkWriter::send_binary`; `recv` reads
+  kinds 0, 1 and 2, `recv_message` still kind 0 only.
+- **Added:** `companion::BlobInfo` (`version`, `namespaces`, `read`,
+  `image_max`, `file_max`, `git_max`, `chunk_max`, `images_per_send`;
+  `serves()`), and `HelloResult::blob` / `ServerCapabilities::blob`
+  (`Option<BlobInfo>`), appended, defaulted when absent and left off the
+  wire when `None`.
+- **Added:** `AgentsSendParams::parts` (`Vec<SendPart>`), appended,
+  defaulted, left off the wire when empty; `common::SendPart`
+  (`#[non_exhaustive]`: `Text`, `Image`).
+- **Added:** `methods::TERMINAL_PASTE` (`terminal.paste`),
+  `TerminalPasteParams`, `TERMINAL_PASTE_TEXT_MAX` (8192),
+  `TERMINAL_PASTE_IMAGES_MAX` (4).

@@ -111,6 +111,11 @@ pub mod methods {
     /// `{}` (plan 20261027_08, decision 10 and the amendment of 23:24
     /// EDT). Added in 0.4.2.
     pub const TERMINAL_RESIZE: &str = "terminal.resize";
+    /// Text or uploaded images' paths pasted into an armed terminal
+    /// ([`TerminalPasteParams`](super::TerminalPasteParams)), answered `{}`
+    /// (plan 20261028_05, the 23:43 EDT amendment, item 2). Gated as
+    /// [`TERMINAL_INPUT`] is. Added in 0.5.4.
+    pub const TERMINAL_PASTE: &str = "terminal.paste";
 }
 
 /// Topics for `events.subscribe`.
@@ -582,6 +587,26 @@ pub struct AgentsSendParams {
     /// confirmation. Ignored from any other client. Off when left out.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub confirmed: bool,
+    /// A message in parts: its text and the images in their places (plan
+    /// 20261028_05, decision 3.4). When non-empty, `command` must be `""`
+    /// and `kind` `message`. Left out of the wire when empty. Added in
+    /// libflankr_proto 0.5.4.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<SendPart>,
+}
+
+/// One part of an [`AgentsSendParams::parts`] message (plan 20261028_05,
+/// decision 3.4). Open: later parts are additive. Added in libflankr_proto
+/// 0.5.4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SendPart {
+    /// Text the user typed or dictated: `{"text": "..."}`.
+    Text(String),
+    /// An image stored by an `images` transfer, by the 16 lowercase hex
+    /// digits of its DONE's reference: `{"image": "9f3c..."}`.
+    Image(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1424,6 +1449,31 @@ pub struct TerminalInputParams {
     pub keys: String,
 }
 
+/// The most bytes of `text` in one `terminal.paste` (plan 20261028_05,
+/// the 23:43 EDT amendment, item 2). Added in 0.5.4.
+pub const TERMINAL_PASTE_TEXT_MAX: usize = 8192;
+/// The most `images` in one `terminal.paste`. Added in 0.5.4.
+pub const TERMINAL_PASTE_IMAGES_MAX: usize = 4;
+
+/// `terminal.paste`, answered with [`Empty`]: text, or the paths of
+/// uploaded images, pasted into an armed terminal (plan 20261028_05, the
+/// 23:43 EDT amendment, item 2; plan 20261028_06, decision 10). Exactly one
+/// of `text` and `images`; both or neither is `INVALID_PARAMS`. Errors:
+/// `NOT_PERMITTED`, `UNKNOWN_AGENT`, `HERDR_UNAVAILABLE`, `INVALID_PARAMS`
+/// (also an unknown or used reference). An older daemon answers
+/// `METHOD_NOT_FOUND`. Added in 0.5.4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalPasteParams {
+    pub terminal_id: u32,
+    /// At most [`TERMINAL_PASTE_TEXT_MAX`] bytes of UTF-8.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// 1-[`TERMINAL_PASTE_IMAGES_MAX`] references from DONE of `images`
+    /// transfers for this pane, 16 lowercase hex digits each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<String>,
+}
+
 /// `terminal.scroll`: scroll an armed terminal's pane by `lines`, as a
 /// mouse wheel does: positive goes back into the scrollback, negative
 /// towards the bottom. The daemon sets herdr's `pane.scroll` offset, so the
@@ -2203,6 +2253,7 @@ mod tests {
             kind: SendKind::Command,
             handle: Some("keep-going".to_string()),
             confirmed: false,
+            parts: vec![],
         });
         round_trip(AgentsSendParams {
             pane_id: "w2:pZ".to_string(),
@@ -2210,6 +2261,18 @@ mod tests {
             kind: SendKind::Message,
             handle: Some("message-claude-flankr-please-run".to_string()),
             confirmed: true,
+            parts: vec![],
+        });
+        round_trip(AgentsSendParams {
+            pane_id: "w2:pZ".to_string(),
+            command: String::new(),
+            kind: SendKind::Message,
+            handle: None,
+            confirmed: true,
+            parts: vec![
+                SendPart::Image("9f3c1a2b00112233".to_string()),
+                SendPart::Text("what is in this?".to_string()),
+            ],
         });
         // Left out, it is off, and off is not written.
         let old: AgentsSendParams =
@@ -2803,5 +2866,73 @@ mod tests {
             serde_json::to_value(resize).unwrap(),
             json!({"terminal_id": 1, "cols": 48, "rows": 22})
         );
+    }
+
+    // Plan 20261028_05, step 1: `parts` and `terminal.paste`.
+    #[test]
+    fn parts_are_appended_and_left_out_when_empty() {
+        let p = AgentsSendParams {
+            pane_id: "p1".into(),
+            command: String::new(),
+            kind: SendKind::Message,
+            handle: None,
+            confirmed: true,
+            parts: vec![
+                SendPart::Text("look at".into()),
+                SendPart::Image("0123456789abcdef".into()),
+            ],
+        };
+        assert_eq!(
+            serde_json::to_value(&p).unwrap(),
+            json!({
+                "pane_id": "p1",
+                "command": "",
+                "kind": "message",
+                "confirmed": true,
+                "parts": [{"text": "look at"}, {"image": "0123456789abcdef"}]
+            })
+        );
+        // An old send decodes with no parts, and none is written.
+        let old: AgentsSendParams =
+            serde_json::from_value(json!({"pane_id": "p1", "command": "continue"})).unwrap();
+        assert!(old.parts.is_empty());
+        assert!(serde_json::to_value(&old).unwrap().get("parts").is_none());
+        // An unknown part is an error, not a silent drop.
+        assert!(
+            serde_json::from_value::<AgentsSendParams>(json!({
+                "pane_id": "p1", "command": "", "parts": [{"video": "x"}]
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn terminal_paste_params_take_text_or_images() {
+        assert_eq!(methods::TERMINAL_PASTE, "terminal.paste");
+        let text = TerminalPasteParams {
+            terminal_id: 3,
+            text: Some("ls -la\n".into()),
+            images: vec![],
+        };
+        round_trip(text.clone());
+        assert_eq!(
+            serde_json::to_value(&text).unwrap(),
+            json!({"terminal_id": 3, "text": "ls -la\n"})
+        );
+        let images = TerminalPasteParams {
+            terminal_id: 3,
+            text: None,
+            images: vec!["0123456789abcdef".into()],
+        };
+        round_trip(images.clone());
+        assert_eq!(
+            serde_json::to_value(&images).unwrap(),
+            json!({"terminal_id": 3, "images": ["0123456789abcdef"]})
+        );
+        let neither: TerminalPasteParams =
+            serde_json::from_value(json!({"terminal_id": 1})).unwrap();
+        assert!(neither.text.is_none() && neither.images.is_empty());
+        assert_eq!(TERMINAL_PASTE_TEXT_MAX, 8192);
+        assert_eq!(TERMINAL_PASTE_IMAGES_MAX, 4);
     }
 }

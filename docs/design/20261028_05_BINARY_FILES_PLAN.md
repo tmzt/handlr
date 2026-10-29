@@ -1,7 +1,7 @@
 ---
 title: Binary transfers over the link, for images to a session and read-only files and git output to the phone, with a built-in preview
 date: 2026-10-28
-status: Draft
+status: In implementation
 covers:
   - "Link kind 2, `KIND_BINARY`, in libflankr_proto (additive): every kind-2
     message is one command type with subcommands (REQUEST, OFFER, ACCEPT,
@@ -1347,3 +1347,11 @@ image preview says it needs a newer app until `decode_image` lands).
 Versions follow release order at each step's commit (the 23:43 EDT
 amendment, item 3). The status stays `Draft` until step 1's commit,
 which sets `In implementation` (Rule 1.5).
+
+## Amendment — 2026-10-28 23:52 EDT: implementation started; the document is now immutable
+
+Implementation starts with this amendment, in the commit of step 1
+(libflankr_proto 0.5.4, the number the 23:43 EDT amendment's item 3
+fixed) on `main-terminal`: `status` is `In implementation`, and the body
+above, with its amendments, is frozen (AGENTS.md Rule 1.5). Departures are
+recorded in `CHANGES.md`.

@@ -6,8 +6,8 @@ use snow::StatelessTransportState;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 
 use super::{
-    FLAG_MORE, FLAG_RESERVED, KEY_LEN, KIND_JSON, KIND_TERMINAL, LinkError, MAX_CHUNK, MAX_FRAME,
-    MAX_MESSAGE,
+    FLAG_MORE, FLAG_RESERVED, KEY_LEN, KIND_BINARY, KIND_JSON, KIND_TERMINAL, LinkError, MAX_CHUNK,
+    MAX_FRAME, MAX_MESSAGE,
 };
 
 /// A message's kind, as the high nibble of its frames' flag byte carries
@@ -20,6 +20,10 @@ pub enum Kind {
     /// A terminal frame ([`KIND_TERMINAL`](super::KIND_TERMINAL); plan
     /// 20261027_07, decision 3): its bytes are `libflankr_term`'s encoding.
     Terminal,
+    /// A binary transfer message ([`KIND_BINARY`](super::KIND_BINARY); plan
+    /// 20261028_05, decision 3.1): its bytes are `libflankr_blob`'s
+    /// encoding.
+    Binary,
 }
 
 impl Kind {
@@ -29,6 +33,7 @@ impl Kind {
         match self {
             Kind::Json => KIND_JSON,
             Kind::Terminal => KIND_TERMINAL,
+            Kind::Binary => KIND_BINARY,
         }
     }
 
@@ -37,6 +42,7 @@ impl Kind {
         match nibble {
             KIND_JSON => Some(Kind::Json),
             KIND_TERMINAL => Some(Kind::Terminal),
+            KIND_BINARY => Some(Kind::Binary),
             _ => None,
         }
     }
@@ -51,6 +57,8 @@ pub enum Message {
     Json(Vec<u8>),
     /// A terminal frame.
     Terminal(Vec<u8>),
+    /// A binary transfer message (plan 20261028_05).
+    Binary(Vec<u8>),
 }
 
 impl Message {
@@ -58,18 +66,19 @@ impl Message {
         match self {
             Message::Json(_) => Kind::Json,
             Message::Terminal(_) => Kind::Terminal,
+            Message::Binary(_) => Kind::Binary,
         }
     }
 
     pub fn bytes(&self) -> &[u8] {
         match self {
-            Message::Json(b) | Message::Terminal(b) => b,
+            Message::Json(b) | Message::Terminal(b) | Message::Binary(b) => b,
         }
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
-            Message::Json(b) | Message::Terminal(b) => b,
+            Message::Json(b) | Message::Terminal(b) | Message::Binary(b) => b,
         }
     }
 
@@ -77,6 +86,7 @@ impl Message {
         match kind {
             Kind::Json => Message::Json(bytes),
             Kind::Terminal => Message::Terminal(bytes),
+            Kind::Binary => Message::Binary(bytes),
         }
     }
 }
@@ -84,8 +94,8 @@ impl Message {
 /// An established link connection. Messages are whole: one
 /// [`send_message`](Self::send_message) is one
 /// [`recv_message`](Self::recv_message) on the other side, and one
-/// `send_message` or [`send_terminal`](Self::send_terminal) is one
-/// [`recv`](Self::recv).
+/// `send_message`, [`send_terminal`](Self::send_terminal) or
+/// [`send_binary`](Self::send_binary) is one [`recv`](Self::recv).
 ///
 /// `recv_message` and `recv` are not cancel-safe: a message half read when its future
 /// is dropped is lost and the stream is out of step. To read and write at
@@ -127,6 +137,13 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LinkStream<S> {
     /// [`recv`](Self::recv): `recv_message` is `BadFrame` on it.
     pub async fn send_terminal(&mut self, msg: &[u8]) -> Result<(), LinkError> {
         self.send_kind(Kind::Terminal, msg).await
+    }
+
+    /// Sends one binary transfer message (plan 20261028_05), as
+    /// [`send_message`](Self::send_message) sends a JSON-RPC message. Send
+    /// it only to a peer that reads kind 2 (decision 3.2).
+    pub async fn send_binary(&mut self, msg: &[u8]) -> Result<(), LinkError> {
+        self.send_kind(Kind::Binary, msg).await
     }
 
     /// Sends one message of `kind`. A message over [`MAX_MESSAGE`] is
@@ -190,14 +207,14 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LinkStream<S> {
         self.recv_accepting(false).await.map(Message::into_bytes)
     }
 
-    /// Receives one whole message of either kind. Errors as
+    /// Receives one whole message of any known kind. Errors as
     /// [`recv_message`](Self::recv_message) does, but a terminal frame is
-    /// [`Message::Terminal`].
+    /// [`Message::Terminal`] and a binary message [`Message::Binary`].
     pub async fn recv(&mut self) -> Result<Message, LinkError> {
         self.recv_accepting(true).await
     }
 
-    async fn recv_accepting(&mut self, terminal: bool) -> Result<Message, LinkError> {
+    async fn recv_accepting(&mut self, all_kinds: bool) -> Result<Message, LinkError> {
         if self.closed {
             return Err(LinkError::Closed);
         }
@@ -205,7 +222,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> LinkStream<S> {
             &mut self.io,
             &self.transport,
             &mut self.recv_nonce,
-            terminal,
+            all_kinds,
         )
         .await;
         if r.is_err() {
@@ -266,11 +283,11 @@ impl<R: AsyncRead + Unpin> LinkReader<R> {
         self.recv_accepting(true).await
     }
 
-    async fn recv_accepting(&mut self, terminal: bool) -> Result<Message, LinkError> {
+    async fn recv_accepting(&mut self, all_kinds: bool) -> Result<Message, LinkError> {
         if self.closed {
             return Err(LinkError::Closed);
         }
-        let r = read_message(&mut self.io, &self.transport, &mut self.nonce, terminal).await;
+        let r = read_message(&mut self.io, &self.transport, &mut self.nonce, all_kinds).await;
         self.closed = r.is_err();
         r
     }
@@ -293,6 +310,11 @@ impl<W: AsyncWrite + Unpin> LinkWriter<W> {
     /// As [`LinkStream::send_terminal`].
     pub async fn send_terminal(&mut self, msg: &[u8]) -> Result<(), LinkError> {
         self.send_kind(Kind::Terminal, msg).await
+    }
+
+    /// As [`LinkStream::send_binary`].
+    pub async fn send_binary(&mut self, msg: &[u8]) -> Result<(), LinkError> {
+        self.send_kind(Kind::Binary, msg).await
     }
 
     /// As [`LinkStream::send_kind`].
@@ -352,14 +374,14 @@ async fn write_message<W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Reads one message. With `terminal` false only kind 0 is read, so any
+/// Reads one message. With `all_kinds` false only kind 0 is read, so any
 /// flag byte but `0x00`/`0x01` is `BadFrame`, exactly as before the kind
 /// nibble (plan 20261027_07, the 14:23 EDT amendment).
 async fn read_message<R: AsyncRead + Unpin>(
     io: &mut R,
     transport: &StatelessTransportState,
     nonce: &mut u64,
-    terminal: bool,
+    all_kinds: bool,
 ) -> Result<Message, LinkError> {
     let mut frame = vec![0u8; MAX_FRAME];
     let mut plain = vec![0u8; MAX_FRAME];
@@ -378,7 +400,8 @@ async fn read_message<R: AsyncRead + Unpin>(
             return Err(LinkError::BadFrame);
         }
         let this = match Kind::from_nibble(flag >> 4) {
-            Some(Kind::Terminal) if !terminal => return Err(LinkError::BadFrame),
+            Some(Kind::Json) => Kind::Json,
+            Some(_) if !all_kinds => return Err(LinkError::BadFrame),
             Some(k) => k,
             None => return Err(LinkError::BadFrame),
         };

@@ -20,15 +20,19 @@
 //!   1 more); bits 1-3 are reserved, must be zero, and a frame with any of
 //!   them set is [`LinkError::BadFrame`]. The high nibble is the message's
 //!   kind: 0 ([`KIND_JSON`]) a JSON-RPC message, 1 ([`KIND_TERMINAL`]) a
-//!   terminal frame, 2-14 reserved, 15 ([`KIND_EXTENDED`]) extended (the
-//!   kind would continue in the next byte). A reserved or extended kind is
+//!   terminal frame, 2 ([`KIND_BINARY`]) a binary transfer message (plan
+//!   20261028_05, decision 3.1; its bytes are `libflankr_blob`'s
+//!   encoding), 3-14 reserved, 15 ([`KIND_EXTENDED`]) extended (the kind
+//!   would continue in the next byte). A reserved or extended kind is
 //!   `BadFrame` for now. Every frame of one message carries the same kind;
 //!   a change mid-message is `BadFrame`. So `0x00`/`0x01` are kind 0, as
-//!   before, and `0x10`/`0x11` a terminal frame, last/more.
-//!   [`LinkStream::recv_message`] takes kind 0 only and is `BadFrame` on
-//!   any other, as before this layout; [`LinkStream::recv`] takes both
-//!   known kinds and returns a [`Message`]. A terminal frame is sent only
-//!   to a peer that has shown it reads them (by calling `terminal.open`).
+//!   before, `0x10`/`0x11` a terminal frame and `0x20`/`0x21` a binary
+//!   message, last/more. [`LinkStream::recv_message`] takes kind 0 only and
+//!   is `BadFrame` on any other, as before this layout; [`LinkStream::recv`]
+//!   takes the three known kinds and returns a [`Message`]. A terminal
+//!   frame is sent only to a peer that has shown it reads them (by calling
+//!   `terminal.open`); a binary message only to a daemon whose `hello`
+//!   carries `blob`, or to a phone that has sent one first (decision 3.2).
 //! * [`PairingPayload`] is the pairing string, `flankr1…`, and its URL;
 //!   [`DeviceCode`] is the device's code, `flankrkey1…`. Neither holds a
 //!   secret.
@@ -112,6 +116,9 @@ pub const MAX_FIRST_MESSAGE: usize = MAX_FRAME - (KEY_LEN + KEY_LEN + TAG_LEN + 
 pub const KIND_JSON: u8 = 0x0;
 /// The kind nibble of a terminal frame (plan 20261027_07, decision 3).
 pub const KIND_TERMINAL: u8 = 0x1;
+/// The kind nibble of a binary transfer message (plan 20261028_05,
+/// decision 3.1): its bytes are `libflankr_blob`'s encoding.
+pub const KIND_BINARY: u8 = 0x2;
 /// The kind nibble that says the kind continues in the next byte.
 /// Reserved: a frame with it is [`LinkError::BadFrame`] today.
 pub const KIND_EXTENDED: u8 = 0xF;

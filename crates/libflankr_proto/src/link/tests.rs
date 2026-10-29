@@ -315,15 +315,94 @@ async fn reserved_flag_bits_are_bad_frame() {
 
 #[tokio::test]
 async fn reserved_and_extended_kinds_are_bad_frame() {
+    // Kind 2 is binary since plan 20261028_05 (decision 3.1): `recv`
+    // reads it, `recv_message` still refuses it.
     for kind in (2u8..=15).chain([1]) {
         for more in [0u8, 1] {
             let flag = kind << 4 | more;
-            if kind != 1 {
+            if kind != 1 && kind != 2 {
                 expect_bad_frame(&[(flag, b"x")], false).await;
             }
             expect_bad_frame(&[(flag, b"x")], true).await;
         }
     }
+}
+
+// Plan 20261028_05, step 1: kind 2, binary transfer messages.
+
+#[tokio::test]
+async fn a_binary_message_round_trips_with_flag_bytes_0x20_and_0x21() {
+    let (mut a, mut b) = connected().await;
+    a.send_binary(b"\x01blob").await.unwrap();
+    let got = b.recv().await.unwrap();
+    assert_eq!(got.kind(), Kind::Binary);
+    assert_eq!(got, Message::Binary(b"\x01blob".to_vec()));
+    assert_eq!(Kind::Binary.nibble(), KIND_BINARY);
+    assert_eq!(Kind::from_nibble(KIND_BINARY), Some(Kind::Binary));
+    // The raw flag bytes: 0x21 more, 0x20 last.
+    a.send_raw_frames(&[(0x21, b"ab"), (0x20, b"c")])
+        .await
+        .unwrap();
+    assert_eq!(b.recv().await.unwrap(), Message::Binary(b"abc".to_vec()));
+    // Kinds 3-14 and 15 stay reserved.
+    for nibble in 3u8..=15 {
+        assert_eq!(Kind::from_nibble(nibble), None, "{nibble}");
+    }
+}
+
+#[tokio::test]
+async fn a_1_mib_binary_message_spans_frames_and_interleaves_whole() {
+    let (mut a, mut b) = connected().await;
+    let big: Vec<u8> = (0..MAX_MESSAGE).map(|i| (i % 251) as u8).collect();
+    let (sent, got) = tokio::join!(a.send_binary(&big), b.recv());
+    sent.unwrap();
+    assert_eq!(got.unwrap(), Message::Binary(big));
+    // Over the limit is refused before sending.
+    let over = vec![0u8; MAX_MESSAGE + 1];
+    assert!(matches!(
+        a.send_binary(&over).await,
+        Err(LinkError::MessageTooLarge)
+    ));
+    // Kinds one after the other stay in step.
+    a.send_binary(b"b").await.unwrap();
+    a.send_terminal(b"t").await.unwrap();
+    a.send_message(b"j").await.unwrap();
+    assert_eq!(b.recv().await.unwrap(), Message::Binary(b"b".to_vec()));
+    assert_eq!(b.recv().await.unwrap(), Message::Terminal(b"t".to_vec()));
+    assert_eq!(b.recv().await.unwrap(), Message::Json(b"j".to_vec()));
+}
+
+#[tokio::test]
+async fn a_binary_message_through_recv_message_is_bad_frame() {
+    let (mut a, mut b) = connected().await;
+    a.send_binary(b"x").await.unwrap();
+    assert!(matches!(b.recv_message().await, Err(LinkError::BadFrame)));
+    assert!(matches!(b.recv_message().await, Err(LinkError::Closed)));
+}
+
+#[tokio::test]
+async fn a_kind_changing_to_or_from_binary_mid_message_is_bad_frame() {
+    expect_bad_frame(&[(0x21, b"a"), (0x00, b"b")], false).await;
+    expect_bad_frame(&[(0x21, b"a"), (0x10, b"b")], false).await;
+    expect_bad_frame(&[(0x01, b"a"), (0x20, b"b")], false).await;
+    expect_bad_frame(&[(0x11, b"a"), (0x20, b"b")], false).await;
+    expect_bad_frame(&[(0x01, b"a"), (0x20, b"b")], true).await;
+}
+
+#[tokio::test]
+async fn split_halves_carry_binary_messages() {
+    let (a, b) = connected().await;
+    let (mut ar, mut aw) = a.into_split();
+    let (mut br, mut bw) = b.into_split();
+    aw.send_binary(b"offer").await.unwrap();
+    assert_eq!(br.recv().await.unwrap(), Message::Binary(b"offer".to_vec()));
+    bw.send_kind(Kind::Binary, b"accept").await.unwrap();
+    assert_eq!(
+        ar.recv().await.unwrap(),
+        Message::Binary(b"accept".to_vec())
+    );
+    bw.send_binary(b"x").await.unwrap();
+    assert!(matches!(ar.recv_message().await, Err(LinkError::BadFrame)));
 }
 
 #[tokio::test]

@@ -102,6 +102,47 @@ pub struct HelloResult {
     /// plugins. Added in libflankr_proto 0.5.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<Vec<PluginInfo>>,
+    /// Binary transfers over the link's kind 2 (plan 20261028_05,
+    /// decision 3.3). `None`, from an older daemon or on a local socket,
+    /// means no kind 2: the phone must not send one. Added in
+    /// libflankr_proto 0.5.4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<BlobInfo>,
+}
+
+/// The binary transfers a daemon offers on a link connection (plan
+/// 20261028_05, decision 3.3). Negotiation only: no transfer is started,
+/// answered or ended in JSON-RPC. Added in libflankr_proto 0.5.4.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlobInfo {
+    /// The binary protocol's version: 1.
+    pub version: u32,
+    /// The namespaces this daemon serves now, e.g. `["images", "files",
+    /// "git"]`. `"files"` is listed only while `[llm.uses.planning] read`
+    /// is non-empty; `"git"` only when a `git` binary was found at start.
+    pub namespaces: Vec<String>,
+    /// The `[llm.uses.planning] read` patterns as configured (the limited
+    /// syntax of plan 20261027_04, 11:20 EDT), so the app can draw only
+    /// readable paths as links. Not a secret: the daemon still checks
+    /// every REQUEST.
+    pub read: Vec<String>,
+    /// Largest image accepted, bytes (20 MiB).
+    pub image_max: u64,
+    /// Largest file served, bytes (8 MiB).
+    pub file_max: u64,
+    /// Largest `git` output served before it is cut, bytes (8 MiB).
+    pub git_max: u64,
+    /// Largest CHUNK data the daemon accepts, bytes (983040).
+    pub chunk_max: u32,
+    /// Most images in one `agents.send` (4).
+    pub images_per_send: u32,
+}
+
+impl BlobInfo {
+    /// Whether the daemon serves `ns` now.
+    pub fn serves(&self, ns: &str) -> bool {
+        self.namespaces.iter().any(|n| n == ns)
+    }
 }
 
 /// The terminal mode a daemon offers (plan 20261027_07, decision 4).
@@ -162,6 +203,10 @@ pub struct ServerCapabilities {
     /// a config reload). Added in libflankr_proto 0.5.2.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<Vec<PluginInfo>>,
+    /// As [`HelloResult::blob`]; sent when it changes (a config reload
+    /// that turns `files` on or off). Added in libflankr_proto 0.5.4.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<BlobInfo>,
 }
 
 /// The largest `params`, `result` or notification `params` of a plugin
@@ -469,6 +514,19 @@ mod tests {
     use serde::de::DeserializeOwned;
     use serde_json::json;
 
+    fn blob_info() -> BlobInfo {
+        BlobInfo {
+            version: 1,
+            namespaces: vec!["images".into(), "files".into(), "git".into()],
+            read: vec!["*.md".into(), "docs/**/*.md".into()],
+            image_max: 20_971_520,
+            file_max: 8_388_608,
+            git_max: 8_388_608,
+            chunk_max: 983_040,
+            images_per_send: 4,
+        }
+    }
+
     fn planning_info() -> PluginInfo {
         PluginInfo {
             ns: "dev.flankr.plugins.planning".into(),
@@ -520,11 +578,13 @@ mod tests {
                 mouse: true,
             }),
             plugins: Some(vec![planning_info()]),
+            blob: Some(blob_info()),
         });
         round_trip(ServerCapabilities {
             llm: Some(LlmInfo::available()),
             terminal: None,
             plugins: None,
+            blob: None,
         });
         round_trip(ServerCapabilities {
             llm: None,
@@ -533,11 +593,13 @@ mod tests {
                 mouse: false,
             }),
             plugins: Some(vec![]),
+            blob: None,
         });
         round_trip(ServerCapabilities {
             llm: None,
             terminal: None,
             plugins: Some(vec![planning_info()]),
+            blob: Some(blob_info()),
         });
         round_trip(TurnStartParams {
             turn_id: 4,
@@ -671,6 +733,7 @@ mod tests {
                 llm: Some(LlmInfo::available()),
                 terminal: None,
                 plugins: None,
+                blob: None,
             })
             .unwrap(),
             json!({"llm": {"general_agent": true, "summaries": true}})
@@ -688,6 +751,7 @@ mod tests {
                     mouse: false,
                 }),
                 plugins: None,
+                blob: None,
             })
             .unwrap(),
             json!({"terminal": {"input": false}})
@@ -828,6 +892,7 @@ mod tests {
             llm: None,
             terminal: None,
             plugins: Some(vec![]),
+            blob: None,
         };
         assert_eq!(serde_json::to_value(&c).unwrap(), json!({"plugins": []}));
         let back: ServerCapabilities = serde_json::from_value(json!({"plugins": []})).unwrap();
@@ -913,5 +978,43 @@ mod tests {
             assert!(!is_plugin_method(bad), "{bad}");
         }
         assert!(is_plugin_method(&"a".repeat(64)));
+    }
+
+    // Plan 20261028_05, step 1: `blob` in hello and server.capabilities.
+    #[test]
+    fn blob_info_is_appended_defaulted_and_left_out_when_absent() {
+        let b = blob_info();
+        assert!(b.serves("git") && !b.serves("dev.x.y"));
+        assert_eq!(
+            serde_json::to_value(&b).unwrap(),
+            json!({
+                "version": 1,
+                "namespaces": ["images", "files", "git"],
+                "read": ["*.md", "docs/**/*.md"],
+                "image_max": 20_971_520,
+                "file_max": 8_388_608,
+                "git_max": 8_388_608,
+                "chunk_max": 983_040,
+                "images_per_send": 4
+            })
+        );
+        // An older daemon's hello and capabilities: None, and not written.
+        let h: HelloResult = serde_json::from_value(json!({"server": "flankr"})).unwrap();
+        assert_eq!(h.blob, None);
+        assert!(serde_json::to_value(&h).unwrap().get("blob").is_none());
+        let c: ServerCapabilities = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(c.blob, None);
+        assert!(serde_json::to_value(&c).unwrap().get("blob").is_none());
+        // Written when present.
+        let c = ServerCapabilities {
+            llm: None,
+            terminal: None,
+            plugins: None,
+            blob: Some(blob_info()),
+        };
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v["blob"]["namespaces"], json!(["images", "files", "git"]));
+        let back: ServerCapabilities = serde_json::from_value(v).unwrap();
+        assert_eq!(back, c);
     }
 }
