@@ -218,3 +218,45 @@ Open questions 1 (nested subagents) and 2 (how long finished ones are
 listed) stay open; until the owner answers, nested subagents are listed
 flat under the pane and finished ones for the session's life, as the
 smallest choices, and either can change by amendment.
+
+## Amendment — 2026-10-28 20:46 EDT: the subagents in a title-bar dropdown, not a row
+
+Agreed with the owner on 2026-10-28: "plan to add agent/subagent dropdown
+menu to titlebar (before plugins menu)"; then, to the lead's proposal,
+"yes, but this isn't a plugin just giving the ui location". This replaces
+the 17:47 EDT amendment's items 1 and 4 and its control
+`agent/subagent_row.rs` (the row above the controls), and the two 17:48
+EDT amendments (main first in the row, the dot for the name viewed). Item
+2's colours and minutes, item 3's short names and item 5's protocol
+fields stand, applied to the menu. Decision 4's link in the flow stands.
+
+1. **The app's own control, not a plugin.** The selector is part of the
+   agent view, built into the app. "Before the plugins menu" names only
+   where it sits: in the agent view's title bar, just left of the ⋮ of
+   plan 20261028_04 (decision 3.6). It uses no plugin interface.
+2. **The button.** Shown only while the pane has subagents (none: the
+   title bar is as without it). It reads ◉ (U+25C9) while any subagent
+   is running, followed by the number running, and ○ (U+25CB) once all
+   have finished; drawn from the terminal face, in cyan as item 2.
+3. **The menu** is a libcontrols `PopupMenu` (0.10.3, libcontrols plan
+   20261028_06) anchored to the button, opening below it:
+   - **main** first, the pane's own agent; then each subagent by its short
+     name, running ones first, then finished, newest first within each;
+   - ● (U+25CF) bright cyan before a running one, ○ dim cyan before a
+     finished one; a running one's elapsed minutes, `(12m)`, only past 5
+     minutes;
+   - the session being viewed is the menu's checked item.
+4. **Choosing** an item opens it in the same standard view (decision 3's
+   opening and header stand); choosing **main** returns to the main agent.
+   A tap outside, Back or Escape closes the menu without changing the view.
+5. **No row.** The bottom row above the suggestions and controls is not
+   built; the transcript keeps that line. The menu lists no other panes'
+   agents (the session drawer, plan 20261028_03, does that).
+6. **Open questions 1 and 2** keep the 17:49 EDT amendment's smallest
+   choices: nested subagents flat under the pane, finished ones listed for
+   the session's life.
+7. **Control:** `apps/companion/src/agent/subagent_menu.rs` replaces
+   `agent/subagent_row.rs`. Step 5's tests: the button hidden with no
+   subagents, its glyph and count, the menu's order, marks, colours and
+   minutes (shown past 5 and not before), the checked item, and choosing
+   a subagent and main.
