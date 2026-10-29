@@ -1080,3 +1080,50 @@ size": the **NN**, **mm/dd** and **status** columns are all drawn at 0.8
 of the row's text size, vertically centred on the row; only the **title**
 is at the row's full size. The status stays dim. The same holds in the
 modal's list.
+
+## Amendment — 2026-10-29 02:10 EDT: plugins contribute general agent tools
+
+On the owner's explicit instruction (Rule 1.5), 2026-10-29: "plug-in should
+be able to contribute general agent tools"; then "Yes, write this into the
+plugins plan as one amendment" to the lead's wording. This adds to
+decisions 3.2 (the daemon half) and 3.3 (`PluginCtx`); nothing earlier is
+replaced.
+
+1. **Tools declared in code.** `Plugin` gains
+   `fn tools(&self) -> &[ToolSpec]` (default empty), beside its menu items:
+   `ToolSpec { name, description, params: serde_json::Value /* JSON schema
+   */, read_only: bool }`, a plain description of one tool, with a method of
+   the plugin's own that runs it.
+2. **Namespaced names.** The general agent sees each tool as
+   `<plugin short name>_<tool name>` (the plugin's namespace's last part:
+   `planning_plans_list`), so it cannot clash with the general agent's own
+   tools (`list_panes`, `read_file`, `send_agent_command`, …); the
+   registry refuses a duplicate or a name outside `[a-z][a-z0-9_]{0,47}`.
+3. **Offered only when** the plugin is enabled, the general agent is on,
+   and `[plugins."<ns>"] agent_tools` (new, default `true`) is on; read-only
+   tools only by default — a tool with `read_only: false` also needs
+   `agent_tools = "all"`. The general agent's tool list is rebuilt when any of
+   these changes, as `[plugins]` reloads are today (step 2's watcher).
+4. **The same restrictions as menu calls.** A tool call runs through the
+   plugin's `PluginCtx`: the focused project, the read rule (both
+   `[llm.uses.planning] read` and the plugin's `read_patterns()`), its
+   declared commands, the 10 s limit and the 256 KiB cap. Its result goes to
+   the model as text, cut to the general agent's tool-result limit; an error
+   goes as the general agent's other tool errors do.
+5. **A tool that changes something is confirmed.** A tool not marked
+   read-only goes through the voice confirmation gate as
+   `send_agent_command` does (AGENTS.md section 3.B), so the model cannot
+   drive it alone. No plugin has such a tool in this round.
+6. **The planning plugin's tools (its 0.1.2, additive):**
+   `planning_plans_list {}` (the plans newest first by last update, each with
+   its NN, date, title and abbreviated status) and
+   `planning_plan_show { name }` (one plan's front matter, covers and
+   amendments, as `plans.show` gives them), both read-only.
+7. **The prompt.** The plugin tools' declarations are added after the fixed
+   part of the system prompt and its fixed tools, with the variable parts at
+   the end (the general agent planning plan's cacheability rule), so the
+   cached prefix stays the same while plugins come and go.
+8. **Steps.** Built as a follow-up after the title icons: the daemon's
+   `Plugin::tools`, the registry checks, the general agent's tool routing
+   and gating (one flankr commit), then the planning plugin 0.1.2 (its
+   own commit with its tag). No protocol or companion change.
