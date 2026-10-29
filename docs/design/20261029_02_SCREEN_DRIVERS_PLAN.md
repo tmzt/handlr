@@ -816,3 +816,16 @@ Order: 1; 2 and 3 in that order; 4 after 1 and 3; 5 after 1; 6 after 5;
    labels, as written.
 6. **The status-line route** (decision 12): leave for later, as written, or
    plan it now as a second, passive usage source? Recommended: later.
+
+## Amendment — 2026-10-29 02:19 EDT: approved with the open questions' recommendations
+
+The owner approved the plan on 2026-10-29 ("approve drivers plan", then
+"Both" when asked which). Section 7's questions take their
+recommendations: (1) the command menu in the message card's input row;
+(2) multi-select left to the Mac if the two actions fall short, until the
+owner chooses; (3) Claude Code only in the first version, the trait and
+fixture folders ready for the others; (4) usage per pane; (5) the numbered
+text with labels, `"; "` between; (6) the status-line route later. The
+choice questions plan gets the amendment this plan names when its first
+step is committed. The status stays `Draft` until the first implementing
+commit (Rule 1.5).

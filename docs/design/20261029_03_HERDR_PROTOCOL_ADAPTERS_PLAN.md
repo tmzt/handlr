@@ -794,3 +794,17 @@ at 22, so `libherdr_term::client_socket_for` serves every version.
 ## 9. README row
 
 | [herdr protocol adapters, one per herdr protocol version, from herdr's types generated once and committed](docs/design/20261029_03_HERDR_PROTOCOL_ADAPTERS_PLAN.md) | 2026-10-29 | Draft | herdr's protocol types are generated once per supported herdr tag (`v0.8.0` protocol 19, `v0.8.2` 20, `v0.9.5` 22) by a new tool crate, `herdr-wire-gen`, and committed into libherdr_term as `herdr_v19.rs`, `herdr_v20.rs` and `herdr_v22.rs` with herdr's Apache-2.0 notice, so builds need no build script, `syn` or `vendor/herdr` (replacing plan 20261027_08's decision 2); a `ProtocolAdapter` per version maps its messages to flankr's grid, cursor, input and resize (22 is today's shell client; 19 and 20 control one terminal through herdr 0.8's direct attach); the daemon picks the adapter from herdr's JSON API `ping` (`protocol`) before connecting, unknown protocols use the poll; fixture tests replay recordings of headless test herdr servers; the screen drivers read the grid from any adapter, so herdr 0.8.0 panes get the grid route; libherdr_term 0.3.0 (breaking: `herdr` renamed `herdr_v22`, the attachment moved to `v22`) then 0.3.1. Draft: awaiting the owner's review of its open questions (which old versions, protocols above 22, 0.8's size lock and mouse, the submodule). |
+
+## Amendment — 2026-10-29 02:20 EDT: approved with the plan's own choices
+
+The owner approved the plan on 2026-10-29 ("approve drivers plan", then
+"Both" when asked which), adding "we can also test old and new herdr
+instances this way" (the Mac test setup of headless herdr 0.8.0 and 0.9.5
+servers, step 5's recordings among them). Section 8's questions keep the
+plan's own choices, each changeable by a later amendment: (1) 19 and 20;
+(2) a protocol above 22 stays on the poll until a row is generated; (3)
+`herdr-wire-gen check` only, no build-time extraction; (4) 0.8's size
+lock accepted while the phone's terminal is open; (5) no mouse on 0.8; (6)
+`vendor/herdr` kept as the generator's source; (7) a version is dropped
+by an amendment once the owner's own herdr has moved past it. The status
+stays `Draft` until the first implementing commit (Rule 1.5).
