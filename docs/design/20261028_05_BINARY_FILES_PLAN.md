@@ -1238,3 +1238,44 @@ cap refused) and both settings. Step 6 (`agents.send` with `parts`)
 covers items 2-4; its tests add an image-only send refused with
 `allow_messages = false`, and paste delivery over herdr's mock
 attachment beside typed delivery without one.
+
+## Amendment — 2026-10-28 23:00 EDT: the preview scrolls with libcontrols' Scrollbar, labelled by section
+
+Agreed with the owner on 2026-10-28: "we should backport the advanced
+scrollbar to libcontrols and use it for the file viewer, with the optional
+features like labels"; then "Yes, write the libcontrols plan and the binary
+files amendment". This adds to section 10.3 (the bodies) and step 8; the
+rest of 10.3 stands.
+
+1. **The control.** Every scrolling body of the preview (Markdown, plain
+   text, diff) scrolls in a libcontrols `ScrollPane` with its `Scrollbar`
+   (`ScrollPane::with_scrollbar`), the agent view's scrollbar backported
+   to libcontrols by its own plan there
+   (~/src/libcontrols/docs/design/20261028_08_SCROLLBAR_PLAN.md, a patch
+   release, 0.10.5 as drafted): a draggable thumb that scrubs, and
+   optional section labels shown as translucent pills while the thumb is
+   dragged, the one nearest the thumb brighter.
+2. **Visibility** follows the app's *Scrollbar* setting (None, On Scroll,
+   Always) as the agent view's does, except that a plain-text or diff
+   body longer than three screens shows the thumb **Always** whatever the
+   setting, since there is no other sense of place in it.
+3. **Labels, by body:**
+   - **Markdown:** one label per `#` and `##` heading, its text cut to
+     40 characters, at the heading's offset;
+   - **diff and `git` output:** one label per file, at its `diff --git`
+     line, the file's name (its last path component; the folder when two
+     share a name), and for `git show` a first label "commit <hash8>" at
+     the top;
+   - **plain text:** no labels, the thumb only;
+   - **an image:** no scrollbar (it pans and zooms, 10.3).
+4. **Order of building.** Step 8 needs the libcontrols release with
+   `Scrollbar`; the app's pin moves to it in step 8's commit. If step 8 is
+   built first, the bodies scroll in a `ScrollPane` with its plain
+   indicator, and the scrollbar comes in a later commit recorded in
+   CHANGES.md.
+5. **Tests** (step 8) add: the labels' texts and offsets from fixture
+   Markdown, a two-file diff and a `git show`, the duplicate-name folder
+   rule, no labels for plain text, and the Always rule past three screens.
+6. **Later, not this plan:** the agent view moves onto the same libcontrols
+   `Scrollbar`, keeping its Finished-card labels, by its own amendment or
+   plan.
