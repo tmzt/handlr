@@ -3559,3 +3559,36 @@ Step 5 (the app), on flankr-companion 0.5.6, with the 2026-10-28 20:46,
    only while the agent itself does not ask; the state line names it
    ("Asking · overview screen"), its question is the card's text, and the
    card has the inactive Yes and No as for the agent's own question.
+
+## 2026-10-29 02:36 EDT — Plan 20261028_04 (plugins), the 02:10 EDT amendment's departures
+
+1. The general agent planning plan states no cacheability rule as such;
+   its decision 6's order is followed: the plugin tools are declared after
+   every fixed tool, and the system prompt gets no plugin text, so it is
+   the same with or without plugins.
+2. There was no general agent tool-result limit; it is
+   `MAX_TOOL_RESULT_BYTES`, `read_file`'s 64 KiB. The answer goes as
+   `{"text"}` (with `cut` and `note` when cut), since Gemini's function
+   response is an object.
+3. The voice gate is the broker's `VoiceTurn` confirmation: a new
+   `ConfirmAction` and `Broker::request_action` run the tool on approval
+   instead of typing into a pane. The card shows the plugin's name and
+   `<tool> <args>` (at most 200 characters). The tool's answer after
+   approval is only logged, as for `send_agent_command`.
+4. Plugin tools are offered whether or not planning is on or `read` is set;
+   without `read`, a read answers "Reading files is off".
+5. Tool calls hold no `CallSlots` and send no `plugin.notify`; the 10 s
+   limit and the 256 KiB cap apply as for menu calls.
+6. `agent_tools` other than true, false or "all" is logged and read as the
+   default.
+7. The registry also refuses a tool with an empty description or parameters
+   that are not a JSON object; a name taken by another plugin leaves the
+   later plugin out. The reserved names include the old
+   `run_command`/`send_command` and herdr's pass-through tools.
+8. `planning_plans_list` also gives each plan's base name (needed by
+   `planning_plan_show`), its update time and any read error;
+   `planning_plan_show` gives all of `plans.show` (headings and the README
+   row too). The update-time and abbreviation code is copied from the app's
+   plan table into the daemon's reader.
+9. `flankr prompt` lists the plugin tools; the general agent's clients for
+   an earlier profile are dropped when a new one is built.
