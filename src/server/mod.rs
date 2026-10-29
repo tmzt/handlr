@@ -102,6 +102,8 @@ pub struct Daemon {
     /// test hook `TurnOptions::herdr_attach`), else `None` and terminals
     /// use the poll only. Started by [`run`].
     pub herdr_attach: Option<Arc<herdr_attach::HerdrAttach>>,
+    /// The built-in plugins and their `[plugins]` (plan 20261028_04).
+    pub plugins: Arc<crate::plugins::PluginHost>,
 }
 
 impl Daemon {
@@ -158,6 +160,15 @@ impl Daemon {
         let hub = SessionHub::new(Arc::clone(&sessions), config.urls.repowiki_url.clone());
         let herdr_attach =
             attach_settings(&client, config, &turns).map(herdr_attach::HerdrAttach::new);
+        // `[plugins]` comes from the file `[llm]` is read from.
+        let plugins = crate::plugins::PluginHost::new(
+            config,
+            crate::plugins::HostOptions {
+                config_path: turns.llm.config_path.clone(),
+                plugins: turns.plugins.clone(),
+                ..Default::default()
+            },
+        );
         let daemon = Arc::new(Daemon {
             sessions,
             hub,
@@ -179,6 +190,7 @@ impl Daemon {
             terminal_input: config.terminal.input,
             terminal_panes: Arc::new(terminal::TerminalPanes::new()),
             herdr_attach,
+            plugins,
         });
         // `[llm.uses.card_summaries]`: each new Finished card summarised
         // once, while card summaries are available.
@@ -397,6 +409,9 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
     // `[llm]` read again on a change to its file or its key files (plan
     // 20261027_05, decision 2), or within 5 s without the file watcher.
     daemon.llm.spawn_watch(daemon.file_watcher().as_ref());
+    // `[plugins]` read again on a change to the config file (plan
+    // 20261028_04, decision 3.5, item 2).
+    daemon.plugins.spawn_watch(daemon.file_watcher().as_ref());
     // The suggestion rules read again on a change to their files (plan
     // 20261027_06, decision 6 as the 14:13 EDT amendment has it).
     daemon

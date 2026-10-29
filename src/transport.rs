@@ -138,27 +138,14 @@ impl HerdrToolExecutor {
             .map_err(|e| e.to_string())?
     }
 
-    /// The current agent's folder, on this machine.
+    /// The current agent's folder, on this machine
+    /// ([`crate::project::agent_folder`]).
     async fn current_folder(&self) -> Result<String, String> {
-        if matches!(self.client.transport(), HerdrTransport::RemoteSsh { .. }) {
-            return Err(
-                "The project's files are on another machine; flankr reads only its own."
-                    .to_string(),
-            );
-        }
+        crate::project::check_local(&self.client)?;
         let Some(pane_id) = self.current() else {
-            return Err("No project is open: open a session, or focus an agent first".to_string());
+            return Err(crate::project::NO_PROJECT.to_string());
         };
-        let snapshot = self
-            .client
-            .list_panes()
-            .await
-            .map_err(|e| format!("herdr is not answering: {e}"))?;
-        current_ref(&snapshot, &pane_id)
-            .and_then(|a| a.cwd)
-            .ok_or_else(|| {
-                format!("The folder of the current agent (pane {pane_id}) is not known.")
-            })
+        crate::project::agent_folder(&self.client, &pane_id).await
     }
 
     /// `recent_commits(count?, path?, files?)` (plan 20261027_05, decision

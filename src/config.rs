@@ -48,6 +48,12 @@ pub struct AppConfig {
     /// `[terminal]`: the terminal mode (plan 20261027_07, decision 6).
     #[serde(default)]
     pub terminal: TerminalConfig,
+    /// `[plugins."<ns>"]`: each built-in plugin's table, by package name
+    /// (docs/design/20261028_04_PLUGINS_PLAN.md, decision 3.5). A plugin
+    /// with no table, or without `enabled = true`, is off. Read again while
+    /// the daemon runs by `crate::plugins::PluginHost`.
+    #[serde(default)]
+    pub plugins: toml::Table,
 }
 
 /// `[terminal]`: the companion's terminal mode (plan 20261027_07).
@@ -228,6 +234,7 @@ impl Default for AppConfig {
             summary: None,
             llm: None,
             terminal: TerminalConfig::default(),
+            plugins: toml::Table::new(),
         }
     }
 }

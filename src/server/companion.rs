@@ -92,6 +92,10 @@ pub struct TurnOptions {
     /// step 7): tests point it at a fake herdr, with short backoff. Only
     /// used while `[terminal] attach` is on.
     pub herdr_attach: Option<super::herdr_attach::AttachSettings>,
+    /// The plugins, instead of the built-in ones (plan 20261028_04,
+    /// decision 3.1, item 3: tests use a test plugin). Their `[plugins]`
+    /// is read from `llm.config_path`, the same file.
+    pub plugins: Option<Vec<Arc<dyn crate::plugins::Plugin>>>,
 }
 
 /// The engine, the session histories, and who is in a turn.

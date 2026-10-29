@@ -610,3 +610,19 @@ Plan 20261028_04 (plugins), step 1. Strictly additive:
 - **Added:** `HelloResult::plugins` and `ServerCapabilities::plugins`
   (`Option<Vec<PluginInfo>>`), appended, defaulted when absent and left off
   the wire when `None`, so an older daemon's objects still read (no plugins).
+
+## dev.flankr.plugins.planning 0.1.0 — 2026-10-28 (the commit tagged `dev.flankr.plugins.planning-v0.1.0`)
+
+Plan 20261028_04 (plugins), step 3. The plugin's first release, disabled by
+default:
+
+- **Added:** the methods `plans.list {}` → `{schema: 1, root, plans: [...]}`
+  and `plans.show {name}` → `{schema: 1, plan: {...}}`, in tpt's schema-1
+  shapes (list items: `file`, `base`, `date_from_name`, `nn`, `name`,
+  `kind`, `title`, `date`, `status`, `status_base`, `status_by {ref}`,
+  `last_amendment`, `readme {row, status, decision}`, `error`; `show` adds
+  `covers`, `sources`, `related`, `living_sections`, `extra`, `headings`,
+  `amendments [{index, line, timestamp, subject, living_section}]`); the
+  errors -32110 (no docs/design plans) and -32111 (no plan of that name).
+- **Added:** the menu item `plans` ("Plans in this project", a modal, both
+  screens).

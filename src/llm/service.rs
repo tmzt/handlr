@@ -478,6 +478,9 @@ fn without_sections(mut table: toml::Table) -> toml::Table {
     for name in SECTIONS {
         table.remove(name);
     }
+    // `[plugins]` is re-read by the plugin host (plan 20261028_04,
+    // decision 3.5), so a change there needs no restart either.
+    table.remove("plugins");
     table
 }
 
