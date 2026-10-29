@@ -739,3 +739,26 @@ field appended to `CompanionConfig`, which has `new`):
 - Submit sends `agents.send` `parts` when the draft names uploaded images;
   link kind 2 is read and written (two-queue writer).
 - Takes libflankr_blob 0.1.0 (new dependency).
+
+## libflankr_proto 0.5.5 — 2026-10-29 (the commit tagged `libflankr_proto-v0.5.5`)
+
+Plan 20261029_01 (choice questions), step 1. Strictly additive:
+
+- **Added:** `PendingQuestion::choices` (`Option<ChoiceSet>`), appended,
+  defaulted when absent and left off the wire when `None`; when present,
+  `answers` is empty and `text` is the first question's text.
+- **Added:** `common::ChoiceSet` (`id`, `questions`, `source`),
+  `ChoiceQuestion` (`header`, `text`, `multi`, `other`, `options`) and
+  `ChoiceOption` (`label`, `detail`, `preview`), all `#[non_exhaustive]`,
+  each with `new` and `within_bounds`; the bounds `CHOICE_QUESTIONS_MAX`
+  (4), `CHOICE_OPTIONS_MAX` (8), `CHOICE_HEADER_MAX` (32),
+  `CHOICE_LABEL_MAX` (120), `CHOICE_DETAIL_MAX` (400), `CHOICE_PREVIEW_MAX`
+  (4000), `CHOICE_PREVIEW_LINES` (60) and `CHOICE_ID_MAX` (128).
+- **Added:** `methods::CHOICE_ANSWER` (`choice.answer`, companions only),
+  `ChoiceAnswerParams` (`pane_id`, `id`, `answers`), `ChoiceAnswer`
+  (`picked`, `other`; `Default`), `ChoiceAnswerResult`
+  (`#[non_exhaustive]`, tagged by `status`: `answered`, `mismatch { got }`,
+  `no_result`) and `CHOICE_RESULT_WAIT_S` (5).
+- **Added:** `envelope::codes::CHOICE_STALE` (-32040),
+  `CHOICE_UNSUPPORTED` (-32041) and `SCREEN_MISMATCH` (-32042);
+  `codes::ALL` is unchanged.

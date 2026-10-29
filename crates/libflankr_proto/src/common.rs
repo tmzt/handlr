@@ -116,6 +116,12 @@ pub mod methods {
     /// (plan 20261028_05, the 23:43 EDT amendment, item 2). Gated as
     /// [`TERMINAL_INPUT`] is. Added in 0.5.4.
     pub const TERMINAL_PASTE: &str = "terminal.paste";
+    /// Answer an open choice question
+    /// ([`ChoiceAnswerParams`](super::ChoiceAnswerParams) →
+    /// [`ChoiceAnswerResult`](super::ChoiceAnswerResult)), plan 20261029_01,
+    /// decision 2. For companions; a `flankr.harness` client gets
+    /// `METHOD_NOT_FOUND`.
+    pub const CHOICE_ANSWER: &str = "choice.answer";
 }
 
 /// Topics for `events.subscribe`.
@@ -498,7 +504,206 @@ pub struct PendingQuestion {
     /// then offers its own.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub answers: Vec<Answer>,
+    /// The question is a choice question (plan 20261029_01): its options,
+    /// answered with `choice.answer`. When present, `answers` is empty and
+    /// `text` is the first question's text. Left out of the wire when
+    /// `None`. Added with plan 20261029_01.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub choices: Option<ChoiceSet>,
 }
+
+/// An agent's multiple-choice questions, in a format that is the same for
+/// any agent (plan 20261029_01, decision 1). Added with plan
+/// 20261029_01.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ChoiceSet {
+    /// The agent's id for the call (Claude Code: the `tool_use` id,
+    /// `toolu_…`), at most [`CHOICE_ID_MAX`] characters.
+    pub id: String,
+    /// 1 to [`CHOICE_QUESTIONS_MAX`], in the order asked.
+    pub questions: Vec<ChoiceQuestion>,
+    /// Who asked and how: `<reader kind>/<tool>`, as
+    /// `claude_code/AskUserQuestion`.
+    pub source: String,
+}
+
+impl ChoiceSet {
+    pub fn new(
+        id: impl Into<String>,
+        questions: Vec<ChoiceQuestion>,
+        source: impl Into<String>,
+    ) -> Self {
+        ChoiceSet {
+            id: id.into(),
+            questions,
+            source: source.into(),
+        }
+    }
+
+    /// Whether the set is within decision 1's bounds: the id's length, 1 to
+    /// [`CHOICE_QUESTIONS_MAX`] questions, each within
+    /// [`ChoiceQuestion::within_bounds`].
+    pub fn within_bounds(&self) -> bool {
+        !self.id.is_empty()
+            && self.id.chars().count() <= CHOICE_ID_MAX
+            && (1..=CHOICE_QUESTIONS_MAX).contains(&self.questions.len())
+            && self.questions.iter().all(ChoiceQuestion::within_bounds)
+    }
+}
+
+/// One question of a [`ChoiceSet`]. Added with plan 20261029_01.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ChoiceQuestion {
+    /// A short chip, at most [`CHOICE_HEADER_MAX`] characters; may be
+    /// empty.
+    pub header: String,
+    /// The question, at most [`PENDING_QUESTION_MAX`] characters.
+    pub text: String,
+    /// Several options may be picked.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi: bool,
+    /// A free-text answer may be given (Claude Code: every question but a
+    /// preview one).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub other: bool,
+    /// 2 to [`CHOICE_OPTIONS_MAX`].
+    pub options: Vec<ChoiceOption>,
+}
+
+impl ChoiceQuestion {
+    pub fn new(
+        header: impl Into<String>,
+        text: impl Into<String>,
+        multi: bool,
+        other: bool,
+        options: Vec<ChoiceOption>,
+    ) -> Self {
+        ChoiceQuestion {
+            header: header.into(),
+            text: text.into(),
+            multi,
+            other,
+            options,
+        }
+    }
+
+    /// Whether the question is within decision 1's bounds: its header and
+    /// text lengths, a non-empty text, 2 to [`CHOICE_OPTIONS_MAX`] options,
+    /// each within [`ChoiceOption::within_bounds`].
+    pub fn within_bounds(&self) -> bool {
+        self.header.chars().count() <= CHOICE_HEADER_MAX
+            && !self.text.trim().is_empty()
+            && self.text.chars().count() <= PENDING_QUESTION_MAX
+            && (2..=CHOICE_OPTIONS_MAX).contains(&self.options.len())
+            && self.options.iter().all(ChoiceOption::within_bounds)
+    }
+}
+
+/// One option of a [`ChoiceQuestion`]. Added with plan 20261029_01.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct ChoiceOption {
+    /// At most [`CHOICE_LABEL_MAX`] characters.
+    pub label: String,
+    /// The option's description, at most [`CHOICE_DETAIL_MAX`]; may be
+    /// empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// Monospace text shown when the option is looked at, at most
+    /// [`CHOICE_PREVIEW_MAX`] characters and [`CHOICE_PREVIEW_LINES`]
+    /// lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+impl ChoiceOption {
+    pub fn new(
+        label: impl Into<String>,
+        detail: impl Into<String>,
+        preview: Option<String>,
+    ) -> Self {
+        ChoiceOption {
+            label: label.into(),
+            detail: detail.into(),
+            preview,
+        }
+    }
+
+    /// Whether the option is within decision 1's bounds: a non-empty label
+    /// of at most [`CHOICE_LABEL_MAX`] characters, the detail's length, and
+    /// the preview's characters and lines.
+    pub fn within_bounds(&self) -> bool {
+        !self.label.trim().is_empty()
+            && self.label.chars().count() <= CHOICE_LABEL_MAX
+            && self.detail.chars().count() <= CHOICE_DETAIL_MAX
+            && self.preview.as_ref().is_none_or(|p| {
+                p.chars().count() <= CHOICE_PREVIEW_MAX && p.lines().count() <= CHOICE_PREVIEW_LINES
+            })
+    }
+}
+
+/// The most questions in a [`ChoiceSet`].
+pub const CHOICE_QUESTIONS_MAX: usize = 4;
+/// The most options in a [`ChoiceQuestion`].
+pub const CHOICE_OPTIONS_MAX: usize = 8;
+/// The longest [`ChoiceQuestion::header`], in characters.
+pub const CHOICE_HEADER_MAX: usize = 32;
+/// The longest [`ChoiceOption::label`], in characters.
+pub const CHOICE_LABEL_MAX: usize = 120;
+/// The longest [`ChoiceOption::detail`], in characters.
+pub const CHOICE_DETAIL_MAX: usize = 400;
+/// The longest [`ChoiceOption::preview`], in characters.
+pub const CHOICE_PREVIEW_MAX: usize = 4000;
+/// The most lines in a [`ChoiceOption::preview`].
+pub const CHOICE_PREVIEW_LINES: usize = 60;
+/// The longest [`ChoiceSet::id`], in characters.
+pub const CHOICE_ID_MAX: usize = 128;
+
+/// `choice.answer`'s params (plan 20261029_01, decision 2). Added with plan
+/// 20261029_01.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceAnswerParams {
+    /// The pane, resolved as `agents.send`'s.
+    pub pane_id: String,
+    /// [`ChoiceSet::id`].
+    pub id: String,
+    /// One per question, in order.
+    pub answers: Vec<ChoiceAnswer>,
+}
+
+/// One question's answer: the options picked and the free text typed.
+/// Added with plan 20261029_01.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ChoiceAnswer {
+    /// Indexes into the question's options. One for a single-choice
+    /// question unless `other` is given; any number for `multi`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub picked: Vec<usize>,
+    /// The free-text answer, only where the question has `other`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
+}
+
+/// `choice.answer`'s result. Added with plan 20261029_01.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ChoiceAnswerResult {
+    /// The agent's result has every answer as sent.
+    Answered,
+    /// The agent's result differs: `got` is what it recorded, one line per
+    /// question (`<header>: <answer>`).
+    Mismatch { got: Vec<String> },
+    /// The keys were sent but no result was written within
+    /// [`CHOICE_RESULT_WAIT_S`].
+    NoResult,
+}
+
+/// How long the daemon waits for the agent's result after the last key,
+/// in seconds.
+pub const CHOICE_RESULT_WAIT_S: u64 = 5;
 
 /// One suggested answer to a pending question (plan 20261027_06,
 /// decision 3). Exactly one of `sends` and `starts` is given.
@@ -1754,6 +1959,7 @@ mod tests {
                 plan: None,
                 links: vec![],
                 answers: vec![],
+                choices: None,
             })),
             removed: vec![Serial::new(0x3fa9_c21e, 400, 195)],
             slots: vec![],
@@ -2041,6 +2247,7 @@ mod tests {
             plan: None,
             links: vec![],
             answers: vec![],
+            choices: None,
         });
         round_trip(PendingQuestion {
             text: "Approve docs/design/X_PLAN.md?".into(),
@@ -2052,6 +2259,7 @@ mod tests {
                 url: "u".into(),
             }],
             answers: vec![],
+            choices: None,
         });
         // With answers (plan 20261027_06, step 2).
         let with_answers = PendingQuestion {
@@ -2086,6 +2294,7 @@ mod tests {
                     answers: false,
                 },
             ],
+            choices: None,
         };
         round_trip(with_answers.clone());
         assert_eq!(
@@ -2157,6 +2366,7 @@ mod tests {
                         plan: None,
                         links: vec![],
                         answers: vec![],
+                        choices: None,
                     }),
                 }),
                 turn: Some(Turn::Asking {
@@ -2934,5 +3144,162 @@ mod tests {
         assert!(neither.text.is_none() && neither.images.is_empty());
         assert_eq!(TERMINAL_PASTE_TEXT_MAX, 8192);
         assert_eq!(TERMINAL_PASTE_IMAGES_MAX, 4);
+    }
+
+    fn two_questions() -> ChoiceSet {
+        ChoiceSet::new(
+            "toolu_01ABC",
+            vec![
+                ChoiceQuestion::new(
+                    "Layout",
+                    "Which layout should the card use?",
+                    false,
+                    false,
+                    vec![
+                        ChoiceOption::new(
+                            "Rows",
+                            "One option per row",
+                            Some("+------+\n| row  |\n+------+".into()),
+                        ),
+                        ChoiceOption::new("Grid", "", Some("[a][b]\n[c][d]".into())),
+                    ],
+                ),
+                ChoiceQuestion::new(
+                    "Extras",
+                    "Which extras do you want?",
+                    true,
+                    true,
+                    vec![
+                        ChoiceOption::new("Icons", "Small icons", None),
+                        ChoiceOption::new("Colours", "", None),
+                        ChoiceOption::new("Badges", "Counts on rows", None),
+                    ],
+                ),
+            ],
+            "claude_code/AskUserQuestion",
+        )
+    }
+
+    #[test]
+    fn choice_questions_round_trip_and_stay_off_the_wire_when_absent() {
+        // Plan 20261029_01, step 1.
+        let set = two_questions();
+        assert!(set.within_bounds());
+        round_trip(set.clone());
+        let q = PendingQuestion {
+            text: set.questions[0].text.clone(),
+            ts: "2026-10-29T04:11:00.000Z".into(),
+            about_plan: false,
+            plan: None,
+            links: vec![],
+            answers: vec![],
+            choices: Some(set.clone()),
+        };
+        round_trip(q.clone());
+        let wire = serde_json::to_value(&q).unwrap();
+        assert_eq!(
+            wire["choices"],
+            json!({
+                "id": "toolu_01ABC",
+                "source": "claude_code/AskUserQuestion",
+                "questions": [
+                    {
+                        "header": "Layout",
+                        "text": "Which layout should the card use?",
+                        "options": [
+                            {"label": "Rows", "detail": "One option per row",
+                             "preview": "+------+\n| row  |\n+------+"},
+                            {"label": "Grid", "preview": "[a][b]\n[c][d]"}
+                        ]
+                    },
+                    {
+                        "header": "Extras",
+                        "text": "Which extras do you want?",
+                        "multi": true,
+                        "other": true,
+                        "options": [
+                            {"label": "Icons", "detail": "Small icons"},
+                            {"label": "Colours"},
+                            {"label": "Badges", "detail": "Counts on rows"}
+                        ]
+                    }
+                ]
+            })
+        );
+        // An older daemon's question reads as before; `None` is left off.
+        let old: PendingQuestion =
+            serde_json::from_value(json!({"text": "Go on?", "ts": "t"})).unwrap();
+        assert!(old.choices.is_none());
+        assert_eq!(
+            serde_json::to_value(&old).unwrap(),
+            json!({"text": "Go on?", "ts": "t"})
+        );
+    }
+
+    #[test]
+    fn choice_bounds() {
+        let mut set = two_questions();
+        assert!(set.within_bounds());
+        set.questions[0].options.truncate(1);
+        assert!(!set.within_bounds(), "one option");
+        let mut set = two_questions();
+        set.questions[1].header = "x".repeat(CHOICE_HEADER_MAX + 1);
+        assert!(!set.within_bounds(), "long header");
+        let mut set = two_questions();
+        set.questions[0].options[0].preview = Some("l\n".repeat(CHOICE_PREVIEW_LINES + 1));
+        assert!(!set.within_bounds(), "too many preview lines");
+        let mut set = two_questions();
+        set.questions = vec![set.questions[0].clone(); CHOICE_QUESTIONS_MAX + 1];
+        assert!(!set.within_bounds(), "five questions");
+        let mut set = two_questions();
+        set.id = String::new();
+        assert!(!set.within_bounds(), "no id");
+    }
+
+    #[test]
+    fn choice_answer_params_and_results_round_trip() {
+        let params = ChoiceAnswerParams {
+            pane_id: "w2:p3".into(),
+            id: "toolu_01ABC".into(),
+            answers: vec![
+                ChoiceAnswer {
+                    picked: vec![1],
+                    other: None,
+                },
+                ChoiceAnswer {
+                    picked: vec![0, 2],
+                    other: Some("Dark mode too".into()),
+                },
+                ChoiceAnswer::default(),
+            ],
+        };
+        round_trip(params.clone());
+        assert_eq!(
+            serde_json::to_value(&params).unwrap(),
+            json!({
+                "pane_id": "w2:p3",
+                "id": "toolu_01ABC",
+                "answers": [
+                    {"picked": [1]},
+                    {"picked": [0, 2], "other": "Dark mode too"},
+                    {}
+                ]
+            })
+        );
+        for (result, wire) in [
+            (ChoiceAnswerResult::Answered, json!({"status": "answered"})),
+            (
+                ChoiceAnswerResult::Mismatch {
+                    got: vec!["Layout: Grid".into(), "Extras: Icons".into()],
+                },
+                json!({"status": "mismatch", "got": ["Layout: Grid", "Extras: Icons"]}),
+            ),
+            (ChoiceAnswerResult::NoResult, json!({"status": "no_result"})),
+        ] {
+            round_trip(result.clone());
+            assert_eq!(serde_json::to_value(&result).unwrap(), wire);
+        }
+        assert_eq!(methods::CHOICE_ANSWER, "choice.answer");
+        assert_eq!(CHOICE_RESULT_WAIT_S, 5);
     }
 }

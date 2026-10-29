@@ -193,11 +193,21 @@ pub mod codes {
     /// [`PLUGIN_MAX_BYTES`](crate::companion::PLUGIN_MAX_BYTES) serialised.
     /// Added in 0.5.2.
     pub const PLUGIN_TOO_LARGE: i64 = -32032;
+    /// `choice.answer`'s `id` is not the pane's open choice question: it
+    /// was answered on the Mac, or is gone (plan 20261029_01, decision 2).
+    /// Added with that plan.
+    pub const CHOICE_STALE: i64 = -32040;
+    /// `choice.answer` for a choice question whose `source` has no driver.
+    pub const CHOICE_UNSUPPORTED: i64 = -32041;
+    /// A screen check of `choice.answer` failed; the message names the
+    /// step. The screen is left as it was, for the Mac.
+    pub const SCREEN_MISMATCH: i64 = -32042;
 
     /// Every code above but `UNAVAILABLE`, the three subscription codes,
-    /// `LLM_UNAVAILABLE` and the three plugin codes, for checking they are distinct. Those came in
-    /// additive releases (0.1.1, 0.3.5, 0.3.10, 0.5.2); growing this array would
-    /// change its type.
+    /// `LLM_UNAVAILABLE`, the three plugin codes and the three choice codes,
+    /// for checking they are distinct. Those came in additive releases
+    /// (0.1.1, 0.3.5, 0.3.10, 0.5.2, plan 20261029_01's); growing this array
+    /// would change its type.
     pub const ALL: [i64; 15] = [
         PARSE_ERROR,
         INVALID_REQUEST,
@@ -286,6 +296,9 @@ mod tests {
             codes::PLUGIN_UNKNOWN,
             codes::PLUGIN_DISABLED,
             codes::PLUGIN_TOO_LARGE,
+            codes::CHOICE_STALE,
+            codes::CHOICE_UNSUPPORTED,
+            codes::SCREEN_MISMATCH,
         ] {
             assert!(seen.insert(later), "{later} repeats a code");
         }

@@ -1,7 +1,7 @@
 ---
 title: Choice questions, with Claude Code's AskUserQuestion answered from the phone
 date: 2026-10-29
-status: Draft
+status: In implementation
 covers:
   - "A flankr format for an agent's multiple-choice questions in
     libflankr_proto, agent-agnostic and additive: `PendingQuestion::choices`
@@ -680,3 +680,11 @@ plain messages (`agents.send`, Gemini's sends included) are refused while a
 choice question is open; (5) Claude Code versions not seen yet are driven
 with the screen checks and logged, not refused. The status stays `Draft`
 until the first implementing commit (Rule 1.5).
+
+## Amendment — 2026-10-29 00:45 EDT: implementation started; the document is now immutable
+
+Implementation starts with this amendment, in the commit of step 1
+(libflankr_proto, at the next free patch version when it is committed) on
+`main-terminal`: `status` is `In implementation`, and the body above,
+with its amendments, is frozen (AGENTS.md Rule 1.5). Departures are
+recorded in `CHANGES.md`.
