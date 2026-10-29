@@ -1636,8 +1636,8 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libcontrols"
-version = "0.10.8"
-source = "git+https://github.com/tmzt/libcontrols?rev=1d813a1ff785d42f164eb004616fee3c3ef54c6a#1d813a1ff785d42f164eb004616fee3c3ef54c6a"
+version = "0.10.9"
+source = "git+https://github.com/tmzt/libcontrols?rev=9acdd6cdc31f99397f597c24bd5ff1fa341258b5#9acdd6cdc31f99397f597c24bd5ff1fa341258b5"
 dependencies = [
  "bytemuck",
  "libmsdf",
@@ -1751,8 +1751,8 @@ dependencies = [
 
 [[package]]
 name = "libmsdf"
-version = "0.6.1"
-source = "git+https://github.com/tmzt/libmsdf?rev=76448a74b9f52bcd1bb40506f06975cfd92e8b28#76448a74b9f52bcd1bb40506f06975cfd92e8b28"
+version = "0.6.2"
+source = "git+https://github.com/tmzt/libmsdf?rev=bd7383dcb936c987dfd7f777e9b3baecbe3317e7#bd7383dcb936c987dfd7f777e9b3baecbe3317e7"
 dependencies = [
  "bytemuck",
  "libmsdf-font",
@@ -1764,8 +1764,8 @@ dependencies = [
 
 [[package]]
 name = "libmsdf-font"
-version = "0.6.1"
-source = "git+https://github.com/tmzt/libmsdf?rev=76448a74b9f52bcd1bb40506f06975cfd92e8b28#76448a74b9f52bcd1bb40506f06975cfd92e8b28"
+version = "0.6.2"
+source = "git+https://github.com/tmzt/libmsdf?rev=bd7383dcb936c987dfd7f777e9b3baecbe3317e7#bd7383dcb936c987dfd7f777e9b3baecbe3317e7"
 dependencies = [
  "rustybuzz",
  "ttf-parser",

@@ -35,8 +35,9 @@ libmorph = { git = "https://github.com/tmzt/libmorph", rev = "c958897495d880c611
 # The revision libcontrols pins, so the graph holds one libmsdf (as voicexn).
 # 0.6.0 (with libcontrols 0.7.0): the terminal face and symbol page for the
 # agent view (plan 20261022_03, decision 9), with cell boxes and Claude
-# Code's interface glyphs; 0.6.1 with libcontrols 0.10.8.
-libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "76448a74b9f52bcd1bb40506f06975cfd92e8b28", features = ["font-apache-roboto-regular", "font-apache-roboto-bold", "font-apache-roboto-italic", "fonts-ofl-terminal"] }
+# Code's interface glyphs; 0.6.1 with libcontrols 0.10.8; 0.6.2 (the coding-agent
+# glyphs: ⊙ ⦿ ⋮ and the rest, libmsdf plan 20261028_01) with libcontrols 0.10.9.
+libmsdf = { git = "https://github.com/tmzt/libmsdf", rev = "bd7383dcb936c987dfd7f777e9b3baecbe3317e7", features = ["font-apache-roboto-regular", "font-apache-roboto-bold", "font-apache-roboto-italic", "fonts-ofl-terminal"] }
 # Basic Markdown, laid out as wrapped styled runs, for the settings copy
 # (docs/design/20261024_04_MARKDOWN_RENDERER_PLAN.md, step 2), drawn in
 # Roboto Regular, Bold and Italic (above) and the terminal face.
@@ -48,7 +49,7 @@ flankr-markdown = { path = "../../crates/flankr-markdown" }
 # TextArea since 0.9.1. 0.10.8 (tag v0.10.8): toggle items that keep the
 # PopupMenu open (0.10.6, `PopupItem::toggle`, `PopupMenuEvent::Toggled`),
 # for the volume menu (plan 20261028_06, decision 3). On the same libmsdf.
-libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "1d813a1ff785d42f164eb004616fee3c3ef54c6a" }
+libcontrols = { git = "https://github.com/tmzt/libcontrols", rev = "9acdd6cdc31f99397f597c24bd5ff1fa341258b5" }
 # The preview (plan 20261028_05, step 8): libflankr_blob's `ReadPattern`
 # for the transcript's path links, and PNG decoding on the desktop (the
 # 21:29 EDT amendment, item 6), at the version flankr-companion uses.
