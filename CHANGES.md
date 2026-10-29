@@ -3368,3 +3368,9 @@ Small departures needed to make the plan work:
     (`recent_commits` results). Not built in the plan: step 9 (attaching
     images), the share icon and image previews on Android (waiting on the
     libmobile and libmorph surfacing), and step 10 (README).
+
+## 2026-10-29 01:11 EDT — Correction to the steps 7-8 addendum
+
+Item 8 of the previous addendum cites "the 2026-10-28 20:42 EDT addendum,
+item 11"; that addendum is headed 2026-10-28 20:43 EDT. Nothing else
+changes.
