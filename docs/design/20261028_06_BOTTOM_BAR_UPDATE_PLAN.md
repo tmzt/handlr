@@ -715,3 +715,19 @@ card row's "the + on the message card only":
    built by this plan.
 3. Paste text stays disabled until libmorph's `clipboard_text` is
    released, as on the message card.
+
+## Amendment — 2026-10-28 23:40 EDT: approved
+
+The owner approved the plan on 2026-10-28 ("approve the bottom bar plan
+and build"). Open questions 1, 2, 4, 5 and 6 take their recommendations
+(the ⋮ menu's Read aloud removed; Speak coding responses kept across
+restarts; a haptic later; Paste text at 8 KB, multi-line refused without
+herdr's attachment; the same volume menu on the overview); question 3 is
+answered by the 23:39 EDT amendment above (a + on Gemini's card for Paste
+text). Steps that need other releases are built as those land: the
+volume menu's toggles need libcontrols' toggle items (0.10.6, being
+planned); Paste text needs libmorph's `clipboard_text` (being built);
+the + on the message card and the terminal + need the binary files plan
+(a Draft) and stay hidden until the daemon offers `images`; the terminal
+paste needs that plan's amendment, which the owner has not yet agreed.
+The status stays `Draft` until the first implementing commit (Rule 1.5).
