@@ -3374,3 +3374,9 @@ Small departures needed to make the plan work:
 Item 8 of the previous addendum cites "the 2026-10-28 20:42 EDT addendum,
 item 11"; that addendum is headed 2026-10-28 20:43 EDT. Nothing else
 changes.
+
+## 2026-10-29 01:04 EDT — Correction to the "Correction to the steps 7-8 addendum" heading
+
+The section headed "2026-10-29 01:11 EDT — Correction to the steps 7-8
+addendum" carries a time typed by hand; it was written at 01:02 EDT by the
+clock. Its content stands.
