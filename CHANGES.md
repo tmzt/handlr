@@ -3129,3 +3129,48 @@ interfaces' intent:
     (`border_thickness`, `item_padding`, separator size, `text_color`,
     `check_*`, `highlight`, `font_size`, `offset`, `margin`); and
     `PopupMenuOptions::dismiss` chooses which dismissals apply.
+
+## 2026-10-28 20:43 EDT — Plan 20261028_04 (plugins), steps 5-7's departures
+
+Small departures needed to make the plan work:
+
+1. Step 5: `Event`'s `Eq` is written by hand, as libflankr_proto's
+   `ErrorObject` is `PartialEq` only.
+2. Step 5: `Event::Plugins` is also given after a toggle is answered or
+   refused (a refusal is `Event::Error`, then the unchanged list) and last
+   in `State::replay`; `hello` gives it before the first `Agents`.
+3. Step 5: the client refuses a call at once when offline
+   (`UNAVAILABLE`), for a bad ns or method (`INVALID_PARAMS`) or over
+   256 KiB (`PLUGIN_TOO_LARGE`); waiting calls get `CANCELLED` on a
+   disconnect, unmatched results are dropped, and plugin inputs for a
+   remote not in use are refused (`NOT_PERMITTED` for a call,
+   `Event::Error` for a toggle) through `client::plugin_refusal`.
+4. Step 6: `DevicePlugin` adds `height(view, w, s)`, `draw` takes the
+   scale, views are passed as `&ViewKind`, `tap` is in the view's own
+   (scrolled) coordinates, `PluginOut::call` returns the id and `notify`
+   sends a call with no answer.
+5. Step 6: the plugin modal is drawn by the app in the settings style
+   (`plugins/modal.rs`, scrolled with `controls::scroll::Scroll`), not as a
+   libcontrols `ModalDialog`, since the device half draws its content;
+   cards are drawn over grid slots reserved by `CardGrid::set_extra`, a
+   hold of 2 s is measured at release, and Unpin is in the shared
+   PopupMenu (`app/unpin/<index>`).
+6. Step 6: `PluginInfo` says nothing of `can_approve`, so the toggle can't
+   be dimmed in advance on a device that may not approve; the refusal is
+   the notice.
+7. Step 6: *Needs a newer flankr* only when the daemon's version is below
+   the half's range; above it, a hash version or no half is *Needs a newer
+   app*.
+8. Step 6: all plugin, menu and planning copy is in `SETTINGS_COPY.md`,
+   as a new file would break the test that lists the copy files.
+9. Step 7: the menu's Up/Down/Enter keys are not wired from the app's key
+   handling (Back and Escape close it); the settings ⋮ is always dim, as
+   the plan gives Settings no items; the ⋮ is three drawn dots, as the
+   terminal face has no U+22EE.
+10. Step 7: the libcontrols pin moves from 0.9.1 to 0.10.3 across 0.10.0's
+    Button change (`"XX - Name"` labels drawn whole); no app change was
+    needed.
+11. Known flake, not from this work: flankr-companion's
+    `tests/link.rs` `removing_the_active_remote_moves_to_the_most_recently_paired`
+    fails about 1 run in 6 on `main-terminal` as well ("no remotes list
+    where b online within 5 s"), from flankr-companion 0.5.0.
