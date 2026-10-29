@@ -20,94 +20,10 @@ pub const DEFAULT_MAX_INSTRUCTIONS_KB: usize = 32;
 /// One `read` pattern (the 11:20 EDT amendment, item 4): `/`-separated
 /// segments matched against a root-relative path's segments. `**` as a
 /// whole segment is zero or more segments; `*` within a segment is any run
-/// of characters but `/`; everything else is literal.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ReadPattern {
-    /// As written.
-    pub text: String,
-    segments: Vec<Segment>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Segment {
-    /// `**`: zero or more segments.
-    AnyDepth,
-    /// One segment, `*` its only wildcard.
-    Name(String),
-}
-
-impl ReadPattern {
-    /// `text` as a pattern, or why it is refused.
-    pub fn parse(text: &str) -> Result<ReadPattern, String> {
-        let refuse = |why: &str| Err(format!("read pattern \"{text}\" is refused: {why}"));
-        if text.is_empty() {
-            return refuse("it is empty");
-        }
-        if let Some(c) = text
-            .chars()
-            .find(|c| matches!(c, '?' | '[' | ']' | '{' | '}' | '!' | '\\'))
-        {
-            return refuse(&format!("'{c}' is not part of the pattern syntax"));
-        }
-        if text.starts_with('/') {
-            return refuse("it starts with '/'; patterns are relative to the project's root");
-        }
-        let mut segments = Vec::new();
-        for segment in text.split('/') {
-            match segment {
-                "" => return refuse("it has an empty segment"),
-                "." | ".." => return refuse("'.' and '..' are not allowed"),
-                "**" => segments.push(Segment::AnyDepth),
-                s if s.contains("**") => return refuse("'**' must be a whole segment"),
-                s => segments.push(Segment::Name(s.to_string())),
-            }
-        }
-        Ok(ReadPattern {
-            text: text.to_string(),
-            segments,
-        })
-    }
-
-    /// Whether the root-relative `path` (`/`-separated) matches.
-    pub fn matches(&self, path: &str) -> bool {
-        let names: Vec<&str> = path.split('/').collect();
-        match_segments(&self.segments, &names)
-    }
-}
-
-fn match_segments(pattern: &[Segment], names: &[&str]) -> bool {
-    match pattern.split_first() {
-        None => names.is_empty(),
-        Some((Segment::AnyDepth, rest)) => {
-            (0..=names.len()).any(|skip| match_segments(rest, &names[skip..]))
-        }
-        Some((Segment::Name(p), rest)) => match names.split_first() {
-            Some((name, names)) => match_name(p, name) && match_segments(rest, names),
-            None => false,
-        },
-    }
-}
-
-/// One name against one segment, `*` being any run of characters.
-fn match_name(pattern: &str, name: &str) -> bool {
-    let mut parts = pattern.split('*');
-    let first = parts.next().unwrap_or("");
-    let Some(mut rest) = name.strip_prefix(first) else {
-        return false;
-    };
-    let parts: Vec<&str> = parts.collect();
-    let Some((last, middle)) = parts.split_last() else {
-        // No `*`: the whole name.
-        return rest.is_empty();
-    };
-    for part in middle {
-        match rest.find(part) {
-            Some(at) => rest = &rest[at + part.len()..],
-            None => return false,
-        }
-    }
-    rest.len() >= last.len() && rest.ends_with(last)
-}
+/// of characters but `/`; everything else is literal. Moved to
+/// libflankr_blob, so the app matches paths with the same code
+/// (docs/design/20261028_05_BINARY_FILES_PLAN.md, decision 4.9).
+pub use libflankr_blob::ReadPattern;
 
 /// `[llm.uses.planning]` as resolved: what its turns may read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]

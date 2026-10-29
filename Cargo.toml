@@ -56,6 +56,11 @@ sha2 = "0.10"
 # written (src/plugins/host.rs, plan 20261028_04, decision 3.5), already in
 # Cargo.lock under toml 0.8.
 toml_edit = "0.22"
+# Binary transfers over the link (src/server/blob/, plan 20261028_05): the
+# encoding and state machines, and the images store's safe folder calls
+# (openat with O_NOFOLLOW, mkdirat, fstat, linkat), already in Cargo.lock.
+libflankr_blob = { path = "crates/libflankr_blob" }
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 # Paused time for the confirmation broker's timers.

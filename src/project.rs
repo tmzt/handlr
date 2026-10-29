@@ -122,10 +122,36 @@ pub struct FileText {
 
 /// Whether a root-relative path is refused whatever the patterns say:
 /// any segment `.private`, `.git`, `.env` or `.env.*`, or `.` and `..`.
-pub fn always_refused(path: &str) -> bool {
-    path.split('/').any(|name| {
-        matches!(name, ".private" | ".git" | ".env" | "." | ".." | "") || name.starts_with(".env.")
-    })
+/// Moved to libflankr_blob, so the app matches paths with the same code
+/// (docs/design/20261028_05_BINARY_FILES_PLAN.md, decision 4.9).
+pub use libflankr_blob::always_refused;
+
+/// A `files` transfer's file (plan 20261028_05, decision 6.2): its bytes,
+/// whole, and what it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileBytes {
+    pub bytes: Vec<u8>,
+    /// `text/markdown`, `text/x-diff`, `text/plain` or an image type.
+    pub mime: &'static str,
+    /// The root-relative path, as resolved.
+    pub name: String,
+    /// The file's mtime in Unix ms, 0 when unknown.
+    pub modified_ms: u64,
+}
+
+/// Why [`ProjectFiles::read_bytes`] refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadRefusal {
+    /// The path's rules refuse it (`not_permitted`).
+    NotPermitted,
+    /// No such file (`not_found`).
+    NotFound,
+    /// Over the size asked (`too_large`).
+    TooLarge,
+    /// Not a previewable type (`bad_type`).
+    BadType,
+    /// It could not be read (`io`).
+    Io,
 }
 
 impl ProjectFiles {
@@ -200,33 +226,86 @@ impl ProjectFiles {
         Ok(Listing { paths, more })
     }
 
-    /// The file at the root-relative `path`, at most [`MAX_READ_BYTES`].
-    pub fn read(&self, path: &str) -> Result<FileText, String> {
+    /// The path rules `read` and `read_bytes` share (plan 20261028_05,
+    /// decision 6.2): the root-relative `path` allowed by its name, its
+    /// canonical path inside the root and allowed by its own name too, and
+    /// a regular file. Gives the canonical path, the resolved relative
+    /// path and the metadata.
+    fn resolve(&self, path: &str) -> Result<(PathBuf, String, std::fs::Metadata), Resolve> {
         // A leading `/` is the project's root, never the filesystem's
         // (CHANGES.md 2026-10-27, plan 20261027_04).
         let given = from_root(path);
-        let refused = || format!("'{path}' may not be read. {PATH_FORM}");
         if given.is_empty() || given.contains('\\') || !self.allowed(given) {
-            return Err(refused());
+            return Err(Resolve::Refused);
         }
         // The real file, which a symbolic link may move: inside the root,
         // and allowed by its own name too.
-        let canonical = std::fs::canonicalize(self.root.join(given))
-            .map_err(|_| format!("'{path}' does not exist. {PATH_FORM}"))?;
-        let real = relative(&self.root, &canonical).ok_or_else(refused)?;
+        let canonical =
+            std::fs::canonicalize(self.root.join(given)).map_err(|_| Resolve::Missing)?;
+        let real = relative(&self.root, &canonical).ok_or(Resolve::Refused)?;
         if !self.allowed(&real) {
-            return Err(refused());
+            return Err(Resolve::Refused);
         }
-        let meta = std::fs::metadata(&canonical).map_err(|_| refused())?;
+        let meta = std::fs::metadata(&canonical).map_err(|_| Resolve::Refused)?;
         if !meta.is_file() {
-            return Err(format!("'{path}' is not a file."));
+            return Err(Resolve::NotAFile);
         }
+        Ok((canonical, real, meta))
+    }
+
+    /// The file at the root-relative `path`, at most [`MAX_READ_BYTES`].
+    pub fn read(&self, path: &str) -> Result<FileText, String> {
+        let refused = || format!("'{path}' may not be read. {PATH_FORM}");
+        let (canonical, _, meta) = self.resolve(path).map_err(|e| match e {
+            Resolve::Refused => refused(),
+            Resolve::Missing => format!("'{path}' does not exist. {PATH_FORM}"),
+            Resolve::NotAFile => format!("'{path}' is not a file."),
+        })?;
         let (text, cut) = read_utf8(&canonical, MAX_READ_BYTES)
             .map_err(|e| format!("'{path}' cannot be read: {e}"))?;
         Ok(FileText {
             text,
             cut,
             len: meta.len(),
+        })
+    }
+
+    /// The file at the root-relative `path`, whole, under exactly
+    /// [`read`](Self::read)'s path rules, for a `files` transfer (plan
+    /// 20261028_05, decision 6.2): served only as UTF-8 text or a PNG,
+    /// JPEG, WebP or GIF image, and not cut: over `max` bytes is
+    /// [`ReadRefusal::TooLarge`].
+    pub fn read_bytes(&self, path: &str, max: u64) -> Result<FileBytes, ReadRefusal> {
+        let (canonical, name, meta) = self.resolve(path).map_err(|e| match e {
+            Resolve::Missing => ReadRefusal::NotFound,
+            Resolve::Refused | Resolve::NotAFile => ReadRefusal::NotPermitted,
+        })?;
+        if meta.len() > max {
+            return Err(ReadRefusal::TooLarge);
+        }
+        let file = std::fs::File::open(&canonical).map_err(|_| ReadRefusal::Io)?;
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        file.take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| ReadRefusal::Io)?;
+        if bytes.len() as u64 > max {
+            return Err(ReadRefusal::TooLarge);
+        }
+        let mime = match libflankr_blob::ImageType::sniff(&bytes) {
+            Some(image) => image.mime(),
+            None if std::str::from_utf8(&bytes).is_ok() => text_mime(&name),
+            None => return Err(ReadRefusal::BadType),
+        };
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_millis() as u64);
+        Ok(FileBytes {
+            bytes,
+            mime,
+            name,
+            modified_ms,
         })
     }
 
@@ -252,6 +331,28 @@ impl ProjectFiles {
             }
         }
         None
+    }
+}
+
+/// Why [`ProjectFiles::resolve`] refused a path.
+enum Resolve {
+    Refused,
+    Missing,
+    NotAFile,
+}
+
+/// The MIME type of a UTF-8 file by its name (plan 20261028_05, decision
+/// 6.2).
+fn text_mime(name: &str) -> &'static str {
+    let ext = name
+        .rsplit('/')
+        .next()
+        .and_then(|n| n.rsplit_once('.'))
+        .map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("md" | "markdown") => "text/markdown",
+        Some("diff" | "patch") => "text/x-diff",
+        _ => "text/plain",
     }
 }
 
@@ -401,6 +502,64 @@ mod tests {
             ["docs/design/x.md"]
         );
         assert!(files.list(Some("docs/[a]")).is_err());
+    }
+
+    // Plan 20261028_05, step 4: `files` keeps every path rule of
+    // `read_file`, and serves bytes.
+    #[test]
+    fn read_bytes_keeps_the_path_rules_and_serves_text_and_images() {
+        let (_dir, root) = sample();
+        write(
+            &root,
+            "docs/a.png",
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0],
+        );
+        write(&root, "docs/bin.md", &[0xff, 0xfe, 0x00, 1, 2]);
+        write(&root, "docs/c.diff", b"+a\n");
+        let files = ProjectFiles::open(
+            root.to_str().unwrap(),
+            patterns(&["*.md", "docs/**/*.md", "docs/*.png", "docs/*.diff"]),
+        )
+        .unwrap();
+        let readme = files.read_bytes("README.md", 1024).unwrap();
+        assert_eq!(readme.bytes, b"text");
+        assert_eq!(readme.mime, "text/markdown");
+        assert_eq!(readme.name, "README.md");
+        assert!(readme.modified_ms > 0);
+        let doc = files.read_bytes("/docs/design/x.md", 1024).unwrap();
+        assert_eq!(doc.name, "docs/design/x.md");
+        assert_eq!(
+            files.read_bytes("docs/a.png", 1024).unwrap().mime,
+            "image/png"
+        );
+        assert_eq!(
+            files.read_bytes("docs/c.diff", 1024).unwrap().mime,
+            "text/x-diff"
+        );
+        assert_eq!(
+            files.read_bytes("docs/bin.md", 1024),
+            Err(ReadRefusal::BadType)
+        );
+        assert_eq!(files.read_bytes("README.md", 3), Err(ReadRefusal::TooLarge));
+        assert_eq!(
+            files.read_bytes("docs/none.md", 1024),
+            Err(ReadRefusal::NotFound)
+        );
+        for path in [
+            "src/main.rs",
+            ".env",
+            ".private/key.md",
+            "../x.md",
+            "docs/out.md",
+            "docs/env.md",
+            "docs",
+        ] {
+            assert_eq!(
+                files.read_bytes(path, 1024),
+                Err(ReadRefusal::NotPermitted),
+                "{path}"
+            );
+        }
     }
 
     #[test]

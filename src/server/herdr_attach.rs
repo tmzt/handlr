@@ -344,6 +344,22 @@ impl HerdrAttach {
         attachment.input(&viewer.pane_id, events)
     }
 
+    /// Send `events` to `pane_id` on the attachment, whichever pane its
+    /// viewers show (plan 20261028_05, the 21:29 EDT amendment, item 2: a
+    /// message's image paths as herdr pastes). `Err(Closed)` while the
+    /// attachment is not up.
+    pub fn input_pane(
+        &self,
+        pane_id: &str,
+        events: Vec<ClientPaneInputEvent>,
+    ) -> Result<(), AttachError> {
+        let s = self.lock();
+        let Some(attachment) = &s.attachment else {
+            return Err(AttachError::Closed);
+        };
+        attachment.input(pane_id, events)
+    }
+
     /// Wait until herdr has answered every request sent, or `limit`.
     pub async fn wait_answered(&self, limit: Duration) {
         let until = Instant::now() + limit;

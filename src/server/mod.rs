@@ -4,6 +4,7 @@
 //! connection says `hello` first, then sends any of the common methods;
 //! requests on a connection run concurrently and `cancel` aborts one.
 
+pub mod blob;
 pub mod companion;
 pub mod conn;
 pub mod herdr_attach;
@@ -104,6 +105,9 @@ pub struct Daemon {
     pub herdr_attach: Option<Arc<herdr_attach::HerdrAttach>>,
     /// The built-in plugins and their `[plugins]` (plan 20261028_04).
     pub plugins: Arc<crate::plugins::PluginHost>,
+    /// Binary transfers: the `images` store and the `git` cap (plan
+    /// 20261028_05).
+    pub blob: blob::BlobService,
 }
 
 impl Daemon {
@@ -169,6 +173,14 @@ impl Daemon {
                 ..Default::default()
             },
         );
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        // The images store's folder: `temp_dir()` read once, here (plan
+        // 20261028_05, decision 5.1); tests point it elsewhere.
+        let blob = blob::BlobService::new(
+            turns.blob_temp.clone().unwrap_or_else(std::env::temp_dir),
+            uid,
+        );
         let daemon = Arc::new(Daemon {
             sessions,
             hub,
@@ -180,8 +192,7 @@ impl Daemon {
             repowiki: config.urls.repowiki_url.clone(),
             watches: Arc::new(WatchRegistry::new()),
             events,
-            // SAFETY: getuid has no preconditions and cannot fail.
-            uid: unsafe { libc::getuid() },
+            uid,
             link,
             turns: companion::TurnService::new(Arc::clone(&llm), &turns),
             llm,
@@ -191,6 +202,7 @@ impl Daemon {
             terminal_panes: Arc::new(terminal::TerminalPanes::new()),
             herdr_attach,
             plugins,
+            blob,
         });
         // `[llm.uses.card_summaries]`: each new Finished card summarised
         // once, while card summaries are available.
@@ -418,6 +430,19 @@ pub async fn run(daemon: Arc<Daemon>, listener: UnixListener, options: ServeOpti
         .sessions
         .suggestions
         .spawn_watch(daemon.file_watcher().as_ref());
+    // The images store's cleanup: at start, then hourly (plan 20261028_05,
+    // decision 5.7).
+    {
+        let daemon = Arc::downgrade(&daemon);
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(blob::images::CLEANUP_INTERVAL);
+            loop {
+                every.tick().await;
+                let Some(d) = daemon.upgrade() else { return };
+                let _ = tokio::task::spawn_blocking(move || d.blob.images.cleanup(0)).await;
+            }
+        });
+    }
     // The terminal's herdr attachment, held for the daemon's run (plan
     // 20261027_08, the 23:32 EDT amendment).
     if let Some(attach) = &daemon.herdr_attach {

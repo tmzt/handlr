@@ -437,6 +437,11 @@ async fn start_with(kind: Kind, config: AppConfig, backoff: Duration) -> Env {
         TurnOptions {
             session_dir: Some(dir.path().join("history")),
             agent_sessions: Some(Arc::new(Sessions::with_home(&dir.path().join("home")))),
+            blob_temp: Some({
+                let t = dir.path().join("tmp");
+                std::fs::create_dir_all(&t).unwrap();
+                t
+            }),
             herdr_attach: Some(AttachSettings {
                 backoff_initial: backoff,
                 backoff_max: backoff * 4,
@@ -511,6 +516,7 @@ impl Env {
             notes: Vec::new(),
             frames: VecDeque::new(),
             hello: Value::Null,
+            blobs: VecDeque::new(),
         };
         client.hello = client.reply(0).await;
         client
@@ -523,6 +529,8 @@ struct Client {
     notes: Vec<Value>,
     frames: VecDeque<Frame>,
     hello: Value,
+    /// Binary transfer messages (plan 20261028_05).
+    blobs: VecDeque<libflankr_blob::BlobMessage>,
 }
 
 impl Client {
@@ -544,6 +552,12 @@ impl Client {
             Message::Terminal(bytes) => {
                 self.frames
                     .push_back(Frame::decode(&bytes).expect("a frame that decodes"));
+                None
+            }
+            Message::Binary(bytes) => {
+                self.blobs.push_back(
+                    libflankr_blob::BlobMessage::decode(&bytes).expect("a message that decodes"),
+                );
                 None
             }
             other => panic!("unexpected {other:?}"),
@@ -619,6 +633,52 @@ impl Client {
         let r = self.call("terminal.open", params).await;
         assert!(r["result"]["terminal_id"].is_u64(), "{r}");
         r["result"].clone()
+    }
+
+    /// A whole `images` upload for `session` (plan 20261028_05): its
+    /// reference as hex.
+    async fn upload(&mut self, session: &str, bytes: &[u8]) -> String {
+        use libflankr_blob::{BlobMessage, Body, Namespace, Offer, TransferId};
+        self.next_id += 1;
+        let id = TransferId(self.next_id as u32 + 1000);
+        let ns = Namespace::images();
+        let offer = Offer::for_bytes(session, "x.png", "image/png", bytes, 0);
+        let send = |b: Body| BlobMessage::new(id, ns.clone(), b).encode();
+        self.stream
+            .send_binary(&send(Body::Offer(offer)))
+            .await
+            .unwrap();
+        // CHUNKs only after ACCEPT.
+        loop {
+            if let Some(m) = self.blobs.pop_front() {
+                assert!(matches!(m.body, Body::Accept { .. }), "{m:?}");
+                break;
+            }
+            self.pump().await;
+        }
+        self.stream
+            .send_binary(&send(Body::Chunk {
+                offset: 0,
+                data: bytes.to_vec(),
+            }))
+            .await
+            .unwrap();
+        self.stream
+            .send_binary(&send(Body::End {
+                size: bytes.len() as u64,
+            }))
+            .await
+            .unwrap();
+        loop {
+            while let Some(m) = self.blobs.pop_front() {
+                match m.body {
+                    Body::Accept { .. } => {}
+                    Body::Done { body } => return libflankr_blob::hex(&body),
+                    other => panic!("{other:?}"),
+                }
+            }
+            self.pump().await;
+        }
     }
 
     async fn arm(&mut self, terminal_id: u64) {
@@ -1340,4 +1400,121 @@ async fn resizes_are_sent_at_most_twice_a_second() {
         )
         .await;
     assert_eq!(code(&r), codes::NOT_PERMITTED, "{r}");
+}
+
+// ---------------------------------------------------------------------
+// Plan 20261028_05, step 6: pastes over the attachment.
+
+fn png() -> Vec<u8> {
+    let mut v = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    v.resize(40, 3);
+    v
+}
+
+/// `terminal.paste` is one herdr paste on the attachment, a multi-line
+/// text included; images paste their paths.
+#[tokio::test]
+async fn terminal_paste_is_a_herdr_paste_on_the_attachment() {
+    let env = start(Kind::Full).await;
+    env.attached().await;
+    let mut phone = env.device("s23", true).await;
+    phone.open(json!({"pane_id": "p1"})).await;
+    phone.arm(1).await;
+    let r = phone
+        .call(
+            "terminal.paste",
+            json!({"terminal_id": 1, "text": "echo a\r\necho b"}),
+        )
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    until("the paste", || !env.herdr.inputs().is_empty()).await;
+    let inputs = env.herdr.inputs();
+    assert_eq!(inputs[0].0, "p1");
+    assert_eq!(
+        inputs[0].1,
+        [ClientPaneInputEvent::Paste("echo a\necho b".into())]
+    );
+    let reference = phone.upload("p1", &png()).await;
+    let r = phone
+        .call(
+            "terminal.paste",
+            json!({"terminal_id": 1, "images": [reference]}),
+        )
+        .await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    until("the second paste", || env.herdr.inputs().len() == 2).await;
+    match &env.herdr.inputs()[1].1[..] {
+        [ClientPaneInputEvent::Paste(path)] => {
+            assert!(
+                path.contains("/images/p1/") && path.ends_with(".png"),
+                "{path}"
+            );
+            assert!(!path.contains('"'), "{path}");
+        }
+        other => panic!("{other:?}"),
+    }
+    // Nothing went through herdr's API.
+    assert!(env.mock(|m| m.keystroke_log.clone()).await.is_empty());
+}
+
+/// `agents.send` with parts, with the attachment up: the text as keys,
+/// each image's path as a paste in its place (the first quoted), then
+/// Enter; nothing typed through the API.
+#[tokio::test]
+async fn agents_send_parts_paste_the_paths_on_the_attachment() {
+    let env = start(Kind::Full).await;
+    env.attached().await;
+    let mut phone = env.device("s23", false).await;
+    // A terminal keeps the attachment up.
+    phone.open(json!({"pane_id": "p1"})).await;
+    let r1 = phone.upload("p1", &png()).await;
+    let r2 = phone.upload("p1", &png()).await;
+    let r = phone
+        .call(
+            "agents.send",
+            json!({"pane_id": "p1", "command": "", "kind": "message", "confirmed": true,
+                   "parts": [{"image": r1}, {"text": "ok"}, {"image": r2}]}),
+        )
+        .await;
+    assert_eq!(r["result"]["status"], "sent", "{r}");
+    until("the message", || !env.herdr.inputs().is_empty()).await;
+    let inputs = env.herdr.inputs();
+    assert_eq!(inputs[0].0, "p1");
+    let pastes: Vec<&String> = inputs[0]
+        .1
+        .iter()
+        .filter_map(|e| match e {
+            ClientPaneInputEvent::Paste(p) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pastes.len(), 2, "{:?}", inputs[0].1);
+    assert!(
+        pastes[0].starts_with('"') && pastes[0].ends_with(".png\""),
+        "{}",
+        pastes[0]
+    );
+    assert!(!pastes[1].contains('"'), "{}", pastes[1]);
+    let chars: String = inputs[0]
+        .1
+        .iter()
+        .filter_map(|e| match e {
+            ClientPaneInputEvent::Key {
+                code: ClientKeyCode::Char(c),
+                kind: ClientKeyKind::Press,
+                ..
+            } => Some(*c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chars, " ok ");
+    assert!(matches!(
+        inputs[0].1.last(),
+        Some(ClientPaneInputEvent::Key {
+            code: ClientKeyCode::Enter,
+            kind: ClientKeyKind::Release,
+            ..
+        })
+    ));
+    assert!(env.mock(|m| m.command_log.clone()).await.is_empty());
 }

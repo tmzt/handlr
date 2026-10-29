@@ -228,6 +228,213 @@ fn parse(out: &str, files: bool) -> Vec<Commit> {
         .collect()
 }
 
+/// What a capped run gave (plan 20261028_05, decisions 6.7 and 6.8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Capped {
+    /// stdout, at most `max` bytes; when cut, ending in the marker.
+    pub stdout: Vec<u8>,
+    /// stdout reached `max` less the marker: the process was killed and
+    /// the marker appended.
+    pub cut: bool,
+    /// The exit code (`None` killed by a signal, or by the cut).
+    pub code: Option<i32>,
+    /// stderr's first line, at most 200 characters.
+    pub stderr_line: String,
+}
+
+/// Why a capped run failed to give an output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CappedError {
+    /// Longer than [`TIMEOUT`]; the process was killed.
+    Timeout,
+    /// It could not start or be read.
+    Io(String),
+}
+
+/// The variables a capped run's child gets, its environment cleared
+/// first (decision 6.7): `PATH` and `HOME` (and `TZ`) as the daemon has
+/// them, and git's fixed ones.
+pub fn capped_env() -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    for key in ["PATH", "HOME", "TZ"] {
+        if let Ok(v) = std::env::var(key) {
+            env.push((key.to_string(), v));
+        }
+    }
+    for (k, v) in [
+        ("LC_ALL", "C"),
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GIT_LITERAL_PATHSPECS", "1"),
+        ("GIT_OPTIONAL_LOCKS", "0"),
+    ] {
+        env.push((k.to_string(), v.to_string()));
+    }
+    env
+}
+
+/// The argv after `git -C <root>` for a `git` namespace request (decision
+/// 6.5 and 6.7): the common prefix, then `show` or `diff` with
+/// `--no-color --no-ext-diff --no-textconv`, `--end-of-options` before the
+/// revs, and `-- <pathspec>` (from [`check_path`]) when given.
+pub fn show_diff_args(request: &libflankr_blob::GitRequest, pathspec: Option<&str>) -> Vec<String> {
+    use libflankr_blob::GitRequest;
+    let mut args: Vec<String> = [
+        "--no-pager",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "log.showSignature=false",
+        "-c",
+        "diff.external=",
+        "-c",
+        "core.pager=cat",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    let flags = ["--no-color", "--no-ext-diff", "--no-textconv"];
+    match request {
+        GitRequest::Show { rev, .. } => {
+            args.push("show".into());
+            args.extend(flags.iter().map(|s| s.to_string()));
+            args.push("--end-of-options".into());
+            args.push(rev.to_string());
+        }
+        GitRequest::DiffRange { from, to, .. } => {
+            args.push("diff".into());
+            args.extend(flags.iter().map(|s| s.to_string()));
+            args.push("--end-of-options".into());
+            args.push(format!("{from}..{to}"));
+        }
+        GitRequest::DiffWorkingTree { .. } => {
+            args.push("diff".into());
+            args.extend(flags.iter().map(|s| s.to_string()));
+            args.push("HEAD".into());
+        }
+    }
+    if let Some(spec) = pathspec {
+        args.push("--".into());
+        args.push(spec.to_string());
+    }
+    args
+}
+
+/// Runs `git -C <root> <args>` with the environment cleared to
+/// [`capped_env`], no shell, stdin closed, killed on drop and after
+/// [`TIMEOUT`]; stdout read in pieces up to `max` bytes, the marker
+/// included: at `max` less the marker the process is killed and the marker
+/// appended (decision 6.8). stderr is read up to 4 KiB, only its first
+/// line kept.
+pub async fn run_capped(
+    git: &Path,
+    root: &Path,
+    args: &[String],
+    max: usize,
+    marker: &str,
+) -> Result<Capped, CappedError> {
+    run_capped_with(git, root, args, max, marker, TIMEOUT).await
+}
+
+/// As [`run_capped`], with its timeout (tests).
+pub async fn run_capped_with(
+    git: &Path,
+    root: &Path,
+    args: &[String],
+    max: usize,
+    marker: &str,
+    timeout: Duration,
+) -> Result<Capped, CappedError> {
+    use tokio::io::AsyncReadExt;
+    let mut cmd = tokio::process::Command::new(git);
+    cmd.env_clear()
+        .envs(capped_env())
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().map_err(|e| CappedError::Io(e.to_string()))?;
+    let mut stdout = child.stdout.take().expect("piped");
+    let mut stderr = child.stderr.take().expect("piped");
+    let limit = max.saturating_sub(marker.len());
+    // stderr is read to its end, so the child never blocks on a full
+    // pipe, keeping the first 4 KiB.
+    let err_task = tokio::spawn(async move {
+        let mut kept = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = stderr.read(&mut buf).await {
+            if n == 0 {
+                break;
+            }
+            let room = 4096usize.saturating_sub(kept.len());
+            kept.extend_from_slice(&buf[..n.min(room)]);
+        }
+        kept
+    });
+    let run = async {
+        let mut out = Vec::new();
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut cut = false;
+        loop {
+            let n = stdout
+                .read(&mut buf)
+                .await
+                .map_err(|e| CappedError::Io(e.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            let room = limit - out.len();
+            if n >= room {
+                out.extend_from_slice(&buf[..room]);
+                cut = true;
+                break;
+            }
+            out.extend_from_slice(&buf[..n]);
+        }
+        if cut {
+            let _ = child.start_kill();
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| CappedError::Io(e.to_string()))?;
+        Ok::<_, CappedError>((out, cut, status.code()))
+    };
+    let (mut out, cut, code) = match tokio::time::timeout(timeout, run).await {
+        Ok(r) => r?,
+        Err(_) => {
+            // `child` is dropped with the future: kill_on_drop kills it.
+            err_task.abort();
+            return Err(CappedError::Timeout);
+        }
+    };
+    let err = tokio::time::timeout(Duration::from_secs(1), err_task)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    if cut {
+        out.extend_from_slice(marker.as_bytes());
+    }
+    let stderr_line: String = String::from_utf8_lossy(&err)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(200)
+        .collect();
+    Ok(Capped {
+        stdout: out,
+        cut,
+        code: if cut { None } else { code },
+        stderr_line,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +623,116 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let path = std::env::join_paths([empty.path(), bin.path()]).unwrap();
         assert_eq!(find_on_path(Some(&path)), Some(fake));
+    }
+
+    // Plan 20261028_05, step 5: the capped runner, with stand-ins for git.
+
+    /// An executable script `body` in a new folder.
+    fn stand_in(body: &str) -> (tempfile::TempDir, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("git");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn the_childs_environment_holds_only_the_fixed_variables() {
+        let (dir, git) = stand_in("env");
+        let out = run_capped(&git, dir.path(), &[], 1 << 20, "[cut]")
+            .await
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        let mut keys: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.split_once('=').map(|(k, _)| k))
+            // The shell's own.
+            .filter(|k| !["PWD", "SHLVL", "_", "OLDPWD"].contains(k))
+            .collect();
+        keys.sort();
+        let mut want = vec![
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_LITERAL_PATHSPECS",
+            "GIT_OPTIONAL_LOCKS",
+            "GIT_TERMINAL_PROMPT",
+            "LC_ALL",
+        ];
+        for k in ["HOME", "PATH", "TZ"] {
+            if std::env::var(k).is_ok() {
+                want.push(k);
+            }
+        }
+        want.sort();
+        assert_eq!(keys, want, "{text}");
+        assert!(text.contains("GIT_OPTIONAL_LOCKS=0"));
+        assert!(!out.cut);
+        assert_eq!(out.code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn a_long_output_is_cut_with_the_marker_and_a_slow_one_times_out() {
+        // 9 MiB of output, cut at 8 MiB with the marker.
+        let (dir, git) = stand_in("head -c 9437184 /dev/zero");
+        let marker = "\n[flankr: cut at 8 MiB]\n";
+        let out = run_capped(&git, dir.path(), &[], 8 << 20, marker)
+            .await
+            .unwrap();
+        assert!(out.cut);
+        assert_eq!(out.stdout.len(), 8 << 20);
+        assert!(out.stdout.ends_with(marker.as_bytes()));
+        // A stand-in that sleeps past the timeout is killed.
+        let (dir, git) = stand_in("exec sleep 6");
+        let started = std::time::Instant::now();
+        let err = run_capped_with(
+            &git,
+            dir.path(),
+            &[],
+            1024,
+            marker,
+            Duration::from_millis(300),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, CappedError::Timeout);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        // A failure's first stderr line, at most 200 characters.
+        let (dir, git) = stand_in(&format!(
+            "echo '{}' >&2; echo second >&2; exit 3",
+            "x".repeat(300)
+        ));
+        let out = run_capped(&git, dir.path(), &[], 1024, marker)
+            .await
+            .unwrap();
+        assert_eq!(out.code, Some(3));
+        assert_eq!(out.stderr_line, "x".repeat(200));
+    }
+
+    #[test]
+    fn the_argv_is_fixed_and_options_stop_before_the_revs() {
+        let r = libflankr_blob::GitRequest::parse("show HEAD~1 -- a.txt").unwrap();
+        let args = show_diff_args(&r, Some("./a.txt"));
+        let tail: Vec<&str> = args.iter().skip(9).map(String::as_str).collect();
+        assert_eq!(
+            tail,
+            [
+                "show",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--end-of-options",
+                "HEAD~1",
+                "--",
+                "./a.txt"
+            ]
+        );
+        assert!(args.contains(&"diff.external=".to_string()));
+        assert!(args.contains(&"core.pager=cat".to_string()));
+        let r = libflankr_blob::GitRequest::parse("diff").unwrap();
+        let args = show_diff_args(&r, None);
+        assert_eq!(args.last().unwrap(), "HEAD");
+        assert!(!args.contains(&"--end-of-options".to_string()));
+        let r = libflankr_blob::GitRequest::parse("diff HEAD~2..HEAD").unwrap();
+        assert_eq!(show_diff_args(&r, None).last().unwrap(), "HEAD~2..HEAD");
     }
 }

@@ -882,6 +882,149 @@ pub(super) async fn input(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorOb
     ok(common::Empty {})
 }
 
+/// Text for `terminal.paste` (plan 20261028_05, the 23:43 EDT amendment,
+/// item 2): at most 8192 bytes of UTF-8, `\r\n` and a lone `\r` made
+/// `\n`, any other control character but `\t` and `\n` refused.
+pub fn paste_text(text: &str) -> Result<String, String> {
+    if text.len() > common::TERMINAL_PASTE_TEXT_MAX {
+        return Err(format!(
+            "a paste is at most {} bytes",
+            common::TERMINAL_PASTE_TEXT_MAX
+        ));
+    }
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if let Some(c) = text
+        .chars()
+        .find(|&c| c.is_control() && c != '\t' && c != '\n')
+    {
+        return Err(format!("the control character {c:?} is not pasted"));
+    }
+    if text.is_empty() {
+        return Err("the paste is empty".to_string());
+    }
+    Ok(text)
+}
+
+/// `text` as `pane.send_keys` tokens, at most `TERMINAL_INPUT_MAX` bytes
+/// of text per batch: one key per character, a space as `space` and a tab
+/// as `tab`. `text` holds no newline or other control character.
+pub fn literal_batches(text: &str) -> Vec<String> {
+    let mut batches = Vec::new();
+    let mut batch: Vec<String> = Vec::new();
+    let mut bytes = 0;
+    for c in text.chars() {
+        let n = c.len_utf8();
+        if bytes + n > TERMINAL_INPUT_MAX && !batch.is_empty() {
+            batches.push(batch.join(" "));
+            batch.clear();
+            bytes = 0;
+        }
+        batch.push(match c {
+            ' ' => "space".to_string(),
+            '\t' => "tab".to_string(),
+            c => c.to_string(),
+        });
+        bytes += n;
+    }
+    if !batch.is_empty() {
+        batches.push(batch.join(" "));
+    }
+    batches
+}
+
+/// `terminal.paste` (plan 20261028_05, the 23:43 EDT amendment, item 2;
+/// plan 20261028_06, decision 10): text, or the paths of uploaded images
+/// joined by single spaces, as one herdr paste on the terminal's
+/// attachment (bracketed when the pane has bracketed paste on), else as
+/// literal keystrokes in 64-byte batches, where a multi-line text is
+/// refused. Gated as `terminal.input` is; never logs the text or paths.
+pub(super) async fn paste(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
+    let p: common::TerminalPasteParams = super::conn::params(raw)?;
+    let (term, _) = input_allowed(conn, p.terminal_id)?;
+    require_armed(&term)?;
+    let invalid = |m: String| ErrorObject::new(codes::INVALID_PARAMS, m);
+    let (text, references) = match (p.text, p.images.is_empty()) {
+        (Some(text), true) => (paste_text(&text).map_err(invalid)?, Vec::new()),
+        (None, false) => {
+            if p.images.len() > common::TERMINAL_PASTE_IMAGES_MAX {
+                return Err(invalid(format!(
+                    "at most {} images in one paste",
+                    common::TERMINAL_PASTE_IMAGES_MAX
+                )));
+            }
+            let store = &conn.daemon.blob.images;
+            let mut paths = Vec::new();
+            for r in &p.images {
+                let path = store
+                    .check(r, &term.pane_id, &conn.principal().id)
+                    .map_err(|e| {
+                        invalid(match e {
+                            super::blob::images::RefError::NotYours => {
+                                "That image was not uploaded for this session".to_string()
+                            }
+                            super::blob::images::RefError::Expired => {
+                                "That image has expired; attach it again".to_string()
+                            }
+                        })
+                    })?;
+                paths.push(path.to_string_lossy().into_owned());
+            }
+            (paths.join(" "), p.images.clone())
+        }
+        _ => {
+            return Err(invalid("give exactly one of text and images".to_string()));
+        }
+    };
+    let mut sent = false;
+    if let Some(attach) = term.attached() {
+        match send_attached(
+            &attach,
+            &term,
+            vec![ClientPaneInputEvent::Paste(text.clone())],
+        )
+        .await
+        {
+            Ok(()) => sent = true,
+            Err(AttachError::Closed) => {}
+            Err(e) => return Err(herdr_unavailable(e)),
+        }
+    }
+    if !sent {
+        // An unbracketed newline would run the line.
+        if text.contains('\n') {
+            return Err(not_permitted(
+                "A multi-line paste needs the attached terminal.",
+            ));
+        }
+        for batch in literal_batches(&text) {
+            conn.daemon
+                .client
+                .send_keys(&term.pane_id, &batch)
+                .await
+                .map_err(herdr_unavailable)?;
+        }
+    }
+    conn.daemon.blob.images.consume(&references);
+    log::info!(
+        "{} pasted {} byte(s) into terminal {} on pane '{}' ({}; terminal_input paste{})",
+        conn.principal().id,
+        text.len(),
+        term.id,
+        term.pane_id,
+        term.agent,
+        if references.is_empty() {
+            String::new()
+        } else {
+            format!(", {} image(s)", references.len())
+        }
+    );
+    notice(conn, &term, |name| {
+        format!("Pasted into {name}'s terminal.")
+    })
+    .await;
+    ok(common::Empty {})
+}
+
 /// A touch, then `events`, over the attachment.
 async fn send_attached(
     attach: &Arc<HerdrAttach>,
@@ -1502,6 +1645,28 @@ mod tests {
         let echo =
             json!({"method": "pane.scroll", "params": {"pane_id": "p1", "offset_from_bottom": 3}});
         assert_eq!(scroll_from_response(&echo), None);
+    }
+
+    // Plan 20261028_05, step 6: terminal.paste's text rules.
+    #[test]
+    fn paste_text_and_literal_batches() {
+        assert_eq!(paste_text("a\r\nb\rc").unwrap(), "a\nb\nc");
+        assert_eq!(paste_text("tab\there").unwrap(), "tab\there");
+        assert!(paste_text("bell\u{7}").is_err());
+        assert!(paste_text("esc\u{1b}[A").is_err());
+        assert!(paste_text("").is_err());
+        assert!(paste_text(&"a".repeat(8193)).is_err());
+        assert!(paste_text(&"a".repeat(8192)).is_ok());
+        assert_eq!(literal_batches("ls -la"), ["l s space - l a"]);
+        let long = "x".repeat(130);
+        let batches = literal_batches(&long);
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].split(' ').count(), 64);
+        assert_eq!(literal_batches("a\tb"), ["a tab b"]);
+        // Every batch's keys pass terminal.input's own parser.
+        for b in literal_batches("/tmp/x y.png") {
+            assert!(parse_keys(&b, false).is_ok(), "{b}");
+        }
     }
 
     #[test]

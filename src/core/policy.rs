@@ -184,6 +184,105 @@ pub fn check_message(
     })
 }
 
+/// A message in parts, checked (plan 20261028_05, decision 7 and the 21:29
+/// EDT amendment, item 4): what [`check_parts`] gives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedParts {
+    /// The parts in order, each text part cleaned (runs of space folded,
+    /// surrounding space trimmed; empty ones dropped), each image part its
+    /// reference as given.
+    pub parts: Vec<Part>,
+    /// The user's words joined, as checked; empty for an image-only send.
+    pub text: String,
+    /// Always true: a message is always confirmed.
+    pub require_confirmation: bool,
+}
+
+/// One part of a [`CheckedParts`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Part {
+    Text(String),
+    Image(String),
+}
+
+/// Most parts in one send, and most images.
+pub const PARTS_MAX: usize = libflankr_blob::PARTS_PER_SEND;
+pub const IMAGES_MAX: usize = libflankr_blob::IMAGES_PER_SEND;
+
+/// Check a message in parts: every send with images needs the agent's
+/// entry, reach and `allow_messages`, not `allow_arbitrary_commands`; the
+/// text parts, joined with one space, are checked as one message by
+/// `validate_message` and `check_paths` against `root`, exactly as
+/// [`check_message`] checks a typed one, unless there is no text at all
+/// (an image-only send). The image paths are inserted by the caller after
+/// this check and are never run through `check_paths`.
+pub fn check_parts(
+    principal: &Principal,
+    agents: &[AgentConfig],
+    agent: &str,
+    pane_id: &str,
+    parts: &[Part],
+    root: Option<&str>,
+) -> Result<CheckedParts, Denied> {
+    let agent_cfg = entry(principal, agents, agent, pane_id)?;
+    if !agent_cfg.allow_messages {
+        return Err(Denied::MessagesOff {
+            agent: agent.to_string(),
+        });
+    }
+    if parts.len() > PARTS_MAX {
+        return Err(Denied::Invalid(format!(
+            "Message rejected: more than {PARTS_MAX} parts."
+        )));
+    }
+    let images = parts.iter().filter(|p| matches!(p, Part::Image(_))).count();
+    if images > IMAGES_MAX {
+        return Err(Denied::Invalid(format!(
+            "Message rejected: more than {IMAGES_MAX} images."
+        )));
+    }
+    let mut cleaned = Vec::new();
+    for part in parts {
+        match part {
+            Part::Text(t) => {
+                if let Some(bad) = t.chars().find(|c| c.is_control()) {
+                    return Err(Denied::Invalid(format!(
+                        "Message rejected: control characters (found {bad:?}) are not permitted."
+                    )));
+                }
+                let folded = t.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !folded.is_empty() {
+                    cleaned.push(Part::Text(folded));
+                }
+            }
+            Part::Image(r) => cleaned.push(Part::Image(r.clone())),
+        }
+    }
+    let joined = cleaned
+        .iter()
+        .filter_map(|p| match p {
+            Part::Text(t) => Some(t.as_str()),
+            Part::Image(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let text = if joined.is_empty() {
+        if images == 0 {
+            return Err(Denied::Invalid("Message cannot be empty.".to_string()));
+        }
+        String::new()
+    } else {
+        let text = validate_message(&joined).map_err(Denied::Invalid)?;
+        check_paths(&text, root).map_err(Denied::Invalid)?;
+        text
+    };
+    Ok(CheckedParts {
+        parts: cleaned,
+        text,
+        require_confirmation: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +410,87 @@ mod tests {
         // On the principal's list but not in [[agents]]: still unconfigured.
         let err = check(&narrowed, &agents(), "codex", "p3", "continue").unwrap_err();
         assert!(matches!(err, Denied::UnconfiguredAgent { .. }));
+    }
+
+    // Plan 20261028_05, step 6: a message in parts.
+    #[test]
+    fn parts_need_allow_messages_and_check_the_text_as_one_message() {
+        let p = Principal::local("t");
+        let img = |r: &str| Part::Image(r.to_string());
+        let txt = |t: &str| Part::Text(t.to_string());
+        // claude: no arbitrary commands; messages on (the default).
+        let checked = check_parts(&p, &agents(), "claude", "p1", &[img("a")], None).unwrap();
+        assert_eq!(checked.text, "");
+        assert_eq!(checked.parts, [img("a")]);
+        assert!(checked.require_confirmation);
+        // allow_messages off: refused, image-only or not.
+        let off = vec![AgentConfig::new("claude", vec![], true).with_messages(false)];
+        for parts in [vec![img("a")], vec![txt("look"), img("a")]] {
+            assert_eq!(
+                check_parts(&p, &off, "claude", "p1", &parts, None).unwrap_err(),
+                Denied::MessagesOff {
+                    agent: "claude".to_string()
+                }
+            );
+        }
+        // The text, joined, is checked as a typed message is.
+        let checked = check_parts(
+            &p,
+            &agents(),
+            "claude",
+            "p1",
+            &[txt("  look   at "), img("a"), txt(""), txt("and src/x.rs")],
+            Some("/work/x"),
+        )
+        .unwrap();
+        assert_eq!(checked.text, "look at and src/x.rs");
+        assert_eq!(
+            checked.parts,
+            [txt("look at"), img("a"), txt("and src/x.rs")]
+        );
+        // A typed path into the temp folder is still outside the project.
+        let err = check_parts(
+            &p,
+            &agents(),
+            "claude",
+            "p1",
+            &[txt("see /tmp/flankr-501/images/p1/x.png"), img("a")],
+            Some("/work/x"),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("outside the project"), "{err}");
+        // The first-word rule applies to the user's words as a whole.
+        let err = check_parts(
+            &p,
+            &agents(),
+            "claude",
+            "p1",
+            &[img("a"), txt("/compact")],
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("makes it a command"), "{err}");
+        // Control characters, limits, nothing at all.
+        assert!(
+            check_parts(
+                &p,
+                &agents(),
+                "claude",
+                "p1",
+                &[txt("a\nb"), img("a")],
+                None
+            )
+            .is_err()
+        );
+        let five: Vec<Part> = (0..5).map(|i| img(&i.to_string())).collect();
+        assert!(check_parts(&p, &agents(), "claude", "p1", &five, None).is_err());
+        let many: Vec<Part> = (0..17).map(|_| txt("a")).collect();
+        assert!(check_parts(&p, &agents(), "claude", "p1", &many, None).is_err());
+        assert!(check_parts(&p, &agents(), "claude", "p1", &[txt("  ")], None).is_err());
+        // Reach and entry as for any send.
+        assert!(matches!(
+            check_parts(&p, &agents(), "codex", "p3", &[img("a")], None),
+            Err(Denied::UnconfiguredAgent { .. })
+        ));
     }
 }

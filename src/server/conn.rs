@@ -63,11 +63,26 @@ enum Origin {
 }
 
 /// What a connection's writer sends: JSON-RPC lines, and on a link
-/// connection terminal frames (plan 20261027_07, decision 3), in the order
-/// they were queued.
+/// connection terminal frames (plan 20261027_07, decision 3) and binary
+/// transfer messages (plan 20261028_05, decision 4.5). Control messages go
+/// out in the order they were queued; a bulk message (a CHUNK) only when
+/// no control message waits.
 pub(super) enum Outgoing {
     Line(String),
     Terminal(Vec<u8>),
+    /// A kind-2 message; `written` fires once the writer has written it.
+    /// Which queue it is on says whether it is bulk.
+    Binary {
+        bytes: Vec<u8>,
+        written: Option<tokio::sync::oneshot::Sender<()>>,
+    },
+}
+
+/// What a connection reads: JSON-RPC lines, and on a link connection
+/// binary transfer messages.
+pub(super) enum Inbound {
+    Line(String),
+    Binary(Vec<u8>),
 }
 
 pub(super) struct Conn {
@@ -75,6 +90,8 @@ pub(super) struct Conn {
     id: u64,
     origin: Origin,
     out: mpsc::UnboundedSender<Outgoing>,
+    /// The writer's bulk queue: CHUNKs (plan 20261028_05, decision 4.5).
+    bulk: mpsc::UnboundedSender<Outgoing>,
     principal: OnceLock<Principal>,
     /// Set at `hello` for `flankr.companion`: its session.
     session: OnceLock<Arc<Session>>,
@@ -126,6 +143,8 @@ pub(super) struct Conn {
     pub(super) terminals: super::terminal::Terminals,
     /// Running plugin calls (plan 20261028_04, decision 3.2, item 2).
     plugin_calls: crate::plugins::CallSlots,
+    /// Binary transfers (plan 20261028_05).
+    pub(super) blob: super::blob::Transfers,
 }
 
 impl Conn {
@@ -152,6 +171,26 @@ impl Conn {
         if self.is_link() {
             let _ = self.out.send(Outgoing::Terminal(frame));
         }
+    }
+
+    /// Queue a binary transfer message; only on a link connection. A
+    /// `bulk` one (a CHUNK) waits for the control queue to be empty;
+    /// `written` fires once it is written.
+    pub(super) fn send_binary(
+        &self,
+        bytes: Vec<u8>,
+        bulk: bool,
+        written: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        if !self.is_link() {
+            return;
+        }
+        let message = Outgoing::Binary { bytes, written };
+        let _ = if bulk {
+            self.bulk.send(message)
+        } else {
+            self.out.send(message)
+        };
     }
 
     /// The connection's number, unique in the daemon's run.
@@ -288,13 +327,18 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     });
-    let lines = FramedRead::new(read, LinesCodec::new_with_max_length(MAX_LINE))
-        .map(|line| line.map_err(|e| format!("unreadable line: {e}")));
+    let lines = FramedRead::new(read, LinesCodec::new_with_max_length(MAX_LINE)).map(|line| {
+        line.map(Inbound::Line)
+            .map_err(|e| format!("unreadable line: {e}"))
+    });
+    // The daemon socket carries no kind 2: its bulk queue is never read.
+    let (bulk, _) = mpsc::unbounded_channel::<Outgoing>();
     serve(
         daemon,
         Origin::Local,
         lines,
         out,
+        bulk,
         written,
         CancellationToken::new(),
     )
@@ -305,11 +349,13 @@ pub async fn handle(daemon: Arc<Daemon>, stream: UnixStream) {
 /// A link connection that finished its handshake as `entry`, with the
 /// client's static key `key`. `first` is
 /// the message carried in the handshake, already checked to be `hello`.
-/// Each link message is one JSON-RPC object, or from the daemon a terminal
-/// frame (plan 20261027_07, decision 3) on the same writer, in queue
-/// order; `close` ends the connection (its entry was revoked or replaced).
-/// A terminal frame from the client is a protocol error, answered as an
-/// unreadable message is (`INVALID_REQUEST`, no id), and closes it.
+/// Each link message is one JSON-RPC object, from the daemon a terminal
+/// frame (plan 20261027_07, decision 3), or either way a binary transfer
+/// message (plan 20261028_05), on the same writer; `close` ends the
+/// connection (its entry was revoked or replaced). The writer drains its
+/// control queue first and sends a CHUNK only when it is empty (decision
+/// 4.5). A terminal frame from the client is a protocol error, answered as
+/// an unreadable message is (`INVALID_REQUEST`, no id), and closes it.
 pub(crate) async fn handle_link(
     daemon: Arc<Daemon>,
     stream: LinkStream<TcpStream>,
@@ -320,10 +366,28 @@ pub(crate) async fn handle_link(
 ) {
     let (reader, mut writer) = stream.into_split();
     let (out, mut out_rx) = mpsc::unbounded_channel::<Outgoing>();
+    let (bulk, mut bulk_rx) = mpsc::unbounded_channel::<Outgoing>();
     let written = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let counted = Arc::clone(&written);
     let write_task = tokio::spawn(async move {
-        while let Some(message) = out_rx.recv().await {
+        let mut bulk_open = true;
+        loop {
+            // Control first: JSON-RPC and terminal frames wait at most one
+            // CHUNK (plan 20261028_05, decision 4.5).
+            let message = tokio::select! {
+                biased;
+                m = out_rx.recv() => match m {
+                    Some(m) => m,
+                    None => break,
+                },
+                m = bulk_rx.recv(), if bulk_open => match m {
+                    Some(m) => m,
+                    None => {
+                        bulk_open = false;
+                        continue;
+                    }
+                },
+            };
             match message {
                 Outgoing::Line(line) => {
                     if writer.send_message(line.as_bytes()).await.is_err() {
@@ -336,15 +400,26 @@ pub(crate) async fn handle_link(
                         return;
                     }
                 }
+                Outgoing::Binary { bytes, written } => {
+                    if writer.send_binary(&bytes).await.is_err() {
+                        return;
+                    }
+                    if let Some(written) = written {
+                        let _ = written.send(());
+                    }
+                }
             }
         }
         let _ = writer.shutdown().await;
     });
-    let first = futures_util::stream::iter(first.map(decode_message));
+    let first = futures_util::stream::iter(first.map(|m| decode_message(m).map(Inbound::Line)));
     let rest = futures_util::stream::unfold(Some(reader), |reader| async move {
         let mut reader = reader?;
         match reader.recv().await {
-            Ok(Message::Json(message)) => Some((decode_message(message), Some(reader))),
+            Ok(Message::Json(message)) => {
+                Some((decode_message(message).map(Inbound::Line), Some(reader)))
+            }
+            Ok(Message::Binary(message)) => Some((Ok(Inbound::Binary(message)), Some(reader))),
             Ok(_) => Some((
                 Err("a terminal frame from the client; only the daemon sends them".to_string()),
                 None,
@@ -358,6 +433,7 @@ pub(crate) async fn handle_link(
         Origin::Link { entry, key },
         Box::pin(first.chain(rest)),
         out,
+        bulk,
         written,
         close,
     )
@@ -375,16 +451,18 @@ async fn serve<S>(
     origin: Origin,
     mut lines: S,
     out: mpsc::UnboundedSender<Outgoing>,
+    bulk: mpsc::UnboundedSender<Outgoing>,
     written: Arc<std::sync::atomic::AtomicU64>,
     close: CancellationToken,
 ) where
-    S: Stream<Item = Result<String, String>> + Unpin,
+    S: Stream<Item = Result<Inbound, String>> + Unpin,
 {
     let conn = Arc::new(Conn {
         daemon,
         id: NEXT_CONN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         origin,
         out,
+        bulk,
         principal: OnceLock::new(),
         session: OnceLock::new(),
         topics: Mutex::new(HashSet::new()),
@@ -407,6 +485,7 @@ async fn serve<S>(
         written,
         terminals: Default::default(),
         plugin_calls: Default::default(),
+        blob: Default::default(),
     });
     let mut forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -417,7 +496,23 @@ async fn serve<S>(
         };
         let Some(line) = line else { break };
         let line = match line {
-            Ok(line) => line,
+            Ok(Inbound::Line(line)) => line,
+            // A binary transfer message (plan 20261028_05): from a
+            // companion after hello only, applied before the next message
+            // is read; an unreadable header closes the connection.
+            Ok(Inbound::Binary(bytes)) => {
+                if conn.principal.get().is_none() || !conn.is_companion() {
+                    log::warn!(
+                        "Connection {} closed: a binary message before a companion hello",
+                        conn.id
+                    );
+                    break;
+                }
+                if super::blob::on_message(&conn, bytes).await.is_err() {
+                    break;
+                }
+                continue;
+            }
             Err(e) => {
                 conn.send(&Response::err(
                     None,
@@ -510,6 +605,7 @@ async fn serve<S>(
     }
     conn.terminals.close_all(&conn.daemon);
     conn.plugin_calls.close();
+    conn.blob.close();
     if let Some(link) = &conn.daemon.link {
         link.end_pair_mode(conn.id);
     }
@@ -599,6 +695,7 @@ async fn hello(conn: &Conn, request: &Request) -> Result<(Principal, Value), Err
             llm: Some(conn.daemon.llm.info()),
             terminal: super::terminal::info(&conn.daemon, conn.is_link()),
             plugins: Some(conn.daemon.plugins.infos()),
+            blob: super::blob::info(&conn.daemon, conn.is_link()),
         })?;
         return Ok((principal, result));
     }
@@ -844,6 +941,7 @@ async fn call(
         // Plan 20261027_08, steps 7 and 8.
         methods::TERMINAL_MOUSE if conn.is_companion() => super::terminal::mouse(conn, raw).await,
         methods::TERMINAL_RESIZE if conn.is_companion() => super::terminal::resize(conn, raw),
+        methods::TERMINAL_PASTE if conn.is_companion() => super::terminal::paste(conn, raw).await,
         companion::methods::PLUGIN_CALL if conn.is_companion() => {
             plugin_call(conn, request_id, params(raw)?)
         }
@@ -1032,6 +1130,9 @@ async fn call(
             let snap = snapshot(conn).await?;
             let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
             let agent = extract_agent_name_for_pane(&snap, &pane_id);
+            if !p.parts.is_empty() {
+                return send_parts(conn, &snap, &pane_id, &agent, p).await;
+            }
             if p.kind == common::SendKind::Message {
                 return send_message(conn, &snap, &pane_id, &agent, p).await;
             }
@@ -1447,6 +1548,232 @@ async fn send_message(
     })
 }
 
+/// One piece of a composed message (plan 20261028_05, decision 7.3).
+enum Piece {
+    Text(String),
+    /// An image's absolute path, quoted when it leads the message (7.4).
+    Path(String),
+}
+
+/// `agents.send` with `parts` (plan 20261028_05, decision 7 and the 21:29
+/// EDT amendment, items 2-4): the parts checked by `policy::check_parts`,
+/// then each image reference this principal holds for this pane replaced
+/// by its file's absolute path, the first one quoted when the message
+/// starts with it. The composed line is not run through `check_paths`.
+/// A tap sends at once, the paths as herdr pastes when the attachment is
+/// up, else typed; otherwise the line is confirmed as a message, its card
+/// showing `[image N]` for each path.
+async fn send_parts(
+    conn: &Arc<Conn>,
+    snap: &Value,
+    pane_id: &str,
+    agent: &str,
+    p: common::AgentsSendParams,
+) -> Result<Value, ErrorObject> {
+    let daemon = &conn.daemon;
+    let principal = conn.principal();
+    if !p.command.trim().is_empty() || p.kind != common::SendKind::Message {
+        return Err(ErrorObject::new(
+            codes::INVALID_PARAMS,
+            "a send with parts has an empty command and kind \"message\"",
+        ));
+    }
+    let mut parts = Vec::with_capacity(p.parts.len());
+    for part in &p.parts {
+        parts.push(match part {
+            common::SendPart::Text(t) => policy::Part::Text(t.clone()),
+            common::SendPart::Image(r) => policy::Part::Image(r.clone()),
+            _ => {
+                return Err(ErrorObject::new(
+                    codes::INVALID_PARAMS,
+                    "a part this daemon does not know",
+                ));
+            }
+        });
+    }
+    let root = crate::core::agents::agents(snap)
+        .into_iter()
+        .find(|a| crate::watch::pane_ids_match(&a.pane_id, pane_id))
+        .and_then(|a| a.cwd);
+    let checked = policy::check_parts(
+        principal,
+        &daemon.agents,
+        agent,
+        pane_id,
+        &parts,
+        root.as_deref(),
+    )
+    .map_err(|denied| ErrorObject::new(codes::NOT_PERMITTED, denied.to_string()))?;
+    // Only paths the daemon made, from live references, are inserted.
+    let store = &daemon.blob.images;
+    let mut pieces = Vec::new();
+    let mut references = Vec::new();
+    let mut shown = Vec::new();
+    for part in &checked.parts {
+        match part {
+            policy::Part::Text(t) => {
+                shown.push(t.clone());
+                pieces.push(Piece::Text(t.clone()));
+            }
+            policy::Part::Image(r) => {
+                let path = store.check(r, pane_id, &principal.id).map_err(|e| {
+                    ErrorObject::new(
+                        codes::NOT_PERMITTED,
+                        match e {
+                            super::blob::images::RefError::NotYours => {
+                                "That image was not uploaded for this session"
+                            }
+                            super::blob::images::RefError::Expired => {
+                                "That image has expired; attach it again"
+                            }
+                        },
+                    )
+                })?;
+                if references.contains(r) {
+                    return Err(ErrorObject::new(
+                        codes::NOT_PERMITTED,
+                        "That image is in the message twice",
+                    ));
+                }
+                references.push(r.clone());
+                let path = path.to_string_lossy().into_owned();
+                shown.push(format!("[image {}]", references.len()));
+                pieces.push(Piece::Path(if pieces.is_empty() {
+                    format!("\"{path}\"")
+                } else {
+                    path
+                }));
+            }
+        }
+    }
+    let line = pieces
+        .iter()
+        .map(|p| match p {
+            Piece::Text(t) | Piece::Path(t) => t.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let shown = shown.join(" ");
+    let count = references.len();
+    if tapped(conn, &p) {
+        deliver_pieces(daemon, pane_id, &pieces, &line).await?;
+        store.consume(&references);
+        log::info!(
+            "Message for pane '{pane_id}' with {count} image(s) confirmed by the tap ({} characters)",
+            line.chars().count()
+        );
+        return ok(common::AgentsSendResult::Sent);
+    }
+    // Confirmed later: the approval types the line (no paste); the card
+    // shows `[image N]`. The references are used now, by this send.
+    let lifetime = if conn.is_companion() {
+        Lifetime::VoiceTurn
+    } else {
+        Lifetime::Standing
+    };
+    let names = daemon.names(snap);
+    let named = names.get(pane_id);
+    let spoken = named
+        .map(|a| a.spoken.clone())
+        .unwrap_or_else(|| crate::core::naming::capitalise(agent));
+    let first_words: Vec<&str> = shown.split(' ').take(3).collect();
+    let fallback = format!("message {}", first_words.join(" "));
+    let request = HandleRequest {
+        given: p.handle.as_deref(),
+        command: &fallback,
+        agent: &spoken,
+        tab_code: None,
+    };
+    let priors = daemon.broker.word_priors();
+    let mut attempt = 0;
+    let (confirm_id, handle) = loop {
+        let pending = daemon.broker.pending_handle_infos(&principal.id);
+        let settled = confirm::settle_handle(&request, &pending, &priors, confirm::random_word);
+        match daemon.broker.request_message_typed(
+            principal,
+            pane_id,
+            agent,
+            &shown,
+            &line,
+            Some(&settled),
+            lifetime,
+        ) {
+            Ok(id) => break (id, settled.handle),
+            Err(ConfirmError::DuplicateHandle(_)) if attempt < 3 => attempt += 1,
+            Err(e) => return Err(confirm_error(e)),
+        }
+    };
+    store.consume(&references);
+    conn.opened.lock().unwrap().insert(confirm_id);
+    if lifetime == Lifetime::VoiceTurn
+        && let Some((view, token)) = daemon.broker.pending(confirm_id)
+    {
+        let pane_names = named.map(|a| super::PaneNames {
+            name: a.shown.clone(),
+            spoken: a.spoken.clone(),
+            project: a.agent.project.clone(),
+            tab: a.tab.as_ref().map(|t| t.shown.clone()),
+        });
+        conn.send(&Notification::new(
+            methods::CONFIRM_REQUESTED,
+            turns::confirm_requested(&view, &token, principal, false, pane_names),
+        ));
+    }
+    log::info!(
+        "Message confirmation {confirm_id} handle '{handle}' for pane '{pane_id}' with {count} \
+         image(s) ({} characters)",
+        line.chars().count()
+    );
+    ok(common::AgentsSendResult::Pending {
+        confirm_id,
+        handle: Some(handle),
+    })
+}
+
+/// A composed message into `pane_id`: with herdr's attachment up, in
+/// order on it, each text run as keys, each path as a herdr paste
+/// (bracketed when the pane has bracketed paste on), then Enter (the 21:29
+/// EDT amendment, item 2); else `line` typed as any message is.
+async fn deliver_pieces(
+    daemon: &super::Daemon,
+    pane_id: &str,
+    pieces: &[Piece],
+    line: &str,
+) -> Result<(), ErrorObject> {
+    use libherdr_term::KeyToken;
+    use libherdr_term::herdr::{ClientKeyCode, ClientPaneInputEvent};
+    if let Some(attach) = daemon.herdr_attach.as_ref().filter(|a| a.usable()) {
+        let mut events: Vec<ClientPaneInputEvent> = Vec::new();
+        for (i, piece) in pieces.iter().enumerate() {
+            if i > 0 {
+                events.extend(Vec::<ClientPaneInputEvent>::from(KeyToken::Text(
+                    " ".into(),
+                )));
+            }
+            match piece {
+                Piece::Text(t) => {
+                    events.extend(Vec::<ClientPaneInputEvent>::from(KeyToken::Text(t.clone())))
+                }
+                Piece::Path(path) => events.push(ClientPaneInputEvent::Paste(path.clone())),
+            }
+        }
+        events.extend(Vec::<ClientPaneInputEvent>::from(KeyToken::Named(
+            ClientKeyCode::Enter,
+        )));
+        match attach.input_pane(pane_id, events) {
+            Ok(()) => return Ok(()),
+            Err(libherdr_term::AttachError::Closed) => {}
+            Err(e) => return Err(herdr_unavailable(e)),
+        }
+    }
+    daemon
+        .client
+        .run_command(pane_id, line)
+        .await
+        .map_err(herdr_unavailable)?;
+    Ok(())
+}
+
 /// `plugin.call` (plan 20261028_04, decision 3.2): answered at once; the
 /// plugin starts once that answer is written, and its result and
 /// notifications come on this connection only. Its project is the call's
@@ -1514,6 +1841,7 @@ async fn forward_events(conn: Arc<Conn>) {
                             llm: Some(info),
                             terminal: super::terminal::info(&conn.daemon, conn.is_link()),
                             plugins: Some(conn.daemon.plugins.infos()),
+                            blob: super::blob::info(&conn.daemon, conn.is_link()),
                         },
                     ));
                 }
@@ -1530,6 +1858,7 @@ async fn forward_events(conn: Arc<Conn>) {
                             llm: Some(conn.daemon.llm.info()),
                             terminal: super::terminal::info(&conn.daemon, conn.is_link()),
                             plugins: Some(list),
+                            blob: super::blob::info(&conn.daemon, conn.is_link()),
                         },
                     ));
                 }

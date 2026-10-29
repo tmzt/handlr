@@ -96,6 +96,10 @@ pub struct TurnOptions {
     /// decision 3.1, item 3: tests use a test plugin). Their `[plugins]`
     /// is read from `llm.config_path`, the same file.
     pub plugins: Option<Vec<Arc<dyn crate::plugins::Plugin>>>,
+    /// The `images` store's folder in place of `std::env::temp_dir()`
+    /// (plan 20261028_05, decision 5.1: tests only; no config key, flag or
+    /// variable names it).
+    pub blob_temp: Option<PathBuf>,
 }
 
 /// The engine, the session histories, and who is in a turn.
