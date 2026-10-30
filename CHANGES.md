@@ -3621,3 +3621,18 @@ Plan 20261028_06 (bottom bar), the 2026-10-29 15:09 EDT amendment:
 2. **Item 1, where:** the microphone shows with the keyboard toggle, on a
    phone only (decision 11.3), so the desktop's cards keep the row they
    had (Gemini's + alone; none on the message card).
+
+## 2026-10-30 13:28 EDT — the kept session list: two departures
+
+Plan 20261028_03 (session drawer), the 2026-10-30 13:15 EDT amendment:
+
+1. **Item 3, the drawer's retry row:** with no rows to show and the
+   remote unreachable, the drawer still shows *Can't reach <nickname> ·
+   retrying in <n> s* (decision 31); it never shows in place of rows, and
+   *Connecting to <nickname>…* is gone.
+2. **Item 3, a remote never listed:** switching to a remote the phone has
+   never listed, while it is offline, can still show *No agents in herdr.*,
+   since the client's replay gives its (empty) list. Changing the replay
+   would be a behaviour change to flankr-companion's public API (a minor
+   bump) for a case the connection manager makes rare: every remote is
+   listed in the background as soon as it is reachable.
