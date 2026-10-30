@@ -688,3 +688,34 @@ Implementation starts with this amendment, in the commit of step 1
 `main-terminal`: `status` is `In implementation`, and the body above,
 with its amendments, is frozen (AGENTS.md Rule 1.5). Departures are
 recorded in `CHANGES.md`.
+
+## Amendment — 2026-10-30 16:42 EDT: a choice question cancelled by dragging its card away
+
+On the owner's instruction (Rule 1.5), 2026-10-30: dragging a pinned card
+away removes it by kind (plan 20261022_03, the L3 entry of 2026-10-30
+15:20 EDT: "a choice question: cancelled, as the agent's own dismiss
+does"), and, asked "Add `choice.cancel`, so dragging a choice question
+presses Esc?": "yes". This replaces the 00:40 EDT amendment's answer (2)
+("no Dismiss button that sends Esc") for the drag only (there is still no
+Dismiss button), and the rule after the keys table that the daemon never
+sends `escape`:
+
+1. **`choice.cancel`** (libflankr_proto, additive): params
+   `ChoiceCancelParams { id: String, pane_id: String }` (the question's
+   `ChoiceSet` id, as `choice.answer` takes it); result
+   `ChoiceCancelResult { cancelled: bool }`. Offered wherever
+   `choice.answer` is.
+2. **The daemon** sends one `escape` to the pane through the same Claude
+   key driver, after the same screen check as before question 1 (its text
+   and `to select`, polled every 100 ms for at most 1 s). If the check
+   fails it sends nothing and answers `cancelled: false`. One Esc rejects
+   the whole call, as finding 1 says; Tab and ← → are still never sent.
+3. **The client:** `Input::CancelChoice { id }` (additive) sends it and,
+   on `cancelled: true`, ends the choice as the agent's own dismiss does.
+4. **The app:** dragging a choice question's pinned card away sends it,
+   then adds the dim flow line *Dismissed the question*; on
+   `cancelled: false` the card springs back and a short note says it
+   could not be dismissed.
+5. **Versions.** libflankr_proto and flankr-companion each take the next
+   patch; the daemon's version and the app's each take the next patch
+   with their `UPDATES.md` entries (FLANKR RULES 1 and 2).
