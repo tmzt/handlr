@@ -3636,3 +3636,28 @@ Plan 20261028_03 (session drawer), the 2026-10-30 13:15 EDT amendment:
    would be a behaviour change to flankr-companion's public API (a minor
    bump) for a case the connection manager makes rare: every remote is
    listed in the background as soon as it is reachable.
+
+## 2026-10-30 14:09 EDT — models by tier and age: small departures in the build
+
+Plan 20261027_02 (inference config), the 2026-10-30 13:54 EDT amendment:
+
+1. **Item 3, the 10 s timeout:** it covers the whole of
+   `ModelCatalog::fetch` (every page), as `tokio::time::timeout` around
+   it, once per distinct key; libinfer-gemini's own 30 s per page sits
+   inside it and never ends a fetch first. The fetch runs in
+   `flankr serve` before the socket is bound, so with an unreachable API
+   the daemon listens up to 10 s later.
+2. **Item 3, which backends:** the lists are held by backend name, for
+   each `gemini` backend with a key when the daemon starts. A backend
+   without one (its fetch failed, it got its key later, or `[llm]` was
+   turned on later) resolves its choices offline until the next start.
+3. **Item 5, reloads:** a reload of `[llm]` resolves each new choice
+   against the lists from start, once per backend and choice (and then
+   kept, so the 5 s check logs nothing new); nothing is fetched again.
+4. **Item 4, how:** the log line's last part is `alias`, `matched`,
+   `named`, `named, not in the key's model list` or `fallback`, after
+   libinfer-gemini's `How`. A successful fetch also logs one line,
+   `[llm] <backends>: the key's model list has <n> model(s)`.
+5. **Item 6, `Cargo.lock`:** taking libinfer-gemini 0.1.1 also re-picked
+   `tempfile`'s `getrandom` (0.4.3 to 0.3.4, both already locked); no
+   manifest change.
