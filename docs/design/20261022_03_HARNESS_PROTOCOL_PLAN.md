@@ -1840,3 +1840,26 @@ never sends Esc, and its approved open question 2 left no dismiss. A
 choice question's card is not dragged until the owner decides how it is
 cancelled. This entry stays open for it.
 
+## Amendment — 2026-10-30 17:00 EDT: implementation record: a choice question cancelled by the drag (living section L3)
+
+The L3 entry of the 2026-10-30 15:20 EDT amendment ("pinned cards: More
+and Less, a sideways drag removes, by kind"), its part left open by the
+16:02 EDT record: item 3's choice question ("cancelled, as the agent's
+own dismiss does") and item 4's line *Dismissed the question*. The owner
+decided how it is cancelled in plan 20261029_01's 2026-10-30 16:42 EDT
+amendment (`choice.cancel`, one Esc after the question's screen check);
+built on the `choice-cancel` branch:
+
+- `66dc175`, libflankr_proto 0.5.8: `choice.cancel`,
+  `ChoiceCancelParams` and `ChoiceCancelResult`.
+- `c468d5c`, the daemon 0.3.0: `choice.cancel` through the Claude Code
+  key driver.
+- `d041b5f`, flankr-companion 0.7.4: `Input::CancelChoice`.
+- `0109ef9`, the companion app 0.6.0: a choice question's pinned card
+  is dragged away, cancelled, with the dim line *Dismissed the
+  question*; not cancelled, it springs back with *Couldn't dismiss the
+  question*.
+- Small departures: `523170d`, the CHANGES.md addendum of 2026-10-30 17:00
+  EDT.
+
+With this, every kind in the 15:20 EDT entry's item 3 is built.
