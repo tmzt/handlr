@@ -174,3 +174,8 @@ These changes came before the app had version numbers.
 **Changed**
 - After you finish speaking, replies that came in while you talked are no longer read one by one: you hear one short update on where things stand now, in light of what you just said. If no update can be made within a few seconds, the replies are read as before.
 - Spoken summaries are shorter: they leave out which files changed, branches, log entries and test counts, and keep what was done, what was found and any question for you.
+
+## 0.2.1 — 2026-10-30
+
+**Fixed**
+- The record button works again after a reply with a dash, an ellipsis, an arrow or a tick mark is read aloud. Reading such a reply on the phone stopped its link to the computer: nothing more was said, pulling to refresh stayed on refreshing, and taps on record did nothing.
