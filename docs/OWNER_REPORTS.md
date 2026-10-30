@@ -184,3 +184,22 @@ the latest updates, it also didn't speak/pin that last summary".
   is no longer available to new users. Please update your code to use
   models/gemini-3.5-flash-lite". A model can be listed and still refused
   to a new key, so *oldest* can pick one that fails.
+
+## 2026-10-30 15:27 EDT — Owner: the record button and the stuck refresh, done
+
+This follows the two entries before ("the record button does nothing"
+and "stuck on refreshing, and no summary"); both had one cause.
+
+**Cause.** The rules that read a reply aloud split a word at a byte
+offset when checking for "am" or "pm", which crashed on a word ending in
+a character such as —, …, → or ✓. The daemon crashed on it while
+measuring the reply for a summary, so the summary was never answered;
+after 10 s the phone read the reply itself, crashed the same way, and the
+crash ended its connection thread without a word. From then on every tap
+and refresh went nowhere.
+
+**Done.** `0d1cb5e` and the commits after it: such a word is read as it
+is; the phone's connection thread now logs a crash that ends it and every
+connection that ends, and a tap that does nothing says why in the log.
+App 0.2.1 and daemon 0.2.1. The summary's model refusal is a separate
+fix, in progress.
