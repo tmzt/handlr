@@ -140,3 +140,8 @@ These changes came before the program had version numbers.
 
 **Fixed**
 - Spoken and card summaries work: the oldest model is now chosen from 3.x up, since older ones can be listed and still refused.
+
+## 0.2.3 — 2026-10-30
+
+**Fixed**
+- If Google refuses a model while the daemon runs, it moves to the next allowed one for that tier and age, and tries again, instead of failing every summary until a restart. A model named exactly in the config is never changed.

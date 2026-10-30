@@ -38,7 +38,7 @@ use std::time::{Duration, SystemTime};
 use libflankr_proto::companion::LlmInfo;
 use tokio::sync::watch;
 
-use super::gemini::Catalogs;
+use super::gemini::{Catalogs, ModelCatalog, ModelChoice};
 use super::planning::{AgentProfile, PlanningConfig, PlanningPrompt};
 use super::{
     KeyEnv, Kind, LlmSettings, LlmSources, Target, Use, UseState, key_files, resolve_sources,
@@ -82,6 +82,13 @@ pub struct ClientSpec<'a> {
     /// The general agent's system prompt and tools; `None` is
     /// [`AgentProfile::base`].
     pub agent: Option<&'a AgentProfile>,
+    /// The use's model choice, which resolved to `target.model`.
+    pub choice: Option<&'a ModelChoice>,
+    /// The backend's model list from start, when it has one: with
+    /// `choice`, the client is built from the choice, so a model refused
+    /// during the run is replaced by the rule's next one (the 2026-10-30
+    /// 15:39 EDT amendment, item 1).
+    pub catalog: Option<&'a ModelCatalog>,
 }
 
 /// Builds clients; [`GeminiFactory`] by default, a mock in tests.
@@ -97,8 +104,11 @@ impl ClientFactory for GeminiFactory {
         match spec.target.kind {
             Kind::Gemini => {
                 let builder = GeminiReasoningEngine::builder()
-                    .api_key(Some(spec.target.key.expose().to_string()))
-                    .model(spec.target.model.clone());
+                    .api_key(Some(spec.target.key.expose().to_string()));
+                let builder = match (spec.choice, spec.catalog) {
+                    (Some(choice), Some(catalog)) => builder.choice(choice.clone(), catalog),
+                    _ => builder.model(spec.target.model.clone()),
+                };
                 match spec.profile {
                     Profile::Agent => {
                         let base;
@@ -185,7 +195,10 @@ struct Watched {
     settings: LlmSettings,
 }
 
-type ClientKey = (Target, Profile, Option<AgentProfile>);
+/// A client is kept by target, profile, the general agent's profile and
+/// the use's choice in its text form (two choices may resolve to one model
+/// but step apart when it is refused).
+type ClientKey = (Target, Profile, Option<AgentProfile>, Option<String>);
 
 /// `[llm]` while the daemon runs.
 pub struct LlmService {
@@ -286,16 +299,23 @@ impl LlmService {
         if let Some(engine) = self.overrides.for_use(use_) {
             return Ok(Arc::clone(engine));
         }
-        let target = self
-            .watched
-            .lock()
-            .unwrap()
-            .settings
-            .target(use_)
-            .cloned()
-            .ok_or_else(|| "unavailable".to_string())?;
+        let (target, choice) = {
+            let watched = self.watched.lock().unwrap();
+            let target = watched
+                .settings
+                .target(use_)
+                .cloned()
+                .ok_or_else(|| "unavailable".to_string())?;
+            let choice = watched.settings.models.get(&use_).map(|m| m.choice.clone());
+            (target, choice)
+        };
         let agent = (profile == Profile::Agent).then(|| self.agent_profile());
-        let key = (target, profile, agent);
+        let key = (
+            target,
+            profile,
+            agent,
+            choice.as_ref().map(ToString::to_string),
+        );
         {
             let mut clients = self.clients.lock().unwrap();
             if let Some(engine) = clients.get(&key) {
@@ -304,7 +324,7 @@ impl LlmService {
             // The general agent's clients for another profile (a plugin
             // reload) are no longer used; a call running on one keeps it.
             if key.2.is_some() {
-                clients.retain(|(t, p, a), _| !(*t == key.0 && *p == key.1 && a.is_some()));
+                clients.retain(|(t, p, a, _), _| !(*t == key.0 && *p == key.1 && a.is_some()));
             }
         }
         let engine = self.factory.build(&ClientSpec {
@@ -313,6 +333,8 @@ impl LlmService {
             target: &key.0,
             system,
             agent: key.2.as_ref(),
+            choice: choice.as_ref(),
+            catalog: self.catalogs.catalog(&key.0.backend),
         })?;
         log::info!(
             "[llm] {}: a client on backend {}, model {}",
@@ -385,9 +407,17 @@ impl LlmService {
         }
         log_settings(Some(&watched.settings), &settings);
         watched.settings = settings;
-        let in_use: Vec<Target> = Use::ALL
+        let in_use: Vec<(Target, Option<String>)> = Use::ALL
             .iter()
-            .filter_map(|&u| watched.settings.target(u).cloned())
+            .filter_map(|&u| {
+                let target = watched.settings.target(u).cloned()?;
+                let choice = watched
+                    .settings
+                    .models
+                    .get(&u)
+                    .map(|m| m.choice.to_string());
+                Some((target, choice))
+            })
             .collect();
         let info = info_of(&watched.settings, &self.overrides);
         drop(watched);
@@ -397,8 +427,9 @@ impl LlmService {
         self.clients
             .lock()
             .unwrap()
-            .retain(|(target, _, profile), _| {
-                in_use.contains(target) && profile.as_ref().is_none_or(|p| *p == agent)
+            .retain(|(target, _, profile, choice), _| {
+                in_use.iter().any(|(t, c)| t == target && c == choice)
+                    && profile.as_ref().is_none_or(|p| *p == agent)
             });
         self.info.send_if_modified(|old| {
             let changed = *old != info;
@@ -623,6 +654,9 @@ mod tests {
     use super::*;
     use crate::reasoning::MockReasoningEngine;
 
+    /// A build's use, choice (text form) and its catalog's names.
+    type BuiltChoice = (Use, Option<String>, Option<Vec<String>>);
+
     /// Records what it was asked to build, and builds a mock answering
     /// with the backend and model.
     #[derive(Default)]
@@ -630,6 +664,8 @@ mod tests {
         pub built: Mutex<Vec<(Use, Profile, String, String)>>,
         /// The general agent's builds: their profiles.
         pub agents: Mutex<Vec<AgentProfile>>,
+        /// Each build's choice (text form) and its catalog's names.
+        pub choices: Mutex<Vec<BuiltChoice>>,
     }
 
     impl ClientFactory for Recording {
@@ -643,6 +679,11 @@ mod tests {
             if let Some(agent) = spec.agent {
                 self.agents.lock().unwrap().push(agent.clone());
             }
+            self.choices.lock().unwrap().push((
+                spec.use_,
+                spec.choice.map(ToString::to_string),
+                spec.catalog.map(|catalog| catalog.names()),
+            ));
             Ok(Arc::new(MockReasoningEngine::with_response(format!(
                 "{}/{}",
                 spec.target.backend, spec.target.model
@@ -763,6 +804,82 @@ backend = "cheap"
         );
         assert_eq!(s.service.client_count(), 2);
         assert_eq!(s.service.info(), LlmInfo::available());
+    }
+
+    /// The 2026-10-30 15:39 EDT amendment, item 1: a backend with a model
+    /// list builds its uses' clients from their choices and the list; one
+    /// without builds from the resolved name, a named model as given.
+    #[test]
+    fn clients_are_built_from_the_choice_and_the_backends_list() {
+        let s = setup(TWO_BACKENDS, true);
+        s.service
+            .client(Use::GeneralAgent, Profile::Agent, None)
+            .unwrap();
+        s.service
+            .client(Use::CardSummaries, Profile::Summary, Some("sys"))
+            .unwrap();
+        let listed = Some(vec![
+            "gemini-3.5-flash-lite".to_string(),
+            "gemini-3.8-flash".to_string(),
+        ]);
+        assert_eq!(
+            s.factory.choices.lock().unwrap().clone(),
+            [
+                (Use::GeneralAgent, Some("flash:newest".into()), listed),
+                (
+                    Use::CardSummaries,
+                    Some("gemini-3.8-flash-lite".into()),
+                    None
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_summaries_default_is_built_from_flash_lite_oldest() {
+        let s = setup(
+            "[llm]\nenabled = true\n[llm.backends.gemini]\nkind = \"gemini\"\n",
+            true,
+        );
+        s.service
+            .client(Use::SpokenSummaries, Profile::Summary, Some("sys"))
+            .unwrap();
+        let choices = s.factory.choices.lock().unwrap().clone();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].1.as_deref(), Some("flash-lite:oldest"));
+        assert!(choices[0].2.is_some(), "built with the backend's list");
+        assert_eq!(
+            s.factory.built.lock().unwrap()[0].3,
+            "gemini-3.5-flash-lite",
+            "the first model is the resolved one"
+        );
+    }
+
+    /// The real factory builds a client from a choice and a list without a
+    /// request (the list is the one fetched at start).
+    #[test]
+    fn the_gemini_factory_builds_from_a_choice_offline() {
+        let target = Target {
+            backend: "gemini".into(),
+            kind: Kind::Gemini,
+            model: "gemini-3.5-flash-lite".into(),
+            key: super::super::ApiKey("k".into()),
+        };
+        let choice = ModelChoice::parse("flash-lite:oldest");
+        let catalog = ModelCatalog::from_names(["gemini-3.5-flash-lite", "gemini-3.6-flash-lite"]);
+        for catalog in [Some(&catalog), None] {
+            GeminiFactory
+                .build(&ClientSpec {
+                    use_: Use::SpokenSummaries,
+                    profile: Profile::Summary,
+                    target: &target,
+                    system: Some("sys"),
+                    agent: None,
+                    choice: Some(&choice),
+                    catalog,
+                })
+                .unwrap();
+        }
     }
 
     #[test]

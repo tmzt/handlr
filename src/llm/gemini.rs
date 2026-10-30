@@ -84,6 +84,15 @@ impl Catalogs {
         self.by_backend.keys().cloned().collect()
     }
 
+    /// `backend`'s list, if it has one that is not empty: what its clients
+    /// are built with, so a refused model is replaced inside the client
+    /// (the 2026-10-30 15:39 EDT amendment, item 1).
+    pub fn catalog(&self, backend: &str) -> Option<&ModelCatalog> {
+        self.by_backend
+            .get(backend)
+            .filter(|catalog| !catalog.names().is_empty())
+    }
+
     /// `choice` for `backend`, resolved once and then remembered; the
     /// first resolution is logged by libinfer-gemini.
     pub fn resolve(&self, backend: &str, choice: &ModelChoice) -> Resolved {
