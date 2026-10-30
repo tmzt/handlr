@@ -81,3 +81,20 @@ a drag or other event it rejects), the whole screen shows the raw error,
 apparently the daemon's JSON. It should be a short message such as
 *Terminal error*, small and centred over the terminal, gone after a couple
 of seconds.
+
+## 2026-10-30 13:30 EDT — Owner: the overview drag report, done
+
+This follows the two entries on the overview's drag snapping back.
+
+**Cause.** The overview grid's scroll took each move's distance over the
+time since the move before as the finger's speed. The S23 delivers moves
+in bursts a fraction of a millisecond apart, so even a slow drag measured
+tens of thousands of points a second, and on release that became a fling
+that ran the grid to the top or the end. The agent view had fixed the
+same fault earlier; the overview's scroll never had the fix.
+
+**Done.** `3da50c6`: the grid keeps the moves' samples and flings at the agent
+view's release speed (a fit over the last 100 ms, capped), as the overview
+plan's A1 already says. A drag now stays where the finger leaves it; a
+hard flick still carries on. The daemon's re-list was checked and does not
+move the scroll. Installed on the S23 the same day.
