@@ -63,3 +63,21 @@ won't let you navigate to the center tiles".
 **Seen.** With several screens of cards, the drag's snap back to the
 beginning or the end means the cards in the middle can't be reached.
 Passed to the same subagent.
+
+## 2026-10-30 13:29 EDT — Owner: a terminal error fills the screen with the daemon's JSON
+
+Device: Galaxy S23 Ultra, the build installed 2026-10-30 13:29 EDT.
+
+**Report.** "on the terminal screen with an incompatible terminal when you
+attempt to drag or do something else that causes an invalid event it's
+the entire screen with it looks like it's from the JSON instead that
+should like a small maybe centered of the terminal just as it you know
+it's only there for a couple of seconds it's out and just just a short
+message like like like terminal arrow or something like that".
+
+**Seen.** Not yet looked into; handed to a subagent in its own worktree.
+Read as: when the terminal can't take an input (an incompatible terminal,
+a drag or other event it rejects), the whole screen shows the raw error,
+apparently the daemon's JSON. It should be a short message such as
+*Terminal error*, small and centred over the terminal, gone after a couple
+of seconds.
