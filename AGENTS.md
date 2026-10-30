@@ -175,6 +175,46 @@ the project, and their replies are spoken.
 2. Leave out commit hashes, line numbers and timestamps unless asked for
    them.
 
+## FLANKR RULES
+
+These rules are flankr's own, beside the critical rules above.
+
+### FLANKR RULE 1: THE APP'S VERSION AND `apps/UPDATES.md`
+
+1. `apps/UPDATES.md` is the companion app's changelog, shown in the app.
+   It lists only what someone using the app can see or do differently:
+   screens, controls, gestures, text, sounds, speech and behaviour.
+2. The app's version is `version` in `apps/companion/Cargo.toml`. It is
+   separate from the crates' versions under Critical Rule 5, which follow
+   public APIs: a crate release that changes nothing the user sees does
+   not change the app's version, and an app-only change does.
+3. Every commit that makes a user-visible change bumps the app's version
+   and appends its entry to `apps/UPDATES.md`, in that same commit. This
+   holds wherever the change is made: in `apps/companion`, in
+   flankr-companion, in the daemon, or in a library such as libcontrols or
+   libmsdf. When the change is outside `apps/`, the bump and the entry
+   go in the commit that moves the app onto it. This is an exception to
+   Critical Rule 3.1.
+4. The bump, while the version is `0.x`: a new feature, or behaviour a
+   user would notice changing, bumps the minor version (`0.x.y` to
+   `0.(x+1).0`); only fixes and small polish bump the patch version
+   (`0.x.y` to `0.x.(y+1)`). Changes landed together may share one bump.
+5. An entry is headed `## <version> — YYYY-MM-DD` and lists its items
+   under **Added**, **Changed**, **Fixed** and **Removed**, one short line
+   each, in plain user language: no commit hashes, crate or protocol
+   names, or plan names or numbers. A library is mentioned only by what
+   it changed for the user (for example, new symbols in a menu).
+6. Entries are appended, newest last, and never edited; a correction is a
+   later entry that says what it corrects. The "History before
+   versioning" section records the changes before this rule, with no
+   versions, and is not added to.
+7. The APK carries the app's version: `versionName` is the version, and
+   `versionCode` is `major * 1000000 + minor * 1000 + patch`. Every build
+   installed on a device carries the version of the newest entry it
+   contains.
+8. The commit that bumps the app's version is tagged
+   `flankr-app-v<version>`, as Critical Rule 5.1 tags crate versions.
+
 ---
 
 ## 1. Core Architecture
