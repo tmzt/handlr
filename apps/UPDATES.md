@@ -185,3 +185,8 @@ These changes came before the app had version numbers.
 **Added**
 - After you speak, the update on where things stand also shows as a pinned card, "While you spoke", even when muted. Tap its ✕ to dismiss it; the next update replaces it.
 - In a session the card sits above the buttons, where the pinned card goes. A waiting question, approval or choice comes first, and the card shows once you answer it.
+
+## 0.3.1 — 2026-10-30
+
+**Fixed**
+- Replies are spoken and summarized on their cards again.
