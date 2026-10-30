@@ -878,3 +878,28 @@ item 2. Strictly additive:
   (`text`, `pane_id`) and `common::SpeechCatchUpResult` (`summary`); each
   `Default`, optional fields defaulted when absent and left off the wire
   when `None`.
+
+## flankr-companion 0.7.0 — 2026-10-30 (the commit tagged `flankr-companion-v0.7.0`)
+
+Plan 20261023_02 (dictated messages), its 2026-10-30 13:52 EDT amendment.
+Not strictly additive: when and what `State` gives as `Event::Say` after
+a voice input changes (Rule 5.4, behaviour a caller can observe):
+
+- **Breaking (behaviour):** when a voice prompt ends (submitted, cleared
+  or closed) with speech held, `State` sends one `speech.catch_up` with
+  the held items, oldest first (a reply read aloud named by its pane and
+  `ts`, a notice by its pane), and what was said (the message as sent and
+  its target pane, or Gemini's prompt; none when cancelled or cleared).
+  Its summary is given as one `Event::Say` in place of the held items,
+  under the queue's usual rules. While it is made the held items stay
+  held, and speech that arrives meanwhile waits behind it, joining the
+  next voice input's catch-up if one starts. The held items are given as
+  they are, as in 0.6.0, when read aloud is off, the daemon makes no
+  summaries (`LlmInfo::summaries`), the client is offline, the request is
+  refused or fails, the answer has no `summary`, the link closes, or no
+  answer comes in `CATCH_UP_WAIT`. Nothing held asks nothing; *Stop
+  reading* and *All sound* off drop a catch-up being made.
+- **Changed:** `State::held_notices()` also counts the items a catch-up is
+  being made for.
+- **Added:** `client::CATCH_UP_WAIT` (8 s).
+- libflankr_proto 0.5.6 → 0.5.7 (semver-compatible).

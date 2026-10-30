@@ -981,6 +981,11 @@ const TERMINAL_INPUT_NOTICE: &str = "terminal_input";
 /// read as it is (plan 20261023_05, decision 5).
 pub const SUMMARY_WAIT: Duration = Duration::from_secs(10);
 
+/// How long the speech held during a voice input waits for its catch-up
+/// before it is said as it is (plan 20261023_02, the 2026-10-30 13:52 EDT
+/// amendment, item 4).
+pub const CATCH_UP_WAIT: Duration = Duration::from_secs(8);
+
 /// How long the link may be quiet before a `ping`, and how long the ping
 /// may go unanswered before the link is closed and made again.
 pub const PING_IDLE: Duration = Duration::from_secs(30);
@@ -1200,6 +1205,8 @@ enum Sent {
     Choose(String, String),
     /// `speech.summarize` of the reply being read with this serial.
     Summarize(u64),
+    /// `speech.catch_up` for the held speech with this serial.
+    CatchUp(u64),
     /// `client.options`, with read aloud as it was then.
     Options,
     /// `ping`, after a quiet spell.
@@ -1295,6 +1302,41 @@ struct Reading {
     section: Option<common::Serial>,
     /// What to say, once known.
     ready: Option<String>,
+    /// The pane it came from, and its subagent if any: for a catch-up.
+    pane_id: Option<String>,
+    child: Option<String>,
+}
+
+/// Speech held in the notice queue: its text, and for a catch-up where it
+/// came from (plan 20261023_02, the 2026-10-30 13:52 EDT amendment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Held {
+    text: String,
+    /// The pane of a notice or a reply.
+    pane_id: Option<String>,
+    /// A reply's entry `ts`, when the daemon can read it from the pane's
+    /// own session (not a subagent's).
+    ts: Option<String>,
+}
+
+impl Held {
+    /// Speech from no pane: a Gemini line, a "stopped" sentence, a
+    /// catch-up.
+    fn text(text: String) -> Self {
+        Held {
+            text,
+            pane_id: None,
+            ts: None,
+        }
+    }
+}
+
+/// A `speech.catch_up` on its way, and the held items it is about.
+#[derive(Debug)]
+struct CatchingUp {
+    serial: u64,
+    held: Vec<Held>,
+    asked_at: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1436,7 +1478,17 @@ pub struct State {
     saying: Vec<String>,
     /// Suggestions tapped and sent, until their confirmation is approved.
     tapped: Vec<Tapped>,
-    notices: VecDeque<String>,
+    notices: VecDeque<Held>,
+    /// Voice input was in progress when the notices were last flushed: its
+    /// end asks for a catch-up (plan 20261023_02, the 2026-10-30 13:52 EDT
+    /// amendment).
+    voice_was: bool,
+    /// What the voice input that ended sent: the message and its pane, or
+    /// Gemini's prompt.
+    voice_said: Option<common::SaidInput>,
+    /// The catch-up asked for, until answered or `CATCH_UP_WAIT`.
+    catching_up: Option<CatchingUp>,
+    next_catch_up: u64,
     /// The driver's clock, as last ticked.
     now: Duration,
     /// The phone's local time of day, as the driver last gave it: clock
@@ -1938,6 +1990,10 @@ impl State {
             saying: Vec::new(),
             tapped: Vec::new(),
             notices: VecDeque::new(),
+            voice_was: false,
+            voice_said: None,
+            catching_up: None,
+            next_catch_up: 1,
             now: Duration::ZERO,
             local_time: LocalTime::default(),
             focus: None,
@@ -2074,9 +2130,10 @@ impl State {
         self.session_id = session_id;
     }
 
-    /// Notices waiting to be said.
+    /// Notices waiting to be said, with those a catch-up is being made
+    /// for.
     pub fn held_notices(&self) -> usize {
-        self.notices.len()
+        self.notices.len() + self.catching_up.as_ref().map_or(0, |c| c.held.len())
     }
 
     /// The `hello` a pairing probe sends to a remote beside the open
@@ -2422,6 +2479,10 @@ impl State {
         let now = self.local_time;
         for r in self.reading.iter_mut().filter(|r| r.ready.is_none()) {
             r.ready = Some(flankr_speech::read_aloud(&r.text, now));
+        }
+        // Nor a catch-up: what it was for is said as it is.
+        if let Some(serial) = self.catching_up.as_ref().map(|c| c.serial) {
+            self.caught_up(serial, None);
         }
         self.read_in_order();
         self.flush_notices(&mut out);
@@ -3056,6 +3117,7 @@ impl State {
             // being said stops.
             self.reading.clear();
             self.notices.clear();
+            self.catching_up = None;
             if self.speaking {
                 out.push(event(Event::StopSpeaking));
             }
@@ -4204,6 +4266,12 @@ impl State {
                 return;
             }
             let text = d.text();
+            if d.mode == PromptMode::Voice {
+                self.voice_said = Some(common::SaidInput {
+                    text: text.clone(),
+                    pane_id: None,
+                });
+            }
             self.dictation = None;
             self.show_dictation(out);
             self.start_turn(text, out);
@@ -4249,6 +4317,12 @@ impl State {
         };
         d.phase = DictationPhase::Submitting;
         d.own_approval = true;
+        if d.mode == PromptMode::Voice {
+            self.voice_said = Some(common::SaidInput {
+                text: text.clone(),
+                pane_id: Some(target.pane_id.clone()),
+            });
+        }
         log::info!(
             "dictation: submitted by {}",
             if by_button {
@@ -4843,6 +4917,10 @@ impl State {
                     log::info!("speech.summarize: {message}; reading the reply here");
                     self.summarized(serial, None, out);
                 }
+                Sent::CatchUp(serial) => {
+                    log::info!("speech.catch_up: {message}; the held speech is said as it is");
+                    self.caught_up(serial, None);
+                }
                 Sent::Subscribe(pane_id, child) => {
                     if let Some(v) = self
                         .view
@@ -5190,6 +5268,18 @@ impl State {
                 }
             },
             Sent::Unsubscribe => {}
+            Sent::CatchUp(serial) => match parse::<common::SpeechCatchUpResult>(result) {
+                Ok(r) => {
+                    if r.summary.is_none() {
+                        log::info!("speech.catch_up: none made; the held speech is said as it is");
+                    }
+                    self.caught_up(serial, r.summary);
+                }
+                Err(e) => {
+                    log::warn!("a bad speech.catch_up result: {e}");
+                    self.caught_up(serial, None);
+                }
+            },
             Sent::Summarize(serial) => match parse::<common::SpeechSummarizeResult>(result) {
                 // Gemini's version when there is one, else the rules'.
                 Ok(r) => self.summarized(serial, r.summary.or(Some(r.read)), out),
@@ -5330,6 +5420,7 @@ impl State {
     ) {
         let serial = self.next_reading;
         self.next_reading += 1;
+        let params_child = child.clone();
         let ready = if self.online() {
             let params = common::SpeechSummarizeParams {
                 pane_id: pane_id.to_string(),
@@ -5349,6 +5440,8 @@ impl State {
             asked_at: self.now,
             section: Some(section),
             ready,
+            pane_id: Some(pane_id.to_string()),
+            child: params_child,
         });
         while self.reading.len() > NOTICE_CAP {
             self.reading.pop_front();
@@ -5357,7 +5450,14 @@ impl State {
 
     /// Queues a reply to be read in its turn as its card's spoken text,
     /// with nothing asked of the daemon.
-    fn queue_spoken(&mut self, section: common::Serial, ts: String, text: String, spoken: String) {
+    fn queue_spoken(
+        &mut self,
+        (pane_id, child): (&str, Option<String>),
+        section: common::Serial,
+        ts: String,
+        text: String,
+        spoken: String,
+    ) {
         let serial = self.next_reading;
         self.next_reading += 1;
         log::info!("read aloud: the card's spoken text, not asked again");
@@ -5368,6 +5468,8 @@ impl State {
             asked_at: self.now,
             section: Some(section),
             ready: Some(spoken),
+            pane_id: Some(pane_id.to_string()),
+            child,
         });
         while self.reading.len() > NOTICE_CAP {
             self.reading.pop_front();
@@ -5403,13 +5505,19 @@ impl State {
                 }
                 None => break,
             };
-            let ts = self.reading.pop_front().map(|r| r.ts).unwrap_or_default();
+            let Some(r) = self.reading.pop_front() else {
+                break;
+            };
             if !text.is_empty() {
-                self.read_replies.push_back((ts, text.clone()));
+                self.read_replies.push_back((r.ts.clone(), text.clone()));
                 while self.read_replies.len() > NOTICE_CAP {
                     self.read_replies.pop_front();
                 }
-                self.notices.push_back(text);
+                self.notices.push_back(Held {
+                    text,
+                    pane_id: r.pane_id,
+                    ts: r.child.is_none().then_some(r.ts),
+                });
             }
         }
         while self.notices.len() > NOTICE_CAP {
@@ -5513,7 +5621,9 @@ impl State {
         }
         for (serial, ts, text, spoken) in replies {
             match spoken {
-                Some(spoken) => self.queue_spoken(serial, ts, text, spoken),
+                Some(spoken) => {
+                    self.queue_spoken((&pane_id, child.clone()), serial, ts, text, spoken)
+                }
                 None => self.read_reply(&pane_id, child.clone(), serial, ts, text, out),
             }
         }
@@ -5669,7 +5779,11 @@ impl State {
                         log::info!("notice: {}", n.text);
                         return;
                     }
-                    self.notices.push_back(n.text);
+                    self.notices.push_back(Held {
+                        text: n.text,
+                        pane_id: (!n.pane_id.is_empty()).then_some(n.pane_id),
+                        ts: None,
+                    });
                     while self.notices.len() > NOTICE_CAP {
                         self.notices.pop_front();
                     }
@@ -5859,20 +5973,114 @@ impl State {
     }
 
     /// Says the held notices, oldest first, unless speaking, listening,
-    /// confirming or taking voice input.
+    /// confirming or taking voice input. When voice input has ended with
+    /// speech held, a catch-up is asked for first, and the notices wait for
+    /// it (plan 20261023_02, the 2026-10-30 13:52 EDT amendment).
     fn flush_notices(&mut self, out: &mut Vec<Output>) {
         if !self.settings.sound {
             self.notices.clear();
+            self.catching_up = None;
             return;
         }
-        if self.speaking || self.listening || !self.confirms.is_empty() || self.voice_input() {
+        if self.voice_input() {
+            self.voice_was = true;
             return;
         }
-        for text in self.notices.drain(..) {
+        if self
+            .catching_up
+            .as_ref()
+            .is_some_and(|c| self.now >= c.asked_at + CATCH_UP_WAIT)
+            && let Some(serial) = self.catching_up.as_ref().map(|c| c.serial)
+        {
+            log::info!("speech.catch_up: no answer in time; the held speech is said as it is");
+            self.caught_up(serial, None);
+        }
+        // Speech that arrives while a catch-up is made waits for it.
+        if self.catching_up.is_some() {
+            return;
+        }
+        if std::mem::take(&mut self.voice_was) {
+            let said = self.voice_said.take();
+            if !self.notices.is_empty() && self.ask_catch_up(said, out) {
+                return;
+            }
+        }
+        if self.speaking || self.listening || !self.confirms.is_empty() {
+            return;
+        }
+        for held in self.notices.drain(..) {
+            let text = held.text;
             if let Some((ts, _)) = self.read_replies.iter().find(|(_, t)| *t == text) {
                 self.saying.push(ts.clone());
             }
             out.push(event(Event::Say(text)));
+        }
+    }
+
+    /// Asks the daemon for one catch-up for the held notices, oldest
+    /// first, and `said` (the 13:52 EDT amendment, item 1). `false`, and
+    /// nothing asked, when it cannot be made: offline, the daemon makes no
+    /// summaries, or spoken output (read aloud) is off (item 4).
+    fn ask_catch_up(&mut self, said: Option<common::SaidInput>, out: &mut Vec<Output>) -> bool {
+        if !self.online() || !self.llm.summaries || !self.read_aloud {
+            log::info!(
+                "speech.catch_up: not asked ({}); the held speech is said as it is",
+                if !self.online() {
+                    "offline"
+                } else if !self.llm.summaries {
+                    "no summaries"
+                } else {
+                    "read aloud is off"
+                }
+            );
+            return false;
+        }
+        let held: Vec<Held> = self.notices.drain(..).collect();
+        let params = common::SpeechCatchUpParams {
+            held: held
+                .iter()
+                .map(|h| common::HeldSpeech {
+                    pane_id: h.pane_id.clone(),
+                    ts: h.ts.clone(),
+                    text: h.text.clone(),
+                })
+                .collect(),
+            said,
+        };
+        let serial = self.next_catch_up;
+        self.next_catch_up += 1;
+        log::info!("speech.catch_up: asked for {} held item(s)", held.len());
+        out.push(self.request(methods::SPEECH_CATCH_UP, params, Sent::CatchUp(serial)));
+        self.catching_up = Some(CatchingUp {
+            serial,
+            held,
+            asked_at: self.now,
+        });
+        true
+    }
+
+    /// The catch-up `serial` is answered with `summary`, or failed: the
+    /// summary, or the held items as they are, go before what came since
+    /// (item 3), to be said in their turn. A catch-up given up or dropped
+    /// is not answered again.
+    fn caught_up(&mut self, serial: u64, summary: Option<String>) {
+        let Some(c) = self.catching_up.take_if(|c| c.serial == serial) else {
+            log::debug!("speech.catch_up: a late answer for {serial}, dropped");
+            return;
+        };
+        match summary
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        {
+            Some(summary) => self.notices.push_front(Held::text(summary)),
+            None => {
+                for held in c.held.into_iter().rev() {
+                    self.notices.push_front(held);
+                }
+            }
+        }
+        while self.notices.len() > NOTICE_CAP {
+            self.notices.pop_front();
         }
     }
 
@@ -5890,7 +6098,7 @@ impl State {
     fn say_or_hold(&mut self, text: String, out: &mut Vec<Output>) {
         if self.voice_input() {
             log::info!("say: held while voice input is in progress");
-            self.notices.push_back(text);
+            self.notices.push_back(Held::text(text));
             while self.notices.len() > NOTICE_CAP {
                 self.notices.pop_front();
             }
@@ -5921,6 +6129,7 @@ impl State {
         );
         self.reading.clear();
         self.notices.clear();
+        self.catching_up = None;
         if self.speaking {
             out.push(event(Event::StopSpeaking));
         }
@@ -5937,7 +6146,10 @@ impl State {
             .filter(|(t, _)| t == ts)
             .map(|(_, text)| text.clone())
             .collect();
-        self.notices.retain(|n| !texts.contains(n));
+        self.notices.retain(|n| !texts.contains(&n.text));
+        if let Some(c) = self.catching_up.as_mut() {
+            c.held.retain(|n| !texts.contains(&n.text));
+        }
         if self.speaking && self.saying.iter().any(|t| t == ts) {
             log::info!("read aloud: the question is answered; skipping it");
             out.push(event(Event::StopSpeaking));
@@ -11859,6 +12071,237 @@ mod tests {
         }));
         assert!(says(&s.input(Input::Clear)).is_empty());
         assert_eq!(s.held_notices(), 0);
+    }
+
+    // After voice input, one catch-up instead of the held speech (plan
+    // 20261023_02, the 2026-10-30 13:52 EDT amendment).
+
+    /// `dictating()` with read aloud on (spoken output).
+    fn dictating_aloud() -> State {
+        let mut s = dictating();
+        s.input(Input::ReadAloud(true));
+        s
+    }
+
+    fn catch_up_of(out: &[Output]) -> Option<Request> {
+        requests(out, "speech.catch_up")
+            .first()
+            .map(|r| (*r).clone())
+    }
+
+    #[test]
+    fn after_a_dictated_message_one_catch_up_replaces_the_held_speech() {
+        let mut s = dictating_aloud();
+        speak(&mut s, 11.0, 12.0, "Run the tests");
+        s.incoming(notice("Codex is done."));
+        s.incoming(note(
+            "notice",
+            json!({"id": 2, "kind": "agent_status", "pane_id": "", "text": "Two agents wait."}),
+        ));
+        let out = s.input(Input::Submit);
+        let sent = message_send(&out).unwrap();
+        let ask = catch_up_of(&out).expect("a catch-up");
+        assert_eq!(
+            ask.params,
+            json!({
+                "held": [
+                    {"pane_id": "p1", "text": "Codex is done."},
+                    {"text": "Two agents wait."},
+                ],
+                "said": {"text": sent.params["text"], "pane_id": "w2:p4"},
+            })
+        );
+        assert_eq!(sent.params["text"], "Run the tests");
+        // Held while it is made.
+        assert!(says(&out).is_empty(), "{out:?}");
+        assert_eq!(s.held_notices(), 2);
+        let out = s.incoming(response(
+            ask.id,
+            json!({"summary": " Codex finished, and your message is on its way. "}),
+        ));
+        assert_eq!(
+            says(&out),
+            ["Codex finished, and your message is on its way.".to_string()]
+        );
+        assert_eq!(s.held_notices(), 0);
+    }
+
+    #[test]
+    fn the_catch_up_waits_for_the_speaker_as_any_notice_does() {
+        let mut s = dictating_aloud();
+        s.incoming(notice("Codex is done."));
+        let ask = catch_up_of(&s.input(Input::Clear)).unwrap();
+        // Cancelled: nothing was said.
+        assert!(ask.params.get("said").is_none(), "{:?}", ask.params);
+        s.input(Input::Speaking(true));
+        let out = s.incoming(response(ask.id, json!({"summary": "Codex is done."})));
+        assert!(says(&out).is_empty());
+        assert_eq!(
+            says(&s.input(Input::Speaking(false))),
+            ["Codex is done.".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_reply_read_aloud_during_voice_input_is_named_by_its_pane_and_time() {
+        let mut s = viewing("working", json!(null));
+        s.input(Input::ReadAloud(true));
+        let out = s.input(Input::StartDictation);
+        assert!(events(&out).contains(&Event::Arm), "{out:?}");
+        let out = deliver(&mut s, vec![text_at(50, 0, "Built it.")], vec![]);
+        let asked = requests(&out, "speech.summarize")[0].clone();
+        let out = s.incoming(response(
+            asked.id,
+            json!({"read": "Built it.", "complex": false}),
+        ));
+        assert!(says(&out).is_empty(), "{out:?}");
+        let ask = catch_up_of(&s.input(Input::Clear)).unwrap();
+        assert_eq!(
+            ask.params,
+            json!({"held": [{"pane_id": "w2:pZ", "ts": "50.0", "text": "Built it."}]})
+        );
+    }
+
+    #[test]
+    fn gemini_voice_prompt_is_what_was_said() {
+        let mut s = online();
+        s.input(Input::ReadAloud(true));
+        s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        speak(&mut s, 10.0, 12.0, "what is flankr");
+        s.incoming(notice("Claude is done."));
+        let out = s.input(Input::Tick(secs(13.0)));
+        assert_eq!(requests(&out, wire::methods::TURN_START).len(), 1);
+        let ask = catch_up_of(&out).unwrap();
+        assert_eq!(ask.params["said"], json!({"text": "what is flankr"}));
+        assert!(says(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn speech_that_comes_while_the_catch_up_is_made_waits_for_the_next() {
+        let mut s = dictating_aloud();
+        s.incoming(notice("one"));
+        let first = catch_up_of(&s.input(Input::Clear)).unwrap();
+        // Not said, and not part of this catch-up.
+        assert!(says(&s.incoming(notice("two"))).is_empty());
+        assert_eq!(s.held_notices(), 2);
+        // Answered: the catch-up, then what came since.
+        let out = s.incoming(response(first.id, json!({"summary": "One is done."})));
+        assert_eq!(says(&out), ["One is done.".to_string(), "two".to_string()]);
+
+        // A new voice input while it is made: both go into its catch-up.
+        let mut s = dictating_aloud();
+        s.incoming(notice("one"));
+        let first = catch_up_of(&s.input(Input::Clear)).unwrap();
+        s.incoming(notice("two"));
+        let out = s.input(Input::StartDictation);
+        assert!(events(&out).contains(&Event::Arm), "{out:?}");
+        let out = s.incoming(response(first.id, json!({"summary": "One is done."})));
+        assert!(says(&out).is_empty(), "{out:?}");
+        let out = s.input(Input::Clear);
+        let second = catch_up_of(&out).unwrap();
+        assert_eq!(
+            second.params["held"],
+            json!([{"text": "One is done."}, {"pane_id": "p1", "text": "two"}])
+        );
+        // None made: the held items as they are.
+        let out = s.incoming(response(second.id, json!({})));
+        assert_eq!(says(&out), ["One is done.".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn a_failed_catch_up_or_none_says_the_held_speech_as_it_is() {
+        let held = || vec!["one".to_string(), "two".to_string()];
+        let asked = || {
+            let mut s = dictating_aloud();
+            s.incoming(notice("one"));
+            s.incoming(notice("two"));
+            let ask = catch_up_of(&s.input(Input::Clear)).unwrap();
+            (s, ask)
+        };
+        // No catch-up made.
+        let (mut s, ask) = asked();
+        assert_eq!(says(&s.incoming(response(ask.id, json!({})))), held());
+        // A blank one.
+        let (mut s, ask) = asked();
+        assert_eq!(
+            says(&s.incoming(response(ask.id, json!({"summary": "  "})))),
+            held()
+        );
+        // Refused, as by a daemon without the method.
+        let (mut s, ask) = asked();
+        let out = s.incoming(Incoming::Response(Response::err(
+            Some(ask.id),
+            libflankr_proto::ErrorObject::new(-32601, "unknown method speech.catch_up"),
+        )));
+        assert_eq!(says(&out), held());
+        // The link closes.
+        let (mut s, _) = asked();
+        assert_eq!(says(&s.disconnected(1000)), held());
+    }
+
+    #[test]
+    fn with_no_answer_in_8_s_the_held_speech_is_said_as_it_is() {
+        let mut s = dictating_aloud();
+        s.incoming(notice("one"));
+        let ask = catch_up_of(&s.input(Input::Clear)).unwrap();
+        assert!(says(&s.input(Input::Tick(secs(17.9)))).is_empty());
+        assert_eq!(says(&s.input(Input::Tick(secs(18.0)))), ["one".to_string()]);
+        // A late answer is dropped.
+        let out = s.incoming(response(ask.id, json!({"summary": "Late."})));
+        assert!(says(&out).is_empty(), "{out:?}");
+        assert_eq!(s.held_notices(), 0);
+    }
+
+    #[test]
+    fn no_catch_up_is_asked_when_it_cannot_be_made() {
+        // Read aloud off: the held speech as it is, as before.
+        let mut s = dictating();
+        s.incoming(notice("one"));
+        let out = s.input(Input::Clear);
+        assert!(catch_up_of(&out).is_none());
+        assert_eq!(says(&out), ["one".to_string()]);
+        // The daemon makes no summaries.
+        let mut s = dictating_aloud();
+        s.incoming(capabilities(true, false));
+        s.incoming(notice("one"));
+        let out = s.input(Input::Clear);
+        assert!(catch_up_of(&out).is_none());
+        assert_eq!(says(&out), ["one".to_string()]);
+        // Nothing held.
+        let mut s = dictating_aloud();
+        let out = s.input(Input::Clear);
+        assert!(catch_up_of(&out).is_none());
+        // Stop reading drops what was held: nothing to catch up on.
+        let mut s = dictating_aloud();
+        s.incoming(notice("one"));
+        s.input(Input::StopReading);
+        let out = s.input(Input::Clear);
+        assert!(catch_up_of(&out).is_none() && says(&out).is_empty());
+        // What the voice input itself says is never held for it.
+        let mut s = dictating_aloud();
+        speak(&mut s, 11.0, 12.0, "Run the tests.");
+        let out = s.input(Input::Utterance("Read it back.".into()));
+        assert_eq!(says(&out), ["Run the tests.".to_string()]);
+        assert!(catch_up_of(&s.input(Input::Clear)).is_none());
+    }
+
+    #[test]
+    fn stop_reading_or_sound_off_while_the_catch_up_is_made_drops_it() {
+        for stop in [
+            Input::StopReading,
+            Input::Settings(Settings {
+                sound: false,
+                ..Settings::default()
+            }),
+        ] {
+            let mut s = dictating_aloud();
+            s.incoming(notice("one"));
+            let ask = catch_up_of(&s.input(Input::Clear)).unwrap();
+            s.input(stop);
+            assert_eq!(s.held_notices(), 0);
+            let out = s.incoming(response(ask.id, json!({"summary": "One is done."})));
+            assert!(says(&out).is_empty(), "{out:?}");
+        }
     }
 
     // Plugins (docs/design/20261028_04_PLUGINS_PLAN.md, 3.10 and section 5).
