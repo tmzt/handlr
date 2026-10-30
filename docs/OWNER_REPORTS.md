@@ -50,3 +50,16 @@ or end it doesn't persist it doesn't persist where you drag to so if you
 have" (the report was cut off there).
 
 **Seen.** Not yet looked into; handed to a subagent in its own worktree.
+
+## 2026-10-30 13:20 EDT — Owner: the rest of the overview drag report
+
+This completes the entry before ("a drag on the overview snaps back"),
+which was cut off.
+
+**Report.** "more if you have more tiles then fit on the screen like more
+than more than three screens or whatever sometimes it won't let you it
+won't let you navigate to the center tiles".
+
+**Seen.** With several screens of cards, the drag's snap back to the
+beginning or the end means the cards in the middle can't be reached.
+Passed to the same subagent.
