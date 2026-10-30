@@ -368,3 +368,56 @@ that mechanism:
    anything else keep their confirmation.
 4. The app's own approval of such confirmations stays, for daemons older
    than this.
+
+## Amendment — 2026-10-30 13:37 EDT: nothing is spoken over voice input
+
+The owner (2026-10-30, `docs/OWNER_REPORTS.md`, the 13:34 EDT entry):
+"spoken messages shouldn't interrupt an interactive voice input".
+
+Plan 20261022_04's decision 4 holds spoken notices only while the speaker
+plays, the STT gate listens (`Listening(true)`) or a confirmation waits,
+and gives every `turn.say` as `Say` at once. During a dictated message the
+gate closes after each sentence until the client arms it again, so a reply
+read aloud or a notice could start in that gap, and a Gemini line or a
+turn's "stopped" sentence could start at any time. This amendment adds a
+hold for voice input. It applies to this plan's dictation mode and to
+Gemini's voice prompt (plans 20261024_03 and 20261028_06), which is the
+same mode in `flankr-companion`'s `State`.
+
+1. **Voice input** is in progress while a prompt is open in voice mode
+   (the record button's message card, or Gemini's card from the centre
+   button) and still collecting: from its start until it is submitted,
+   cancelled or cleared, or leaves voice mode. A submitted message waiting
+   for its own confirmation is no longer voice input (that confirmation
+   already holds notices, as before). A typed prompt (keyboard mode) is
+   not voice input.
+2. **What is held.** While voice input is in progress, nothing that is not
+   the voice input's own speech is given as `Say`: replies read aloud
+   (the play button), the daemon's notices, Gemini's `turn.say` lines (when
+   *Speak agent (Gemini) responses* is on) and a tapped turn's "stopped"
+   sentence all go to the client's notice queue instead, in the order they
+   come.
+3. **When it plays.** When voice input ends (submitted, by the button or by
+   the silence; cancelled; cleared; or the card closed), the held speech
+   is given as `Say`, oldest first, under the queue's usual rules: not
+   while the speaker plays, the gate listens or a confirmation waits.
+4. **What is dropped.** Nothing is dropped by age. The queue keeps its cap
+   of 8 (plan 20261022_04, decision 4): past it the oldest held item goes.
+   *Stop reading* drops the held items too (plan 20261028_06, the
+   2026-10-29 00:43 EDT amendment). With *All sound* off nothing is
+   queued; muted, the held speech is dropped by the app when it is given,
+   as every `Say` is (plan 20261028_06, the 2026-10-29 00:52 EDT
+   amendment).
+5. **Starting voice input stops what is playing.** Starting a voice prompt
+   (and *continue by voice* from a typed one) while the speaker plays sends
+   `StopSpeaking`, as a tap does (decision 2): what was cut off is not said
+   again. Gemini's prompt already did this for a running turn.
+6. **What is still spoken** during voice input, because the voice input
+   asks for it: "read it back"; "The message is empty." and "The message
+   is full."; a refused submit and its reason; "I couldn't focus …"; and a
+   message that failed to send. A confirmation question is also still
+   spoken at once: while dictating, the next sentence answers it
+   (decision 2's "approve" and "deny"), so it is part of the flow. A
+   replay the user taps is spoken at once.
+7. **Not changed.** Sounds that are not speech (the done ding, the record
+   chimes) are not held.
