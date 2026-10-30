@@ -167,6 +167,15 @@ pub enum Input {
         id: String,
         answers: Vec<common::ChoiceAnswer>,
     },
+    /// A choice question's card dragged away (plan 20261029_01, the
+    /// 2026-10-30 16:42 EDT amendment, item 3): `choice.cancel` for the
+    /// open view's pane, `id` the card's [`common::ChoiceSet::id`]. The
+    /// daemon presses the agent's own dismiss. [`Event::ChoiceAnswered`]
+    /// follows with `outcome` `cancelled`, the question then ended as the
+    /// agent's own dismiss ends it (its card goes at once), or
+    /// `not_cancelled`, with the reason in `got` when there is one. One
+    /// request at a time with [`Input::Choose`]. Added in 0.7.4.
+    CancelChoice { id: String },
     /// The play button: read the agent's new replies aloud, or stop. Only
     /// its prose is read, never tool calls, their output or code blocks.
     ReadAloud(bool),
@@ -977,7 +986,11 @@ pub enum Event {
     /// closed, or no answer came in [`CHOICE_ANSWER_WAIT`]; `got` is then
     /// the reason, one line, and `code` the daemon's error code when it
     /// gave one (`CHOICE_STALE`, `CHOICE_UNSUPPORTED`, `SCREEN_MISMATCH`,
-    /// `NOT_PERMITTED`, …). Added in 0.5.5.
+    /// `NOT_PERMITTED`, …). Added in 0.5.5. For [`Input::CancelChoice`]
+    /// (0.7.4), `outcome` is `cancelled` (the card goes) or
+    /// `not_cancelled`: the agent's screen did not show the question, so
+    /// nothing was sent (`got` empty), or, as `failed` above, the request
+    /// did not go through (`got` the reason, `code` the daemon's).
     ChoiceAnswered {
         id: String,
         /// The pane it was for; empty when no view was open.
@@ -1251,6 +1264,8 @@ enum Sent {
     Respond(String, String),
     /// `choice.answer` of the choice set with this id, for this pane.
     Choose(String, String),
+    /// `choice.cancel` of the choice set with this id, for this pane.
+    CancelChoice(String, String),
     /// `speech.summarize` of the reply being read with this serial.
     Summarize(u64),
     /// `speech.catch_up` for the held speech with this serial.
@@ -1583,9 +1598,10 @@ pub struct State {
     /// A `link.unpair` for the active remote is on its way, since this
     /// time.
     unpairing: Option<(Duration, RemoteId)>,
-    /// A `choice.answer` on its way: its request id, its choice set's id,
-    /// its pane and when it was sent ([`CHOICE_ANSWER_WAIT`]).
-    choosing: Option<(Id, String, String, Duration)>,
+    /// A `choice.answer` or `choice.cancel` on its way: its request id,
+    /// its choice set's id, its pane, when it was sent
+    /// ([`CHOICE_ANSWER_WAIT`]) and whether it is a cancel.
+    choosing: Option<(Id, String, String, Duration, bool)>,
     /// Panes whose finished turn the agent view has dinged: the list's
     /// next stopped turn for them is the same one, and is not dinged again.
     dinged: HashSet<String>,
@@ -2403,8 +2419,9 @@ impl State {
         };
         let mut out = Vec::new();
         // A new connection answers nothing of the last one's.
-        if let Some((_, id, pane_id, _)) = self.choosing.take() {
-            out.push(event(choice_failed(
+        if let Some((_, id, pane_id, _, cancel)) = self.choosing.take() {
+            out.push(event(choice_not_done(
+                cancel,
                 id,
                 pane_id,
                 "the connection closed".to_string(),
@@ -2667,8 +2684,9 @@ impl State {
         }
         // A choice answer on its way gets none: the card is told, and its
         // choices stay for another try.
-        if let Some((_, id, pane_id, _)) = self.choosing.take() {
-            out.push(event(choice_failed(
+        if let Some((_, id, pane_id, _, cancel)) = self.choosing.take() {
+            out.push(event(choice_not_done(
+                cancel,
                 id,
                 pane_id,
                 "the connection closed".to_string(),
@@ -2838,6 +2856,7 @@ impl State {
             Input::Respond(response) => self.respond(response, &mut out),
             Input::Suggested(answer) => self.suggested(answer, &mut out),
             Input::Choose { id, answers } => self.choose(id, answers, &mut out),
+            Input::CancelChoice { id } => self.cancel_choice(id, &mut out),
             Input::Background(on) => {
                 // Gone to the background with a view open: it is kept, and
                 // is the last session, shown now.
@@ -4273,12 +4292,13 @@ impl State {
         if self
             .choosing
             .as_ref()
-            .is_some_and(|(_, _, _, at)| self.now >= *at + CHOICE_ANSWER_WAIT)
-            && let Some((request, id, pane_id, _)) = self.choosing.take()
+            .is_some_and(|(_, _, _, at, _)| self.now >= *at + CHOICE_ANSWER_WAIT)
+            && let Some((request, id, pane_id, _, cancel)) = self.choosing.take()
         {
-            log::warn!("choice.answer: no answer in time");
+            log::warn!("choice.answer or choice.cancel: no answer in time");
             self.sent.remove(&request);
-            out.push(event(choice_failed(
+            out.push(event(choice_not_done(
+                cancel,
                 id,
                 pane_id,
                 format!(
@@ -4752,42 +4772,9 @@ impl State {
     /// the daemon checks the rest. One at a time: a second while one is on
     /// its way is refused here, as the daemon would.
     fn choose(&mut self, id: String, answers: Vec<common::ChoiceAnswer>, out: &mut Vec<Output>) {
-        let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
-            out.push(event(choice_failed(
-                id,
-                String::new(),
-                "no session is open".to_string(),
-                None,
-            )));
+        let Some(pane_id) = self.choice_pane(&id, false, out) else {
             return;
         };
-        if self.view.as_ref().is_some_and(|v| v.child.is_some()) {
-            out.push(event(choice_failed(
-                id,
-                pane_id,
-                "a subagent takes no answers; answer the main agent".to_string(),
-                Some(libflankr_proto::envelope::codes::NOT_PERMITTED),
-            )));
-            return;
-        }
-        if !self.online() {
-            out.push(event(choice_failed(
-                id,
-                pane_id,
-                "offline".to_string(),
-                None,
-            )));
-            return;
-        }
-        if self.choosing.is_some() {
-            out.push(event(choice_failed(
-                id,
-                pane_id,
-                "an answer is already on its way".to_string(),
-                Some(libflankr_proto::envelope::codes::NOT_PERMITTED),
-            )));
-            return;
-        }
         log::info!(
             "choice.answer: {} answer(s) for {id} in {pane_id}",
             answers.len()
@@ -4800,9 +4787,125 @@ impl State {
         let sent = Sent::Choose(id.clone(), pane_id.clone());
         let request = self.request(methods::CHOICE_ANSWER, params, sent);
         if let Output::Send(r) = &request {
-            self.choosing = Some((r.id.clone(), id, pane_id, self.now));
+            self.choosing = Some((r.id.clone(), id, pane_id, self.now, false));
         }
         out.push(request);
+    }
+
+    /// The open view's pane for a choice request about the set `id`, or
+    /// `None` with [`Event::ChoiceAnswered`] given: no view open, a
+    /// subagent's view, offline, or a choice request already on its way.
+    fn choice_pane(&mut self, id: &str, cancel: bool, out: &mut Vec<Output>) -> Option<String> {
+        let refuse = |pane_id: String, reason: &str, code: Option<i64>| {
+            event(choice_not_done(
+                cancel,
+                id.to_string(),
+                pane_id,
+                reason.to_string(),
+                code,
+            ))
+        };
+        let not_permitted = Some(libflankr_proto::envelope::codes::NOT_PERMITTED);
+        let Some(pane_id) = self.view.as_ref().map(|v| v.pane_id.clone()) else {
+            out.push(refuse(String::new(), "no session is open", None));
+            return None;
+        };
+        if self.view.as_ref().is_some_and(|v| v.child.is_some()) {
+            out.push(refuse(
+                pane_id,
+                "a subagent takes no answers; answer the main agent",
+                not_permitted,
+            ));
+            return None;
+        }
+        if !self.online() {
+            out.push(refuse(pane_id, "offline", None));
+            return None;
+        }
+        if self.choosing.is_some() {
+            out.push(refuse(
+                pane_id,
+                "an answer is already on its way",
+                not_permitted,
+            ));
+            return None;
+        }
+        Some(pane_id)
+    }
+
+    /// A choice question's card dragged away (plan 20261029_01, the
+    /// 2026-10-30 16:42 EDT amendment, item 3): `choice.cancel` for the
+    /// open view's pane, refused here as [`State::choose`] is.
+    fn cancel_choice(&mut self, id: String, out: &mut Vec<Output>) {
+        let Some(pane_id) = self.choice_pane(&id, true, out) else {
+            return;
+        };
+        log::info!("choice.cancel: {id} in {pane_id}");
+        let params = common::ChoiceCancelParams {
+            id: id.clone(),
+            pane_id: pane_id.clone(),
+        };
+        let sent = Sent::CancelChoice(id.clone(), pane_id.clone());
+        let request = self.request(methods::CHOICE_CANCEL, params, sent);
+        if let Output::Send(r) = &request {
+            self.choosing = Some((r.id.clone(), id, pane_id, self.now, true));
+        }
+        out.push(request);
+    }
+
+    /// The pending question's card goes at once, as its answer's or the
+    /// agent's own dismiss's next read would take it: the choice set `id`
+    /// is replied to.
+    fn end_choice(&mut self, id: &str, out: &mut Vec<Output>) {
+        if let Some(v) = self.view.as_mut()
+            && let Some(q) = v
+                .pending_question
+                .as_ref()
+                .filter(|q| q.choices.as_ref().is_some_and(|c| c.id == id))
+        {
+            v.replied_to = Some(q.ts.clone());
+        }
+        self.recompute_view(out);
+    }
+
+    /// `choice.cancel`'s result for the set `id`: cancelled, the question
+    /// ends as the agent's own dismiss ends it.
+    fn choice_cancelled(
+        &mut self,
+        id: String,
+        pane_id: String,
+        result: Value,
+        out: &mut Vec<Output>,
+    ) {
+        let cancelled = match parse::<common::ChoiceCancelResult>(result) {
+            Ok(r) => r.cancelled,
+            Err(e) => {
+                out.push(event(choice_not_done(
+                    true,
+                    id,
+                    pane_id,
+                    format!("a bad choice.cancel result: {e}"),
+                    None,
+                )));
+                return;
+            }
+        };
+        if cancelled {
+            self.end_choice(&id, out);
+        }
+        let outcome = if cancelled {
+            "cancelled"
+        } else {
+            "not_cancelled"
+        };
+        log::info!("choice.cancel: {outcome}");
+        out.push(event(Event::ChoiceAnswered {
+            id,
+            pane_id,
+            outcome: outcome.to_string(),
+            got: Vec::new(),
+            code: None,
+        }));
     }
 
     /// `choice.answer`'s result for the set `id`. Answered, the question's
@@ -4816,15 +4919,7 @@ impl State {
     ) {
         let (outcome, got) = match parse::<common::ChoiceAnswerResult>(result) {
             Ok(common::ChoiceAnswerResult::Answered) => {
-                if let Some(v) = self.view.as_mut()
-                    && let Some(q) = v
-                        .pending_question
-                        .as_ref()
-                        .filter(|q| q.choices.as_ref().is_some_and(|c| c.id == id))
-                {
-                    v.replied_to = Some(q.ts.clone());
-                }
-                self.recompute_view(out);
+                self.end_choice(&id, out);
                 ("answered", Vec::new())
             }
             Ok(common::ChoiceAnswerResult::Mismatch { got }) => ("mismatch", got),
@@ -5310,6 +5405,17 @@ impl State {
                         Some(error.code),
                     )));
                 }
+                Sent::CancelChoice(id, pane_id) => {
+                    log::info!("choice.cancel: {message}");
+                    self.choosing = None;
+                    out.push(event(choice_not_done(
+                        true,
+                        id,
+                        pane_id,
+                        error.message.clone(),
+                        Some(error.code),
+                    )));
+                }
                 Sent::Respond(label, text) => {
                     // Not sent: the card comes back and the input goes.
                     if let Some(v) = self.view.as_mut() {
@@ -5496,6 +5602,10 @@ impl State {
             Sent::Choose(id, pane_id) => {
                 self.choosing = None;
                 self.choice_answered(id, pane_id, result, out);
+            }
+            Sent::CancelChoice(id, pane_id) => {
+                self.choosing = None;
+                self.choice_cancelled(id, pane_id, result, out);
             }
             Sent::Respond(_, text) => match parse::<common::AgentsSendResult>(result) {
                 Ok(common::AgentsSendResult::Pending { confirm_id, .. }) => {
@@ -6846,6 +6956,22 @@ fn choice_failed(id: String, pane_id: String, reason: String, code: Option<i64>)
         got: vec![reason],
         code,
     }
+}
+
+/// [`choice_failed`], or for a cancel (`cancel`) the same as
+/// `not_cancelled`.
+fn choice_not_done(
+    cancel: bool,
+    id: String,
+    pane_id: String,
+    reason: String,
+    code: Option<i64>,
+) -> Event {
+    let mut e = choice_failed(id, pane_id, reason, code);
+    if cancel && let Event::ChoiceAnswered { outcome, .. } = &mut e {
+        *outcome = "not_cancelled".to_string();
+    }
+    e
 }
 
 fn parse<T: DeserializeOwned>(value: Value) -> Result<T, serde_json::Error> {
@@ -9818,6 +9944,96 @@ mod tests {
         });
         assert!(sent(&out).is_empty());
         assert_eq!(choice_answered(&out)[0].2, ["offline"]);
+    }
+
+    fn cancel(s: &mut State) -> (Id, Vec<Output>) {
+        let out = s.input(Input::CancelChoice {
+            id: "toolu_01abc".into(),
+        });
+        let sent = requests(&out, "choice.cancel");
+        assert_eq!(sent.len(), 1, "{out:?}");
+        assert_eq!(
+            sent[0].params,
+            json!({"id": "toolu_01abc", "pane_id": "w2:pZ"})
+        );
+        assert!(choice_answered(&out).is_empty(), "nothing yet");
+        (sent[0].id.clone(), out)
+    }
+
+    #[test]
+    fn cancel_choice_sends_choice_cancel_and_cancelled_ends_the_question() {
+        let mut s = viewing_choices("Which colour?");
+        let (id, _) = cancel(&mut s);
+        // One choice request at a time: an answer meanwhile is refused.
+        let out = s.input(Input::Choose {
+            id: "toolu_01abc".into(),
+            answers: two_answers(),
+        });
+        assert!(requests(&out, "choice.answer").is_empty());
+        assert_eq!(choice_answered(&out)[0].1, "failed");
+        let out = s.incoming(response(id, json!({"cancelled": true})));
+        assert_eq!(
+            choice_answered(&out),
+            [("toolu_01abc".into(), "cancelled".into(), vec![], None)]
+        );
+        assert!(live_question(&s).is_none(), "the card goes");
+    }
+
+    #[test]
+    fn a_choice_not_cancelled_keeps_its_card_and_says_so() {
+        // The daemon's screen check failed: nothing was sent.
+        let mut s = viewing_choices("Which colour?");
+        let (id, _) = cancel(&mut s);
+        let out = s.incoming(response(id, json!({"cancelled": false})));
+        assert_eq!(
+            choice_answered(&out),
+            [("toolu_01abc".into(), "not_cancelled".into(), vec![], None)]
+        );
+        assert!(live_question(&s).unwrap().choices.is_some());
+        // And another try may go.
+        cancel(&mut s);
+
+        // Refused by the daemon: not cancelled, with its code and reason.
+        let mut s = viewing_choices("Which colour?");
+        let (id, _) = cancel(&mut s);
+        let code = libflankr_proto::envelope::codes::CHOICE_STALE;
+        let out = s.incoming(Incoming::Response(Response::err(
+            Some(id),
+            libflankr_proto::ErrorObject::new(code, "not the open choice question"),
+        )));
+        assert_eq!(
+            choice_answered(&out),
+            [(
+                "toolu_01abc".into(),
+                "not_cancelled".into(),
+                vec!["not the open choice question".to_string()],
+                Some(code)
+            )]
+        );
+        assert!(live_question(&s).is_some());
+
+        // A result this client cannot read, no answer in time, or the
+        // link closing: not cancelled.
+        let mut s = viewing_choices("Which colour?");
+        let (id, _) = cancel(&mut s);
+        let got = choice_answered(&s.incoming(response(id, json!({"cancelled": "yes"}))));
+        assert_eq!(got[0].1, "not_cancelled");
+        assert!(got[0].2[0].contains("choice.cancel"), "{got:?}");
+        let mut s = viewing_choices("Which colour?");
+        cancel(&mut s);
+        let got = choice_answered(&s.input(Input::Tick(secs(120.0))));
+        assert_eq!(got[0].1, "not_cancelled");
+        let mut s = viewing_choices("Which colour?");
+        cancel(&mut s);
+        let got = choice_answered(&s.disconnected(1000));
+        assert_eq!(got[0].1, "not_cancelled");
+        assert_eq!(got[0].2, ["the connection closed"]);
+
+        // With no view open: not cancelled, nothing sent.
+        let mut s = online();
+        let out = s.input(Input::CancelChoice { id: "x".into() });
+        assert!(requests(&out, "choice.cancel").is_empty());
+        assert_eq!(choice_answered(&out)[0].1, "not_cancelled");
     }
 
     #[test]

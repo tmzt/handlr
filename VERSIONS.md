@@ -1008,3 +1008,19 @@ item 1. Strictly additive:
   `ChoiceSet::id`, and `pane_id`) and `common::ChoiceCancelResult`
   (`cancelled`: false when the agent's screen did not show the question
   and nothing was sent).
+
+## flankr-companion 0.7.4 — 2026-10-30 (the commit tagged `flankr-companion-v0.7.4`)
+
+Plan 20261029_01 (choice questions), its 2026-10-30 16:42 EDT amendment,
+item 3. Strictly additive: the variant is on the `#[non_exhaustive]`
+`Input`, and the new outcomes come only after it.
+
+- **Added:** `Input::CancelChoice { id }`: `choice.cancel` for the open
+  view's pane, refused here as `Input::Choose` is (no view, a subagent's
+  view, offline, or a choice request already on its way), one choice
+  request at a time with it.
+- **Added:** `Event::ChoiceAnswered`'s outcomes for a cancel: `cancelled`,
+  the question then ended as the agent's own dismiss ends it (its live
+  card goes at once), and `not_cancelled`, with `got` empty when the
+  agent's screen did not show the question, or the reason and the
+  daemon's `code` when the request did not go through.
