@@ -98,3 +98,16 @@ view's release speed (a fit over the last 100 ms, capped), as the overview
 plan's A1 already says. A drag now stays where the finger leaves it; a
 hard flick still carries on. The daemon's re-list was checked and does not
 move the scroll. Installed on the S23 the same day.
+
+## 2026-10-30 13:34 EDT — Owner: spoken messages interrupt voice input
+
+Device: Galaxy S23 Ultra, the build installed 2026-10-30 13:31 EDT.
+
+**Report.** "spoken messages shouldn't interrupt an interactive voice
+input".
+
+**Seen.** Not yet looked into; handed to a subagent in its own worktree.
+Read as: while the owner is giving voice input (dictating a message or
+talking to Gemini, the mic armed or hearing), a reply read aloud or a
+spoken notice starts playing over it. Speech should wait until the voice
+input ends.
