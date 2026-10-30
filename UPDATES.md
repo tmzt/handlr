@@ -122,3 +122,11 @@ These changes came before the program had version numbers.
 
 **Changed**
 - Gemini models are picked by tier and age from the models your key can use. The general agent uses the newest flash model and summaries use the cheapest flash-lite model. The daemon lists them once when it starts and logs what it chose.
+
+## 0.2.0 — 2026-10-30
+
+**Added**
+- When you finish speaking to the phone and replies came in meanwhile, the daemon writes one short spoken update on where things stand, in light of what you said, with the new `spoken_catch_up` prompt in `ADDITIONAL_PROMPTS.md`. It runs on the spoken summaries model and gives up after 8 seconds.
+
+**Changed**
+- Spoken summaries leave out which files changed, worktrees and branches, log and report entries, and test counts, unless a reply is only about them.
