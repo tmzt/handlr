@@ -3763,3 +3763,46 @@ Plan: `docs/design/20261027_02_INFERENCE_CONFIG_PLAN.md`, the
   is built, so each new client logs one more `gemini: <choice> is
   <model>` info line from libinfer-gemini; the daemon's own start log
   (item 3) is unchanged.
+
+## 2026-10-30 16:02 EDT — pinned cards, More and Less and the sideways drag: small departures in the build
+
+Plan 20261022_03 (harness protocol), living section L3, the 2026-10-30
+15:20 EDT amendment ("pinned cards: More and Less, a sideways drag
+removes, by kind"):
+
+1. **Item 1, the links:** the pinned card's own links (a Markdown link in
+   its text) were given indexes past the flow's, but a tap was looked up
+   in the flow's alone, so it reached nothing. A tap is now looked up in
+   the pinned card's links first. *More* and *Less* show only when the
+   other form differs from the one shown (a card whose text is laid out
+   whole as Markdown has none); a summary card's own dim "more" becomes
+   the link.
+2. **Item 2:** only the card shown in full is dragged; the one-line bar
+   while scrolled back is not. The way is decided past the 10 pt slop,
+   sideways when the finger went further across than up or down. A fling
+   is a release at 600 pt/s or more, the way it was dragged, within
+   100 ms of the last move. The card fades to 40% as it goes and springs
+   back with a time constant of about 55 ms.
+3. **Item 3, the one-line form:** a Finished card or a plan question
+   dragged away is the bar in the pinned place, `<title> · <first line>`;
+   at the bottom a tap on it shows the card whole again, as the Finished
+   line over the terminal does, and scrolled back it jumps to the bottom
+   as before. It is not dragged again.
+4. **Item 3, a question with the daemon's answers:** answered with its
+   answer labelled No, or else the one styled `deny`, that sends. With
+   neither (a question that is not yes/no), it is not answered and goes
+   to one line, as a plan question does.
+5. **Item 3, the cards that go:** something broke, a denied approval and
+   a question answered No leave the pinned place and stay in the flow as
+   resolved cards (one dim line), also while the client still gives them
+   live. On a subagent's view, whose answers are inactive, an approval or
+   a yes/no question is not dragged.
+6. **Item 3, speech:** every card dragged away drops its speech by its
+   section serial (the replies on its line), the answered ones too; if
+   that speech is being said, it stops. The *While you spoke* card is
+   dragged away on both screens, dropping its catch-up's speech; its ✕
+   still dismisses it without that.
+7. **Item 4:** the dim line is `-- <text>` in the scrollback's style,
+   after the card, or, while the card is not shown (the client leaves an
+   answered question out), after the last section before it.
+
