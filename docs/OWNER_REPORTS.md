@@ -40,3 +40,13 @@ starts.
 amendment (`ec4df3c`): each remote's last list is kept in its
 `state.redb`, shown at once at start and on a switch, with no
 looking-for message, and each new list merged in by pane. Being built.
+
+## 2026-10-30 13:19 EDT — Owner: a drag on the overview snaps back
+
+Device: Galaxy S23 Ultra, the build installed 2026-10-30 13:14 EDT.
+
+**Report.** "dragging on the overview screen snaps back to the beginning
+or end it doesn't persist it doesn't persist where you drag to so if you
+have" (the report was cut off there).
+
+**Seen.** Not yet looked into; handed to a subagent in its own worktree.
