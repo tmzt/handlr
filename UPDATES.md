@@ -130,3 +130,8 @@ These changes came before the program had version numbers.
 
 **Changed**
 - Spoken summaries leave out which files changed, worktrees and branches, log and report entries, and test counts, unless a reply is only about them.
+
+## 0.2.1 — 2026-10-30
+
+**Fixed**
+- A reply with a dash, an ellipsis, an arrow or a tick mark is summarized for the phone again. The daemon dropped the phone's request for it without an answer.
