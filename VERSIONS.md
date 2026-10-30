@@ -995,3 +995,16 @@ struct is additive"); a pattern that names every field of
   last known. The `net` thread keeps both tables as the view opens,
   closes and goes to the background, and gives `Event::Remotes` when a
   last session changes.
+
+## libflankr_proto 0.5.8 — 2026-10-30 (the commit tagged `libflankr_proto-v0.5.8`)
+
+Plan 20261029_01 (choice questions), its 2026-10-30 16:42 EDT amendment,
+item 1. Strictly additive:
+
+- **Added:** `methods::CHOICE_CANCEL` (`choice.cancel`), companions only,
+  offered as `choice.answer` is: cancels the pane's open choice question,
+  as the agent's own dismiss does.
+- **Added:** `common::ChoiceCancelParams` (`id`, the question's
+  `ChoiceSet::id`, and `pane_id`) and `common::ChoiceCancelResult`
+  (`cancelled`: false when the agent's screen did not show the question
+  and nothing was sent).

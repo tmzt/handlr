@@ -128,6 +128,13 @@ pub mod methods {
     /// decision 2. For companions; a `flankr.harness` client gets
     /// `METHOD_NOT_FOUND`.
     pub const CHOICE_ANSWER: &str = "choice.answer";
+    /// Cancel an open choice question, as the agent's own dismiss does
+    /// ([`ChoiceCancelParams`](super::ChoiceCancelParams) →
+    /// [`ChoiceCancelResult`](super::ChoiceCancelResult)), plan 20261029_01,
+    /// the 2026-10-30 16:42 EDT amendment. Offered as [`CHOICE_ANSWER`] is:
+    /// for companions; a `flankr.harness` client gets `METHOD_NOT_FOUND`.
+    /// Added in 0.5.8.
+    pub const CHOICE_CANCEL: &str = "choice.cancel";
 }
 
 /// Topics for `events.subscribe`.
@@ -808,6 +815,24 @@ pub enum ChoiceAnswerResult {
     /// The keys were sent but no result was written within
     /// [`CHOICE_RESULT_WAIT_S`].
     NoResult,
+}
+
+/// `choice.cancel`'s params (plan 20261029_01, the 2026-10-30 16:42 EDT
+/// amendment, item 1). Added in 0.5.8.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChoiceCancelParams {
+    /// [`ChoiceSet::id`], as [`ChoiceAnswerParams::id`].
+    pub id: String,
+    /// The pane, resolved as `agents.send`'s.
+    pub pane_id: String,
+}
+
+/// `choice.cancel`'s result. Added in 0.5.8.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ChoiceCancelResult {
+    /// The cancel was sent to the agent's question screen. False when the
+    /// screen did not show the question, and nothing was sent.
+    pub cancelled: bool,
 }
 
 /// How long the daemon waits for the agent's result after the last key,
@@ -3615,5 +3640,27 @@ mod tests {
         }
         assert_eq!(methods::CHOICE_ANSWER, "choice.answer");
         assert_eq!(CHOICE_RESULT_WAIT_S, 5);
+    }
+
+    #[test]
+    fn choice_cancel_params_and_result_round_trip() {
+        let params = ChoiceCancelParams {
+            id: "toolu_01ABC".into(),
+            pane_id: "w2:p3".into(),
+        };
+        round_trip(params.clone());
+        assert_eq!(
+            serde_json::to_value(&params).unwrap(),
+            json!({"id": "toolu_01ABC", "pane_id": "w2:p3"})
+        );
+        for cancelled in [true, false] {
+            let result = ChoiceCancelResult { cancelled };
+            round_trip(result);
+            assert_eq!(
+                serde_json::to_value(result).unwrap(),
+                json!({ "cancelled": cancelled })
+            );
+        }
+        assert_eq!(methods::CHOICE_CANCEL, "choice.cancel");
     }
 }
