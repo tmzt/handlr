@@ -959,3 +959,31 @@ a **tap** on a remote card switches to it, and a tap on the active card
 does nothing; only a **2 s press** on any card opens that remote's details
 modal, from which it can be removed (the same confirm flow). The press
 shows feedback while held, and a press that becomes a hold never switches.
+
+## Amendment — 2026-10-30 13:15 EDT: each remote's session list is kept and shown at once, merged as lists arrive
+
+The owner (2026-10-30): "for the remote session list, that should be
+stored persisted and restored immediately. It shouldn't have a looking for
+agents message in places that both in the drawer and the overview screen.
+What should happen instead is it should merge the up list as it comes in".
+This replaces decision 29's `Event::Agents(vec![])` on a switch and
+decision 30's *Connecting to &lt;nickname&gt;…* row, and the overview's
+*Looking for agents…* line:
+
+1. **Kept per remote:** each remote's last agent list (the `AgentInfo`s
+   of its last `agents.list`) is written to that remote's `state.redb`
+   whenever a new list arrives, replacing the one before.
+2. **Restored at once:** at start, and on a switch to a remote, its kept
+   list is given as `Event::Agents` before the connection is made, so the
+   overview's cards and the drawer's rows show at once.
+3. **No looking-for message:** neither the overview nor the drawer shows
+   *Looking for agents…* or *Connecting to &lt;nickname&gt;…* in place of
+   the list. With no kept list (a remote never listed), both show nothing
+   until the first list arrives. *No agents in herdr.* and *No sessions on
+   &lt;nickname&gt;* still show once a list has arrived empty, and the
+   connection's state stays where it is shown now (the remote card's
+   second line and the overview's status line).
+4. **Merged as lists arrive:** each new list is merged into what shows,
+   by pane: a pane still listed is updated in place, keeping its card's or
+   row's place; a new pane is added in the list's order; a pane no longer
+   listed is removed. The list is never cleared to empty in between.
