@@ -505,6 +505,109 @@ mod tests {
         assert_eq!(g.pane_at(third.x + 5.0, third.y + 5.0), Some("p6"));
     }
 
+    /// Enough cards for about three windows of HALF: a drag to the middle
+    /// has to stay in the middle.
+    fn three_screens() -> Vec<AgentInfo> {
+        (1..=20)
+            .map(|t| agent(&format!("p{t}"), "w1", t, None))
+            .collect()
+    }
+
+    /// Drags up by `by` px from `y`: quickly, then slowly to a stop that
+    /// is still moving at release, the moves arriving in pairs 0.1 ms
+    /// apart, as the S23 delivers them. Ends the touch and runs the fling
+    /// out. Returns the time it ended.
+    fn drag_in_bursts(g: &mut CardGrid, y: f32, by: f32, t: Duration) -> Duration {
+        let ms = Duration::from_millis;
+        let burst = Duration::from_micros(100);
+        g.touch(1, TouchPhase::Started, 540.0, y, t);
+        let mut now = t;
+        let mut at = y;
+        // Most of the way at 1250 px/s...
+        let fast = by - 40.0;
+        for _ in 0..10 {
+            now += ms(16);
+            at -= fast / 20.0;
+            g.touch(1, TouchPhase::Moved, 540.0, at, now);
+            now += burst;
+            at -= fast / 20.0;
+            g.touch(1, TouchPhase::Moved, 540.0, at, now);
+        }
+        // ...then the last 40 px at 200 px/s, the finger slowing to lift.
+        for _ in 0..10 {
+            now += ms(20);
+            at -= 2.0;
+            g.touch(1, TouchPhase::Moved, 540.0, at, now);
+            now += burst;
+            at -= 2.0;
+            g.touch(1, TouchPhase::Moved, 540.0, at, now);
+        }
+        now += ms(5);
+        g.touch(1, TouchPhase::Ended, 540.0, at, now);
+        let mut frames = 0;
+        while g.tick(ms(16)) {
+            frames += 1;
+            assert!(frames < 10_000, "the fling never stopped");
+        }
+        now
+    }
+
+    #[test]
+    fn a_drag_to_the_middle_stays_there() {
+        // The owner, 2026-10-30: "dragging on the overview screen snaps
+        // back to the beginning or end ... it won't let you navigate to
+        // the center tiles".
+        let agents = three_screens();
+        let mut g = grid(&agents);
+        let max = g.scroll().max();
+        assert!(max > 2.0 * HALF.h, "about three windows: {max}");
+        drag_in_bursts(&mut g, 1000.0, 600.0, Duration::ZERO);
+        let at = g.scroll().offset();
+        // The slow release carries on a little, not to an end.
+        assert!(
+            (600.0..800.0).contains(&at),
+            "left at {at} of {max} after a 600 px drag"
+        );
+        // And back down by 300 px: from where it was, not from an end.
+        let t = Duration::from_secs(5);
+        g.touch(1, TouchPhase::Started, 540.0, 500.0, t);
+        let mut now = t;
+        for i in 1..=10 {
+            now += Duration::from_millis(16);
+            g.touch(1, TouchPhase::Moved, 540.0, 500.0 + 30.0 * i as f32, now);
+        }
+        g.touch(
+            1,
+            TouchPhase::Ended,
+            540.0,
+            800.0,
+            now + Duration::from_millis(300),
+        );
+        while g.tick(Duration::from_millis(16)) {}
+        assert!((g.scroll().offset() - (at - 300.0)).abs() < 1.0);
+    }
+
+    #[test]
+    fn the_daemons_relist_leaves_the_scroll_where_it_is() {
+        let mut agents = three_screens();
+        let mut g = grid(&agents);
+        drag_in_bursts(&mut g, 1000.0, 600.0, Duration::ZERO);
+        let at = g.scroll().offset();
+        // The same list again, every few seconds.
+        assert!(!g.set_agents(&agents, &[]));
+        assert_eq!(g.scroll().offset(), at);
+        // A changed list: a turn asks, another is pending, a card is
+        // added at the end.
+        agents[3].turn = asking("Push it?");
+        agents.push(agent("p21", "w1", 21, None));
+        assert!(g.set_agents(&agents, &["p5".to_string()]));
+        assert_eq!(g.scroll().offset(), at);
+        // A plugin card, and the theme.
+        g.set_extra(vec![120.0]);
+        g.restyle();
+        assert_eq!(g.scroll().offset(), at);
+    }
+
     #[test]
     fn plugin_cards_follow_the_agents_full_width_and_take_taps() {
         let mut g = grid(&[

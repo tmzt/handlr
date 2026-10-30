@@ -1970,9 +1970,10 @@ impl Drag {
 
 /// The finger's speed at release, in pixels per second: over the span
 /// from the window's start to the last move, none for a span too short to
-/// measure, and at most `MAX_FLING`.
-fn release_speed(d: &Drag, s: f32) -> f32 {
-    let samples = &d.samples[..d.sampled];
+/// measure, and at most `MAX_FLING`. `samples` are the moves' times and
+/// positions, oldest first; the overview's grid measures its own the same
+/// way ([`crate::controls::scroll::Scroll`]).
+pub(crate) fn release_speed(samples: &[(Duration, f32)], s: f32) -> f32 {
     let Some(&(last_t, _)) = samples.last() else {
         return 0.0;
     };
@@ -2013,7 +2014,7 @@ fn release_speed(d: &Drag, s: f32) -> f32 {
 
 /// A finger speed to a fling's: the same up to `FLING_KNEE`, growing as
 /// its power `FLING_POWER` above it.
-fn fling_curve(v: f32, s: f32) -> f32 {
+pub(crate) fn fling_curve(v: f32, s: f32) -> f32 {
     let knee = FLING_KNEE * s;
     if v.abs() <= knee {
         return v;
@@ -2065,7 +2066,7 @@ const SPEED_WINDOW: Duration = Duration::from_millis(100);
 /// adds to it (as Android and iOS do).
 const FLING_BOOST_TOUCH: Duration = Duration::from_millis(400);
 /// Samples kept for it.
-const SAMPLES: usize = 16;
+pub(crate) const SAMPLES: usize = 16;
 /// A shorter span gives no speed: too little to measure.
 const SPEED_SPAN_MIN: Duration = Duration::from_millis(16);
 /// How long the agent must be quiet, in seconds, before continue is
@@ -4848,7 +4849,7 @@ impl AgentScreen {
                 if d.moved {
                     // A finger that stopped before lifting does not fling.
                     let still = now.saturating_sub(d.last_t) > Duration::from_millis(100);
-                    let mut velocity = fling_curve(release_speed(&d, s), s);
+                    let mut velocity = fling_curve(release_speed(&d.samples[..d.sampled], s), s);
                     // Two fingers lifted together fling at 5x.
                     let pair = d
                         .pair_lifted

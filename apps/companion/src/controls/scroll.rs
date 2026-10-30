@@ -4,6 +4,11 @@
 //! window and gives it the touches that started there.
 //!
 //! A drag moves the content; a fling carries on with momentum that decays.
+//! The fling starts at the finger's release speed, measured as the agent
+//! view measures it ([`release_speed`]): moves that arrive together (the
+//! S23 sends them microseconds apart) no longer throw the content to an
+//! end (owner, 2026-10-30: "dragging on the overview screen snaps back to
+//! the beginning or end").
 //! A sticky scroll follows the end while it is there, as the agent view's
 //! flow follows the newest entry, and holds still once scrolled back.
 
@@ -11,7 +16,9 @@ use std::time::Duration;
 
 use libmorph::TouchPhase;
 
-use crate::agent::{DECAY, MIN_FLING, SLOP};
+use crate::agent::{
+    DECAY, FLING_DT_MAX, MAX_FLING_OUT, MIN_FLING, SAMPLES, SLOP, fling_curve, release_speed,
+};
 
 /// A finger on the window.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -22,8 +29,21 @@ struct Drag {
     last_t: Duration,
     /// Past the slop: a scroll, not a tap.
     moved: bool,
-    /// Pixels per second, smoothed.
-    velocity: f32,
+    /// The latest moves' times and positions, oldest first, for the
+    /// release speed.
+    samples: [(Duration, f32); SAMPLES],
+    sampled: usize,
+}
+
+impl Drag {
+    fn sample(&mut self, t: Duration, y: f32) {
+        if self.sampled == SAMPLES {
+            self.samples.copy_within(1.., 0);
+            self.sampled -= 1;
+        }
+        self.samples[self.sampled] = (t, y);
+        self.sampled += 1;
+    }
 }
 
 /// What a touch did.
@@ -122,7 +142,8 @@ impl Scroll {
                     last_y: y,
                     last_t: now,
                     moved: false,
-                    velocity: 0.0,
+                    samples: [(now, y); SAMPLES],
+                    sampled: 1,
                 });
                 Touched::Nothing
             }
@@ -136,15 +157,7 @@ impl Scroll {
                     d.moved = true;
                 }
                 let dy = y - d.last_y;
-                let dt = now.saturating_sub(d.last_t).as_secs_f32();
-                if dt > 0.0 {
-                    let v = dy / dt;
-                    d.velocity = if d.velocity == 0.0 {
-                        v
-                    } else {
-                        0.6 * v + 0.4 * d.velocity
-                    };
-                }
+                d.sample(now, y);
                 d.last_y = y;
                 d.last_t = now;
                 self.drag = Some(d);
@@ -164,8 +177,10 @@ impl Scroll {
                 }
                 // A finger that stopped before lifting does not fling.
                 let still = now.saturating_sub(d.last_t) > Duration::from_millis(100);
-                if !still && d.velocity.abs() > MIN_FLING * s {
-                    self.fling = d.velocity;
+                let velocity = fling_curve(release_speed(&d.samples[..d.sampled], s), s)
+                    .clamp(-MAX_FLING_OUT * s, MAX_FLING_OUT * s);
+                if !still && velocity.abs() > MIN_FLING * s {
+                    self.fling = velocity;
                 }
                 Touched::Scrolled
             }
@@ -181,7 +196,8 @@ impl Scroll {
         if self.fling == 0.0 || self.drag.is_some() {
             return false;
         }
-        let dt = dt.as_secs_f32().min(0.1);
+        // A slow frame cannot throw the content, as in the agent view.
+        let dt = dt.as_secs_f32().min(FLING_DT_MAX);
         let before = self.offset;
         self.scroll_to(self.offset - self.fling * dt);
         self.fling *= (-DECAY * dt).exp();
@@ -254,6 +270,32 @@ mod tests {
             assert!(steps < 10_000, "the fling never stopped");
         }
         assert!(s.offset() <= s.max());
+    }
+
+    #[test]
+    fn moves_arriving_together_do_not_throw_the_content() {
+        // The S23's bursts: two moves 0.1 ms apart every 20 ms, a finger
+        // at 200 px/s. Speeds of each pair alone are 20 000 px/s.
+        let mut s = Scroll::new(false);
+        s.set_extent(20_000.0, 1000.0);
+        s.touch(1, TouchPhase::Started, 100.0, 1500.0, Duration::ZERO, 2.0);
+        let (mut now, mut y) = (Duration::ZERO, 1500.0);
+        for _ in 0..20 {
+            for gap in [Duration::from_millis(20), Duration::from_micros(100)] {
+                now += gap;
+                y -= 2.0;
+                s.touch(1, TouchPhase::Moved, 100.0, y, now, 2.0);
+            }
+        }
+        s.touch(1, TouchPhase::Ended, 100.0, y, now, 2.0);
+        let dragged = s.offset();
+        while s.tick(MS, 2.0) {}
+        // 200 px/s decaying at 2.0/s goes at most 100 px further.
+        assert!(
+            s.offset() - dragged <= 100.0,
+            "{} after {dragged}",
+            s.offset()
+        );
     }
 
     #[test]
