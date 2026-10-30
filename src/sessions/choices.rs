@@ -15,7 +15,10 @@
 //! | E. Preview question, option k | `k`; `enter` |
 //! | F. After the last question, with two or more questions or one multi-select | `1` on the review |
 //!
-//! `escape`, Tab and ← → are never sent. Before each question's keys and
+//! `escape`, Tab and ← → are never sent in an answer. A cancel
+//! ([`cancel_plan`], `choice.cancel`, the plan's 2026-10-30 16:42 EDT
+//! amendment) is question 1's screen check and one `escape`, which rejects
+//! the whole call. Before each question's keys and
 //! before the review's `1`, the visible frame is read until it shows what
 //! the step expects ([`Step::Question`], [`Step::Review`]); a check that
 //! fails stops the answer there, the screen left for the Mac. After the
@@ -200,6 +203,31 @@ pub fn plan(set: &ChoiceSet, answers: &[ChoiceAnswer]) -> Result<Vec<Step>, Plan
         steps.push(Step::Key("1".into()));
     }
     Ok(steps)
+}
+
+/// The steps that cancel `set` (`choice.cancel`, the plan's 2026-10-30
+/// 16:42 EDT amendment, item 2): the screen check before question 1 (its
+/// text and the hint), then one `escape`, which rejects the whole call as
+/// the agent's own dismiss does. Tab and ← → are still never sent.
+pub fn cancel_plan(set: &ChoiceSet) -> Result<Vec<Step>, PlanError> {
+    if !supported(&set.source) {
+        return Err(PlanError::Unsupported(format!(
+            "no driver for {}",
+            set.source
+        )));
+    }
+    let Some(first) = set.questions.first() else {
+        return Err(PlanError::Invalid("the question has no questions".into()));
+    };
+    Ok(vec![
+        Step::Question {
+            index: 0,
+            needle: needle(&first.text),
+            other_empty: false,
+            first_focused: false,
+        },
+        Step::Key("escape".into()),
+    ])
 }
 
 /// The first [`QUESTION_NEEDLE`] characters of a question's text, folded.

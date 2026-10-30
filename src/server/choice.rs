@@ -1,13 +1,16 @@
 //! `choice.answer` (docs/design/20261029_01_CHOICE_QUESTIONS_PLAN.md,
 //! decisions 2, 5 and 6): a companion's answer to the choice question open
 //! in a pane, given by the agent's own keys and checked against the result
-//! the agent writes.
+//! the agent writes; and `choice.cancel` (the plan's 2026-10-30 16:42 EDT
+//! amendment), the question dismissed with the agent's own Esc.
 
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use libflankr_proto::ErrorObject;
-use libflankr_proto::common::{ChoiceAnswerParams, ChoiceAnswerResult};
+use libflankr_proto::common::{
+    ChoiceAnswerParams, ChoiceAnswerResult, ChoiceCancelParams, ChoiceCancelResult,
+};
 use libflankr_proto::envelope::codes;
 use libherdr::HerdrClient;
 use libherdr::protocol::{HerdrRequest, ReadSource};
@@ -15,8 +18,9 @@ use serde_json::{Value, json};
 
 use super::Daemon;
 use super::conn::{Conn, ok, params, resolve_target, snapshot};
-use crate::core::agents::{self, extract_agent_name_for_pane};
+use crate::core::agents::{self, AgentRef, extract_agent_name_for_pane};
 use crate::core::policy;
+use crate::sessions::OpenChoice;
 use crate::sessions::choices::{self, DriveError, PlanError, Timing};
 
 /// Lines asked of `pane.read`; the visible frame is what comes back.
@@ -87,17 +91,25 @@ fn not_permitted(reason: impl Into<String>) -> ErrorObject {
     ErrorObject::new(codes::NOT_PERMITTED, reason)
 }
 
-/// `choice.answer`, for companions only (the dispatcher gives anyone else
-/// `METHOD_NOT_FOUND`).
-pub(super) async fn answer(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
-    let mut p: ChoiceAnswerParams = params(raw)?;
+/// The pane's open choice question `id`, checked as decision 6 says.
+struct Asked {
+    pane_id: String,
+    agent: String,
+    pane: AgentRef,
+    open: OpenChoice,
+}
+
+/// Resolve `pane_id` and find its open choice question `id`: the agent
+/// takes messages and this principal reaches it (decision 6), the question
+/// is the pane's open one (`CHOICE_STALE`) and has a driver
+/// (`CHOICE_UNSUPPORTED`). Shared by `choice.answer` and `choice.cancel`.
+async fn asked(conn: &Arc<Conn>, pane_id: &str, id: &str) -> Result<Asked, ErrorObject> {
     let daemon = &conn.daemon;
     let snap = snapshot(conn).await?;
-    let pane_id = resolve_target(daemon, &snap, &p.pane_id)?;
+    let pane_id = resolve_target(daemon, &snap, pane_id)?;
     let agent = extract_agent_name_for_pane(&snap, &pane_id);
-    let principal = conn.principal();
     // Decision 6: the agent takes messages and this principal reaches it.
-    policy::check_answer(principal, &daemon.agents, &agent, &pane_id)
+    policy::check_answer(conn.principal(), &daemon.agents, &agent, &pane_id)
         .map_err(|denied| not_permitted(denied.to_string()))?;
     let pane = agents::agents(&snap)
         .into_iter()
@@ -111,11 +123,11 @@ pub(super) async fn answer(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorO
     let open = local
         .then(|| daemon.sessions.open_choice(&pane))
         .flatten()
-        .filter(|o| o.set.id == p.id)
+        .filter(|o| o.set.id == id)
         .ok_or_else(|| {
             ErrorObject::new(
                 codes::CHOICE_STALE,
-                format!("{} is not the open choice question of {pane_id}", p.id),
+                format!("{id} is not the open choice question of {pane_id}"),
             )
         })?;
     if !choices::supported(&open.set.source) {
@@ -124,6 +136,26 @@ pub(super) async fn answer(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorO
             format!("no driver for {}", open.set.source),
         ));
     }
+    Ok(Asked {
+        pane_id,
+        agent,
+        pane,
+        open,
+    })
+}
+
+/// `choice.answer`, for companions only (the dispatcher gives anyone else
+/// `METHOD_NOT_FOUND`).
+pub(super) async fn answer(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
+    let mut p: ChoiceAnswerParams = params(raw)?;
+    let daemon = &conn.daemon;
+    let principal = conn.principal();
+    let Asked {
+        pane_id,
+        agent,
+        pane,
+        open,
+    } = asked(conn, &p.pane_id, &p.id).await?;
     // Other texts as messages are checked: one line, no command prefix,
     // the paths in the agent's project. The cleaned text is what is typed.
     for answer in &mut p.answers {
@@ -203,6 +235,61 @@ pub(super) async fn answer(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorO
     ok(result)
 }
 
+/// `choice.cancel` (plan 20261029_01, the 2026-10-30 16:42 EDT amendment,
+/// item 2), for companions only: one `escape` after question 1's screen
+/// check, which rejects the whole call as the agent's own dismiss does.
+/// A check that fails sends nothing and answers `cancelled: false`.
+pub(super) async fn cancel(conn: &Arc<Conn>, raw: Value) -> Result<Value, ErrorObject> {
+    let p: ChoiceCancelParams = params(raw)?;
+    let daemon = &conn.daemon;
+    let Asked { pane_id, open, .. } = asked(conn, &p.pane_id, &p.id).await?;
+    let steps = choices::cancel_plan(&open.set).map_err(|e| match e {
+        PlanError::Invalid(why) => ErrorObject::new(codes::INVALID_PARAMS, why),
+        PlanError::Unsupported(why) => ErrorObject::new(codes::CHOICE_UNSUPPORTED, why),
+    })?;
+    let Some(_answering) = Answering::take(daemon, &pane_id) else {
+        return Err(not_permitted(format!(
+            "an answer to {pane_id}'s question is already being sent"
+        )));
+    };
+    log::info!(
+        "Cancelling choice question {} in pane '{pane_id}' by the drag",
+        p.id
+    );
+    let herdr = HerdrPane {
+        client: &daemon.client,
+        pane_id: &pane_id,
+    };
+    let result = cancelled(
+        choices::drive(&herdr, &steps, &Timing::default()).await,
+        &p.id,
+        &pane_id,
+    )?;
+    ok(result)
+}
+
+/// `choice.cancel`'s result from the drive: a failed screen check is
+/// `cancelled: false` (nothing was sent), herdr failing an error.
+fn cancelled(
+    driven: Result<(), DriveError>,
+    id: &str,
+    pane_id: &str,
+) -> Result<ChoiceCancelResult, ErrorObject> {
+    match driven {
+        Ok(()) => Ok(ChoiceCancelResult { cancelled: true }),
+        Err(DriveError::Screen { step, sent }) => {
+            log::warn!(
+                "Choice question {id} in pane '{pane_id}' not cancelled: {step} ({sent} keys sent); left for the Mac"
+            );
+            Ok(ChoiceCancelResult { cancelled: false })
+        }
+        Err(DriveError::Herdr(e)) => Err(ErrorObject::new(
+            codes::HERDR_UNAVAILABLE,
+            format!("herdr: {e}"),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +306,23 @@ mod tests {
         let rpc = send_text_request("p", "t").to_jsonrpc();
         assert_eq!(rpc.method, "pane.send_text");
         assert_eq!(rpc.params, json!({"pane_id": "p", "text": "t"}));
+    }
+
+    #[test]
+    fn a_cancel_whose_check_fails_is_not_cancelled_and_herdr_failing_errs() {
+        assert_eq!(
+            cancelled(Ok(()), "toolu_1", "w1:p2").unwrap(),
+            ChoiceCancelResult { cancelled: true }
+        );
+        let screen = DriveError::Screen {
+            step: "question 1 did not appear".into(),
+            sent: 0,
+        };
+        assert_eq!(
+            cancelled(Err(screen), "toolu_1", "w1:p2").unwrap(),
+            ChoiceCancelResult { cancelled: false }
+        );
+        let err = cancelled(Err(DriveError::Herdr("gone".into())), "toolu_1", "w1:p2").unwrap_err();
+        assert_eq!(err.code, codes::HERDR_UNAVAILABLE);
     }
 }

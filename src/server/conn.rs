@@ -959,6 +959,7 @@ async fn call(
         // Plan 20261029_01, decision 2: for companions; anyone else gets
         // METHOD_NOT_FOUND below.
         methods::CHOICE_ANSWER if conn.is_companion() => super::choice::answer(conn, raw).await,
+        methods::CHOICE_CANCEL if conn.is_companion() => super::choice::cancel(conn, raw).await,
         companion::methods::PLUGIN_CALL if conn.is_companion() => {
             plugin_call(conn, request_id, params(raw)?)
         }

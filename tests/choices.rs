@@ -519,3 +519,55 @@ async fn bad_shapes_permissions_and_harness_clients_are_refused() {
     assert_eq!(r["error"]["code"], -32001, "{r}");
     assert!(keys(&env.daemon).await.is_empty());
 }
+
+// ── The 2026-10-30 16:42 EDT amendment: choice.cancel ──────────────────
+
+fn cancel_params() -> Value {
+    json!({"id": CALL, "pane_id": "p1"})
+}
+
+#[tokio::test]
+async fn a_cancel_sends_one_escape_after_question_one_shows() {
+    let env = start(claude(true), &(prompt() + &ask(two_questions()))).await;
+    script(&env.daemon, vec![colour_frame(None)], None);
+    let mut c = Client::connect(&env, "flankr.companion").await;
+    let r = c.call("choice.cancel", cancel_params()).await;
+    assert_eq!(r["result"], json!({"cancelled": true}), "{r}");
+    assert_eq!(keys(&env.daemon).await, ["escape"]);
+}
+
+#[tokio::test]
+async fn a_cancel_whose_screen_check_fails_sends_nothing() {
+    let env = start(claude(true), &(prompt() + &ask(two_questions()))).await;
+    // Question 2 is showing (moved on at the Mac): not question 1.
+    script(&env.daemon, vec![icons_frame()], None);
+    let mut c = Client::connect(&env, "flankr.companion").await;
+    let r = c.call("choice.cancel", cancel_params()).await;
+    assert_eq!(r["result"], json!({"cancelled": false}), "{r}");
+    assert!(keys(&env.daemon).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_cancel_is_refused_when_stale_not_permitted_or_from_a_harness() {
+    let env = start(claude(true), &(prompt() + &ask(two_questions()))).await;
+    script(&env.daemon, vec![colour_frame(None)], None);
+    let mut c = Client::connect(&env, "flankr.companion").await;
+    let r = c
+        .call(
+            "choice.cancel",
+            json!({"id": "toolu_other", "pane_id": "p1"}),
+        )
+        .await;
+    assert_eq!(r["error"]["code"], -32040, "{r}");
+    let mut harness = Client::connect(&env, "flankr.harness").await;
+    let r = harness.call("choice.cancel", cancel_params()).await;
+    assert_eq!(r["error"]["code"], -32601, "{r}");
+    assert!(keys(&env.daemon).await.is_empty());
+
+    let env = start(claude(false), &(prompt() + &ask(two_questions()))).await;
+    script(&env.daemon, vec![colour_frame(None)], None);
+    let mut c = Client::connect(&env, "flankr.companion").await;
+    let r = c.call("choice.cancel", cancel_params()).await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+    assert!(keys(&env.daemon).await.is_empty());
+}

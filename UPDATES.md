@@ -145,3 +145,8 @@ These changes came before the program had version numbers.
 
 **Fixed**
 - If Google refuses a model while the daemon runs, it moves to the next allowed one for that tier and age, and tries again, instead of failing every summary until a restart. A model named exactly in the config is never changed.
+
+## 0.3.0 — 2026-10-30
+
+**Added**
+- A choice question Claude is showing can be dismissed from the phone. The daemon presses Esc in Claude's question screen, as dismissing it at the Mac does, but only once it sees the question's first page there; otherwise it sends nothing and tells the phone.

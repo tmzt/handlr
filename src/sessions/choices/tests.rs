@@ -347,6 +347,56 @@ async fn an_other_row_with_text_is_refused_before_any_key() {
     assert!(pane.sent().is_empty());
 }
 
+#[test]
+fn a_cancel_checks_question_one_then_sends_one_escape() {
+    let s = set(vec![
+        single("Which colour?", &["Teal", "Amber"]),
+        multi("Which rows?", &["Files", "Folders"]),
+    ]);
+    let steps = cancel_plan(&s).unwrap();
+    assert_eq!(shape(&steps), ["?1", "escape"]);
+    match &steps[0] {
+        Step::Question { needle, .. } => assert_eq!(needle, "Which colour?"),
+        other => panic!("{other:?}"),
+    }
+    let codex = ChoiceSet::new("c1", vec![single("Which?", &["A", "B"])], "codex/ask");
+    assert!(matches!(
+        cancel_plan(&codex),
+        Err(PlanError::Unsupported(_))
+    ));
+}
+
+#[tokio::test]
+async fn a_cancel_is_driven_when_question_one_shows_and_sends_nothing_when_not() {
+    let s = set(vec![
+        single("Which colour?", &["Teal", "Amber"]),
+        single("Which size?", &["Small", "Large"]),
+    ]);
+    let steps = cancel_plan(&s).unwrap();
+    let q1 = frame_single("Which colour?", &["Teal", "Amber"], None);
+    let pane = Scripted::new(vec![q1]);
+    drive(&pane, &steps, &fast()).await.unwrap();
+    assert_eq!(pane.sent(), ["escape"]);
+
+    // Moved on to question 2 on the Mac: the check fails, nothing is sent.
+    let q2 = frame_single("Which size?", &["Small", "Large"], None);
+    let pane = Scripted::new(vec![q2]);
+    let err = drive(&pane, &steps, &fast()).await.unwrap_err();
+    assert_eq!(
+        err,
+        DriveError::Screen {
+            step: "question 1 did not appear".into(),
+            sent: 0
+        }
+    );
+    assert!(pane.sent().is_empty());
+
+    // The review is showing: nothing is sent either.
+    let pane = Scripted::new(vec![REVIEW_FRAME.to_string()]);
+    assert!(drive(&pane, &steps, &fast()).await.is_err());
+    assert!(pane.sent().is_empty());
+}
+
 fn answered(pairs: &[(&str, &str)]) -> ChoiceOutcome {
     ChoiceOutcome {
         answers: pairs
