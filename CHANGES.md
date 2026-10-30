@@ -3806,3 +3806,37 @@ removes, by kind"):
    after the card, or, while the card is not shown (the client leaves an
    answered question out), after the last section before it.
 
+## 2026-10-30 16:04 EDT — the last view cached and *At startup*: small departures in the build (plan 20261023_03 and plan 20261024_02, their 15:20 EDT amendments)
+
+Small departures needed to make the two amendments work (Rule 1.7):
+
+1. **`State::restore_view` caches, it does not open** (subscriptions
+   plan, item 2). It puts the kept view into the cache of closed views
+   instead of giving `Event::AgentView` itself: the client cannot know
+   *At startup*'s value when the `net` thread loads the remotes, so the
+   app decides, and its `Input::OpenAgent` gives the usual
+   `Event::AgentView`, `cached`, at once and offline. The same kept view
+   also shows at once when that session is opened from the overview.
+2. **The last session is its own table.** `state.redb` has `view` (key
+   `view`, the cached view) and `last_session` (key `last`, the pane and
+   when it was last shown, Unix seconds). Closing to the overview deletes
+   `last`; the view stays. The app reads each remote's last session as
+   `RemoteInfo::last_session`, given only while the pane is in that
+   remote's agent list as last known (kept or the daemon's).
+3. **What is kept.** With a window, the sections within one screenful of
+   the last one shown (both sides), nearest first; without one, the
+   newest first; capped at 200 sections or 512 KiB of section JSON. The
+   whole outline is kept (slots only, not counted in the cap). A
+   subagent's view is not kept; nor is an ended one.
+4. **"Ended" is for restored views only** (item 4): a view restored from
+   `state.redb` that gets a no-session delivery before any other, or
+   whose pane is missing from the daemon's first list, says *This session
+   has ended*. A view opened as before with no session still says "(no
+   session to show)". A subscribe error does not end it.
+5. **The *At startup* row** is in the Voice section, right after *Tab
+   follows focus* (there is no general section). libcontrols'
+   `SelectableLabel` steps without wrapping, so with two values the arrow
+   at the end is dim.
+6. **The refreshing line** is the pull's *-- refreshing… --*, held while
+   `cached`; it springs back with no result line once the first delivery
+   comes.
