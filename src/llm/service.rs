@@ -669,7 +669,7 @@ mod tests {
     fn catalogs() -> Catalogs {
         let list = || {
             super::super::gemini::ModelCatalog::from_names([
-                "gemini-2.0-flash-lite",
+                "gemini-3.5-flash-lite",
                 "gemini-3.8-flash",
             ])
         };

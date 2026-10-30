@@ -310,7 +310,7 @@ impl LlmSettings {
 
     /// One line per use, for the log at start: the choice, the model it
     /// resolved to and how (`[llm] spoken_summaries: flash-lite:oldest is
-    /// gemini-2.5-flash-lite (matched)`), or why it is unavailable.
+    /// gemini-3.5-flash-lite (matched)`), or why it is unavailable.
     pub fn describe(&self) -> Vec<String> {
         self.uses
             .iter()
@@ -821,12 +821,15 @@ mod tests {
     }
 
     /// A key's model list as the API gives it, in its shapes: versioned
-    /// stable names, revisions, previews, `-latest` aliases and Pro.
-    const LISTED: [&str; 12] = [
+    /// stable names (2.x ones below *oldest*'s 3.0 floor), revisions,
+    /// previews, `-latest` aliases and Pro.
+    const LISTED: [&str; 14] = [
         "models/gemini-2.0-flash-lite",
         "models/gemini-2.0-flash-lite-001",
         "models/gemini-1.5-flash-lite-preview",
         "models/gemini-2.5-flash-lite",
+        "models/gemini-3.5-flash-lite-001",
+        "models/gemini-3.5-flash-lite",
         "models/gemini-2.5-flash",
         "models/gemini-3.8-flash",
         "models/gemini-3.9-flash-preview",
@@ -886,11 +889,11 @@ mod tests {
             assert_eq!(s.models[&u].choice, Kind::Gemini.default_choice(u));
             assert!(!model(&s, u).contains("pro"), "{u:?}");
         }
-        // Summaries: the oldest stable Flash-Lite, not a revision or a
-        // preview; the general agent: the `-latest` alias when there is
+        // Summaries: the oldest stable Flash-Lite from 3.0 up, not a 2.x,
+        // a revision or a preview; the general agent: the `-latest` alias when there is
         // none for Flash, so the newest stable Flash.
-        assert_eq!(model(&s, Use::CardSummaries), "gemini-2.0-flash-lite");
-        assert_eq!(model(&s, Use::SpokenSummaries), "gemini-2.0-flash-lite");
+        assert_eq!(model(&s, Use::CardSummaries), "gemini-3.5-flash-lite");
+        assert_eq!(model(&s, Use::SpokenSummaries), "gemini-3.5-flash-lite");
         assert_eq!(how(&s, Use::SpokenSummaries), gemini::How::Matched);
         assert_eq!(model(&s, Use::GeneralAgent), "gemini-3.8-flash");
         assert_eq!(how(&s, Use::GeneralAgent), gemini::How::Matched);
@@ -904,7 +907,7 @@ mod tests {
         let s = resolve_on("[llm]\nenabled = true\n", &env, &aliased);
         assert_eq!(model(&s, Use::GeneralAgent), "gemini-flash-latest");
         assert_eq!(how(&s, Use::GeneralAgent), gemini::How::Alias);
-        assert_eq!(model(&s, Use::CardSummaries), "gemini-2.0-flash-lite");
+        assert_eq!(model(&s, Use::CardSummaries), "gemini-3.5-flash-lite");
     }
 
     /// Item 4: one line per use, the choice, the model and how.
@@ -923,7 +926,7 @@ mod tests {
                 "[llm] general_agent: flash:newest is gemini-3.8-flash (matched)",
                 "[llm] card_summaries: gemini-9-flash is gemini-9-flash \
                  (named, not in the key's model list)",
-                "[llm] spoken_summaries: flash-lite:oldest is gemini-2.0-flash-lite (matched)",
+                "[llm] spoken_summaries: flash-lite:oldest is gemini-3.5-flash-lite (matched)",
                 "[llm] planning: unavailable: [llm.uses.planning] is off unless enabled = true",
             ]
         );
@@ -1031,7 +1034,7 @@ model = "gemini-flash-lite:oldest"
             s.models[&Use::GeneralAgent].choice.to_string(),
             "pro:newest"
         );
-        assert_eq!(model(&s, Use::CardSummaries), "gemini-2.0-flash-lite");
+        assert_eq!(model(&s, Use::CardSummaries), "gemini-3.5-flash-lite");
         assert_eq!(model(&s, Use::SpokenSummaries), "gemini-2.5-flash");
         assert_eq!(how(&s, Use::SpokenSummaries), gemini::How::Named);
 
@@ -1062,7 +1065,7 @@ enabled = false
         let cards = s.target(Use::CardSummaries).unwrap();
         assert_eq!(cards.backend, "cheap");
         assert_eq!(cards.key.expose(), "k2");
-        assert_eq!(cards.model, "gemini-2.5-flash-lite");
+        assert_eq!(cards.model, "gemini-3.0-flash-lite");
         assert!(matches!(
             s.state(Use::SpokenSummaries),
             UseState::Unavailable {

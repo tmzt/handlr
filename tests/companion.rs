@@ -2422,13 +2422,15 @@ fn rewrite(path: &Path, text: &str) {
 }
 
 /// The model lists the test daemon starts with (no network): those of
-/// `gemini` and `main`; `cheap` has none.
+/// `gemini` and `main`; `cheap` has none. The 2.x Flash-Lite names are
+/// below *oldest*'s 3.0 floor.
 fn catalogs() -> Catalogs {
     let list = || {
         ModelCatalog::from_names([
             "models/gemini-2.0-flash-lite",
             "models/gemini-2.0-flash-lite-001",
             "models/gemini-2.5-flash-lite",
+            "models/gemini-3.5-flash-lite",
             "models/gemini-3.8-flash",
             "models/gemini-flash-lite-latest",
             "models/gemini-pro-latest",
@@ -2603,8 +2605,8 @@ async fn each_use_runs_on_the_model_its_rule_resolved_to() {
         settings.describe()[..3],
         [
             "[llm] general_agent: flash:newest is gemini-3.8-flash (matched)",
-            "[llm] card_summaries: flash-lite:oldest is gemini-2.0-flash-lite (matched)",
-            "[llm] spoken_summaries: flash-lite:oldest is gemini-2.0-flash-lite (matched)",
+            "[llm] card_summaries: flash-lite:oldest is gemini-3.5-flash-lite (matched)",
+            "[llm] spoken_summaries: flash-lite:oldest is gemini-3.5-flash-lite (matched)",
         ]
     );
     let (mut c, _) = Client::companion(&e.env).await;
@@ -2621,7 +2623,7 @@ async fn each_use_runs_on_the_model_its_rule_resolved_to() {
         .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
         .await;
     assert_eq!(
-        r["result"]["summary"], "gemini/gemini-2.0-flash-lite",
+        r["result"]["summary"], "gemini/gemini-3.5-flash-lite",
         "{r}"
     );
 

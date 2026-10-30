@@ -135,3 +135,8 @@ These changes came before the program had version numbers.
 
 **Fixed**
 - A reply with a dash, an ellipsis, an arrow or a tick mark is summarized for the phone again. The daemon dropped the phone's request for it without an answer.
+
+## 0.2.2 — 2026-10-30
+
+**Fixed**
+- Spoken and card summaries work: the oldest model is now chosen from 3.x up, since older ones can be listed and still refused.
