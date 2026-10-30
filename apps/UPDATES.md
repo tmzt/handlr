@@ -168,3 +168,9 @@ These changes came before the app had version numbers.
 - Dragging across the drawer's session rows no longer opens a session. Only a tap does.
 - The overview's flick follows your finger's speed, so a drag stays where you leave it and the grid no longer runs to the top or the end.
 - Nothing is spoken over voice input. Speech waits, and plays once the voice input ends.
+
+## 0.2.0 — 2026-10-30
+
+**Changed**
+- After you finish speaking, replies that came in while you talked are no longer read one by one: you hear one short update on where things stand now, in light of what you just said. If no update can be made within a few seconds, the replies are read as before.
+- Spoken summaries are shorter: they leave out which files changed, branches, log entries and test counts, and keep what was done, what was found and any question for you.
