@@ -23,6 +23,10 @@ pub const PROMPT_TAG: &str = "Prompt";
 /// The spoken summary of a complex reply (plan 20261023_05, decision 8).
 pub const SPOKEN_SUMMARY: &str = "spoken_summary";
 
+/// The spoken catch-up after a voice input (plan 20261023_05, the
+/// 2026-10-30 13:52 EDT amendment, item 3).
+pub const SPOKEN_CATCH_UP: &str = "spoken_catch_up";
+
 /// The general agent's planning blocks (plan 20261027_04, decision 6).
 pub const PLANNING: &str = "planning";
 
@@ -187,7 +191,7 @@ mod tests {
     fn the_shipped_file_parses() {
         let (prompts, errors) = Prompts::shipped();
         assert!(errors.is_empty(), "{errors:?}");
-        assert_eq!(prompts.len(), 2);
+        assert_eq!(prompts.len(), 3);
         let p = prompts.get(SPOKEN_SUMMARY).expect("spoken_summary");
         assert_eq!(p.settings.get("max_words").map(String::as_str), Some("60"));
         assert_eq!(p.number("max_words"), Some(60.0));
@@ -195,6 +199,19 @@ mod tests {
         assert!(p.system.starts_with("You turn a coding agent's reply"));
         assert!(p.system.contains("{{ [#] max_words }}"));
         assert!(p.user.as_deref().unwrap().ends_with("{{ [abc] reply }}"));
+        // Shorter: what the ear does not need is left out (the 2026-10-30
+        // 13:52 EDT amendment, item 1).
+        let words = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(words(&p.system).contains(
+            "also leave out which files changed, worktrees and branches, \
+             log and report entries, and test counts"
+        ));
+        let c = prompts.get(SPOKEN_CATCH_UP).expect("spoken_catch_up");
+        assert_eq!(c.number("max_words"), Some(40.0));
+        assert_eq!(c.number("temperature"), Some(0.2));
+        assert!(words(&c.system).contains("in light of what they just said"));
+        let user = c.user.as_deref().unwrap();
+        assert!(user.contains("{{ [abc] held }}") && user.ends_with("{{ [abc] said }}"));
         let planning = prompts.get(PLANNING).expect("planning");
         assert!(planning.user.is_none());
         assert_eq!(planning.number("max_instructions_kb"), Some(32.0));
@@ -218,6 +235,26 @@ mod tests {
         assert_eq!(
             user,
             "The claude agent in flankr replied:\n\nDone: `src/prompts.rs` added."
+        );
+    }
+
+    #[test]
+    fn spoken_catch_up_fills() {
+        let (prompts, _) = Prompts::shipped();
+        let p = prompts.get(SPOKEN_CATCH_UP).unwrap();
+        let system = p.fill(&p.system, &BTreeMap::new()).unwrap();
+        assert!(system.contains("at most 40 words:"), "{system}");
+        assert!(!system.contains("{{"));
+        let v = values(&[
+            ("held", "- The claude agent in flankr: The tests pass."),
+            ("said", "Then the user asked the general agent:\n\nwhat now"),
+        ]);
+        let user = p.fill(p.user.as_deref().unwrap(), &v).unwrap();
+        assert_eq!(
+            user,
+            "While the user spoke, these arrived, oldest first:\n\n\
+             - The claude agent in flankr: The tests pass.\n\n\
+             Then the user asked the general agent:\n\nwhat now"
         );
     }
 

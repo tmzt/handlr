@@ -2236,6 +2236,124 @@ async fn with_the_general_agent_off_spoken_summaries_go_on() {
     assert_eq!(mock.recorded_transcripts().len(), 1);
 }
 
+// speech.catch_up (plan 20261023_05, the 2026-10-30 13:52 EDT amendment):
+// one spoken catch-up for the speech held during a voice input.
+
+#[tokio::test]
+async fn a_catch_up_reads_held_replies_whole_and_names_the_message() {
+    let reply = format!("{COMPLEX}\nThe key is {FAKE_KEY}.");
+    let home = speech_home(&reply);
+    // Past the prompt's 40 words: cut at the last sentence within them.
+    let answer = format!(
+        "Claude changed three files, and you asked it to push them. \
+         Pushing now should be quick. Anything else? {}",
+        "And then some more words. ".repeat(6)
+    );
+    let mock = Arc::new(MockReasoningEngine::with_response(&answer));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let mut c = speaking_companion(&env).await;
+    let r = c
+        .call(
+            "speech.catch_up",
+            json!({
+                "held": [
+                    {"pane_id": "p1", "ts": REPLY_TS, "text": "cut off…"},
+                    {"text": "Claude is running the tests."},
+                    {"pane_id": "nowhere", "text": "A notice."},
+                ],
+                "said": {"text": "Now push it.", "pane_id": "p1"},
+            }),
+        )
+        .await;
+    // 19 words, then four of the six 5-word sentences.
+    let cut = format!(
+        "Claude changed three files, and you asked it to push them. \
+         Pushing now should be quick. Anything else? {}",
+        "And then some more words. ".repeat(4)
+    );
+    assert_eq!(r["result"]["summary"], cut.trim_end(), "{r}");
+    let sent = mock.recorded_transcripts();
+    assert_eq!(sent.len(), 1);
+    let sent = &sent[0];
+    assert!(
+        sent.starts_with(
+            "While the user spoke, these arrived, oldest first:\n\n- The Claude agent in "
+        ),
+        "{sent}"
+    );
+    // The whole reply, redacted; not the client's text.
+    assert!(sent.contains("- src/gamma.rs"), "{sent}");
+    assert!(
+        !sent.contains(FAKE_KEY) && !sent.contains("cut off"),
+        "{sent}"
+    );
+    assert!(sent.contains("\n- The general agent: Claude is running the tests.\n"));
+    assert!(
+        sent.contains("\n- The general agent: A notice.\n"),
+        "{sent}"
+    );
+    assert!(sent.ends_with(" this message:\n\nNow push it."), "{sent}");
+    assert!(
+        sent.contains("Then the user sent the Claude agent in "),
+        "{sent}"
+    );
+
+    // Gemini's prompt, and an input cancelled.
+    let held = json!([{"text": "Codex is done."}]);
+    c.call(
+        "speech.catch_up",
+        json!({"held": held, "said": {"text": "what now"}}),
+    )
+    .await;
+    assert!(
+        mock.recorded_transcripts()[1]
+            .ends_with("Then the user asked the general agent:\n\nwhat now")
+    );
+    c.call("speech.catch_up", json!({"held": held})).await;
+    assert!(
+        mock.recorded_transcripts()[2].ends_with("Then the user stopped without sending anything.")
+    );
+}
+
+#[tokio::test]
+async fn no_catch_up_is_made_without_spoken_output_held_speech_or_an_answer() {
+    let home = speech_home(COMPLEX);
+    let mock = Arc::new(MockReasoningEngine::with_response("Caught up."));
+    let env = start_summaries(home.path(), mock.clone(), WAIT).await;
+    let held = json!({"held": [{"text": "Codex is done."}]});
+    // Spoken output off, as a new connection starts.
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("speech.catch_up", held.clone()).await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    // Nothing held.
+    let mut c = speaking_companion(&env).await;
+    let r = c.call("speech.catch_up", json!({"held": []})).await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    assert!(mock.recorded_transcripts().is_empty());
+    let r = c.call("speech.catch_up", held.clone()).await;
+    assert_eq!(r["result"], json!({"summary": "Caught up."}), "{r}");
+
+    // An empty answer, an error, or none in time: no catch-up, not an
+    // error.
+    for engine in [
+        MockReasoningEngine::with_response("  "),
+        MockReasoningEngine::with_error("no key"),
+        MockReasoningEngine::with_handler(Never),
+    ] {
+        let env = start_summaries(home.path(), Arc::new(engine), Duration::from_millis(200)).await;
+        let mut c = speaking_companion(&env).await;
+        let started = Instant::now();
+        let r = c.call("speech.catch_up", held.clone()).await;
+        assert_eq!(r["result"], json!({}), "{r}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    // A harness client may not.
+    let (mut local, _) = Client::unix(&env.socket, "flankr.harness", "ctl").await;
+    let r = local.call("speech.catch_up", held).await;
+    assert_eq!(r["error"]["code"], -32001, "{r}");
+}
+
 // Plan 20261027_02, step 2: the daemon on `[llm]`, with Gemini mocked by a
 // factory that answers with the backend and model it was built for.
 
@@ -2275,7 +2393,9 @@ impl ClientFactory for Factory {
         ));
         Ok(match spec.profile {
             Profile::Agent => Arc::new(MockReasoningEngine::with_handler(Labelled(label))),
-            Profile::Summary => Arc::new(MockReasoningEngine::with_response(label)),
+            Profile::Summary | Profile::CatchUp => {
+                Arc::new(MockReasoningEngine::with_response(label))
+            }
         })
     }
 }
@@ -2441,6 +2561,38 @@ async fn each_use_runs_on_its_own_backend_and_model() {
             ),
         ]
     );
+}
+
+/// The catch-up runs on the spoken summaries backend and model, in a
+/// client of its own (its system text is not the summary's); with `[llm]`
+/// off none is made and nothing is built.
+#[tokio::test]
+async fn the_catch_up_runs_on_the_spoken_summaries_client() {
+    let held = json!({"held": [{"text": "Codex is done."}]});
+    let e = start_llm(TWO_BACKENDS, true).await;
+    let (mut c, _) = Client::companion(&e.env).await;
+    c.call("client.options", json!({"spoken_output": true}))
+        .await;
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(r["result"]["summary"], "cheap/gemini-3.8-flash-lite", "{r}");
+    let r = c.call("speech.catch_up", held.clone()).await;
+    assert_eq!(r["result"]["summary"], "cheap/gemini-3.8-flash-lite", "{r}");
+    let spoken = (
+        "spoken_summaries".to_string(),
+        "cheap".to_string(),
+        "gemini-3.8-flash-lite".to_string(),
+    );
+    assert_eq!(*e.factory.built.lock().unwrap(), [spoken.clone(), spoken]);
+
+    let e = start_llm("", true).await;
+    let (mut c, _) = Client::companion(&e.env).await;
+    c.call("client.options", json!({"spoken_output": true}))
+        .await;
+    let r = c.call("speech.catch_up", held).await;
+    assert_eq!(r["result"], json!({}), "{r}");
+    assert!(e.factory.built.lock().unwrap().is_empty());
 }
 
 /// Plan 20261027_02, the 13:54 EDT amendment, step 2: the turns and the

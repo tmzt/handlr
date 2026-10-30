@@ -65,6 +65,10 @@ pub enum Profile {
     Agent,
     /// A summary: the given system text, no tools, one turn.
     Summary,
+    /// The spoken catch-up after a voice input (plan 20261023_05, the
+    /// 2026-10-30 13:52 EDT amendment): as `Summary`, but its own client,
+    /// since clients are kept by target and profile, not by system text.
+    CatchUp,
 }
 
 /// What to build a client for.
@@ -113,7 +117,7 @@ impl ClientFactory for GeminiFactory {
                         let gemini = builder.build()?;
                         Ok(with_flankr_routes(Arc::new(gemini)))
                     }
-                    Profile::Summary => {
+                    Profile::Summary | Profile::CatchUp => {
                         let builder = builder.tools(Vec::new()).max_turns(1);
                         let builder = match spec.system {
                             Some(system) => builder.system_prompt(system),

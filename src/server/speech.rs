@@ -13,6 +13,13 @@
 //! [`flankr_speech::read_aloud`] at the daemon's local time. Summaries are
 //! kept by `(pane_id, ts)`, so the same reply is never summarised twice.
 //!
+//! `speech.catch_up` (the 2026-10-30 13:52 EDT amendment) is one spoken
+//! catch-up for the speech a companion held while the user spoke: the
+//! `spoken_catch_up` prompt on the same spoken summaries client, with the
+//! held replies read whole from their sessions. No model, spoken output
+//! off, a failed or empty answer: no catch-up, and the client says what it
+//! held as it is.
+//!
 //! With `[summary] cards` (the CHANGES.md departure of 2026-10-24 12:06
 //! EDT), the same prompt also summarises each new Finished card, asked for
 //! points as well by its `points` member: [`DaemonCards`] is the hub's
@@ -26,19 +33,28 @@ use std::time::Duration;
 use async_trait::async_trait;
 use flankr_speech::LocalTime;
 use libflankr_proto::ErrorObject;
-use libflankr_proto::common::{CARD_POINTS_MAX, SpeechSummarizeParams, SpeechSummarizeResult};
+use libflankr_proto::common::{
+    CARD_POINTS_MAX, SpeechCatchUpParams, SpeechCatchUpResult, SpeechSummarizeParams,
+    SpeechSummarizeResult,
+};
 use libflankr_proto::envelope::codes;
 use serde_json::Value;
 
 use super::conn::{self, Conn};
 use crate::llm::{LlmService, Profile, Use};
-use crate::prompts::{Prompt, Prompts, SPOKEN_SUMMARY};
+use crate::prompts::{Prompt, Prompts, SPOKEN_CATCH_UP, SPOKEN_SUMMARY};
 use crate::reasoning::{Message, ReasoningEngine, ToolExecutor};
 use crate::sessions::hub::{CardSummarizer, CardSummary};
 
 /// How long a summary may take before it is given up and the reply is
 /// read through the rules (decision 5, as amended at 16:56 EDT).
 pub const SUMMARY_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a catch-up may take: the client says the held speech as it is
+/// after 8 s (the 2026-10-30 13:52 EDT amendment, item 4), so the daemon
+/// gives up then too.
+pub const CATCH_UP_TIMEOUT: Duration = Duration::from_secs(8);
+/// The words of a catch-up when its prompt has no `max_words`.
+pub const CATCH_UP_WORDS_DEFAULT: usize = 40;
 /// How many answers are kept, by `(pane_id, ts)` (decision 5).
 pub const CACHE_SIZE: usize = 64;
 /// The words of a summary when the prompt has no `max_words`.
@@ -125,15 +141,23 @@ pub struct SpeechService {
     /// `spoken_summary` and its filled system text, or why it is not
     /// there.
     prompt: Result<(Prompt, String), String>,
+    /// `spoken_catch_up` and its filled system text, or why it is not
+    /// there.
+    catch_up: Result<(Prompt, String), String>,
     timeout: Duration,
     cache: Mutex<VecDeque<((String, String), String)>>,
 }
 
 impl SpeechService {
     pub fn new(llm: Arc<LlmService>, options: SpeechOptions) -> Self {
+        let prompts = load_prompts(options.prompts_file.as_deref());
         SpeechService {
             llm,
-            prompt: load_prompt(options.prompts_file.as_deref()),
+            prompt: prompts
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|p| prompt_named(p, SPOKEN_SUMMARY)),
+            catch_up: prompts.and_then(|p| prompt_named(&p, SPOKEN_CATCH_UP)),
             timeout: options.timeout.unwrap_or(SUMMARY_TIMEOUT),
             cache: Mutex::new(VecDeque::new()),
         }
@@ -293,6 +317,148 @@ impl SpeechService {
     }
 }
 
+/// One held item for a catch-up: its agent and project as shown, when it
+/// came from a pane, and its text (a reply's whole text when found).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatchUpItem {
+    pub from: Option<(String, String)>,
+    pub text: String,
+}
+
+/// What the voice input was, for a catch-up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatchUpSaid {
+    /// A message sent to this agent in this project.
+    Message {
+        agent: String,
+        project: String,
+        text: String,
+    },
+    /// A message to a pane that could not be named.
+    MessageTo { text: String },
+    /// Gemini's prompt.
+    Prompt { text: String },
+}
+
+impl SpeechService {
+    /// The catch-up's system text, with its slots filled.
+    pub fn catch_up_system_text(&self) -> Option<&str> {
+        self.catch_up
+            .as_ref()
+            .ok()
+            .map(|(_, system)| system.as_str())
+    }
+
+    /// One spoken catch-up for `held`, in light of `said` (the 2026-10-30
+    /// 13:52 EDT amendment, items 2 to 4). `summary: None` when none is
+    /// made, logged once with the reason; never an error.
+    pub async fn catch_up(
+        &self,
+        held: &[CatchUpItem],
+        said: Option<&CatchUpSaid>,
+        spoken_output: bool,
+    ) -> SpeechCatchUpResult {
+        let why = if held.is_empty() {
+            Some("nothing was held".to_string())
+        } else if !spoken_output {
+            Some("spoken output is off".to_string())
+        } else {
+            self.llm.available(Use::SpokenSummaries).err()
+        };
+        if let Some(why) = why {
+            log::info!("speech.catch_up: {why}; the held speech is said as it is");
+            return SpeechCatchUpResult { summary: None };
+        }
+        match self.ask_catch_up(held, said).await {
+            Ok(summary) => SpeechCatchUpResult {
+                summary: Some(summary),
+            },
+            Err(e) => {
+                log::warn!(
+                    "speech.catch_up: {}; the held speech is said as it is",
+                    e.message
+                );
+                SpeechCatchUpResult { summary: None }
+            }
+        }
+    }
+
+    async fn ask_catch_up(
+        &self,
+        held: &[CatchUpItem],
+        said: Option<&CatchUpSaid>,
+    ) -> Result<String, ErrorObject> {
+        let (prompt, system) = self.catch_up.as_ref().map_err(unavailable)?;
+        let user_text = prompt
+            .user
+            .as_deref()
+            .ok_or_else(|| unavailable(format!("the prompt `{SPOKEN_CATCH_UP}` has no `user`")))?;
+        let values: BTreeMap<&str, String> = [("held", held_text(held)), ("said", said_text(said))]
+            .into_iter()
+            .collect();
+        let user = prompt.fill(user_text, &values).map_err(unavailable)?;
+        let engine = self
+            .llm
+            .client(Use::SpokenSummaries, Profile::CatchUp, Some(system))
+            .map_err(unavailable)?;
+        let turns = [Message {
+            role: "user".to_string(),
+            content: user,
+            name: None,
+            thought_signature: None,
+        }];
+        let wait = self.timeout.min(CATCH_UP_TIMEOUT);
+        let answer = tokio::time::timeout(wait, engine.process_turns(&turns, &NoTools))
+            .await
+            .map_err(|_| unavailable("the catch-up timed out"))?
+            .map_err(unavailable)?
+            .map(|a| a.trim().to_string())
+            .filter(|a| !a.is_empty())
+            .ok_or_else(|| unavailable("the catch-up was empty"))?;
+        let words = prompt
+            .number("max_words")
+            .map_or(CATCH_UP_WORDS_DEFAULT, |n| n as usize);
+        Ok(cut_at_sentence(&answer, words))
+    }
+}
+
+/// The held items for the catch-up's user text, one per line, oldest
+/// first.
+pub fn held_text(held: &[CatchUpItem]) -> String {
+    held.iter()
+        .map(|item| {
+            let text = item.text.trim();
+            match &item.from {
+                Some((agent, project)) => format!("- The {agent} agent in {project}: {text}"),
+                None => format!("- The general agent: {text}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What the user said, for the catch-up's user text.
+pub fn said_text(said: Option<&CatchUpSaid>) -> String {
+    match said {
+        Some(CatchUpSaid::Message {
+            agent,
+            project,
+            text,
+        }) => format!(
+            "Then the user sent the {agent} agent in {project} this message:\n\n{}",
+            text.trim()
+        ),
+        Some(CatchUpSaid::MessageTo { text }) => format!(
+            "Then the user sent a coding agent this message:\n\n{}",
+            text.trim()
+        ),
+        Some(CatchUpSaid::Prompt { text }) => {
+            format!("Then the user asked the general agent:\n\n{}", text.trim())
+        }
+        None => "Then the user stopped without sending anything.".to_string(),
+    }
+}
+
 /// The hub's card summariser (`[llm.uses.card_summaries]`): the daemon's
 /// [`SpeechService::card_summary`]. Card summaries unavailable, no answer
 /// or an error leaves the card's fields empty.
@@ -344,10 +510,9 @@ pub fn local_now() -> LocalTime {
     }
 }
 
-/// `spoken_summary` from `file`, or from the shipped prompts. Every error
-/// in the file is logged; the summary is unavailable only when its own
-/// prompt has one.
-fn load_prompt(file: Option<&std::path::Path>) -> Result<(Prompt, String), String> {
+/// The prompts of `file`, or the shipped ones. Every error in the file is
+/// logged, once.
+fn load_prompts(file: Option<&std::path::Path>) -> Result<Prompts, String> {
     let (prompts, errors) = match file {
         Some(path) => Prompts::load(path).inspect_err(|e| log::warn!("{e}"))?,
         None => Prompts::shipped(),
@@ -355,12 +520,18 @@ fn load_prompt(file: Option<&std::path::Path>) -> Result<(Prompt, String), Strin
     for e in &errors {
         log::warn!("ADDITIONAL_PROMPTS: {e}");
     }
+    Ok(prompts)
+}
+
+/// The prompt `name` and its filled system text; unavailable only when its
+/// own prompt has an error.
+fn prompt_named(prompts: &Prompts, name: &str) -> Result<(Prompt, String), String> {
     let prompt = prompts
-        .get(SPOKEN_SUMMARY)
+        .get(name)
         .cloned()
-        .ok_or_else(|| format!("the prompt `{SPOKEN_SUMMARY}` did not load"))?;
+        .ok_or_else(|| format!("the prompt `{name}` did not load"))?;
     if prompt.user.is_none() {
-        let e = format!("the prompt `{SPOKEN_SUMMARY}` has no `user`");
+        let e = format!("the prompt `{name}` has no `user`");
         log::warn!("ADDITIONAL_PROMPTS: {e}");
         return Err(e);
     }
@@ -458,6 +629,77 @@ pub(super) async fn speech_summarize(
     if let Some(summary) = &result.summary {
         daemon.speech.keep(key, summary.clone());
     }
+    conn::ok(result)
+}
+
+/// `speech.catch_up` on a companion connection (the 2026-10-30 13:52 EDT
+/// amendment): each held item named by its pane, a reply read whole from
+/// its session when the pane may be reached (the client's text when it is
+/// not found), and the message named by its target. herdr out of reach
+/// leaves the items unnamed; it is never an error.
+pub(super) async fn speech_catch_up(
+    conn: &Conn,
+    p: SpeechCatchUpParams,
+) -> Result<Value, ErrorObject> {
+    let daemon = &conn.daemon;
+    let names = match conn::snapshot(conn).await {
+        Ok(snap) => Some(daemon.names(&snap)),
+        Err(e) => {
+            log::debug!("speech.catch_up: {}; the items are not named", e.message);
+            None
+        }
+    };
+    let here = conn::sessions_here(daemon);
+    let named = |pane_id: Option<&str>| {
+        let pane_id = pane_id.filter(|id| !id.is_empty())?;
+        names.as_ref()?.get(pane_id)
+    };
+    let project_of = |n: &crate::core::naming::NamedAgent| {
+        n.project
+            .as_ref()
+            .map(|p| p.shown.clone())
+            .or_else(|| n.agent.project.clone())
+            .unwrap_or_else(|| "this project".to_string())
+    };
+    let held: Vec<CatchUpItem> = p
+        .held
+        .iter()
+        .map(|h| {
+            let Some(n) = named(h.pane_id.as_deref()) else {
+                return CatchUpItem {
+                    from: None,
+                    text: crate::sessions::redact::redact(&h.text),
+                };
+            };
+            let pane = &n.agent;
+            let reachable = pane.agent != "shell" && conn.principal().may_reach(&pane.agent);
+            let found = match (&h.ts, reachable && here) {
+                (Some(ts), true) => daemon.sessions.reply_text_in(pane, None, ts).ok().flatten(),
+                _ => None,
+            };
+            CatchUpItem {
+                from: Some((n.agent_part.shown.clone(), project_of(n))),
+                text: found.unwrap_or_else(|| crate::sessions::redact::redact(&h.text)),
+            }
+        })
+        .collect();
+    let said = p.said.as_ref().map(|s| {
+        let text = crate::sessions::redact::redact(&s.text);
+        match (&s.pane_id, named(s.pane_id.as_deref())) {
+            (_, Some(n)) => CatchUpSaid::Message {
+                agent: n.agent_part.shown.clone(),
+                project: project_of(n),
+                text,
+            },
+            (Some(_), None) => CatchUpSaid::MessageTo { text },
+            (None, None) => CatchUpSaid::Prompt { text },
+        }
+    });
+    let _one = conn.speech.lock().await;
+    let result = daemon
+        .speech
+        .catch_up(&held, said.as_ref(), conn.spoken_output())
+        .await;
     conn::ok(result)
 }
 
@@ -594,6 +836,85 @@ mod tests {
             .unwrap();
         assert_eq!(r.summary, None);
         assert!(r.complex && !r.read.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_lists_the_held_items_then_what_was_said() {
+        let mock = Arc::new(MockReasoningEngine::with_response(" Caught up. "));
+        let service = service(
+            &AppConfig::default(),
+            SpeechOptions {
+                engine: Some(mock.clone()),
+                ..SpeechOptions::default()
+            },
+        );
+        assert!(
+            service
+                .catch_up_system_text()
+                .unwrap()
+                .contains("at most 40 words")
+        );
+        let held = [
+            CatchUpItem {
+                from: Some(("Claude".to_string(), "flankr".to_string())),
+                text: "The tests pass. ".to_string(),
+            },
+            CatchUpItem {
+                from: None,
+                text: "Codex is working.".to_string(),
+            },
+        ];
+        let said = CatchUpSaid::Prompt {
+            text: "what now".to_string(),
+        };
+        // Off, or nothing held: no call.
+        assert_eq!(
+            service.catch_up(&held, Some(&said), false).await.summary,
+            None
+        );
+        assert_eq!(service.catch_up(&[], Some(&said), true).await.summary, None);
+        assert!(mock.recorded_transcripts().is_empty());
+        let r = service.catch_up(&held, Some(&said), true).await;
+        assert_eq!(r.summary.as_deref(), Some("Caught up."));
+        assert_eq!(
+            mock.recorded_transcripts(),
+            ["While the user spoke, these arrived, oldest first:\n\n\
+              - The Claude agent in flankr: The tests pass.\n\
+              - The general agent: Codex is working.\n\n\
+              Then the user asked the general agent:\n\nwhat now"]
+        );
+    }
+
+    #[tokio::test]
+    async fn without_its_prompt_no_catch_up_is_made_and_summaries_go_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("prompts.md");
+        let shipped = crate::prompts::ADDITIONAL_PROMPTS_RAW;
+        let start = shipped.find("# [Prompt] spoken_catch_up").unwrap();
+        let end = shipped.find("# [Prompt] planning").unwrap();
+        std::fs::write(&file, format!("{}{}", &shipped[..start], &shipped[end..])).unwrap();
+        let mock = Arc::new(MockReasoningEngine::with_response("Summary."));
+        let service = service(
+            &AppConfig::default(),
+            SpeechOptions {
+                engine: Some(mock.clone()),
+                prompts_file: Some(file),
+                ..SpeechOptions::default()
+            },
+        );
+        assert!(service.catch_up_system_text().is_none());
+        assert!(service.system_text().is_some());
+        let held = [CatchUpItem {
+            from: None,
+            text: "Done.".to_string(),
+        }];
+        assert_eq!(service.catch_up(&held, None, true).await.summary, None);
+        assert!(mock.recorded_transcripts().is_empty());
+        let r = service
+            .answer("Claude", "flankr", PATHS, true, NOON, None)
+            .await
+            .unwrap();
+        assert_eq!(r.summary.as_deref(), Some("Summary."));
     }
 
     #[test]

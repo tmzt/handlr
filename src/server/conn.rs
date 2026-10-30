@@ -1136,6 +1136,18 @@ async fn call(
             let p: common::SpeechSummarizeParams = params(raw)?;
             super::speech::speech_summarize(conn, p).await
         }
+        methods::SPEECH_CATCH_UP => {
+            // Plan 20261023_05, the 2026-10-30 13:52 EDT amendment:
+            // companions only; never an error once the params read.
+            if !conn.is_companion() {
+                return Err(ErrorObject::new(
+                    codes::NOT_PERMITTED,
+                    "speech.catch_up is served to companions",
+                ));
+            }
+            let p: common::SpeechCatchUpParams = params(raw)?;
+            super::speech::speech_catch_up(conn, p).await
+        }
         methods::CLIENT_OPTIONS => {
             // Plan 20261023_05, A4: a companion's options for this
             // connection; unknown ones are ignored.
