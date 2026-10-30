@@ -3661,3 +3661,50 @@ Plan 20261027_02 (inference config), the 2026-10-30 13:54 EDT amendment:
 5. **Item 6, `Cargo.lock`:** taking libinfer-gemini 0.1.1 also re-picked
    `tempfile`'s `getrandom` (0.4.3 to 0.3.4, both already locked); no
    manifest change.
+
+## 2026-10-30 14:40 EDT — shorter spoken summaries and the catch-up after voice input: small departures in the build
+
+Plan 20261023_05 (spoken summaries), the 2026-10-30 13:52 EDT amendment,
+and plan 20261023_02 (dictated messages), its amendment of the same time:
+
+1. **20261023_05 item 2, how it is offered:** no new capability field. The
+   method is offered while the daemon makes summaries, which hello and
+   `server.capabilities` already say as `llm.summaries`; the daemon
+   answers `summary` only while the connection's `client.options` has
+   `spoken_output` on. An older daemon refuses the method (method not
+   found), which the client treats as a failed request (20261023_02 item 4).
+2. **20261023_05 item 3, its own client:** the daemon's clients are kept
+   by backend, model and profile, not by system text, so the catch-up
+   runs on the spoken summaries backend and model under a profile of its
+   own (`Profile::CatchUp`); otherwise it would reuse the summary's
+   system text. The prompt's temperature is not applied, as for the
+   summary (still open since the plan's 16:55 EDT amendment).
+3. **20261023_05 items 3 and 4, the daemon's wait:** the daemon gives up a
+   catch-up after 8 s (`CATCH_UP_TIMEOUT`), the client's own wait, not
+   the summary's 10 s.
+4. **20261023_05 item 3, the user text:** each held item is one line,
+   `- The <agent> agent in <project>: <text>`; an item from a pane that
+   cannot be named is `- A coding agent: <text>`, one from no pane (a
+   Gemini line, a "stopped" sentence) `- The general agent: <text>`.
+   What was said follows: `Then the user sent the <agent> agent in
+   <project> this message:`, `Then the user asked the general agent:`,
+   or `Then the user stopped without sending anything.`
+5. **20261023_02 item 1, subagents:** a reply read aloud from a subagent's
+   view is sent with its pane and without its `ts`, since
+   `HeldSpeech` names no subagent; the daemon uses its text as it is.
+6. **20261023_02 item 3, after the answer:** speech that arrived while the
+   catch-up was made is said after it, under the queue's usual rules. When
+   a new voice input started meanwhile, the catch-up (or, failing it, the
+   items it was for) and what arrived since are all held, and form that
+   input's catch-up.
+7. **20261023_02 item 4, "spoken summaries off":** read as read aloud off
+   (the play button, `spoken_output`), as `speech.summarize` reads it;
+   the client then asks nothing. A link that closes while waiting also
+   says the held items as they are.
+8. **20261023_02 item 5, muted:** the client does not know the app's mute,
+   so a muted phone's client still holds speech and asks for the catch-up;
+   the app drops the `Say`, as it drops every `Say` while muted (the
+   13:37 EDT amendment, item 4). *Stop reading* and *All sound* off drop a
+   catch-up being made, and its late answer is ignored.
+9. **flankr-companion, `State::held_notices()`:** it also counts the
+   items a catch-up is being made for.
