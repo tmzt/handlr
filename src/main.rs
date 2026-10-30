@@ -263,6 +263,12 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
+    // Each `gemini` backend's model list, fetched once before any use is
+    // made (plan 20261027_02, the 2026-10-30 13:54 EDT amendment, item 3).
+    let catalogs = std::sync::Arc::new(
+        flankr::llm::fetch_catalogs(&config, &flankr::llm::KeyEnv::from_process()).await,
+    );
+
     let socket = daemon_socket(&args, &config);
     let listener = flankr::server::bind(&socket).await?;
     let link_listeners = match &link {
@@ -292,6 +298,7 @@ async fn serve(args: AppArgs) -> Result<(), Box<dyn std::error::Error>> {
             // The `planning` prompt comes from the same file
             // (plan 20261027_04, decision 6).
             prompts_file: args.prompts.as_ref().map(expand_tilde),
+            catalogs: Some(catalogs),
             ..Default::default()
         },
         // SUGGESTIONS.md: the given file or the shipped one, with the

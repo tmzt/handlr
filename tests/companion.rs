@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use flankr::config::{AgentConfig, AppConfig};
+use flankr::llm::gemini::{Catalogs, ModelCatalog};
 use flankr::llm::{ClientFactory, ClientSpec, KeyEnv, LlmOptions, Profile};
 use flankr::reasoning::{MockHandler, MockReasoningEngine, ReasoningEngine, ToolExecutor};
 use flankr::server::companion::{INTERRUPTED_ENTRY, TurnOptions};
@@ -2303,8 +2304,24 @@ fn rewrite(path: &Path, text: &str) {
         .unwrap();
 }
 
+/// The model lists the test daemon starts with (no network): those of
+/// `gemini` and `main`; `cheap` has none.
+fn catalogs() -> Catalogs {
+    let list = || {
+        ModelCatalog::from_names([
+            "models/gemini-2.0-flash-lite",
+            "models/gemini-2.0-flash-lite-001",
+            "models/gemini-2.5-flash-lite",
+            "models/gemini-3.8-flash",
+            "models/gemini-flash-lite-latest",
+            "models/gemini-pro-latest",
+        ])
+    };
+    Catalogs::of([("gemini", list()), ("main", list())])
+}
+
 /// A daemon whose `[llm]` is `text`, watched every 100 ms, with a key when
-/// `key`, the factory's clients and no engine given.
+/// `key`, the factory's clients, [`catalogs`] and no engine given.
 async fn start_llm(text: &str, key: bool) -> LlmEnv {
     let folder = tempfile::tempdir().unwrap();
     if key {
@@ -2322,7 +2339,7 @@ async fn start_llm(text: &str, key: bool) -> LlmEnv {
             factory: Some(factory.clone()),
             interval: Some(Duration::from_millis(100)),
             prompts_file: None,
-            catalogs: None,
+            catalogs: Some(Arc::new(catalogs())),
         },
         ..TurnOptions::default()
     };
@@ -2424,6 +2441,58 @@ async fn each_use_runs_on_its_own_backend_and_model() {
             ),
         ]
     );
+}
+
+/// Plan 20261027_02, the 13:54 EDT amendment, step 2: the turns and the
+/// summaries run on the models their rules resolved to at start, and a
+/// reload resolves a new choice on the same list.
+#[tokio::test]
+async fn each_use_runs_on_the_model_its_rule_resolved_to() {
+    let e = start_llm("[llm]\nenabled = true\n", true).await;
+    let settings = e.env.daemon.llm.settings();
+    assert_eq!(
+        settings.describe()[..3],
+        [
+            "[llm] general_agent: flash:newest is gemini-3.8-flash (matched)",
+            "[llm] card_summaries: flash-lite:oldest is gemini-2.0-flash-lite (matched)",
+            "[llm] spoken_summaries: flash-lite:oldest is gemini-2.0-flash-lite (matched)",
+        ]
+    );
+    let (mut c, _) = Client::companion(&e.env).await;
+    let r = c.call("turn.start", turn(1, "hello")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    let say = c.note("turn.say").await;
+    assert_eq!(
+        say["params"]["text"], "You said hello. (gemini/gemini-3.8-flash)",
+        "{say}"
+    );
+    c.call("client.options", json!({"spoken_output": true}))
+        .await;
+    let r = c
+        .call("speech.summarize", json!({"pane_id": "p1", "ts": REPLY_TS}))
+        .await;
+    assert_eq!(
+        r["result"]["summary"], "gemini/gemini-2.0-flash-lite",
+        "{r}"
+    );
+
+    rewrite(
+        &e.config,
+        "[llm]\nenabled = true\n[llm.uses.spoken_summaries]\nmodel = \"pro:newest\"\n",
+    );
+    let pro = || {
+        e.env
+            .daemon
+            .llm
+            .settings()
+            .target(flankr::llm::Use::SpokenSummaries)
+            .is_some_and(|t| t.model == "gemini-pro-latest")
+    };
+    let end = Instant::now() + Duration::from_secs(2);
+    while !pro() && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(pro(), "{:?}", e.env.daemon.llm.settings().describe());
 }
 
 #[tokio::test]
