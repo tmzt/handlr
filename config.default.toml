@@ -73,9 +73,14 @@ terminal_input = false
 # `enabled = true`: without it, nothing calls any model. Turned on, the rest
 # is automatic: a `gemini` backend is found from `.private/gemini_api_key`
 # (in the daemon's working folder, mode 0600) or GEMINI_API_KEY, every use
-# is on, and each use gets its tier model: gemini-3.8-flash for the general
-# agent, gemini-3.8-flash-lite for summaries. A Pro model runs only where a
-# `model` names it. The daemon reads this section again when the file or a
+# is on, and each use's model is chosen by tier and age from the models the
+# key can use, listed once when the daemon starts: "flash:newest" for the
+# general agent, "flash-lite:oldest" (the cheapest) for summaries. A
+# `model` is such a rule ("flash-lite", "flash" or "pro", then ":newest" or
+# ":oldest") or an exact name ("gemini-2.5-flash"). A Pro model runs only
+# where a `model` names it or a "pro:" rule. The daemon logs each use's
+# choice and the model it resolved to at start; the list is not fetched
+# again while it runs. The daemon reads this section again when the file or a
 # key file changes (every 5 s if it can't watch files), and tells the
 # companion app what is available.
 # [llm]
@@ -88,13 +93,13 @@ terminal_input = false
 # [llm.backends.gemini]
 # kind = "gemini"
 # api_key_file = ".private/gemini_api_key"
-# model = "gemini-3.8-flash"
+# model = "flash:newest"
 #
 # Uses, each optional: general_agent, card_summaries, spoken_summaries.
 # Each is on unless `enabled = false`; `backend` and `model` override.
 # [llm.uses.general_agent]
 # backend = "gemini"
-# model = "gemini-3.8-flash"
+# model = "gemini-2.5-flash"
 #
 # [llm.uses.spoken_summaries]
 # enabled = false

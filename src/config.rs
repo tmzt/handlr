@@ -113,7 +113,9 @@ pub struct LlmBackendConfig {
     /// `gemini`: `.private/gemini_api_key`, against the daemon's working
     /// folder; without the file, `GEMINI_API_KEY`).
     pub api_key_file: Option<String>,
-    /// This backend's model for every use, over the tier defaults.
+    /// This backend's model for every use, over the defaults: a rule
+    /// (`flash-lite:oldest`, `flash:newest`, `pro:newest`) or an exact name
+    /// (plan 20261027_02, the 2026-10-30 13:54 EDT amendment, item 2).
     pub model: Option<String>,
 }
 
@@ -125,7 +127,8 @@ pub struct LlmUseConfig {
     pub enabled: Option<bool>,
     /// The backend, else `[llm] default`.
     pub backend: Option<String>,
-    /// The model, else the backend's `model`, else its kind's tier default.
+    /// The model, a rule or an exact name, else the backend's `model`, else
+    /// its kind's default rule.
     pub model: Option<String>,
     /// `[llm.uses.planning]` only (plan 20261027_04, decision 5): the
     /// current project's agent instructions are added to each turn.

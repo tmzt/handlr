@@ -21,6 +21,10 @@
 //!   is available, the general agent's client is built with the planning
 //!   prompt's blocks after `PROMPT.md` and its tools; the [`AgentProfile`]
 //!   is part of the client's key, so a change builds the next one anew.
+//! - **Models** (the 2026-10-30 13:54 EDT amendment): each use's model is
+//!   its choice resolved against the [`Catalogs`] fetched at start
+//!   ([`LlmOptions::catalogs`]); a reload resolves against the same lists,
+//!   and nothing is fetched again while the daemon runs.
 //! - **Plugin tools** (plan 20261028_04, the 02:10 EDT amendment of
 //!   2026-10-29): the [`AgentToolSource`] (the plugin host) is asked for
 //!   the enabled plugins' tools each time the profile is made, so a
@@ -34,6 +38,7 @@ use std::time::{Duration, SystemTime};
 use libflankr_proto::companion::LlmInfo;
 use tokio::sync::watch;
 
+use super::gemini::Catalogs;
 use super::planning::{AgentProfile, PlanningConfig, PlanningPrompt};
 use super::{
     KeyEnv, Kind, LlmSettings, LlmSources, Target, Use, UseState, key_files, resolve_sources,
@@ -137,6 +142,10 @@ pub struct LlmOptions {
     /// `--prompts <path>`: the `planning` prompt from this file in place
     /// of the shipped `ADDITIONAL_PROMPTS.md`.
     pub prompts_file: Option<PathBuf>,
+    /// The backends' model lists, fetched at the daemon's start
+    /// ([`super::fetch_catalogs`]); without them every choice resolves
+    /// offline.
+    pub catalogs: Option<Arc<Catalogs>>,
 }
 
 /// Engines that stand in for a use's client whatever `[llm]` says, but
@@ -183,6 +192,8 @@ pub struct LlmService {
     overrides: Overrides,
     /// The `planning` prompt, loaded once at start.
     planning_prompt: Result<PlanningPrompt, String>,
+    /// The model lists from start, and the choices resolved on them.
+    catalogs: Arc<Catalogs>,
     watched: Mutex<Watched>,
     clients: Mutex<HashMap<ClientKey, Arc<dyn ReasoningEngine>>>,
     info: watch::Sender<LlmInfo>,
@@ -195,8 +206,11 @@ impl LlmService {
     pub fn new(config: &AppConfig, options: LlmOptions, overrides: Overrides) -> Arc<Self> {
         let env = options.key_env.unwrap_or_else(KeyEnv::from_process);
         let planning_prompt = PlanningPrompt::load(options.prompts_file.as_deref());
+        let catalogs = options
+            .catalogs
+            .unwrap_or_else(|| Arc::new(Catalogs::none()));
         let sources = LlmSources::of(config);
-        let mut settings = resolve_sources(&sources, &env);
+        let mut settings = resolve_sources(&sources, &env, &catalogs);
         apply_prompt(&mut settings, &planning_prompt);
         log_settings(None, &settings);
         let (stamp, rest) = match &options.config_path {
@@ -217,6 +231,7 @@ impl LlmService {
             interval: options.interval.unwrap_or(RELOAD_INTERVAL),
             overrides,
             planning_prompt,
+            catalogs,
             watched: Mutex::new(Watched {
                 sources,
                 rest,
@@ -359,7 +374,7 @@ impl LlmService {
                 self.reread(&mut watched, path);
             }
         }
-        let mut settings = resolve_sources(&watched.sources, &self.env);
+        let mut settings = resolve_sources(&watched.sources, &self.env, &self.catalogs);
         apply_prompt(&mut settings, &self.planning_prompt);
         if settings == watched.settings {
             return false;
@@ -574,7 +589,8 @@ fn info_of(settings: &LlmSettings, overrides: &Overrides) -> LlmInfo {
     }
 }
 
-/// The log for new settings: each use's backend and model or reason, and
+/// The log for new settings: each use's model choice and the model it
+/// resolved to, or its reason, and
 /// the notes and problems not logged before (each once).
 fn log_settings(old: Option<&LlmSettings>, new: &LlmSettings) {
     let seen = |list: fn(&LlmSettings) -> &Vec<String>, line: &String| {
@@ -644,6 +660,18 @@ mod tests {
         service: Arc<LlmService>,
     }
 
+    /// Model lists for the backends the tests name, but `cheap`, so the
+    /// general agent and the summaries resolve to different models.
+    fn catalogs() -> Catalogs {
+        let list = || {
+            super::super::gemini::ModelCatalog::from_names([
+                "gemini-2.0-flash-lite",
+                "gemini-3.8-flash",
+            ])
+        };
+        Catalogs::of([("gemini", list()), ("main", list())])
+    }
+
     fn setup(text: &str, key: bool) -> Setup {
         let dir = tempfile::tempdir().unwrap();
         if key {
@@ -661,6 +689,7 @@ mod tests {
                 factory: Some(factory.clone()),
                 interval: None,
                 prompts_file: None,
+                catalogs: Some(Arc::new(catalogs())),
             },
             Overrides::default(),
         );
@@ -869,6 +898,7 @@ backend = "cheap"
                 factory: Some(Arc::new(Recording::default())),
                 interval: Some(Duration::from_millis(100)),
                 prompts_file: None,
+                catalogs: None,
             },
             Overrides::default(),
         );

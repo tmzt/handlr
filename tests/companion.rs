@@ -2322,6 +2322,7 @@ async fn start_llm(text: &str, key: bool) -> LlmEnv {
             factory: Some(factory.clone()),
             interval: Some(Duration::from_millis(100)),
             prompts_file: None,
+            catalogs: None,
         },
         ..TurnOptions::default()
     };

@@ -5,8 +5,10 @@
 //! `[summary]`, into [`LlmSettings`]: for each [`Use`], the backend, model
 //! and key it runs on, or why it is unavailable. The master switch is off
 //! unless set; everything behind it is automatic: a `gemini` backend
-//! discovered from a key, every use on, and each use's tier model (Flash
-//! for the general agent, Flash-Lite for summaries, never Pro by default).
+//! discovered from a key, every use on, and each use's model chosen by
+//! tier and age (the 2026-10-30 13:54 EDT amendment: `flash:newest` for the
+//! general agent, `flash-lite:oldest` for summaries, never Pro by default),
+//! resolved against the key's model list as [`gemini::Catalogs`] holds it.
 
 pub mod gemini;
 pub mod planning;
@@ -83,10 +85,10 @@ impl Kind {
         }
     }
 
-    /// The kind's default model for `use_`, by tier.
-    pub fn tier_model(self, use_: Use) -> &'static str {
+    /// The kind's default model choice for `use_`, by tier and age.
+    pub fn default_choice(self, use_: Use) -> gemini::ModelChoice {
         match self {
-            Kind::Gemini => gemini::tier_model(use_),
+            Kind::Gemini => gemini::default_choice(use_),
         }
     }
 
@@ -243,6 +245,15 @@ impl UseState {
     }
 }
 
+/// How an available use's model was chosen (the 13:54 EDT amendment,
+/// item 4): what was asked for, and how it resolved to
+/// [`Target::model`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UseModel {
+    pub choice: gemini::ModelChoice,
+    pub how: gemini::How,
+}
+
 /// `[llm]` resolved: each use's state, and what is to be logged about the
 /// config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +261,8 @@ pub struct LlmSettings {
     /// The master switch, after the deprecated `[gemini]`.
     pub enabled: bool,
     pub uses: BTreeMap<Use, UseState>,
+    /// For each available use, how its model was chosen.
+    pub models: BTreeMap<Use, UseModel>,
     /// Deprecations and conflicts, each once (decision 5), and unknown
     /// use names. Logged at info.
     pub notes: Vec<String>,
@@ -295,20 +308,24 @@ impl LlmSettings {
         (general, summaries, reason)
     }
 
-    /// One line per use, for the log at start: its backend and model, or
-    /// why it is unavailable.
+    /// One line per use, for the log at start: the choice, the model it
+    /// resolved to and how (`[llm] spoken_summaries: flash-lite:oldest is
+    /// gemini-2.5-flash-lite (matched)`), or why it is unavailable.
     pub fn describe(&self) -> Vec<String> {
         self.uses
             .iter()
-            .map(|(u, s)| match s {
-                UseState::Available(t) => format!(
-                    "[llm] {}: backend {} ({}), model {}",
+            .map(|(u, s)| match (s, self.models.get(u)) {
+                (UseState::Available(t), Some(m)) => format!(
+                    "[llm] {}: {} is {} ({})",
                     u.name(),
-                    t.backend,
-                    t.kind.name(),
-                    t.model
+                    m.choice,
+                    t.model,
+                    gemini::how_name(m.how)
                 ),
-                UseState::Unavailable { reason, .. } => {
+                (UseState::Available(t), None) => {
+                    format!("[llm] {}: {}", u.name(), t.model)
+                }
+                (UseState::Unavailable { reason, .. }, _) => {
                     format!("[llm] {}: unavailable: {reason}", u.name())
                 }
             })
@@ -335,24 +352,47 @@ impl LlmSources {
     }
 }
 
-/// `config`'s `[llm]` resolved against `env`.
+/// `config`'s `[llm]` resolved against `env`, with no model list (each
+/// tier rule resolves offline, to libinfer-gemini's default model).
 pub fn resolve(config: &AppConfig, env: &KeyEnv) -> LlmSettings {
-    resolve_sources(&LlmSources::of(config), env)
+    resolve_sources(&LlmSources::of(config), env, &gemini::Catalogs::none())
+}
+
+/// The `gemini` backends whose model list is to be fetched at start (the
+/// 13:54 EDT amendment, item 3): each one with a key, by name, while the
+/// master switch is on. Reads the key files; never logs.
+pub fn catalog_keys(sources: &LlmSources, env: &KeyEnv) -> Vec<(String, ApiKey)> {
+    let llm = effective(sources, &mut Vec::new());
+    if llm.enabled != Some(true) {
+        return Vec::new();
+    }
+    let (declared, discovered) = declared(&llm);
+    declared
+        .iter()
+        .filter_map(|(name, b)| match backend(name, b, env, discovered) {
+            Ok((Kind::Gemini, _, key)) => Some((name.clone(), key)),
+            Err(_) => None,
+        })
+        .collect()
+}
+
+/// Each `gemini` backend's model list for `config`, fetched once (the
+/// daemon's start; never in tests).
+pub async fn fetch_catalogs(config: &AppConfig, env: &KeyEnv) -> gemini::Catalogs {
+    gemini::Catalogs::fetch(catalog_keys(&LlmSources::of(config), env)).await
 }
 
 /// A backend as resolved: its kind and key, or why it cannot be used.
 type BackendState = Result<(Kind, Option<String>, ApiKey), String>;
 
-/// [`resolve`], from the sections alone.
-pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
-    let mut notes = Vec::new();
-    let mut problems = Vec::new();
-
+/// The `[llm]` in force: the section, or the deprecated ones read as it
+/// (decision 5), with the notes about them.
+fn effective(sources: &LlmSources, notes: &mut Vec<String>) -> LlmConfig {
     // Decision 5: the old sections, read as the new ones, unless `[llm]`
     // is set. Plan 20261027_05, decision 6: `[llm]` counts as set only
     // with its `enabled` key; `[llm.uses.*]` or `[llm.backends.*]` alone
     // leave the old sections read, merged under them.
-    let llm = match &sources.llm {
+    match &sources.llm {
         Some(llm) if llm.enabled.is_some() => {
             if sources.gemini.is_some() {
                 notes.push(
@@ -410,7 +450,39 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
             }
             llm
         }
+    }
+}
+
+/// The backends, discovered when none is declared (decision 2), and
+/// whether they were.
+fn declared(llm: &LlmConfig) -> (BTreeMap<String, LlmBackendConfig>, bool) {
+    let discovered = llm.backends.is_empty();
+    let declared = if discovered {
+        [(
+            "gemini".to_string(),
+            LlmBackendConfig {
+                kind: Some("gemini".to_string()),
+                ..LlmBackendConfig::default()
+            },
+        )]
+        .into_iter()
+        .collect()
+    } else {
+        llm.backends.clone()
     };
+    (declared, discovered)
+}
+
+/// [`resolve`], from the sections alone, each use's model resolved
+/// against `catalogs`.
+pub fn resolve_sources(
+    sources: &LlmSources,
+    env: &KeyEnv,
+    catalogs: &gemini::Catalogs,
+) -> LlmSettings {
+    let mut notes = Vec::new();
+    let mut problems = Vec::new();
+    let llm = effective(sources, &mut notes);
     for name in llm.uses.keys() {
         if Use::from_name(name).is_none() {
             notes.push(format!(
@@ -455,6 +527,7 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
         return LlmSettings {
             enabled: false,
             uses,
+            models: BTreeMap::new(),
             notes,
             problems,
             planning,
@@ -462,20 +535,7 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
     }
 
     // The backends, discovered when none is declared (decision 2).
-    let discovered = llm.backends.is_empty();
-    let declared: BTreeMap<String, LlmBackendConfig> = if discovered {
-        [(
-            "gemini".to_string(),
-            LlmBackendConfig {
-                kind: Some("gemini".to_string()),
-                ..LlmBackendConfig::default()
-            },
-        )]
-        .into_iter()
-        .collect()
-    } else {
-        llm.backends.clone()
-    };
+    let (declared, discovered) = declared(&llm);
     let backends: BTreeMap<String, BackendState> = declared
         .iter()
         .map(|(name, b)| {
@@ -500,6 +560,7 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
         None => Err("[llm] has several backends and no default".to_string()),
     };
 
+    let mut models = BTreeMap::new();
     for u in Use::ALL {
         let own = llm.uses.get(u.name()).cloned().unwrap_or_default();
         if turned_off(u) {
@@ -526,14 +587,26 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
             Ok(name) => match &backends[&name] {
                 Err(e) => UseState::off(e.clone()),
                 Ok((kind, model, key)) => {
-                    let model = nonempty(own.model.as_deref())
+                    // Item 2: a `model` in either form; else the default
+                    // rule (item 1).
+                    let choice = nonempty(own.model.as_deref())
                         .or(model.as_deref())
-                        .unwrap_or(kind.tier_model(u))
-                        .to_string();
+                        .map(gemini::ModelChoice::parse)
+                        .unwrap_or_else(|| kind.default_choice(u));
+                    let resolved = match kind {
+                        Kind::Gemini => catalogs.resolve(&name, &choice),
+                    };
+                    models.insert(
+                        u,
+                        UseModel {
+                            choice,
+                            how: resolved.how,
+                        },
+                    );
                     UseState::Available(Target {
                         backend: name,
                         kind: *kind,
-                        model,
+                        model: resolved.model,
                         key: key.clone(),
                     })
                 }
@@ -543,10 +616,16 @@ pub fn resolve_sources(sources: &LlmSources, env: &KeyEnv) -> LlmSettings {
     }
     let (state, planning) =
         resolve_planning(&llm, &uses[&Use::GeneralAgent], &mut notes, &mut problems);
+    if state.target().is_some()
+        && let Some(general) = models.get(&Use::GeneralAgent).cloned()
+    {
+        models.insert(Use::Planning, general);
+    }
     uses.insert(Use::Planning, state);
     LlmSettings {
         enabled: true,
         uses,
+        models,
         notes,
         problems,
         planning,
@@ -741,54 +820,225 @@ mod tests {
         assert!(!format!("{s:?} {:?}", KeyEnv::in_dir(dir.path())).contains("k1"));
     }
 
-    #[test]
-    fn each_use_has_its_tier_model_and_never_pro() {
-        let dir = with_key("k");
-        let s = resolve(
-            &parse("[llm]\nenabled = true\n"),
-            &KeyEnv::in_dir(dir.path()),
-        );
-        assert_eq!(model(&s, Use::GeneralAgent), gemini::GENERAL_AGENT_MODEL);
-        assert_eq!(model(&s, Use::CardSummaries), gemini::SUMMARY_MODEL);
-        assert_eq!(model(&s, Use::SpokenSummaries), gemini::SUMMARY_MODEL);
-        assert!(gemini::GENERAL_AGENT_MODEL.contains("flash"));
-        assert!(!gemini::GENERAL_AGENT_MODEL.contains("lite"));
-        assert!(gemini::SUMMARY_MODEL.contains("flash-lite"));
-        for u in Use::ALL {
-            assert!(!model(&s, u).contains("pro"), "{u:?}");
-        }
-        assert_eq!(s.describe().len(), 4, "planning too");
-        assert!(s.describe()[0].contains(gemini::GENERAL_AGENT_MODEL));
+    /// A key's model list as the API gives it, in its shapes: versioned
+    /// stable names, revisions, previews, `-latest` aliases and Pro.
+    const LISTED: [&str; 12] = [
+        "models/gemini-2.0-flash-lite",
+        "models/gemini-2.0-flash-lite-001",
+        "models/gemini-1.5-flash-lite-preview",
+        "models/gemini-2.5-flash-lite",
+        "models/gemini-2.5-flash",
+        "models/gemini-3.8-flash",
+        "models/gemini-3.9-flash-preview",
+        "models/gemini-flash-lite-latest",
+        "models/gemini-2.5-pro",
+        "models/gemini-3.8-pro",
+        "models/gemini-pro-latest",
+        "models/text-embedding-004",
+    ];
+
+    /// [`LISTED`] as the `gemini` backend's list, plus `other` for
+    /// `cheap`, with no network.
+    fn listed(other: &[&str]) -> gemini::Catalogs {
+        gemini::Catalogs::of([
+            ("gemini", gemini::ModelCatalog::from_names(LISTED)),
+            ("cheap", gemini::ModelCatalog::from_names(other)),
+        ])
     }
 
+    fn rule(tier: gemini::Tier, age: gemini::Age) -> gemini::ModelChoice {
+        gemini::ModelChoice::Rule { tier, age }
+    }
+
+    fn resolve_on(text: &str, env: &KeyEnv, catalogs: &gemini::Catalogs) -> LlmSettings {
+        resolve_sources(&LlmSources::of(&parse(text)), env, catalogs)
+    }
+
+    fn how(s: &LlmSettings, u: Use) -> gemini::How {
+        s.models[&u].how
+    }
+
+    /// The 13:54 EDT amendment, item 1: the defaults are rules, never Pro.
+    #[test]
+    fn each_use_has_its_default_rule_and_never_pro() {
+        use gemini::{Age, Tier};
+        for (u, choice) in [
+            (Use::GeneralAgent, rule(Tier::Flash, Age::Newest)),
+            (Use::Planning, rule(Tier::Flash, Age::Newest)),
+            (Use::CardSummaries, rule(Tier::FlashLite, Age::Oldest)),
+            (Use::SpokenSummaries, rule(Tier::FlashLite, Age::Oldest)),
+        ] {
+            assert_eq!(Kind::Gemini.default_choice(u), choice, "{u:?}");
+        }
+        assert_eq!(
+            Kind::Gemini.default_choice(Use::CardSummaries).to_string(),
+            "flash-lite:oldest"
+        );
+
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let s = resolve_on(
+            "[llm]\nenabled = true\n[llm.uses.planning]\nenabled = true\n",
+            &env,
+            &listed(&[]),
+        );
+        for u in Use::ALL.into_iter().chain([Use::Planning]) {
+            assert_eq!(s.models[&u].choice, Kind::Gemini.default_choice(u));
+            assert!(!model(&s, u).contains("pro"), "{u:?}");
+        }
+        // Summaries: the oldest stable Flash-Lite, not a revision or a
+        // preview; the general agent: the `-latest` alias when there is
+        // none for Flash, so the newest stable Flash.
+        assert_eq!(model(&s, Use::CardSummaries), "gemini-2.0-flash-lite");
+        assert_eq!(model(&s, Use::SpokenSummaries), "gemini-2.0-flash-lite");
+        assert_eq!(how(&s, Use::SpokenSummaries), gemini::How::Matched);
+        assert_eq!(model(&s, Use::GeneralAgent), "gemini-3.8-flash");
+        assert_eq!(how(&s, Use::GeneralAgent), gemini::How::Matched);
+        assert_eq!(s.target(Use::Planning), s.target(Use::GeneralAgent));
+
+        // With the Flash alias listed, the general agent takes it.
+        let aliased = gemini::Catalogs::of([(
+            "gemini",
+            gemini::ModelCatalog::from_names(LISTED.iter().chain(&["gemini-flash-latest"])),
+        )]);
+        let s = resolve_on("[llm]\nenabled = true\n", &env, &aliased);
+        assert_eq!(model(&s, Use::GeneralAgent), "gemini-flash-latest");
+        assert_eq!(how(&s, Use::GeneralAgent), gemini::How::Alias);
+        assert_eq!(model(&s, Use::CardSummaries), "gemini-2.0-flash-lite");
+    }
+
+    /// Item 4: one line per use, the choice, the model and how.
+    #[test]
+    fn the_start_log_names_the_choice_the_model_and_how() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let s = resolve_on(
+            "[llm]\nenabled = true\n[llm.uses.card_summaries]\nmodel = \"gemini-9-flash\"\n",
+            &env,
+            &listed(&[]),
+        );
+        assert_eq!(
+            s.describe(),
+            [
+                "[llm] general_agent: flash:newest is gemini-3.8-flash (matched)",
+                "[llm] card_summaries: gemini-9-flash is gemini-9-flash \
+                 (named, not in the key's model list)",
+                "[llm] spoken_summaries: flash-lite:oldest is gemini-2.0-flash-lite (matched)",
+                "[llm] planning: unavailable: [llm.uses.planning] is off unless enabled = true",
+            ]
+        );
+        let s = resolve_on(
+            "[llm]\nenabled = true\n[llm.uses.planning]\nenabled = true\n",
+            &env,
+            &listed(&[]),
+        );
+        assert_eq!(
+            s.describe()[3],
+            "[llm] planning: flash:newest is gemini-3.8-flash (matched)"
+        );
+    }
+
+    /// Item 3: without a list (the fetch failed, or none was made), a rule
+    /// is libinfer-gemini's default model and a name is used as given.
+    #[test]
+    fn without_a_model_list_rules_fall_back_and_names_stand() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let text = "[llm]\nenabled = true\n[llm.uses.general_agent]\nmodel = \"gemini-2.5-pro\"\n";
+        for s in [
+            resolve(&parse(text), &env),
+            resolve_on(text, &env, &gemini::Catalogs::none()),
+            // An empty list counts as none.
+            resolve_on(
+                text,
+                &env,
+                &gemini::Catalogs::of([("gemini", gemini::ModelCatalog::from_names([""; 0]))]),
+            ),
+        ] {
+            assert_eq!(model(&s, Use::GeneralAgent), "gemini-2.5-pro");
+            assert_eq!(how(&s, Use::GeneralAgent), gemini::How::Named);
+            for u in [Use::CardSummaries, Use::SpokenSummaries] {
+                assert_eq!(model(&s, u), libinfer_gemini::DEFAULT_MODEL);
+                assert_eq!(how(&s, u), gemini::How::Fallback);
+            }
+            assert!(
+                s.describe()[2].ends_with("(fallback)"),
+                "{:?}",
+                s.describe()
+            );
+        }
+    }
+
+    /// Item 5: a choice is resolved once per backend; the same settings
+    /// come out of every later resolution.
+    #[test]
+    fn a_choice_is_resolved_once_and_kept() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let catalogs = listed(&[]);
+        let a = resolve_on("[llm]\nenabled = true\n", &env, &catalogs);
+        let b = resolve_on("[llm]\nenabled = true\n", &env, &catalogs);
+        assert_eq!(a, b);
+        assert_eq!(catalogs.backends(), ["cheap", "gemini"]);
+    }
+
+    /// Item 2: `model` in either form, per backend and per use; a `pro:`
+    /// rule or a Pro name only where it is written.
     #[test]
     fn models_are_overridden_per_backend_and_per_use() {
         let dir = with_key("k");
         let env = KeyEnv::in_dir(dir.path());
-        let s = resolve(
-            &parse(
-                r#"
+        let catalogs = listed(&["gemini-2.5-flash-lite", "gemini-3.0-flash-lite"]);
+        // A rule on the backend, a name on a use.
+        let s = resolve_on(
+            r#"
 [llm]
 enabled = true
 [llm.backends.gemini]
 kind = "gemini"
-model = "gemini-3.8-flash"
+model = "flash:newest"
 [llm.uses.general_agent]
 model = "gemini-3.8-pro"
 "#,
-            ),
             &env,
+            &catalogs,
         );
-        // A Pro model only where it is named.
         assert_eq!(model(&s, Use::GeneralAgent), "gemini-3.8-pro");
+        assert_eq!(how(&s, Use::GeneralAgent), gemini::How::Named);
         assert_eq!(model(&s, Use::CardSummaries), "gemini-3.8-flash");
         assert_eq!(model(&s, Use::SpokenSummaries), "gemini-3.8-flash");
+        assert_eq!(how(&s, Use::SpokenSummaries), gemini::How::Matched);
 
-        // Two backends of one kind, with a default and a use on the other.
+        // A name on the backend, a rule on a use; a `pro:` rule is Pro.
+        let s = resolve_on(
+            r#"
+[llm]
+enabled = true
+[llm.backends.gemini]
+kind = "gemini"
+model = "gemini-2.5-flash"
+[llm.uses.general_agent]
+model = " Pro:Newest "
+[llm.uses.card_summaries]
+model = "gemini-flash-lite:oldest"
+"#,
+            &env,
+            &catalogs,
+        );
+        assert_eq!(model(&s, Use::GeneralAgent), "gemini-pro-latest");
+        assert_eq!(how(&s, Use::GeneralAgent), gemini::How::Alias);
+        assert_eq!(
+            s.models[&Use::GeneralAgent].choice.to_string(),
+            "pro:newest"
+        );
+        assert_eq!(model(&s, Use::CardSummaries), "gemini-2.0-flash-lite");
+        assert_eq!(model(&s, Use::SpokenSummaries), "gemini-2.5-flash");
+        assert_eq!(how(&s, Use::SpokenSummaries), gemini::How::Named);
+
+        // Two backends of one kind, each resolved on its own list.
         write_key(&dir.path().join("other_key"), "k2");
-        let s = resolve(
-            &parse(
-                r#"
+        let s = resolve_on(
+            r#"
 [llm]
 enabled = true
 default = "main"
@@ -797,22 +1047,22 @@ kind = "gemini"
 [llm.backends.cheap]
 kind = "gemini"
 api_key_file = "other_key"
-model = "gemini-3.8-flash-lite"
 [llm.uses.card_summaries]
 backend = "cheap"
 [llm.uses.spoken_summaries]
 enabled = false
 "#,
-            ),
             &env,
+            &catalogs,
         );
         let general = s.target(Use::GeneralAgent).unwrap();
         assert_eq!(general.backend, "main");
-        assert_eq!(general.model, gemini::GENERAL_AGENT_MODEL);
+        // `main` has no list: offline.
+        assert_eq!(general.model, libinfer_gemini::DEFAULT_MODEL);
         let cards = s.target(Use::CardSummaries).unwrap();
         assert_eq!(cards.backend, "cheap");
         assert_eq!(cards.key.expose(), "k2");
-        assert_eq!(cards.model, "gemini-3.8-flash-lite");
+        assert_eq!(cards.model, "gemini-2.5-flash-lite");
         assert!(matches!(
             s.state(Use::SpokenSummaries),
             UseState::Unavailable {
@@ -820,8 +1070,42 @@ enabled = false
                 ..
             }
         ));
+        assert!(!s.models.contains_key(&Use::SpokenSummaries));
         // Summaries are available while one of the two is.
         assert!(s.availability().1);
+    }
+
+    /// Item 3: the backends whose list is fetched: each `gemini` one with a
+    /// key, and none while the switch is off.
+    #[test]
+    fn the_lists_fetched_are_the_keyed_backends() {
+        let dir = with_key("k");
+        let env = KeyEnv::in_dir(dir.path());
+        let keys = |text: &str| -> Vec<(String, String)> {
+            catalog_keys(&LlmSources::of(&parse(text)), &env)
+                .into_iter()
+                .map(|(name, key)| (name, key.expose().to_string()))
+                .collect()
+        };
+        assert!(keys("").is_empty());
+        assert!(keys("[llm]\nenabled = false\n").is_empty());
+        assert_eq!(
+            keys("[llm]\nenabled = true\n"),
+            [("gemini".to_string(), "k".to_string())]
+        );
+        assert_eq!(
+            keys("[gemini]\n"),
+            [("gemini".to_string(), "k".to_string())],
+            "the deprecated section too"
+        );
+        assert_eq!(
+            keys(
+                "[llm]\nenabled = true\n[llm.backends.a]\nkind = \"gemini\"\n\
+                 [llm.backends.b]\nkind = \"gemini\"\napi_key_file = \"missing\"\n\
+                 [llm.backends.c]\nkind = \"llama\"\n"
+            ),
+            [("a".to_string(), "k".to_string())]
+        );
     }
 
     #[test]
@@ -931,7 +1215,7 @@ backend = "b"
 
         // An empty [gemini] is the discovered backend, with tier models.
         let s = resolve(&parse("[gemini]\n[summary]\ncards = false\n"), &env);
-        assert_eq!(model(&s, Use::GeneralAgent), gemini::GENERAL_AGENT_MODEL);
+        assert_eq!(model(&s, Use::GeneralAgent), libinfer_gemini::DEFAULT_MODEL);
         assert!(matches!(
             s.state(Use::CardSummaries),
             UseState::Unavailable {
@@ -952,7 +1236,7 @@ backend = "b"
             &parse("[gemini]\nmodel = \"old\"\n[summary]\ncards = false\n[llm]\nenabled = true\n"),
             &env,
         );
-        assert_eq!(model(&s, Use::GeneralAgent), gemini::GENERAL_AGENT_MODEL);
+        assert_eq!(model(&s, Use::GeneralAgent), libinfer_gemini::DEFAULT_MODEL);
         assert!(s.target(Use::CardSummaries).is_some(), "[summary] ignored");
         assert_eq!(s.notes.len(), 2);
         assert!(
@@ -1078,7 +1362,7 @@ read = ["*.md", "docs/**/*.md", "a?"]
         assert!(
             s.describe()
                 .iter()
-                .any(|l| l.starts_with("[llm] planning: backend"))
+                .any(|l| l.starts_with("[llm] planning: gemini-3.8-pro is gemini-3.8-pro"))
         );
         // The availability the phone is told is the three uses'.
         assert_eq!(s.availability(), (true, true, None));
