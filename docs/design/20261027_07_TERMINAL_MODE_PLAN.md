@@ -618,3 +618,48 @@ lands before step 1; the 20:44 EDT amendment's "with step 1's commit" is
 corrected to this commit. Steps 1 and 2 are independent. The status is
 `In implementation`, and the document is now immutable: it changes only on
 the owner's explicit instruction.
+
+## Amendment — 2026-10-30 13:31 EDT: a terminal error is a short pill for 2 s, not the error's text
+
+**The owner (2026-10-30), verbatim:** "on the terminal screen with an
+incompatible terminal when you attempt to drag or do something else that
+causes an invalid event it's the entire screen with it looks like it's from
+the JSON instead that should like a small maybe centered of the terminal
+just as it you know it's only there for a couple of seconds it's out and
+just just a short message like like like terminal arrow or something like
+that" (logged in `docs/OWNER_REPORTS.md`, 2026-10-30 13:29 EDT).
+
+**Found.** The body does not say how a terminal failure is shown. The app
+put the client's `TerminalStatus::error` (the daemon's error message and
+code, which for a herdr whose terminal does not match can be a long JSON
+text) into the terminal's status line, "The daemon refused the terminal:
+…", wrapped over the whole terminal rect at 14 pt, and kept it there until
+the terminal was next opened. Each failure also went to the overview's
+status line as the app's note.
+
+**Decided.** This adds to step 5 (the app's terminal view) and replaces the
+status line's refusal text:
+
+1. **The pill.** A failure of a `terminal.*` call (`terminal.open`,
+   `terminal.input_arm`, `terminal.input`, `terminal.scroll`,
+   `terminal.mouse`; the client's `Event::Error` whose text starts with
+   `terminal.`) shows the words **Terminal error** in a pill: 13 pt (the
+   other pills' size), the warning colour at 92 % behind the theme's
+   background colour as text (as the stale pill), sized to its words,
+   centred horizontally and vertically in the terminal's rect.
+2. **How long.** It shows for 2 s from the failure and then goes, with
+   no fade. A further failure while it shows starts the 2 s again.
+3. **The terminal underneath** is drawn as it was: the grid, the cursor
+   and the other pills are unchanged, and the pill covers only its own
+   rect.
+4. **The error's text is not drawn**, in the terminal or on the overview's
+   status line (terminal failures no longer become the app's note). It is
+   logged in full, as now, with `log::warn!("companion: <text>")`.
+5. **The status line** no longer carries the refusal. When the terminal
+   could not open (no screen: neither open nor opening, with an error), it
+   says "The terminal could not open." (or, when the daemon offers no
+   terminal mode, the existing "No terminal: …" line); otherwise it shows
+   what it did before for opening, ended and offline.
+
+The client (`flankr-companion`) is not changed: its `TerminalStatus::error`
+and `Event::Error` stay as they are.
