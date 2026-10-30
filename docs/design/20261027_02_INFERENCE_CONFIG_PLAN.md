@@ -328,3 +328,27 @@ failed requests, 2026-10-27 to 2026-10-30). This replaces decision 2's
 
 **Approved** by the owner (2026-10-30, the quotation above), to be built
 now in a worktree.
+
+## Amendment — 2026-10-30 15:39 EDT: clients built from the choice, so a refused model is replaced
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "Yes, approve the
+refused-model plan addition and build it", the flankr side of libinfer's
+model choice plan amendment "a refused model is replaced by the policy's
+next choice" (its item 6). This adds to the 13:54 EDT amendment, items 3
+and 5:
+
+1. **Built from the choice.** Where the daemon now builds a use's Gemini
+   client from the resolved name, it builds it with libinfer-gemini
+   0.2.1's `GeminiReasoningEngineBuilder::choice(choice, &catalog)`, with
+   that use's choice and its backend's catalog, when the backend has one;
+   without a catalog it builds from the resolved name as now.
+2. **Replaces item 5** ("not re-resolved during the run") for rules: a
+   model refused during the run is replaced inside the client by the
+   policy's next choice, as libinfer's amendment says, and the switch is
+   logged there. An exact name in the config still never switches.
+3. **The start log** is unchanged: it names the first model each use
+   resolved to.
+4. **Versions.** libinfer-gemini 0.2.1 in `Cargo.lock`. Summaries no longer
+   stop when a model is refused, which the person running the daemon can
+   notice: the daemon takes the next patch with its `UPDATES.md` entry
+   (FLANKR RULE 2).
