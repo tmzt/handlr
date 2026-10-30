@@ -918,3 +918,20 @@ tagged.
   `speech.summarize` task and the companion client's own reading of a
   reply, when no summary came, both panicked on such a reply; the client's
   panic ended its `net` thread.
+
+## flankr-companion 0.7.1 — 2026-10-30 (the commit tagged `flankr-companion-v0.7.1`)
+
+Plan 20261023_02 (dictated messages), its 2026-10-30 15:10 EDT amendment.
+Strictly additive: both variants are on `#[non_exhaustive]` enums, and a
+caller that gives neither sees no change.
+
+- **Added:** `Event::CatchUp { text }`: when a voice input's catch-up
+  comes, its summary (trimmed) is given at once for the app's *While you
+  spoke* card, beside the `Event::Say` of the same text that follows in
+  the queue's turn. Never given for the fallback (none made, refused,
+  failed, late, or the link closed).
+- **Added:** `Input::Muted(bool)`: the app's mute. Muted, no reply is read
+  aloud and no Gemini line is spoken, except during voice input, where
+  they are held as unmuted so its catch-up is still asked for. With it,
+  the app gives `Input::ReadAloud` and `Settings::speak_gemini` as they
+  are, not turned off for mute. Not muted until given.
