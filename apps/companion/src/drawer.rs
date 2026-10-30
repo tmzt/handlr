@@ -387,6 +387,11 @@ impl AppDrawer {
                         _ => DrawerTouch::Nothing,
                     };
                 }
+                // A drag that scrolled the list, or moved off a row, is no
+                // tap: only a release within the slop is.
+                if p.moved {
+                    return DrawerTouch::Nothing;
+                }
                 match self
                     .layout
                     .deliver(InputEvent::Mouse(MouseEvent::Click { pos, button: left }))
@@ -600,6 +605,36 @@ mod tests {
             d.touch(2, TouchPhase::Ended, x + 80.0, y, t0 + HOLD),
             DrawerTouch::Nothing
         );
+    }
+
+    #[test]
+    fn a_drag_over_the_rows_is_no_tap_and_a_release_within_the_slop_is() {
+        let mut d = opened(3);
+        let now = Duration::from_secs(5);
+        let row = d.row_on_screen(1).unwrap();
+        let [x, y] = row.center();
+        // Dragged a row's height and back onto it: a drag, no session.
+        d.touch(1, TouchPhase::Started, x, y, now);
+        d.touch(1, TouchPhase::Moved, x, y - row.h, now);
+        d.touch(1, TouchPhase::Moved, x, y, now);
+        assert_eq!(
+            d.touch(1, TouchPhase::Ended, x, y, now + Duration::from_millis(300)),
+            DrawerTouch::Nothing
+        );
+        // Moved within the slop: still a tap.
+        let s = 2.8;
+        d.touch(2, TouchPhase::Started, x, y, now);
+        d.touch(2, TouchPhase::Moved, x + 6.0 * s, y, now);
+        assert!(matches!(
+            d.touch(
+                2,
+                TouchPhase::Ended,
+                x + 6.0 * s,
+                y,
+                now + Duration::from_millis(80)
+            ),
+            DrawerTouch::Hit(DrawerHit::Session(_))
+        ));
     }
 
     #[test]
