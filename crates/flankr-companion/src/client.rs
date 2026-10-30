@@ -2984,6 +2984,7 @@ impl State {
     /// once it answers, a fetch of the newest screen's contents.
     fn refresh(&mut self, out: &mut Vec<Output>) {
         if self.view.is_none() {
+            log::info!("refresh: no agent view open");
             out.push(event(Event::Refreshed { new: 0 }));
             return;
         }
@@ -4027,6 +4028,10 @@ impl State {
             && !d.general_agent
             && d.mode == PromptMode::Voice
         {
+            log::info!(
+                "dictation: a message is already taken by voice ({:?}); kept",
+                d.phase
+            );
             return;
         }
         self.dictation = None;
@@ -4042,6 +4047,10 @@ impl State {
             && !d.general_agent
             && d.mode == PromptMode::Keyboard
         {
+            log::info!(
+                "dictation: a message is already typed ({:?}); kept",
+                d.phase
+            );
             return;
         }
         let existing_parts = self
@@ -4126,6 +4135,7 @@ impl State {
             .as_mut()
             .filter(|d| d.mode == PromptMode::Keyboard)
         else {
+            log::info!("dictation: no typed prompt to go on by voice");
             return;
         };
         d.mode = PromptMode::Voice;
@@ -4143,6 +4153,10 @@ impl State {
             && d.mode == PromptMode::Voice
             && d.parts == parts
         {
+            log::info!(
+                "dictation: this message is already taken by voice ({:?}); kept",
+                d.phase
+            );
             return;
         }
         self.dictation = None;
@@ -12160,6 +12174,31 @@ mod tests {
             ask.params,
             json!({"held": [{"pane_id": "w2:pZ", "ts": "50.0", "text": "Built it."}]})
         );
+    }
+
+    #[test]
+    fn a_reply_with_a_dash_read_here_after_no_summary_leaves_the_record_button_working() {
+        // The owner's report of 2026-10-30 15:12 EDT: "tapped the record
+        // button and got no response". The reply's summary did not come in
+        // `SUMMARY_WAIT`, so it was read here, and the reading rules
+        // panicked on its dash, ending the client: nothing after it was
+        // said, and the taps on record did nothing.
+        let mut s = viewing("working", json!(null));
+        s.input(Input::ReadAloud(true));
+        let out = deliver(
+            &mut s,
+            vec![text_at(50, 0, "Built it \u{2014} all green\u{2026}")],
+            vec![],
+        );
+        assert_eq!(requests(&out, "speech.summarize").len(), 1);
+        let out = s.input(Input::Tick(secs(100.0) + SUMMARY_WAIT));
+        assert_eq!(
+            says(&out),
+            ["Built it \u{2014} all green\u{2026}".to_string()]
+        );
+        let out = s.input(Input::StartDictation);
+        assert!(dictation_of(&out).is_some_and(|d| d.active), "{out:?}");
+        assert!(events(&out).contains(&Event::Arm), "{out:?}");
     }
 
     #[test]
