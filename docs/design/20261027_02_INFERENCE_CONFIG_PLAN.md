@@ -277,3 +277,54 @@ commit.
 Step 1 (the config) is the first implementing commit. From here the plan
 changes only on the owner's explicit instruction; departures go to
 `CHANGES.md` (Rule 1.7).
+
+## Amendment — 2026-10-30 13:54 EDT: models chosen by tier and age from the key's model list; approved
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "update our plan for
+LLM and approve and start the work", after libinfer's Gemini model choice
+plan (libinfer `docs/design/20261030_01_GEMINI_MODEL_CHOICE_PLAN.md`,
+libinfer-gemini 0.1.1). The daemon's summaries have never worked: the
+Flash-Lite default `gemini-3.8-flash-lite` is not served to the key (336
+failed requests, 2026-10-27 to 2026-10-30). This replaces decision 2's
+"Models chosen per use" for the `gemini` kind, and the constants
+`GENERAL_AGENT_MODEL` and `SUMMARY_MODEL` in `src/llm/gemini.rs`:
+
+1. **Defaults by rule, not by name.** `general_agent` and `planning`:
+   `flash:newest`; `card_summaries` and `spoken_summaries`:
+   `flash-lite:oldest` (libinfer-gemini's `ModelChoice::Rule`). Still
+   never Pro by default.
+2. **`model` in a backend or a use** takes the text form
+   (`flash-lite:oldest`, `flash:newest`, `pro:newest`) or an exact name,
+   read with `ModelChoice::parse`. A `pro:` rule counts as naming Pro.
+3. **Resolved once at start.** For each `gemini` backend with a key, the
+   daemon fetches `ModelCatalog::fetch` once, with a 10 s timeout, before
+   its uses are made; each use's choice is resolved against it with
+   `ModelCatalog::resolve`, and the name it gives is the model for the
+   run. When the fetch fails, the choices are resolved with
+   `resolve_offline` (a rule gives `DEFAULT_MODEL`) and one warning names
+   the backend and the reason, never the key.
+4. **Logged at start, per use:** the choice, the model it resolved to,
+   and how (`[llm] spoken_summaries: flash-lite:oldest is <model>
+   (matched)`), replacing the current per-use model line.
+5. **Not re-resolved** during the run: a model retired while the daemon
+   runs fails its requests until the next start, as now.
+6. **libinfer-gemini 0.1.1** is taken in `Cargo.toml` (a path
+   dependency, as now) with `Cargo.lock`.
+
+**Steps:**
+
+1. **Resolution.** `src/llm/`: the tier defaults become `ModelChoice`
+   rules; `model` strings are parsed; the catalog is fetched and each
+   use resolved at start; the start log as item 4. **Done when:** unit
+   tests cover the defaults per use, a config `model` in both forms per
+   backend and per use, resolution over a `ModelCatalog::from_names` list
+   (summaries get the oldest stable Flash-Lite, the general agent the
+   `-latest` alias or the newest Flash), and the offline fallback, with no
+   network call in tests and no key read.
+2. **The daemon on it.** `TurnService`, card summaries and
+   `speech.summarize` use the resolved names. **Done when:** `cargo test`
+   passes and a start of the test daemon (not the real one) logs one
+   resolved line per use.
+
+**Approved** by the owner (2026-10-30, the quotation above), to be built
+now in a worktree.
