@@ -3708,3 +3708,42 @@ and plan 20261023_02 (dictated messages), its amendment of the same time:
    catch-up being made, and its late answer is ignored.
 9. **flankr-companion, `State::held_notices()`:** it also counts the
    items a catch-up is being made for.
+
+## 2026-10-30 15:28 EDT — the catch-up as a pinned card: small departures in the build
+
+Plan 20261023_02 (dictated messages), the 2026-10-30 15:10 EDT amendment:
+
+1. **The preamble, mute never stops a catch-up — a correction to the
+   14:40 EDT addendum's item 8:** that item said the client does not know
+   the app's mute and so still asks for the catch-up while muted. It did
+   not: muted, the app told the client read aloud and *Speak agent
+   (Gemini) responses* were off (plan 20261028_06, the 2026-10-29 00:26
+   EDT amendment), so no reply was held and `speech.catch_up` was never
+   asked (it needs read aloud on, as `spoken_output` for the daemon). To
+   build the preamble, flankr-companion 0.7.1 adds `Input::Muted(bool)`
+   (on the `#[non_exhaustive]` `Input`: additive), and the app gives
+   read aloud and *Speak agent (Gemini) responses* as they are, with
+   `Muted` beside them, on start, on a reset and when mute changes.
+   Muted, the client reads no reply and speaks no Gemini line outside
+   voice input, as before; during voice input it holds them as unmuted, so
+   the catch-up is asked for and its `Say` is dropped by the app. The
+   daemon's `spoken_output` is now on while muted; it makes a summary
+   only when asked, which muted is only during voice input.
+2. **Item 2, the agent view's ranking:** the view pins its highest live
+   card. A live question or approval, or a choice question, outranks the
+   catch-up, which shows once it is answered. Any other live card (a
+   finished turn, something broke) gives the catch-up its place and is
+   shown in the flow while the catch-up shows; a tap on the ✕ pins it
+   again.
+3. **Item 2, its place:** the card is one of the prompt cards (`Prompts`,
+   both screens), the topmost of them: on the overview above Gemini's
+   card, and in the agent view at the top of the prompt cards, where the
+   pinned card goes. It is not shown while a prompt card is expanded into
+   its overlay. Its edge and header are in the spoken colour; its text is
+   cut to 5 lines.
+4. **Item 2, the ✕:** drawn as two strokes, as the plugin modal's close,
+   since the faces may lack the glyph. Dismissing it on one screen
+   dismisses it on both. A tap elsewhere on the card does nothing.
+5. **Not settled:** muting (the volume tap sends *Stop reading*) while a
+   catch-up is being made drops it, as *Stop reading* does (the 13:52 EDT
+   amendment's addendum, item 8), so no card follows for it.
