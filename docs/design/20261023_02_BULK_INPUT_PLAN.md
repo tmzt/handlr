@@ -421,3 +421,10 @@ same mode in `flankr-companion`'s `State`.
    replay the user taps is spoken at once.
 7. **Not changed.** Sounds that are not speech (the done ding, the record
    chimes) are not held.
+
+## Amendment — 2026-10-30 13:45 EDT: correction to the 13:37 EDT amendment's item 7
+
+The 13:37 EDT amendment's item 7 names "the record chimes" among the
+sounds that are not speech; the app has no record chime. The only such
+sound is the done ding (`Event::Ding`), which still plays during voice
+input. Nothing else changes.
