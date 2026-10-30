@@ -829,3 +829,17 @@ Strictly additive (a variant on the `#[non_exhaustive]` `Input`):
   or Gemini's) goes on in voice mode, its text kept as its first part, and
   `Event::Arm` is sent. Nothing changes with the microphone setting off or
   no typed prompt open.
+
+## flankr-companion 0.5.8 — 2026-10-30 (the commit tagged `flankr-companion-v0.5.8`)
+
+Plan 20261028_03 (session drawer), its 2026-10-30 13:15 EDT amendment.
+Strictly additive:
+
+- **Added:** `State::restore_agents(Vec<AgentInfo>)`: a list kept from
+  an earlier run is given as `Event::Agents` until the daemon lists;
+  nothing once it has.
+- **Added:** `State::take_new_list()`: the agent list, once, after the
+  daemon gives one that differs from what showed.
+- **Added:** `RemoteState::agents()` and `RemoteState::set_agents(&[AgentInfo])`:
+  the remote's last agent list, kept in its `state.redb` (an `agents`
+  table).

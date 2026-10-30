@@ -6,7 +6,9 @@
 //! data plan's session tables (plan 20261023_09) go in this file when that
 //! plan is built, capped per remote at 50 MB with least-recently-used
 //! eviction and no session count (plan 20261028_01, the 13:06 EDT
-//! amendment); nothing else is written here until then.
+//! amendment). It also holds `agents`: the remote's last agent list, as
+//! JSON under `list`, kept so the list shows at once at the next start
+//! (plan 20261028_03, the 2026-10-30 13:15 EDT amendment).
 //!
 //! The directories are made 0700 and a new file 0600 as they are created,
 //! never loosened and then tightened (plan 20261028_01, the 14:37 EDT
@@ -28,6 +30,9 @@ use crate::keys::{RemoteId, Remotes, ServerRecord};
 
 /// The `meta` table: names to values, all text.
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
+
+/// The `agents` table: `list`, the last agent list as JSON.
+const AGENTS: TableDefinition<&str, &str> = TableDefinition::new("agents");
 
 /// The layout of `state.redb` this crate writes.
 pub const STATE_SCHEMA: u32 = 1;
@@ -217,6 +222,43 @@ impl RemoteState {
         }))
     }
 
+    /// The remote's last agent list as kept, or `None` if none was (or
+    /// what was kept no longer reads).
+    pub fn agents(&self) -> Result<Option<Vec<libflankr_proto::common::AgentInfo>>, String> {
+        let path = &self.path;
+        let read = self.db.begin_read().map_err(|e| db_err(path, e))?;
+        let table = match read.open_table(AGENTS) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(db_err(path, e)),
+        };
+        let Some(json) = table.get("list").map_err(|e| db_err(path, e))? else {
+            return Ok(None);
+        };
+        match serde_json::from_str(json.value()) {
+            Ok(list) => Ok(Some(list)),
+            Err(e) => {
+                log::warn!("state: {}: the kept agent list: {e}", path.display());
+                Ok(None)
+            }
+        }
+    }
+
+    /// Keeps `agents` as the remote's last agent list, replacing the one
+    /// before.
+    pub fn set_agents(&self, agents: &[libflankr_proto::common::AgentInfo]) -> Result<(), String> {
+        let path = &self.path;
+        let json = serde_json::to_string(agents).map_err(|e| db_err(path, e))?;
+        let write = self.db.begin_write().map_err(|e| db_err(path, e))?;
+        {
+            let mut table = write.open_table(AGENTS).map_err(|e| db_err(path, e))?;
+            table
+                .insert("list", json.as_str())
+                .map_err(|e| db_err(path, e))?;
+        }
+        write.commit().map_err(|e| db_err(path, e))
+    }
+
     /// Deletes `<data dir>/remotes/<id>/`, which must not be open. Nothing
     /// there is not an error.
     pub fn delete(data_dir: &Path, id: RemoteId) -> Result<(), String> {
@@ -328,6 +370,27 @@ mod tests {
 
     fn remote(n: u8) -> ServerRecord {
         ServerRecord::new(format!("m{n}"), [n; 32], vec!["127.0.0.1:7347".into()])
+    }
+
+    #[test]
+    fn the_agent_list_is_kept_and_read_back_after_reopening() {
+        let data = tempfile::tempdir().unwrap();
+        let r = remote(1);
+        let state = RemoteState::open(data.path(), &r).unwrap();
+        assert_eq!(state.agents().unwrap(), None);
+        let list: Vec<libflankr_proto::common::AgentInfo> = serde_json::from_value(
+            serde_json::json!([{"pane_id": "w1:p1", "name": "the flankr agent",
+                "spoken": "the flankr agent", "agent": "claude", "project": "flankr",
+                "tab_label": "17-fl", "tab_number": 17, "status": "idle", "focused": false}]),
+        )
+        .unwrap();
+        state.set_agents(&list).unwrap();
+        drop(state);
+        let again = RemoteState::open(data.path(), &r).unwrap();
+        assert_eq!(again.agents().unwrap(), Some(list));
+        // Replaced, not added to.
+        again.set_agents(&[]).unwrap();
+        assert_eq!(again.agents().unwrap(), Some(Vec::new()));
     }
 
     #[test]

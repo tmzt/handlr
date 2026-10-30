@@ -276,7 +276,7 @@ struct LinkSlot {
     key: LinkKey,
     state: State,
     /// The remote's `state.redb`, open while it is listed.
-    _remote_state: Option<RemoteState>,
+    remote_state: Option<RemoteState>,
     backoff: Backoff,
     /// Bumped with each attempt and each end: what an older attempt or
     /// connection reports is dropped.
@@ -672,6 +672,20 @@ impl Net {
                 LinkKey::Remote(id) => self.open_state(id),
                 LinkKey::Local => None,
             };
+            // The list kept from the last run shows at once (plan
+            // 20261028_03, the 2026-10-30 13:15 EDT amendment).
+            let kept = remote_state.as_ref().and_then(|r| match r.agents() {
+                Ok(list) => list,
+                Err(e) => {
+                    log::warn!("state: reading the kept agent list: {e}");
+                    None
+                }
+            });
+            if let Some(list) = kept {
+                log::info!("links: {} kept agent(s) shown", list.len());
+                let outputs = state.restore_agents(list);
+                self.pending.push_back((key, outputs));
+            }
             log::info!(
                 "links: {}",
                 match key {
@@ -689,7 +703,7 @@ impl Net {
             self.links.push(LinkSlot {
                 key,
                 state,
-                _remote_state: remote_state,
+                remote_state,
                 backoff: Backoff::new(self.config.backoff_initial, self.config.backoff_max),
                 generation: 0,
                 conn: LinkConn::Waiting(tokio::time::Instant::now()),
@@ -701,6 +715,22 @@ impl Net {
     fn drop_links(&mut self) {
         let wanted = self.wanted();
         self.links.retain(|l| wanted.contains(&l.key));
+    }
+
+    /// Keeps `key`'s agent list in its `state.redb` when the daemon gave a
+    /// new one.
+    fn keep_list(&mut self, key: LinkKey) {
+        let Some(slot) = self.slot_mut(key) else {
+            return;
+        };
+        let Some(list) = slot.state.take_new_list() else {
+            return;
+        };
+        if let Some(r) = &slot.remote_state
+            && let Err(e) = r.set_agents(&list)
+        {
+            log::warn!("state: keeping the agent list: {e}");
+        }
     }
 
     /// Opens `id`'s `state.redb`.
@@ -1754,6 +1784,7 @@ impl Net {
                 };
                 self.pending.push_back((key, outputs));
                 self.persist_session(key);
+                self.keep_list(key);
             }
             Wire::Closed { key, generation } => {
                 if self

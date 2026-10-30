@@ -1453,6 +1453,9 @@ pub struct State {
     agents: Vec<common::AgentInfo>,
     /// `agents.list` has answered on this connection.
     listed: bool,
+    /// A list the daemon gave that is new, not yet taken to be kept
+    /// ([`State::take_new_list`]).
+    new_list: bool,
     /// An `agents.list` is on its way.
     listing: bool,
     /// When the last `agents.list` was sent.
@@ -1943,6 +1946,7 @@ impl State {
             shown: Dictation::off(),
             agents: Vec::new(),
             listed: false,
+            new_list: false,
             listing: false,
             listed_at: None,
             list_wanted: false,
@@ -2046,6 +2050,23 @@ impl State {
     /// The session to continue on the next connection.
     pub fn session_id(&self) -> Option<&str> {
         self.session_id.as_deref()
+    }
+
+    /// Shows `agents`, a list kept from an earlier run, until the daemon
+    /// gives one (plan 20261028_03, the 2026-10-30 13:15 EDT amendment):
+    /// `Event::Agents` with it, or nothing once the daemon has listed.
+    pub fn restore_agents(&mut self, agents: Vec<common::AgentInfo>) -> Vec<Output> {
+        if self.listed {
+            return Vec::new();
+        }
+        self.agents = agents;
+        vec![event(Event::Agents(self.agents.clone()))]
+    }
+
+    /// The agent list, once, after the daemon gives one that differs from
+    /// what showed: the list to keep.
+    pub fn take_new_list(&mut self) -> Option<Vec<common::AgentInfo>> {
+        std::mem::take(&mut self.new_list).then(|| self.agents.clone())
     }
 
     /// Sets the session to continue, such as one stored from an earlier run.
@@ -5040,6 +5061,7 @@ impl State {
                     self.ding_finished(&list.agents, out);
                     if !self.listed || list.agents != self.agents {
                         out.push(event(Event::Agents(list.agents.clone())));
+                        self.new_list = true;
                     }
                     self.listed = true;
                     self.agents = list.agents;
@@ -9378,6 +9400,26 @@ mod tests {
     fn answer_list(s: &mut State, out: &[Output], agents: Value) -> Vec<Output> {
         let list = requests(out, "agents.list")[0].clone();
         s.incoming(response(list.id, json!({ "agents": agents })))
+    }
+
+    #[test]
+    fn a_kept_list_shows_until_the_daemon_lists_and_a_new_list_is_taken_once() {
+        let kept: Vec<common::AgentInfo> =
+            serde_json::from_value(json!([agent_info("w2:pK", "idle")])).unwrap();
+        let mut s = State::new("test");
+        let out = s.restore_agents(kept.clone());
+        assert_eq!(agents_of(&out), vec![kept.clone()]);
+        assert_eq!(s.take_new_list(), None, "a kept list is not new");
+        // The daemon's first list replaces it, and is taken once to keep.
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        let out = s.incoming(response(id, json!({"server": "flankr", "vocabulary": []})));
+        answer_list(&mut s, &out, json!([agent_info("w2:pZ", "working")]));
+        let new = s.take_new_list().expect("the daemon's list");
+        assert_eq!(new[0].pane_id, "w2:pZ");
+        assert_eq!(s.take_new_list(), None, "once");
+        // Listed: a kept list no longer replaces what the daemon gave.
+        assert!(s.restore_agents(kept).is_empty());
     }
 
     /// Online at 0 s, hello's list answered with one working agent.
