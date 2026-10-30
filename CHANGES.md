@@ -3876,3 +3876,12 @@ Plan 20261029_01 (choice questions), the 2026-10-30 16:42 EDT amendment
    A test-only probe switch (`probe::daemon_choices`) drops the
    client's own `Event::ChoiceAnswered` so the test's injected result
    stands in for the daemon's.
+
+## 2026-10-30 17:02 EDT — choice.cancel: the daemon's and the app's versions are minor bumps
+
+Plan 20261029_01, the 2026-10-30 16:42 EDT amendment, item 5, says the
+daemon's version and the app's each take the next patch. A choice question
+dismissed from the phone is a new feature, which FLANKR RULES 1.4 and 2.3
+make a minor bump, and the rules win: the daemon is 0.3.0 and the app
+0.6.0, not 0.2.4 and 0.5.1 (never pushed or tagged). libflankr_proto 0.5.8
+and flankr-companion 0.7.4 are additive patches as the item says.
