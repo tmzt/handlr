@@ -1,6 +1,6 @@
 [package]
 name = "flankr-companion"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2024"
 description = "The companion client: connection, sessions, keys and turn logic, without audio"
 

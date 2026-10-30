@@ -935,3 +935,18 @@ caller that gives neither sees no change.
   they are held as unmuted so its catch-up is still asked for. With it,
   the app gives `Input::ReadAloud` and `Settings::speak_gemini` as they
   are, not turned off for mute. Not muted until given.
+
+## flankr-companion 0.7.2 — 2026-10-30 (the commit tagged `flankr-companion-v0.7.2`)
+
+Plan 20261022_03 (harness protocol), living section L3, the 2026-10-30
+15:20 EDT amendment, item 5. Strictly additive: the variant is on the
+`#[non_exhaustive]` `Input`, the new enum is itself `#[non_exhaustive]`,
+and a caller that gives neither sees no change.
+
+- **Added:** `Input::DropSpeech(SpeechOf)`: a card dismissed on the phone
+  drops its speech waiting to be said, and stops it if it is being said;
+  other speech is left as it is.
+- **Added:** `SpeechOf`, whose speech that is: `Card(Serial)`, the open
+  view's card at that section serial (the replies on its line, waiting to
+  be summarized, read aloud or held for a catch-up), or `CatchUp`, the
+  catch-up last given as `Event::CatchUp`.

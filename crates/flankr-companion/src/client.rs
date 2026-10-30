@@ -187,6 +187,12 @@ pub enum Input {
     /// said is dropped, so nothing follows it. Replies that come after
     /// are read as usual.
     StopReading,
+    /// A card dismissed on the phone (plan 20261022_03, the L3 amendment
+    /// of 2026-10-30 15:20 EDT, items 3 and 5): the user has acknowledged
+    /// it, so its speech waiting to be said is dropped, and if it is being
+    /// said, that stops. Other speech is left as it is. See [`SpeechOf`].
+    /// Added in 0.7.2.
+    DropSpeech(SpeechOf),
     /// The app went to the background (`true`) or came back (`false`).
     /// In the background the link is a single sleeping socket: no polling,
     /// a slow ping, and only what the daemon pushes.
@@ -335,6 +341,20 @@ pub enum Input {
     /// (`terminal.paste`): once pasted they are used up and go. Added in
     /// 0.5.3.
     TerminalPasteImages(Vec<u8>),
+}
+
+/// Whose speech [`Input::DropSpeech`] drops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SpeechOf {
+    /// The open view's card at this section serial: the replies on its
+    /// line of the session file (a Finished card's reply, a question's
+    /// text), waiting to be summarized, read aloud or held for a
+    /// catch-up. Nothing without an open view.
+    Card(common::Serial),
+    /// The *While you spoke* card's: the catch-up last given as
+    /// [`Event::CatchUp`].
+    CatchUp,
 }
 
 /// A grade of memory pressure (plan 20261022_03, the L3 amendment of
@@ -1496,6 +1516,10 @@ pub struct State {
     /// skip its reading.
     read_replies: VecDeque<(String, String)>,
     saying: Vec<String>,
+    /// The catch-up last given as [`Event::CatchUp`], and whether it is
+    /// being said: for [`Input::DropSpeech`].
+    catch_up_text: Option<String>,
+    saying_catch_up: bool,
     /// Suggestions tapped and sent, until their confirmation is approved.
     tapped: Vec<Tapped>,
     notices: VecDeque<Held>,
@@ -2009,6 +2033,8 @@ impl State {
             next_reading: 1,
             read_replies: VecDeque::new(),
             saying: Vec::new(),
+            catch_up_text: None,
+            saying_catch_up: false,
             tapped: Vec::new(),
             notices: VecDeque::new(),
             voice_was: false,
@@ -2525,6 +2551,7 @@ impl State {
                 self.speaking = on;
                 if !on {
                     self.saying.clear();
+                    self.saying_catch_up = false;
                 }
                 self.read_back_speaking(on, &mut out);
                 self.flush_notices(&mut out);
@@ -2622,6 +2649,7 @@ impl State {
                 }
             }
             Input::StopReading => self.stop_reading(&mut out),
+            Input::DropSpeech(of) => self.drop_speech(of, &mut out),
             Input::Muted(on) => {
                 log::info!("muted: {on}");
                 self.muted = on;
@@ -5315,6 +5343,7 @@ impl State {
                     // The pinned card's text, beside the `Say` that
                     // follows in its turn (the 15:10 EDT amendment).
                     if let Some(text) = self.caught_up(serial, r.summary) {
+                        self.catch_up_text = Some(text.clone());
                         out.push(event(Event::CatchUp { text }));
                     }
                 }
@@ -6057,6 +6086,9 @@ impl State {
             if let Some((ts, _)) = self.read_replies.iter().find(|(_, t)| *t == text) {
                 self.saying.push(ts.clone());
             }
+            if self.catch_up_text.as_ref() == Some(&text) {
+                self.saying_catch_up = true;
+            }
             out.push(event(Event::Say(text)));
         }
     }
@@ -6183,6 +6215,46 @@ impl State {
         self.catching_up = None;
         if self.speaking {
             out.push(event(Event::StopSpeaking));
+        }
+    }
+
+    /// A dismissed card's speech goes (the L3 amendment of 2026-10-30
+    /// 15:20 EDT, item 3): a view card's replies, by its line, as an
+    /// answered question's are; the catch-up's summary.
+    fn drop_speech(&mut self, of: SpeechOf, out: &mut Vec<Output>) {
+        match of {
+            SpeechOf::Card(serial) => {
+                let Some(v) = self.view.as_ref() else {
+                    return;
+                };
+                let replies: Vec<String> = v
+                    .sections
+                    .on_line(serial)
+                    .flat_map(|s| s.entries.iter().filter(|e| is_reply(e)))
+                    .map(|e| e.ts.clone())
+                    .collect();
+                log::info!(
+                    "read aloud: a dismissed card's {} repl(ies) dropped",
+                    replies.len()
+                );
+                let mut stop = Vec::new();
+                for ts in replies {
+                    self.skip_reading(&ts, &mut stop);
+                }
+                if !stop.is_empty() {
+                    out.push(event(Event::StopSpeaking));
+                }
+            }
+            SpeechOf::CatchUp => {
+                let Some(text) = self.catch_up_text.take() else {
+                    return;
+                };
+                log::info!("read aloud: the dismissed catch-up dropped");
+                self.notices.retain(|n| n.text != text);
+                if self.speaking && std::mem::take(&mut self.saying_catch_up) {
+                    out.push(event(Event::StopSpeaking));
+                }
+            }
         }
     }
 
@@ -11483,6 +11555,73 @@ mod tests {
         assert_eq!(said(&out), ["Also done."]);
         let out = s.incoming(response(asked.id, json!({"read": "Another reply."})));
         assert!(said(&out).is_empty(), "{out:?}");
+    }
+
+    // A card dismissed on the phone drops its speech (plan 20261022_03,
+    // the L3 amendment of 2026-10-30 15:20 EDT, items 3 and 5).
+
+    #[test]
+    fn a_dismissed_cards_speech_is_dropped_and_the_rest_said() {
+        let mut s = viewing("working", asking());
+        s.input(Input::ReadAloud(true));
+        s.input(Input::Tick(secs(200.0)));
+        s.input(Input::Speaking(true));
+        deliver(
+            &mut s,
+            vec![text_at(5, 0, "A reply."), finished_spoken(5, "All done.")],
+            vec![],
+        );
+        deliver(
+            &mut s,
+            vec![text_at(7, 0, "Another."), finished_spoken(7, "Also done.")],
+            vec![],
+        );
+        assert_eq!(s.held_notices(), 2);
+        let card = common::Serial::new(FILE, 5, 194);
+        let out = s.input(Input::DropSpeech(SpeechOf::Card(card)));
+        assert!(events(&out).is_empty(), "not being said: {out:?}");
+        assert_eq!(s.held_notices(), 1);
+        assert_eq!(said(&s.input(Input::Speaking(false))), ["Also done."]);
+        // Being said: it stops.
+        s.input(Input::Speaking(true));
+        let out = s.input(Input::DropSpeech(SpeechOf::Card(common::Serial::new(
+            FILE, 7, 194,
+        ))));
+        assert_eq!(events(&out), vec![Event::StopSpeaking]);
+        // A reply still waiting for its summary is not read once it comes.
+        let out = deliver(&mut s, vec![text_at(9, 0, "Third.")], vec![]);
+        let asked = requests(&out, "speech.summarize")[0].clone();
+        s.input(Input::Speaking(false));
+        s.input(Input::DropSpeech(SpeechOf::Card(common::Serial::new(
+            FILE, 9, 194,
+        ))));
+        let out = s.incoming(response(asked.id, json!({"read": "Third."})));
+        assert!(said(&out).is_empty(), "{out:?}");
+    }
+
+    #[test]
+    fn a_dismissed_catch_up_is_not_said_or_stops() {
+        // Held behind the speaker: dropped.
+        let mut s = dictating_aloud();
+        s.incoming(notice("Codex is done."));
+        let ask = catch_up_of(&s.input(Input::Clear)).unwrap();
+        s.input(Input::Speaking(true));
+        s.incoming(response(ask.id, json!({"summary": "Codex is done."})));
+        assert_eq!(s.held_notices(), 1);
+        let out = s.input(Input::DropSpeech(SpeechOf::CatchUp));
+        assert!(events(&out).is_empty(), "{out:?}");
+        assert_eq!(s.held_notices(), 0);
+        assert!(said(&s.input(Input::Speaking(false))).is_empty());
+        // Being said: it stops; once more, nothing.
+        let mut s = dictating_aloud();
+        s.incoming(notice("Codex is done."));
+        let ask = catch_up_of(&s.input(Input::Clear)).unwrap();
+        let out = s.incoming(response(ask.id, json!({"summary": "Codex is done."})));
+        assert_eq!(says(&out), ["Codex is done.".to_string()]);
+        s.input(Input::Speaking(true));
+        let out = s.input(Input::DropSpeech(SpeechOf::CatchUp));
+        assert_eq!(events(&out), vec![Event::StopSpeaking]);
+        assert!(events(&s.input(Input::DropSpeech(SpeechOf::CatchUp))).is_empty());
     }
 
     #[test]

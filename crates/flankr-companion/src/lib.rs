@@ -42,7 +42,7 @@ use std::time::Duration;
 pub use blob::{Attachment, PREVIEW_CACHE_MAX, PreviewCache};
 pub use client::{
     CACHED_VIEWS, DICTATION_SILENCE, DRAWER_LIST_INTERVAL, DeviceCodeFallback, Dictation,
-    DictationPhase, Event, Input, Pressure, PromptMode, Settings, Speaker, Suggestion,
+    DictationPhase, Event, Input, Pressure, PromptMode, Settings, Speaker, SpeechOf, Suggestion,
 };
 pub use cross::{SessionCard, SessionCardKind, is_terminal_only};
 pub use keys::{
