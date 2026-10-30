@@ -1,7 +1,7 @@
 ---
 title: Spoken summaries of complex replies, from structured prompts
 date: 2026-10-23
-status: In implementation
+status: Implemented
 covers:
   - "Read aloud (the agent view's play button) sends a reply that is
     complex, by a basic coding measure or because it has backquotes, to
@@ -503,3 +503,18 @@ The status returns from `Implemented` to `In implementation` for the
 2026-10-30 13:52 EDT amendment (shorter spoken summaries and
 `speech.catch_up`). The document stays immutable; it returns to
 `Implemented` when that amendment is built.
+
+## Amendment — 2026-10-30 14:40 EDT: implemented again
+
+The 2026-10-30 13:52 EDT amendment is built; the status returns to
+`Implemented`. The commits:
+
+| Item | Commits |
+|---|---|
+| 2. `speech.catch_up` in libflankr_proto 0.5.7 | `0238289` (tag `libflankr_proto-v0.5.7`) |
+| 1, 3 and 4. Shorter `spoken_summary`, `spoken_catch_up`, the daemon's method | `593cc6a`, `cd95915`; CHANGES.md `3604187` |
+| The client's catch-up (the dictated messages plan's amendment of the same time) | `1e50dad` (flankr-companion 0.7.0, tag `flankr-companion-v0.7.0`) |
+
+Not yet checked on the S23: as that amendment's item 6 says, it waits on
+spoken summaries working (libinfer's Gemini model choice plan,
+20261030_01).
