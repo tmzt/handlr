@@ -3840,3 +3840,39 @@ Small departures needed to make the two amendments work (Rule 1.7):
 6. **The refreshing line** is the pull's *-- refreshing… --*, held while
    `cached`; it springs back with no result line once the first delivery
    comes.
+
+## 2026-10-30 17:00 EDT — a choice question cancelled by dragging its card away: small departures in the build
+
+Plan 20261029_01 (choice questions), the 2026-10-30 16:42 EDT amendment
+("a choice question cancelled by dragging its card away"), items 1 to 5:
+
+1. **Item 2, refusals:** `choice.cancel` is checked as `choice.answer`
+   is before the screen check: the agent's `allow_messages` and the
+   principal's reach (`NOT_PERMITTED`), the id the pane's open choice
+   question (`CHOICE_STALE`), a driver for its source
+   (`CHOICE_UNSUPPORTED`), and one answer or cancel per pane at a time
+   (`NOT_PERMITTED`). These are errors, as for an answer; only the
+   failed screen check is `cancelled: false`. herdr failing is
+   `HERDR_UNAVAILABLE`. The daemon does not wait for the rejected
+   `tool_result` after the Esc: the next read of the session takes the
+   question away, as for a dismiss at the Mac.
+2. **Item 3, the event:** the result comes as `Event::ChoiceAnswered`,
+   reused, with two new outcomes: `cancelled` and `not_cancelled`.
+   Everything that would make an answer `failed` (refused by the
+   daemon or by the client, a bad result, no answer in
+   `CHOICE_ANSWER_WAIT`, the link closing) is `not_cancelled` for a
+   cancel, with the reason in `got` and the daemon's `code`. An answer
+   and a cancel share the client's one-request-at-a-time slot.
+3. **Item 4, while the cancel is on its way:** the card leaves the pinned
+   place at once, in the flow as a resolved card, and the dim line
+   *Dismissed the question* is added when `cancelled` comes. On
+   `not_cancelled` (any reason) the card is live and pinned again,
+   springing back from the offset it left at, and the choice card's own
+   line (red, where its other results show) says *Couldn't dismiss the
+   question*. A choice card is not dragged while its answer or a cancel
+   is on its way, nor on a subagent's view.
+4. **Item 4, the scripted runs:** with no daemon attached, the client
+   answers `Input::CancelChoice` itself at once ("no session is open").
+   A test-only probe switch (`probe::daemon_choices`) drops the
+   client's own `Event::ChoiceAnswered` so the test's injected result
+   stands in for the daemon's.
