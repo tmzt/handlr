@@ -392,4 +392,16 @@ mod tests {
         // Clock times are words once read.
         assert!(!complexity("Started at 20:02:49Z and done.").is_complex());
     }
+
+    #[test]
+    fn a_reply_with_dashes_and_arrows_is_read_and_measured() {
+        // The owner's report of 2026-10-30 15:12 EDT: the daemon and the
+        // phone both read such a reply, and both panicked.
+        let reply = "Fixed it \u{2014} the card shows again\u{2026} \u{2713}\n\n- old \u{2192} new";
+        assert_eq!(
+            said(reply),
+            "Fixed it \u{2014} the card shows again\u{2026} \u{2713} old \u{2192} new"
+        );
+        assert!(!complexity(reply).is_complex());
+    }
 }

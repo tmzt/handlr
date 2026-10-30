@@ -104,12 +104,14 @@ fn clock_at(words: &[&str]) -> Option<Clock> {
     if let Some(d) = core.strip_suffix('Z') {
         digits = d;
         zone = Some(0);
-    } else if core.len() > 2 {
-        let (d, m) = core.split_at(core.len() - 2);
-        if let Some(pm) = meridiem_of(m) {
-            digits = d;
-            meridiem = Some(pm);
-        }
+    } else if core.len() > 2
+        // Split only on a character boundary: a word may end in a
+        // character of more than one byte (`—`, `…`, `→`).
+        && let Some((d, m)) = core.split_at_checked(core.len() - 2)
+        && let Some(pm) = meridiem_of(m)
+    {
+        digits = d;
+        meridiem = Some(pm);
     }
     let (hour, minute, second) = parse_digits(digits)?;
     // The words after it, while no punctuation ends it.
@@ -394,5 +396,27 @@ mod tests {
         ] {
             assert_eq!(read(text), text);
         }
+    }
+
+    #[test]
+    fn a_word_ending_in_a_wide_character_is_left_alone() {
+        // The owner's report of 2026-10-30 15:12 EDT: a word ending in a
+        // character of more than one byte (a dash, an ellipsis, an arrow,
+        // a tick) was split inside that character, and the reading
+        // panicked.
+        for text in [
+            "Built it \u{2014} all green.",
+            "Working on it\u{2026}",
+            "old \u{2192} new",
+            "Tests pass \u{2713}",
+            "\u{2014}",
+            "at 16:13\u{2014}then pushed",
+        ] {
+            assert_eq!(read(text), text);
+        }
+        assert_eq!(
+            read("Done at 16:13:48 \u{2014} pushed."),
+            "Done three minutes ago \u{2014} pushed."
+        );
     }
 }

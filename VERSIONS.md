@@ -903,3 +903,18 @@ a voice input changes (Rule 5.4, behaviour a caller can observe):
   being made for.
 - **Added:** `client::CATCH_UP_WAIT` (8 s).
 - libflankr_proto 0.5.6 → 0.5.7 (semver-compatible).
+
+## flankr-speech 0.1.1 — 2026-10-30 (the commit tagged `flankr-speech-v0.1.1`)
+
+A fix, with no public API change (the owner's report of 2026-10-30 15:12
+EDT, "tapped the record button and got no response"). The crate's first
+entry here: 0.1.0 is the version it was introduced at, not separately
+tagged.
+
+- **Fixed:** `read_aloud` and `complexity` no longer panic on a word
+  ending in a character of more than one byte (`—`, `…`, `→`, `✓`): the
+  check for an attached `am`/`pm` split such a word inside that
+  character. The word is now left as it is. The daemon's
+  `speech.summarize` task and the companion client's own reading of a
+  reply, when no summary came, both panicked on such a reply; the client's
+  panic ended its `net` thread.
