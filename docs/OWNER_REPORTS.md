@@ -163,3 +163,24 @@ them: no dictation started, no refusal. Before them: 15:09:21 a tap on an
 answer chip; 15:10:16 the viewed agent finished and a reply was spoken;
 15:10:21 "no answer in time; reading the reply here". Handed to a subagent
 in its own worktree.
+
+## 2026-10-30 15:22 EDT — Owner: stuck on refreshing, and no summary
+
+Device: Galaxy S23 Ultra, the build installed 2026-10-30 14:47 EDT.
+
+**Report.** "app is currently showing --refreshing...-- and doesn't have
+the latest updates, it also didn't speak/pin that last summary".
+
+**Seen.**
+- **The connection.** At 15:10:21 the phone logged "no answer in time;
+  reading the reply here", and the real daemon logged the phone's
+  connection closed at the same second. The phone's client has logged
+  nothing since: no disconnect, no reconnect. So every later input (the
+  record taps in the entry before, pull to refresh) goes nowhere. Very
+  likely the same fault as the record button; passed to that subagent.
+- **The summary.** Every summary since the restart failed: the key's model
+  list includes `gemini-2.5-flash-lite`, which *oldest* picked, but
+  generating with it is refused: "This model models/gemini-2.5-flash-lite
+  is no longer available to new users. Please update your code to use
+  models/gemini-3.5-flash-lite". A model can be listed and still refused
+  to a new key, so *oldest* can pick one that fails.
