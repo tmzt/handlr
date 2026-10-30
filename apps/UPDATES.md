@@ -179,3 +179,9 @@ These changes came before the app had version numbers.
 
 **Fixed**
 - The record button works again after a reply with a dash, an ellipsis, an arrow or a tick mark is read aloud. Reading such a reply on the phone stopped its link to the computer: nothing more was said, pulling to refresh stayed on refreshing, and taps on record did nothing.
+
+## 0.3.0 — 2026-10-30
+
+**Added**
+- After you speak, the update on where things stand also shows as a pinned card, "While you spoke", even when muted. Tap its ✕ to dismiss it; the next update replaces it.
+- In a session the card sits above the buttons, where the pinned card goes. A waiting question, approval or choice comes first, and the card shows once you answer it.

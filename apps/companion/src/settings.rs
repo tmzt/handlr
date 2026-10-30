@@ -269,14 +269,17 @@ impl Settings {
             microphone: self.microphone,
             general_agent: self.general_agent,
             tab_follows_focus: self.tab_follows_focus,
-            speak_gemini: self.speak_gemini && !self.muted,
+            // As it is, muted or not: the client is told mute on its own
+            // (`Input::Muted`), so a voice input's catch-up is still asked
+            // for (plan 20261023_02, the 2026-10-30 15:10 EDT amendment).
+            speak_gemini: self.speak_gemini,
         }
     }
 
     /// *Speak coding responses* as the client's read aloud
-    /// (`Input::ReadAloud`): off while muted.
+    /// (`Input::ReadAloud`), muted or not: mute is `Input::Muted`.
     pub fn read_aloud(&self) -> bool {
-        self.speak_coding && !self.muted
+        self.speak_coding
     }
 
     /// `settings.toml` in `dir`. Missing or unreadable, the defaults; an
@@ -595,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn muted_is_kept_and_tells_the_client_both_options_are_off() {
+    fn muted_is_kept_and_leaves_both_options_as_they_are() {
         // Off by default and in a file without it.
         let dir = tempfile::tempdir().unwrap();
         assert!(!Settings::default().muted);
@@ -603,15 +606,16 @@ mod tests {
         let s = Settings::load(dir.path());
         assert!(!s.muted && s.read_aloud() && s.to_client().speak_gemini);
         // Muted: both options keep their values, kept across restarts,
-        // and the client hears neither.
+        // and the client is given them as they are, with `Muted` beside
+        // them (plan 20261023_02, the 2026-10-30 15:10 EDT amendment).
         let m = Settings { muted: true, ..s };
         m.save(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
         assert!(text.contains("muted = true"), "{text}");
         let m = Settings::load(dir.path());
         assert!(m.muted && m.speak_coding && m.speak_gemini);
-        assert!(!m.read_aloud());
-        assert!(!m.to_client().speak_gemini);
+        assert!(m.read_aloud());
+        assert!(m.to_client().speak_gemini);
     }
 
     #[test]

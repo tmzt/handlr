@@ -232,18 +232,20 @@ fn a_tap_on_volume_mutes_and_unmutes_without_its_menu() {
     let [x, y] = volume.center();
     let tap = format!("touch 5 start {x} {y}\nframes 2\ntouch 5 end {x} {y}\nframes 4\n");
     // Both options on: muting stops what is said, clears the queue and
-    // tells the client both are off; no menu opens.
+    // tells the client it is muted, both options left as they are (plan
+    // 20261023_02, the 2026-10-30 15:10 EDT amendment); no menu opens.
     let on = "speak_coding = true\nspeak_gemini = true\n";
     let p = run_with(&format!("frames {SETTLE}\n{tap}"), Some(on)).unwrap();
     assert!(p.drawer.menu_items.is_empty(), "{:?}", p.drawer.menu_items);
     assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
-    assert_eq!(inputs_with(&p, "ReadAloud(false)"), 1, "{:?}", p.inputs);
-    assert_eq!(inputs_with(&p, "speak_gemini: false"), 1, "{:?}", p.inputs);
-    // A second tap unmutes: both come back, and nothing more is stopped.
+    assert_eq!(inputs_with(&p, "Muted(true)"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "ReadAloud("), 0, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "speak_gemini: false"), 0, "{:?}", p.inputs);
+    // A second tap unmutes, and nothing more is stopped.
     let p = run_with(&format!("frames {SETTLE}\n{tap}{tap}"), Some(on)).unwrap();
     assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
-    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Muted(false)"), 1, "{:?}", p.inputs);
     let last = p
         .inputs
         .iter()
@@ -258,7 +260,7 @@ fn a_tap_on_volume_mutes_and_unmutes_without_its_menu() {
     )
     .unwrap();
     assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
-    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Muted(false)"), 1, "{:?}", p.inputs);
 }
 
 #[test]
@@ -300,8 +302,8 @@ fn while_speaking_a_tap_on_volume_skips_and_does_not_mute() {
     .unwrap();
     assert_eq!(inputs_with(&p, "Skip"), 1, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
-    // Not muted: the settings are not sent again.
-    assert_eq!(inputs_with(&p, "ReadAloud(false)"), 0, "{:?}", p.inputs);
+    // Not muted.
+    assert_eq!(inputs_with(&p, "Muted(true)"), 0, "{:?}", p.inputs);
     assert!(p.drawer.menu_items.is_empty(), "{:?}", p.drawer.menu_items);
 }
 
@@ -324,7 +326,7 @@ fn while_speaking_a_1_s_press_on_volume_stops_and_clears_without_muting() {
     assert_eq!(inputs_with(&p, "StopReading"), 1, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "Skip"), 0, "no tap: {:?}", p.inputs);
     assert_eq!(
-        inputs_with(&p, "ReadAloud(false)"),
+        inputs_with(&p, "Muted(true)"),
         0,
         "not muted: {:?}",
         p.inputs
@@ -412,7 +414,7 @@ fn muted_a_press_on_volume_unmutes_or_opens_the_menu_even_while_speaking() {
     .unwrap();
     assert_eq!(inputs_with(&p, "Skip"), 0, "{:?}", p.inputs);
     assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
-    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Muted(false)"), 1, "{:?}", p.inputs);
     // Held past 1 s: no stop, still timed for the menu.
     let p = run_full(
         &format!("frames {SETTLE}\ntouch 5 start {x} {y}\nframes {STOP_HOLD}\n"),
@@ -432,10 +434,68 @@ fn muted_a_press_on_volume_unmutes_or_opens_the_menu_even_while_speaking() {
     )
     .unwrap();
     assert_eq!(inputs_with(&p, "StopReading"), 0, "{:?}", p.inputs);
-    assert_eq!(inputs_with(&p, "ReadAloud(true)"), 0, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Muted(false)"), 0, "{:?}", p.inputs);
     assert!(
         p.drawer.menu_items.iter().any(|i| i == menu::SPEAK_CODING),
         "{:?}",
         p.drawer.menu_items
     );
+}
+
+/// The *While you spoke* card on the overview (plan 20261023_02, the
+/// 2026-10-30 15:10 EDT amendment): the client's catch-up pins it, muted
+/// or not; the next replaces it, and its ✕ dismisses it.
+#[test]
+fn a_catch_up_is_pinned_until_its_x_and_the_next_replaces_it() {
+    let catch_up = |text: &str| Event::CatchUp { text: text.into() };
+    let Some(p) = run_events(
+        &format!("frames {SETTLE}\n"),
+        None,
+        false,
+        vec![catch_up("Codex finished.")],
+    ) else {
+        return;
+    };
+    assert_eq!(p.drawer.catch_up.as_deref(), Some("Codex finished."));
+    let x = p.drawer.catch_up_x.expect("its \u{2715}");
+    // Muted, the same card.
+    let muted = Some("speak_coding = true\nmuted = true\n");
+    let p = run_events(
+        &format!("frames {SETTLE}\n"),
+        muted,
+        false,
+        vec![catch_up("Codex finished.")],
+    )
+    .unwrap();
+    assert_eq!(p.drawer.catch_up.as_deref(), Some("Codex finished."));
+    assert_eq!(p.drawer.catch_up_x, Some(x));
+    // The next replaces it.
+    let p = run_events(
+        &format!("frames {SETTLE}\n"),
+        None,
+        false,
+        vec![
+            catch_up("Codex finished."),
+            catch_up("Claude asks a question."),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        p.drawer.catch_up.as_deref(),
+        Some("Claude asks a question.")
+    );
+    // A tap on its ✕: gone, and nothing is sent.
+    let [cx, cy] = x.center();
+    let p = run_events(
+        &format!(
+            "frames {SETTLE}\ntouch 5 start {cx} {cy}\nframes 2\ntouch 5 end {cx} {cy}\nframes 4\n"
+        ),
+        None,
+        false,
+        vec![catch_up("Codex finished.")],
+    )
+    .unwrap();
+    assert_eq!(p.drawer.catch_up, None);
+    assert_eq!(p.drawer.catch_up_x, None);
+    assert!(p.drawer.menu_items.is_empty());
 }

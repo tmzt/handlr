@@ -15,6 +15,7 @@
 
 pub mod bars;
 pub mod card;
+pub mod catch_up;
 pub mod history;
 pub mod input_row;
 pub mod keyboard;
@@ -32,6 +33,7 @@ use crate::settings;
 
 pub use bars::Bars;
 pub use card::{PromptCard, Reply};
+pub use catch_up::CatchUpCard;
 pub use history::{History, Sent};
 pub use input_row::{InputRow, InputTools};
 pub use overlay::{OverlayTouch, PromptOverlay};
@@ -156,6 +158,12 @@ pub struct Prompts {
     gemini: PromptCard,
     message: PromptCard,
     overlay: PromptOverlay,
+    /// The *While you spoke* card, above Gemini's (plan 20261023_02, the
+    /// 2026-10-30 15:10 EDT amendment).
+    catch_up: CatchUpCard,
+    /// The agent view's live question, approval or choice outranks it:
+    /// not shown until that is answered.
+    catch_up_outranked: bool,
     /// The Gemini card shown over an open message, from a tap on its bars.
     peek: bool,
     touch: Option<(u64, Target)>,
@@ -177,6 +185,8 @@ impl Prompts {
             gemini: PromptCard::new(PromptKind::GeneralAgent),
             message: PromptCard::new(PromptKind::Message),
             overlay: PromptOverlay::new(),
+            catch_up: CatchUpCard::new(),
+            catch_up_outranked: false,
             peek: false,
             touch: None,
             scale: 1.0,
@@ -193,6 +203,28 @@ impl Prompts {
 
     pub fn message(&self) -> &PromptCard {
         &self.message
+    }
+
+    pub fn catch_up(&self) -> &CatchUpCard {
+        &self.catch_up
+    }
+
+    /// The catch-up to show, replacing any before it, or `None` once
+    /// dismissed. Returns whether it changed.
+    pub fn set_catch_up(&mut self, text: Option<String>) -> bool {
+        self.catch_up.set_text(text)
+    }
+
+    /// Whether a live card outranks the catch-up (the agent view's
+    /// question, approval or choice waiting). Returns whether it changed.
+    pub fn set_catch_up_outranked(&mut self, outranked: bool) -> bool {
+        std::mem::replace(&mut self.catch_up_outranked, outranked) != outranked
+    }
+
+    /// Whether the *While you spoke* card shows: a catch-up, not outranked,
+    /// and no card expanded over it.
+    pub fn catch_up_shown(&self) -> bool {
+        self.catch_up.rect().h > 0.0
     }
 
     pub fn message_mut(&mut self) -> &mut PromptCard {
@@ -379,6 +411,16 @@ impl Prompts {
         } else {
             self.gemini.clear_layout();
         }
+        // The catch-up's card, above Gemini's: not while a card is
+        // expanded, nor while a live card outranks it.
+        if self.expanded().is_none() && !self.catch_up_outranked {
+            let h = self.catch_up.lay_out(x, w, above, s);
+            if h > 0.0 {
+                above -= h + gap;
+            }
+        } else {
+            self.catch_up.clear_layout();
+        }
         let sheet_top = (screen_h * (1.0 - PromptOverlay::SHARE))
             .max(top)
             .min(above);
@@ -414,6 +456,7 @@ impl Prompts {
         self.message
             .hit(x, y)
             .or_else(|| self.gemini.hit(x, y))
+            .or_else(|| self.catch_up.hit(x, y))
             .or_else(|| {
                 self.gemini
                     .bars()
@@ -435,6 +478,7 @@ impl Prompts {
             }
             AgentHit::PromptCollapse if self.overlay.is_open() => Some(self.overlay.handle_rect()),
             AgentHit::PromptBars => self.gemini.bars().rect(),
+            AgentHit::CatchUpDismiss => self.catch_up.close_rect(),
             _ => self
                 .message
                 .rect_of(hit)
@@ -448,7 +492,7 @@ impl Prompts {
         if self.overlay.is_open() {
             return self.overlay.contains(x, y) || y < self.overlay.rect().y;
         }
-        self.message.contains(x, y) || self.gemini.contains(x, y)
+        self.message.contains(x, y) || self.gemini.contains(x, y) || self.catch_up.contains(x, y)
     }
 
     /// A touch at `now`. `None`: not the prompts' (it started elsewhere);
@@ -469,7 +513,9 @@ impl Prompts {
             } else if self.overlay.is_open() && y < self.overlay.rect().y {
                 Target::Shade
             } else if !self.overlay.is_open()
-                && (self.message.contains(x, y) || self.gemini.contains(x, y))
+                && (self.message.contains(x, y)
+                    || self.gemini.contains(x, y)
+                    || self.catch_up.contains(x, y))
             {
                 Target::Pinned
             } else {
@@ -518,6 +564,12 @@ impl Prompts {
                     self.open_from_bars();
                     Some(AgentHit::PromptBars)
                 }
+                // The ✕: the catch-up goes (the app also clears the other
+                // screen's).
+                Some(AgentHit::CatchUpDismiss) => {
+                    self.set_catch_up(None);
+                    Some(AgentHit::CatchUpDismiss)
+                }
                 other => other,
             },
             Target::Pinned => None,
@@ -550,6 +602,7 @@ impl Prompts {
     pub fn draw_pinned(&self, list: &mut DrawList, ctx: &DrawContext) {
         self.message.draw(list, ctx);
         self.gemini.draw(list, ctx);
+        self.catch_up.draw(list, ctx);
     }
 
     /// Draws the overlay, `width` wide, if it shows: the shade over what is

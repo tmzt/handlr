@@ -351,6 +351,9 @@ pub enum AgentHit {
     PromptCollapse,
     /// Gemini's bars while its card is hidden: open it again.
     PromptBars,
+    /// The *While you spoke* card's ✕: dismiss the catch-up (plan
+    /// 20261023_02, the 2026-10-30 15:10 EDT amendment).
+    CatchUpDismiss,
     /// A key of the terminal's keys row (plan 20261022_03, the L3
     /// amendment of 2026-10-28 10:42 EDT): its keys go to the pane, and a
     /// tap on it never reaches the terminal or the soft keyboard.
@@ -2392,7 +2395,11 @@ pub struct AgentScreen {
     tops: Vec<f32>,
     /// The blocks, by packed serial.
     blocks: HashMap<u64, Block>,
+    /// The pinned card's serial as shown: the view's, unless the catch-up
+    /// takes its place ([`AgentScreen::set_catch_up`]).
     pinned: Option<Serial>,
+    /// The view's pinned card, as the client gives it.
+    view_pinned: Option<Serial>,
     /// The width and scale the blocks were laid out at.
     laid_at: (f32, f32),
     layout: Layout,
@@ -2773,7 +2780,7 @@ impl AgentScreen {
         if self.name == name
             && self.status == status
             && changed.is_empty()
-            && self.pinned == pinned
+            && self.view_pinned == pinned
             && same_slots
         {
             return;
@@ -2828,7 +2835,8 @@ impl AgentScreen {
         }
         self.name = name;
         self.status = status;
-        self.pinned = pinned;
+        self.view_pinned = pinned;
+        self.rank_catch_up();
         // A different pinned card starts folded.
         if self.pinned_card().map(|c| (c.kind, c.text.clone())) != pin_was {
             self.pin_expanded = false;
@@ -3590,6 +3598,57 @@ impl AgentScreen {
     /// The choice card's state, as it stands.
     pub fn choice(&self) -> &ChoiceCard {
         &self.choice
+    }
+
+    /// The catch-up after a voice input, replacing any before it, or
+    /// `None` once dismissed (plan 20261023_02, the 2026-10-30 15:10 EDT
+    /// amendment, item 2): the *While you spoke* card, in the pinned
+    /// card's place unless a live card outranks it.
+    pub fn set_catch_up(&mut self, text: Option<String>) {
+        if self.prompts.set_catch_up(text) {
+            self.repin();
+        }
+    }
+
+    /// The pinned card again, after the catch-up came or went.
+    fn repin(&mut self) {
+        let pin_was = self.pinned_card().map(|c| (c.kind, c.text.clone()));
+        let was = self.pinned;
+        self.rank_catch_up();
+        if self.pinned != was {
+            if self.pinned_card().map(|c| (c.kind, c.text.clone())) != pin_was {
+                self.pin_expanded = false;
+                self.pin_saved_expanded = None;
+                self.pin_overridden = false;
+            }
+            self.sync_choice();
+            self.refresh_blocks();
+            self.flow_stale = true;
+        }
+        self.settle();
+    }
+
+    /// Ranks the catch-up against the view's pinned card: a question, an
+    /// approval or a choice waiting outranks it, and it shows once that is
+    /// answered; any other live card (a finished turn, something broke)
+    /// gives it its place and goes back to the flow while it shows.
+    fn rank_catch_up(&mut self) {
+        let waits = self
+            .view_pinned
+            .and_then(|p| self.blocks.get(&p.to_u64()))
+            .and_then(Block::card)
+            .is_some_and(|c| {
+                c.live
+                    && (matches!(c.kind, CardKind::Approval | CardKind::Question)
+                        || c.choices.is_some())
+            });
+        self.prompts.set_catch_up_outranked(waits);
+        let catch_up = self.prompts.catch_up().text().is_some();
+        self.pinned = if catch_up && !waits {
+            None
+        } else {
+            self.view_pinned
+        };
     }
 
     /// The pinned card, if any.
@@ -4699,7 +4758,10 @@ impl AgentScreen {
             return match touched {
                 PromptTouched::Held => None,
                 PromptTouched::Hit(hit) => {
-                    if matches!(
+                    if hit == AgentHit::CatchUpDismiss {
+                        // The view's pinned card comes back.
+                        self.repin();
+                    } else if matches!(
                         hit,
                         AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars
                     ) {
@@ -10552,5 +10614,85 @@ mod tests {
         a.set_children(None, children());
         assert_eq!(a.title(), "Claude");
         assert!(a.rect_of(yes).is_some());
+    }
+
+    // The *While you spoke* card (plan 20261023_02, the 2026-10-30 15:10
+    // EDT amendment, item 2).
+
+    #[test]
+    fn the_catch_up_takes_the_pinned_cards_place_until_its_x() {
+        let all = conversation(4);
+        let at = all.len() - 1;
+        let done = live_card(CardKind::Finished, at, "Done.");
+        let mut a = screen(all.clone(), vec![done], Some(0));
+        assert!(a.pinned_card().is_some());
+        assert!(a.rect_of(AgentHit::CatchUpDismiss).is_none());
+        a.set_catch_up(Some("Codex finished; your message is on its way.".into()));
+        assert!(a.prompts().catch_up_shown());
+        // The finished card goes back to the flow while it shows.
+        assert!(a.pinned_card().is_none());
+        assert!(a.frame().pin.is_none());
+        // Above the buttons.
+        let card = a.prompts().catch_up().rect();
+        let volume = a.rect_of(AgentHit::Volume).unwrap();
+        assert!(card.y + card.h <= volume.y, "{card:?} {volume:?}");
+        // The next replaces it.
+        a.set_catch_up(Some("Claude is idle.".into()));
+        assert_eq!(a.prompts().catch_up().text(), Some("Claude is idle."));
+        let rows: Vec<&str> = a
+            .prompts()
+            .catch_up()
+            .rows()
+            .iter()
+            .map(|r| r.text.as_str())
+            .collect();
+        assert_eq!(rows, ["While you spoke", "Claude is idle."]);
+        // Its ✕ dismisses it, and the finished card is pinned again.
+        let x = a.rect_of(AgentHit::CatchUpDismiss).unwrap();
+        assert_eq!(
+            tap(&mut a, 1, x, Duration::ZERO),
+            Some(AgentHit::CatchUpDismiss)
+        );
+        assert!(!a.prompts().catch_up_shown());
+        assert_eq!(a.prompts().catch_up().text(), None);
+        assert!(a.pinned_card().is_some());
+        assert!(a.frame().pin.is_some());
+        assert!(a.rect_of(AgentHit::CatchUpDismiss).is_none());
+    }
+
+    #[test]
+    fn a_waiting_question_or_approval_outranks_the_catch_up_until_answered() {
+        for kind in [CardKind::Question, CardKind::Approval] {
+            let all = conversation(4);
+            let at = all.len() - 1;
+            let mut a = screen(
+                all.clone(),
+                vec![live_card(kind, at, "Which one?")],
+                Some(0),
+            );
+            a.set_catch_up(Some("Codex finished.".into()));
+            assert!(!a.prompts().catch_up_shown(), "{kind:?}");
+            assert!(a.pinned_card().is_some_and(|c| c.kind == kind));
+            assert!(a.rect_of(AgentHit::CatchUpDismiss).is_none());
+            // Answered: no live card, and the catch-up shows.
+            flat(
+                &mut a,
+                "idle",
+                0,
+                all.clone(),
+                vec![card(kind, at, false)],
+                None,
+            );
+            assert!(a.prompts().catch_up_shown(), "{kind:?}");
+            assert_eq!(a.prompts().catch_up().text(), Some("Codex finished."));
+        }
+    }
+
+    #[test]
+    fn a_choice_waiting_outranks_the_catch_up() {
+        let mut a = choice_screen(choice_set(None));
+        a.set_catch_up(Some("Codex finished.".into()));
+        assert!(!a.prompts().catch_up_shown());
+        assert!(a.pinned_card().is_some_and(|c| c.choices.is_some()));
     }
 }

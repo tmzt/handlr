@@ -310,6 +310,16 @@ impl Overview {
         }
     }
 
+    /// The catch-up after a voice input, replacing any before it, or
+    /// `None` once dismissed (plan 20261023_02, the 2026-10-30 15:10 EDT
+    /// amendment, item 2): the *While you spoke* card, pinned with the
+    /// prompt cards, above Gemini's.
+    pub fn set_catch_up(&mut self, text: Option<String>) {
+        if self.prompts.set_catch_up(text) {
+            self.settle();
+        }
+    }
+
     /// A line of the conversation with Gemini.
     pub fn push_turn(&mut self, speaker: Speaker, text: String) {
         self.prompts.gemini_mut().push_turn(speaker, &text);
@@ -568,7 +578,10 @@ impl Overview {
                 PromptTouched::Hit(hit) => {
                     if matches!(
                         hit,
-                        AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars
+                        AgentHit::PromptExpand(_)
+                            | AgentHit::PromptCollapse
+                            | AgentHit::PromptBars
+                            | AgentHit::CatchUpDismiss
                     ) {
                         self.settle();
                     }
@@ -1640,5 +1653,37 @@ mod tests {
             tap(&mut o, p1[0], p1[1]),
             Some(OverviewHit::Agent("p1".into()))
         );
+    }
+
+    // The *While you spoke* card (plan 20261023_02, the 2026-10-30 15:10
+    // EDT amendment, item 2).
+
+    #[test]
+    fn the_catch_up_is_pinned_above_geminis_card_until_its_x() {
+        let mut o = overview(3);
+        o.push_turn(Speaker::User, "what is p2 doing".into());
+        o.push_turn(Speaker::Gemini, "It is asking.".into());
+        assert!(o.rect_of(AgentHit::CatchUpDismiss).is_none());
+        o.set_catch_up(Some("p2 finished, and p3 is waiting.".into()));
+        assert!(o.prompts().catch_up_shown());
+        let card = o.prompts().catch_up().rect();
+        let gemini = o.prompts().gemini().rect();
+        assert!(card.y + card.h <= gemini.y, "{card:?} above {gemini:?}");
+        // The next replaces it.
+        o.set_catch_up(Some("All three are idle.".into()));
+        assert_eq!(o.prompts().catch_up().text(), Some("All three are idle."));
+        // Its ✕ dismisses it.
+        let x = o.rect_of(AgentHit::CatchUpDismiss).unwrap();
+        assert_eq!(
+            tap(&mut o, x.x + x.w * 0.5, x.y + x.h * 0.5),
+            Some(OverviewHit::Bottom(AgentHit::CatchUpDismiss))
+        );
+        assert!(!o.prompts().catch_up_shown());
+        assert!(o.rect_of(AgentHit::CatchUpDismiss).is_none());
+        // A tap elsewhere on it does nothing.
+        o.set_catch_up(Some("Again.".into()));
+        let card = o.prompts().catch_up().rect();
+        assert_eq!(tap(&mut o, card.x + 40.0, card.y + card.h - 8.0), None);
+        assert!(o.prompts().catch_up_shown());
     }
 }

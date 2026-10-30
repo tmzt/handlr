@@ -399,6 +399,10 @@ pub struct App {
     /// The conversation with Gemini, as each screen's card is given it
     /// (plan 20261027_03, decision 1: each screen owns its own card).
     gemini_turns: Vec<(Speaker, String)>,
+    /// The catch-up after a voice input, until dismissed or replaced: the
+    /// *While you spoke* card on both screens (plan 20261023_02, the
+    /// 2026-10-30 15:10 EDT amendment). Not kept across restarts.
+    catch_up: Option<String>,
     /// What each session's message card keeps for the app's run, by pane
     /// (the amendment of 2026-10-27 01:14 EDT, item 2).
     sessions: HashMap<String, SessionPrompt>,
@@ -1045,6 +1049,12 @@ impl App {
                 self.gemini_turns.drain(..drop);
                 self.overview.push_turn(speaker, text);
             }
+            // The catch-up, pinned on both screens, muted or not (the
+            // `Say` beside it follows mute, above).
+            Event::CatchUp { text } => {
+                log::info!("catch-up: pinned");
+                self.set_catch_up(Some(text));
+            }
             Event::Dictation(d) => {
                 if d.active != self.dictation.is_some() {
                     log::info!("dictation: {}", if d.active { "on" } else { "off" });
@@ -1517,6 +1527,16 @@ impl App {
         }
     }
 
+    /// The catch-up shown on both screens, or none (plan 20261023_02, the
+    /// 2026-10-30 15:10 EDT amendment).
+    fn set_catch_up(&mut self, text: Option<String>) {
+        self.catch_up = text;
+        if let Some(agent) = &mut self.agent {
+            agent.set_catch_up(self.catch_up.clone());
+        }
+        self.overview.set_catch_up(self.catch_up.clone());
+    }
+
     /// The volume glyph's state: muted, and either speak option on (plan
     /// 20261028_06, decision 4, and its 2026-10-29 00:26 EDT amendment).
     fn volume(&self) -> Volume {
@@ -1543,8 +1563,9 @@ impl App {
     /// 00:43 EDT amendment, item 2): mutes or unmutes, kept in
     /// `settings.toml`. Muting stops what is being said and clears the
     /// queue (`Input::StopReading`, the 00:43 EDT amendment, item 3);
-    /// neither speak option changes, and the client is told as if both
-    /// were off while muted.
+    /// neither speak option changes, and the client is told `Muted` (plan
+    /// 20261023_02, the 2026-10-30 15:10 EDT amendment; before it, the
+    /// client was told both options were off while muted).
     fn toggle_mute(&mut self) {
         let muted = !self.settings.muted;
         log::info!("volume: muted {muted}");
@@ -1847,6 +1868,7 @@ impl App {
             p.gemini_mut().set_listening(listening);
             p.gemini_mut().set_expanded(expanded);
         });
+        agent.set_catch_up(self.catch_up.clone());
         // A shell has only its terminal, shown at once (plan 20261022_03,
         // the L3 amendment of 2026-10-28 00:47 EDT); otherwise the terminal
         // again, if the session was left showing it.
@@ -2346,6 +2368,7 @@ impl App {
         }
         let voice_changed = settings.voice != self.settings.voice;
         let coding_changed = settings.read_aloud() != self.settings.read_aloud();
+        let muted_changed = settings.muted != self.settings.muted;
         self.settings = settings.clone();
         settings::set_current(settings.clone());
         if voice_changed {
@@ -2360,10 +2383,15 @@ impl App {
         }
         self.send(Input::Settings(settings.to_client()));
         // *Speak coding responses* is the client's read aloud (plan
-        // 20261028_06, decision 6), from the volume menu or Settings; off
-        // while muted.
+        // 20261028_06, decision 6), from the volume menu or Settings. Mute
+        // is told on its own, so a voice input's catch-up is still asked
+        // for while muted (plan 20261023_02, the 2026-10-30 15:10 EDT
+        // amendment).
         if coding_changed {
             self.send(Input::ReadAloud(settings.read_aloud()));
+        }
+        if muted_changed {
+            self.send(Input::Muted(settings.muted));
         }
         // *Appearance* and the theme rows apply at once.
         self.apply_theme();
@@ -2576,6 +2604,7 @@ impl App {
         self.apply_voice();
         self.send(Input::Settings(self.settings.to_client()));
         self.send(Input::ReadAloud(self.settings.read_aloud()));
+        self.send(Input::Muted(self.settings.muted));
         self.overview.settings_changed();
     }
 
@@ -2805,6 +2834,11 @@ impl App {
             // collapsed one; the state is remembered (decision 5).
             AgentHit::PromptExpand(_) | AgentHit::PromptCollapse | AgentHit::PromptBars => {
                 self.remember_prompts();
+            }
+            // The *While you spoke* card's ✕: gone from both screens.
+            AgentHit::CatchUpDismiss => {
+                log::info!("catch-up: dismissed");
+                self.set_catch_up(None);
             }
             // The keys row (plan 20261022_03, the L3 amendment of
             // 2026-10-28 10:42 EDT): CTRL and ALT latch, the others go to
@@ -4290,6 +4324,7 @@ impl MorphApp for App {
             attach_wanted: None,
             paste_wanted: None,
             gemini_turns: Vec::new(),
+            catch_up: None,
             sessions: HashMap::new(),
             agent_gemini_expanded: false,
             terminal_panes: TerminalSessions::default(),
@@ -4367,6 +4402,8 @@ impl MorphApp for App {
                 // *Speak coding responses*, kept across restarts (plan
                 // 20261028_06, decision 6).
                 companion.send(Input::ReadAloud(app.settings.read_aloud()));
+                // Mute, kept across restarts (the 15:10 EDT amendment).
+                companion.send(Input::Muted(app.settings.muted));
                 app.companion = Some(companion);
             }
             Err(e) => {
@@ -5110,6 +5147,11 @@ pub(crate) mod probe {
         /// The All agents… modal, while open: its rows' sessions and
         /// rects, and its ✕.
         pub agents_modal: Option<crate::agent::agents_modal::Targets>,
+        /// The *While you spoke* card's text, and its ✕ on the screen
+        /// shown while it shows (plan 20261023_02, the 2026-10-30 15:10
+        /// EDT amendment).
+        pub catch_up: Option<String>,
+        pub catch_up_x: Option<Rect>,
     }
 
     /// When an injected event is given.
@@ -5262,6 +5304,11 @@ pub(crate) mod probe {
                 })
                 .unwrap_or_default(),
             agents_modal: app.agents_modal.targets(&app.agents_lines(), &app.layout),
+            catch_up: app.catch_up.clone(),
+            catch_up_x: match &app.agent {
+                Some(agent) => agent.rect_of(crate::agent::AgentHit::CatchUpDismiss),
+                None => app.overview.rect_of(crate::agent::AgentHit::CatchUpDismiss),
+            },
         };
         PROBE.with(|p| p.borrow_mut().drawer = probe);
     }

@@ -637,6 +637,14 @@ the general agent's two bars while its card is hidden.
 
 - text: No messages sent to this session yet.
 
+The catch-up's card after a voice input, pinned with the prompt cards
+(docs/design/20261023_02_BULK_INPUT_PLAN.md, the 2026-10-30 15:10 EDT
+amendment, `src/prompt/catch_up.rs`): its header, over the catch-up.
+
+# [Copy] prompt_catch_up
+
+- text: While you spoke
+
 The ⋮ menu in the title bars (docs/design/20261028_04_PLUGINS_PLAN.md,
 decision 3.6): the app's own items, after the plugins'.
 
