@@ -5039,6 +5039,14 @@ impl AgentScreen {
         std::mem::take(&mut self.term_latch).apply_first(keys)
     }
 
+    /// A `terminal.*` call failed: the terminal shows its short error
+    /// pill for a moment (plan 20261027_07, the 2026-10-30 13:31 EDT
+    /// amendment); the error's text is the app's to log.
+    pub fn terminal_failed(&mut self) {
+        self.term.flash_error();
+        self.dirty = true;
+    }
+
     /// What the view was last given, for the app to compare.
     pub fn terminal_stamp(&self) -> Option<TermStamp> {
         self.term_stamp
@@ -5201,6 +5209,10 @@ impl AgentScreen {
         self.step_pull(dt);
         // The prompt overlay's slide and its history's fling.
         if self.prompts.tick(dt) {
+            self.dirty = true;
+        }
+        // The terminal's error pill, once its time is up.
+        if self.term.tick(dt) {
             self.dirty = true;
         }
         moved
@@ -7062,6 +7074,44 @@ mod tests {
             source: flankr_companion::TerminalSource::Poll,
         });
         st
+    }
+
+    #[test]
+    fn a_terminal_failure_shows_the_short_pill_for_two_seconds_and_redraws_when_it_goes() {
+        // Plan 20261027_07, the 2026-10-30 13:31 EDT amendment.
+        let mut a = screen(conversation(3), vec![], None);
+        let mut st = open_state(true, true);
+        if let Some(status) = st.status.as_mut() {
+            status.error =
+                Some("{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32602}} (-32010)".into());
+        }
+        a.set_terminal_state((1, true, true, Some(0)), st);
+        a.toggle_terminal();
+        a.take_terminal_asks();
+        let mut list = DrawList::new();
+        a.draw(&mut list, &DrawContext::default(), None);
+        assert_eq!(a.terminal_view().error_label(), None);
+        a.terminal_failed();
+        assert_eq!(a.terminal_view().error_label(), Some("Terminal error"));
+        assert!(
+            a.draw(&mut list, &DrawContext::default(), None),
+            "redrawn with it"
+        );
+        // About 2 s at 15 fps: still there at 29 frames, gone at 31.
+        for _ in 0..29 {
+            a.tick(Duration::from_millis(66));
+        }
+        assert_eq!(a.terminal_view().error_label(), Some("Terminal error"));
+        a.draw(&mut list, &DrawContext::default(), None);
+        a.tick(Duration::from_millis(66));
+        a.tick(Duration::from_millis(66));
+        assert_eq!(a.terminal_view().error_label(), None);
+        assert!(
+            a.draw(&mut list, &DrawContext::default(), None),
+            "redrawn without it"
+        );
+        // The terminal still shows, open and armed.
+        assert!(a.terminal_shown() && a.terminal_armed());
     }
 
     #[test]

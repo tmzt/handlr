@@ -955,8 +955,17 @@ impl App {
             }
             Event::Error(e) => {
                 log::warn!("companion: {e}");
+                // A terminal call failed: only logged, and a short pill
+                // over the terminal for a moment (plan 20261027_07, the
+                // 2026-10-30 13:31 EDT amendment); its text is not drawn.
+                if e.starts_with("terminal.") {
+                    if let Some(agent) = self.agent.as_mut() {
+                        agent.terminal_failed();
+                    }
                 // A plugin's toggle refused: its notice, in Settings.
-                if let Some(screen) = self.settings_screen.as_mut().filter(|s| s.plugin_pending()) {
+                } else if let Some(screen) =
+                    self.settings_screen.as_mut().filter(|s| s.plugin_pending())
+                {
                     screen.plugin_failed(&e);
                 } else {
                     self.note = Some((e, Role::Warn));

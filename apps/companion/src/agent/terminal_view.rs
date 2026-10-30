@@ -90,6 +90,11 @@ const STATUS_PT: f32 = 14.0;
 const PILL_PT: f32 = 13.0;
 /// The stale pill's words (plan 20261027_08, the 23:32 EDT amendment).
 pub const STALE_LABEL: &str = "Desktop has the tab \u{2014} touch to take it back";
+/// The error pill's words (plan 20261027_07, the 2026-10-30 13:31 EDT
+/// amendment): a failed `terminal.*` call, its text only logged.
+pub const ERROR_LABEL: &str = "Terminal error";
+/// How long the error pill shows after the last failure.
+pub const ERROR_FOR: Duration = Duration::from_secs(2);
 /// A fit's cells are counted with this much slack, so a size that fills
 /// the rect exactly is not one short from rounding.
 const FIT_SLACK: f32 = 1e-3;
@@ -269,8 +274,17 @@ pub fn status_line(state: &TermState) -> Option<String> {
     if let Some(reason) = st.closed {
         return Some(closed_words(reason).to_string());
     }
-    if let Some(e) = &st.error {
-        return Some(format!("The daemon refused the terminal: {e}"));
+    // A refusal's text is only logged; its pill shows for a moment (the
+    // 2026-10-30 13:31 EDT amendment). A terminal that could not open has
+    // no screen to show, so it says that much.
+    if st.error.is_some() && !st.open && !st.opening {
+        return Some(if state.supported {
+            "The terminal could not open.".to_string()
+        } else {
+            "No terminal: the daemon is offline, or does not offer terminal mode \
+             (no `terminal` in its hello)."
+                .to_string()
+        });
     }
     let empty = state.screen.as_ref().is_none_or(|s| s.seq() == 0);
     if st.opening && !state.supported {
@@ -471,6 +485,8 @@ pub struct TermView {
     gesture_mouse: bool,
     /// The left button is held at this cell (a mouse drag under way).
     mouse_held: Option<(u16, u16)>,
+    /// How long the error pill has shown, while it shows.
+    error_shown: Option<Duration>,
 }
 
 impl Default for TermView {
@@ -489,6 +505,7 @@ impl Default for TermView {
             wheel: 0.0,
             last_tap: None,
             cache: Vec::new(),
+            error_shown: None,
             mouse_mode: false,
             gesture_mouse: false,
             mouse_held: None,
@@ -830,6 +847,41 @@ impl TermView {
         self.axis
     }
 
+    /// A `terminal.*` call failed: the error pill shows for [`ERROR_FOR`]
+    /// from now.
+    pub fn flash_error(&mut self) {
+        self.error_shown = Some(Duration::ZERO);
+    }
+
+    /// The error pill's words while it shows.
+    pub fn error_label(&self) -> Option<&'static str> {
+        self.error_shown.map(|_| ERROR_LABEL)
+    }
+
+    /// Carries the error pill on by `dt`; returns whether it went.
+    pub fn tick(&mut self, dt: Duration) -> bool {
+        let Some(t) = self.error_shown else {
+            return false;
+        };
+        let t = t + dt;
+        self.error_shown = (t < ERROR_FOR).then_some(t);
+        self.error_shown.is_none()
+    }
+
+    /// The error pill's rect in `rect` at scale `s`: sized to its words,
+    /// centred.
+    pub fn error_pill(rect: Rect, s: f32) -> Rect {
+        let px = PILL_PT * s;
+        let w = (ERROR_LABEL.chars().count() as f32 * px * 0.5 + 16.0 * s).min(rect.w - 16.0 * s);
+        let h = line_h(px) + 6.0 * s;
+        Rect::new(
+            rect.x + (rect.w - w) * 0.5,
+            rect.y + (rect.h - h) * 0.5,
+            w,
+            h,
+        )
+    }
+
     /// Draws the grid in `rect`, clipped to it.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
@@ -1009,6 +1061,19 @@ impl TermView {
                 theme().bg,
             );
         }
+        // A call failed: a short pill, centred, for a moment.
+        if let Some(label) = self.error_label() {
+            let px = PILL_PT * s;
+            let pill = Self::error_pill(rect, s);
+            fill(list, pill, with_alpha(theme().warn, 0.92), pill.h * 0.5);
+            ctx.draw_text(
+                list,
+                label,
+                [pill.x + 8.0 * s, pill.y + 3.0 * s],
+                px,
+                theme().bg,
+            );
+        }
     }
 }
 
@@ -1131,10 +1196,16 @@ mod tests {
         closed.closed = Some(TerminalClosedReason::PaneClosed);
         st.status = Some(closed);
         assert!(status_line(&st).unwrap().contains("pane closed"));
+        // A terminal that could not open says so, without the daemon's
+        // text (plan 20261027_07, the 2026-10-30 13:31 EDT amendment).
         let mut refused = status(false);
+        refused.opening = false;
         refused.error = Some("not permitted".into());
         st.status = Some(refused);
-        assert!(status_line(&st).unwrap().contains("not permitted"));
+        assert_eq!(
+            status_line(&st).as_deref(),
+            Some("The terminal could not open.")
+        );
         st.supported = false;
         st.status = None;
         assert!(status_line(&st).unwrap().starts_with("No terminal"));
@@ -1778,6 +1849,100 @@ mod tests {
             assert_eq!(mark, None);
             assert!(fills_at(&list, cell).is_empty());
         }
+    }
+
+    /// A daemon's refusal as an old herdr gives it: a long JSON text.
+    const JSON_ERROR: &str = "herdr: {\"jsonrpc\":\"2.0\",\"id\":7,\"error\":{\"code\":-32602,\
+        \"message\":\"invalid params: unknown variant `mouse`, expected one of `visible`, \
+        `recent`, `recent_unwrapped`, `detection`\",\"data\":{\"pane_id\":\"w1-p2\"}}} (-32010)";
+
+    #[test]
+    fn a_failure_on_a_shown_terminal_is_not_its_text_on_the_screen() {
+        let mut open = status(true);
+        open.armed_for = Some(Duration::MAX);
+        open.error = Some(JSON_ERROR.into());
+        let st = TermState {
+            supported: true,
+            input_allowed: true,
+            mouse_allowed: true,
+            screen: Some(screen_of("hello")),
+            status: Some(open),
+        };
+        // No status line over the frame: the refusal's text is not drawn.
+        assert_eq!(status_line(&st), None);
+    }
+
+    /// The colours of the rounded fills exactly at `r`: the pills.
+    fn pills_at(list: &DrawList, r: Rect) -> Vec<[f32; 4]> {
+        list.instances
+            .iter()
+            .filter(|i| matches!(i.kind, libmsdf::drawlist::SdfKind::RoundedBox { .. }))
+            .filter(|i| i.position == r.pos() && i.size == r.size())
+            .map(|i| i.color)
+            .collect()
+    }
+
+    #[test]
+    fn the_error_pill_shows_for_two_seconds_over_the_terminal() {
+        let rect = Rect::new(0.0, 100.0, 800.0, 1200.0);
+        let s = 2.0;
+        let mut open = status(true);
+        open.error = Some(JSON_ERROR.into());
+        let st = TermState {
+            supported: true,
+            // A run with a background, to see the grid is still drawn.
+            screen: Some(screen_with("\x1b[41mhello\x1b[0m", Some(cursor(0, 5, 2)))),
+            status: Some(open),
+            ..Default::default()
+        };
+        let mut v = TermView::default();
+        v.follow(st.screen.as_ref(), rect, s, true);
+        let px = v.pt() * s;
+        let red = Rect::new(
+            rect.x - v.pan()[0],
+            rect.y - v.pan()[1],
+            5.0 * CELL_EM * px,
+            term_h(px),
+        );
+        let pill = TermView::error_pill(rect, s);
+        let warn = with_alpha(theme().warn, 0.92);
+        let draw = |v: &mut TermView| {
+            let mut list = DrawList::new();
+            v.draw(&mut list, &DrawContext::default(), None, &st, rect, s);
+            list
+        };
+        // Before a failure: no pill.
+        assert_eq!(v.error_label(), None);
+        assert!(pills_at(&draw(&mut v), pill).is_empty());
+        v.flash_error();
+        assert_eq!(v.error_label(), Some("Terminal error"));
+        // Small and centred in the terminal's rect.
+        assert!(pill.w < rect.w * 0.5 && pill.h < 60.0);
+        let centre = |r: Rect| [r.x + r.w * 0.5, r.y + r.h * 0.5];
+        let (c, rc) = (centre(pill), centre(rect));
+        assert!((c[0] - rc[0]).abs() < 0.5 && (c[1] - rc[1]).abs() < 0.5);
+        let list = draw(&mut v);
+        assert_eq!(pills_at(&list, pill), vec![warn]);
+        // The terminal is still drawn underneath.
+        assert_eq!(fills_at(&list, red), vec![palette_colour(1, dark_theme())]);
+        // Still shown just short of 2 s ...
+        assert!(!v.tick(Duration::from_millis(1900)));
+        assert_eq!(v.error_label(), Some("Terminal error"));
+        assert!(!pills_at(&draw(&mut v), pill).is_empty());
+        // ... and gone after; the tick says it went, once.
+        assert!(v.tick(Duration::from_millis(150)));
+        assert!(!v.tick(Duration::from_millis(150)));
+        assert_eq!(v.error_label(), None);
+        let list = draw(&mut v);
+        assert!(pills_at(&list, pill).is_empty());
+        assert_eq!(fills_at(&list, red), vec![palette_colour(1, dark_theme())]);
+        // A further failure while it shows starts the 2 s again.
+        v.flash_error();
+        assert!(!v.tick(Duration::from_millis(1500)));
+        v.flash_error();
+        assert!(!v.tick(Duration::from_millis(1500)));
+        assert_eq!(v.error_label(), Some("Terminal error"));
+        assert!(v.tick(Duration::from_millis(600)));
     }
 
     #[test]
