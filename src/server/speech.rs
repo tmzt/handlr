@@ -317,12 +317,23 @@ impl SpeechService {
     }
 }
 
-/// One held item for a catch-up: its agent and project as shown, when it
-/// came from a pane, and its text (a reply's whole text when found).
+/// One held item for a catch-up: where it came from, and its text (a
+/// reply's whole text when found).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatchUpItem {
-    pub from: Option<(String, String)>,
+    pub from: CatchUpFrom,
     pub text: String,
+}
+
+/// Where a held item came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CatchUpFrom {
+    /// This agent in this project, as shown.
+    Agent { agent: String, project: String },
+    /// A pane that could not be named.
+    Pane,
+    /// No pane: a general agent (Gemini) line.
+    General,
 }
 
 /// What the voice input was, for a catch-up.
@@ -429,8 +440,11 @@ pub fn held_text(held: &[CatchUpItem]) -> String {
         .map(|item| {
             let text = item.text.trim();
             match &item.from {
-                Some((agent, project)) => format!("- The {agent} agent in {project}: {text}"),
-                None => format!("- The general agent: {text}"),
+                CatchUpFrom::Agent { agent, project } => {
+                    format!("- The {agent} agent in {project}: {text}")
+                }
+                CatchUpFrom::Pane => format!("- A coding agent: {text}"),
+                CatchUpFrom::General => format!("- The general agent: {text}"),
             }
         })
         .collect::<Vec<_>>()
@@ -666,8 +680,12 @@ pub(super) async fn speech_catch_up(
         .iter()
         .map(|h| {
             let Some(n) = named(h.pane_id.as_deref()) else {
+                let from = match h.pane_id.as_deref() {
+                    Some(id) if !id.is_empty() => CatchUpFrom::Pane,
+                    _ => CatchUpFrom::General,
+                };
                 return CatchUpItem {
-                    from: None,
+                    from,
                     text: crate::sessions::redact::redact(&h.text),
                 };
             };
@@ -678,7 +696,10 @@ pub(super) async fn speech_catch_up(
                 _ => None,
             };
             CatchUpItem {
-                from: Some((n.agent_part.shown.clone(), project_of(n))),
+                from: CatchUpFrom::Agent {
+                    agent: n.agent_part.shown.clone(),
+                    project: project_of(n),
+                },
                 text: found.unwrap_or_else(|| crate::sessions::redact::redact(&h.text)),
             }
         })
@@ -856,11 +877,14 @@ mod tests {
         );
         let held = [
             CatchUpItem {
-                from: Some(("Claude".to_string(), "flankr".to_string())),
+                from: CatchUpFrom::Agent {
+                    agent: "Claude".to_string(),
+                    project: "flankr".to_string(),
+                },
                 text: "The tests pass. ".to_string(),
             },
             CatchUpItem {
-                from: None,
+                from: CatchUpFrom::General,
                 text: "Codex is working.".to_string(),
             },
         ];
@@ -905,7 +929,7 @@ mod tests {
         assert!(service.catch_up_system_text().is_none());
         assert!(service.system_text().is_some());
         let held = [CatchUpItem {
-            from: None,
+            from: CatchUpFrom::Pane,
             text: "Done.".to_string(),
         }];
         assert_eq!(service.catch_up(&held, None, true).await.summary, None);

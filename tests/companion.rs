@@ -2288,10 +2288,7 @@ async fn a_catch_up_reads_held_replies_whole_and_names_the_message() {
         "{sent}"
     );
     assert!(sent.contains("\n- The general agent: Claude is running the tests.\n"));
-    assert!(
-        sent.contains("\n- The general agent: A notice.\n"),
-        "{sent}"
-    );
+    assert!(sent.contains("\n- A coding agent: A notice.\n"), "{sent}");
     assert!(sent.ends_with(" this message:\n\nNow push it."), "{sent}");
     assert!(
         sent.contains("Then the user sent the Claude agent in "),
