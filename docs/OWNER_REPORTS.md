@@ -127,3 +127,23 @@ text also went to the overview's status line.
 terminal for 2 s (restarted by a further failure), with the terminal
 still drawn under it; the full error goes only to the log. A failed open
 says *The terminal could not open.* Installed on the S23 the same day.
+
+## 2026-10-30 13:46 EDT — Owner: the voice input report, done
+
+This follows the entry on spoken messages interrupting voice input.
+
+**Cause.** Four ways speech reached voice input: queued notices and
+read-aloud replies were let out in the gap between dictated sentences,
+when the mic goes idle before the next is armed; Gemini's spoken lines
+were said at once, even while a message was being dictated; a tapped
+Gemini turn's "stopped" sentence spoke over the new prompt; and speech
+already playing when voice input started was never stopped.
+
+**Done.** The dictated messages plan's 2026-10-30 13:37 EDT amendment and
+flankr-companion 0.6.0 (`5fd5b66`): while a message or Gemini's prompt is
+taken by voice, speech is held in order and plays as soon as the voice
+input ends (sent, cleared or timed out); starting voice input stops what
+is being said. Still spoken at once: the dictation's own read-back, its
+empty, full and send-failure lines, replays you tap, and confirmation
+questions (the next sentence answers them). The done ding still plays.
+Installed on the S23 the same day.
