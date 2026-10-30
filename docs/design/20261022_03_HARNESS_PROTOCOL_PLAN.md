@@ -1776,3 +1776,43 @@ and Submit, answered with `choice.answer`. Such a card has no record
 button and no Yes or No, and messages to the pane are refused while it is
 open. For that card, its decisions 6 to 9 are the reference from here;
 every other card is as this section has it.
+
+## Amendment — 2026-10-30 15:20 EDT: pinned cards: More and Less, a sideways drag removes, by kind (living section L3)
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "how should we handle
+dismissing pinned cards? currently, tapping reduces them to the shorter
+version, instead it should have more switch to less and only a tap there
+should reduce the size (this should also fix the tappable links getting
+ignored in the markdown content). dragging the card should remove it, but
+replace certain cards like finish with a single-line version. other cards
+representing spoken content should be dismissed along with their queued
+message (the user has acknowledged and dismissed it), cards with critical
+queestions should be answered No or Deny with that noted as a text block
+(generally the agent will say something so we may not have to)", agreed
+as proposed. A new L3 entry; it replaces the tap-to-fold of the earlier
+entries (the pinned card's tap anywhere expanding or folding it):
+
+1. **More and Less.** A pinned card cut off shows *More* at its bottom
+   right; expanded, *Less*. Only that link changes its size. Every other
+   tap goes to what is under it: a link in its Markdown, an answer chip,
+   a button.
+2. **A sideways drag removes it.** The card follows the finger left or
+   right; past 40 pt, or a fling, it goes; released short, it springs
+   back. Up and down still scroll the flow.
+3. **By kind:**
+   - **Finished:** shrinks to one line, *Finished · <the reply's first
+     line>*, in the pinned card's place; its queued read-aloud is
+     dropped.
+   - **Something broke, the catch-up (*While you spoke*), and other
+     spoken cards:** dismissed, with their queued speech dropped.
+   - **Approval needed:** answered **Deny**.
+   - **A yes/no question:** answered **No**.
+   - **A choice question:** cancelled, as the agent's own dismiss does.
+   - **A plan question** (approve, discuss, implement): not answered; it
+     shrinks to one line, as *Finished* does.
+4. **Answered by a drag:** a dim line in the flow says so (*Denied by
+   dismissing*, *Answered No by dismissing*, *Dismissed the question*).
+5. **Versions.** flankr-companion, additive: an input that drops a card's
+   queued speech (by the card's section serial), taking the next patch.
+   The app's version takes the next minor with its `apps/UPDATES.md`
+   entry (FLANKR RULE 1).

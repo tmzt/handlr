@@ -913,3 +913,30 @@ The owner approved building the plan on 2026-10-23: "Approve the plan".
 Implementation starts with step 1 (libherdr 0.3.0, the focus and pane
 subscriptions). From this commit the document is frozen; departures are
 recorded in CHANGES.md (Rule 1.7).
+
+## Amendment — 2026-10-30 15:20 EDT: the last view cached, shown at start and refreshed on connect
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "Last session should also return to that remote if available or to the most recent remote and session if not. Ideally this will be loaded from cache so the user is sent back to a working screen with the updates loading in the background (like pull to refresh)"; agreed as
+proposed. For the settings screen plan's *At startup* (its amendment of
+the same time):
+
+1. **What is kept.** When the agent view closes, or the app goes to the
+   background with it open, the client keeps that session's view: its
+   outline window and the sections in it (the last screenful and the
+   windows either side, at most 200 sections or 512 KiB of section JSON,
+   whichever is less), with the pane, the session id and the time, in the
+   remote's `state.redb` (a `view` table, one entry per remote,
+   replaced each time).
+2. **Shown at once.** flankr-companion, additive: `State::restore_view`
+   gives the kept view as the usual `Event::AgentView` events, marked as
+   cached, before the connection is up, so the agent view opens usable:
+   scrolling, reading and tapping links work.
+3. **Refreshed on connect.** When the link is up, the subscription opens
+   as it does now and its deliveries merge into the cached view by
+   section serial; the agent view shows the pull-to-refresh indicator
+   until the first delivery has arrived.
+4. **Gone.** If the session is no longer listed, or the subscription says
+   there is no session, the view says *This session has ended* with a
+   button back to the overview, instead of an empty view.
+5. **Versions.** flankr-companion takes the next patch (additive); the
+   app's version is moved by the settings plan's amendment.

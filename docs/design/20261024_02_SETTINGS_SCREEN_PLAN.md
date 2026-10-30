@@ -434,3 +434,36 @@ speaker button's tap mutes or unmutes; `muted` (default false) is kept in
 `settings.toml` beside `speak_coding` and `speak_gemini`. Sound's two speak
 rows (the 00:18 EDT amendment's item 1) stay; while muted they keep their
 values. There is no Mute row.
+
+## Amendment — 2026-10-30 15:20 EDT: *At startup*: the overview or the last session
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "add a global setting for Show overview or Show last session at startup, using the SelectableLabel control and a tag like At startup or whatever fits on the row"; then "Last session should also return to that remote if available or to the most recent remote and session if not. Ideally this will be loaded from cache so the user is sent back to a working screen with the updates loading in the background (like pull to refresh)"; agreed
+as proposed ("yes, append both plans as suggested and queue the work").
+The cached view and its refresh are the session subscriptions plan's
+amendment of the same time.
+
+1. **The row.** *At startup*, in the general group beside *Tab follows
+   focus*, with an ⓘ like the other rows. Its control is libcontrols'
+   `SelectableLabel` (its arrows cycle the values), the first setting
+   row to use it: *Overview* or *Last session*.
+2. **Saved** as `startup = "overview" | "last_session"` in
+   `settings.toml`; default `overview`, so nothing changes until it is
+   chosen.
+3. **Last session, which one opens:**
+   1. the session last open, on the remote last in use, when that remote
+      is still paired and the session is still listed;
+   2. else the remote used most recently of the others, and its last
+      session;
+   3. else the overview.
+   The app keeps, per remote, the last open session's pane and the time
+   it was last shown, across restarts, in the remote's `state.redb`.
+   Closing the agent view back to the overview clears that remote's
+   entry, so the overview opens next time.
+4. **At once:** the agent view opens on the kept list and the cached view
+   (the subscriptions plan's amendment) before the connection is up; the
+   overview is under it, as when a session is opened from the overview.
+5. **ⓘ text:** "Open the overview, or go back to the session you last
+   had open, on the remote you last used. The saved session shows at once
+   and updates once connected."
+6. **The app's version** takes the next minor with its `apps/UPDATES.md`
+   entry (FLANKR RULE 1).
