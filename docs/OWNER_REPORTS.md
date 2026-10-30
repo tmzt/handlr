@@ -111,3 +111,19 @@ Read as: while the owner is giving voice input (dictating a message or
 talking to Gemini, the mic armed or hearing), a reply read aloud or a
 spoken notice starts playing over it. Speech should wait until the voice
 input ends.
+
+## 2026-10-30 13:39 EDT — Owner: the terminal error report, done
+
+This follows the entry on a terminal error filling the screen.
+
+**Cause.** When a terminal call failed (opening, arming, input, a scroll
+or mouse event, as an older herdr refuses), the client kept the daemon's
+error text, and the agent view's status line drew it as *The daemon
+refused the terminal: …*, wrapped across the whole terminal. The same
+text also went to the overview's status line.
+
+**Done.** The terminal mode plan's 2026-10-30 13:31 EDT amendment and
+`9d35f5e`: a failure shows a small *Terminal error* pill centred over the
+terminal for 2 s (restarted by a further failure), with the terminal
+still drawn under it; the full error goes only to the log. A failed open
+says *The terminal could not open.* Installed on the S23 the same day.
