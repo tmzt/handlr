@@ -2703,6 +2703,9 @@ impl State {
             }
         }
         self.show_cards(&mut out);
+        // Speech held for voice input goes once it ends (plan 20261023_02,
+        // the 2026-10-30 13:37 EDT amendment, item 3).
+        self.flush_notices(&mut out);
         self.gate(out)
     }
 
@@ -4045,6 +4048,7 @@ impl State {
         });
         self.show_dictation(out);
         if mode == PromptMode::Voice {
+            self.stop_for_voice_input(out);
             out.push(event(Event::Arm));
         }
     }
@@ -4066,6 +4070,7 @@ impl State {
         d.phase = DictationPhase::Collecting;
         d.quiet_from = None;
         self.show_dictation(out);
+        self.stop_for_voice_input(out);
         out.push(event(Event::Arm));
     }
 
@@ -4111,6 +4116,7 @@ impl State {
             self.ask_list(out);
         }
         self.show_dictation(out);
+        self.stop_for_voice_input(out);
         out.push(event(Event::Arm));
     }
 
@@ -4649,6 +4655,9 @@ impl State {
             }
         }
         self.show_cards(&mut out);
+        // Speech held for voice input goes once it ends (plan 20261023_02,
+        // the 2026-10-30 13:37 EDT amendment, item 3).
+        self.flush_notices(&mut out);
         self.gate(out)
     }
 
@@ -5585,7 +5594,7 @@ impl State {
             return;
         };
         if turn.tapped && !stopped.is_empty() {
-            out.push(event(Event::Say(stopped_sentence(&stopped))));
+            self.say_or_hold(stopped_sentence(&stopped), out);
         }
         out.push(event(Event::TurnEnded { outcome, stopped }));
         if self.dictation.as_ref().is_some_and(|d| d.general_agent) {
@@ -5618,7 +5627,7 @@ impl State {
                         // responses* is on (plan 20261028_06, decision 6);
                         // `sound` gates it downstream.
                         if self.settings.speak_gemini {
-                            out.push(event(Event::Say(say.text)));
+                            self.say_or_hold(say.text, out);
                         }
                     } else {
                         log::debug!("dropping a late turn.say for turn {}", say.turn_id);
@@ -5849,14 +5858,14 @@ impl State {
         }
     }
 
-    /// Says the held notices, oldest first, unless speaking, listening or
-    /// confirming.
+    /// Says the held notices, oldest first, unless speaking, listening,
+    /// confirming or taking voice input.
     fn flush_notices(&mut self, out: &mut Vec<Output>) {
         if !self.settings.sound {
             self.notices.clear();
             return;
         }
-        if self.speaking || self.listening || !self.confirms.is_empty() {
+        if self.speaking || self.listening || !self.confirms.is_empty() || self.voice_input() {
             return;
         }
         for text in self.notices.drain(..) {
@@ -5864,6 +5873,40 @@ impl State {
                 self.saying.push(ts.clone());
             }
             out.push(event(Event::Say(text)));
+        }
+    }
+
+    /// Whether voice input is in progress (plan 20261023_02, the
+    /// 2026-10-30 13:37 EDT amendment, item 1): a prompt open in voice
+    /// mode, the message or Gemini's, still collecting.
+    fn voice_input(&self) -> bool {
+        self.dictation
+            .as_ref()
+            .is_some_and(|d| d.mode == PromptMode::Voice && d.phase == DictationPhase::Collecting)
+    }
+
+    /// Says `text` now, or during voice input holds it with the notices,
+    /// to be said once the input ends (the 13:37 EDT amendment, item 2).
+    fn say_or_hold(&mut self, text: String, out: &mut Vec<Output>) {
+        if self.voice_input() {
+            log::info!("say: held while voice input is in progress");
+            self.notices.push_back(text);
+            while self.notices.len() > NOTICE_CAP {
+                self.notices.pop_front();
+            }
+        } else {
+            out.push(event(Event::Say(text)));
+        }
+    }
+
+    /// Voice input starts: what the speaker plays stops (the 13:37 EDT
+    /// amendment, item 5).
+    fn stop_for_voice_input(&mut self, out: &mut Vec<Output>) {
+        let stopped = out
+            .iter()
+            .any(|o| matches!(o, Output::Event(Event::StopSpeaking)));
+        if self.speaking && !stopped {
+            out.push(event(Event::StopSpeaking));
         }
     }
 
@@ -11688,6 +11731,134 @@ mod tests {
         let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
         assert!(events(&out).contains(&Event::Arm));
         assert!(dictation_of(&out).unwrap().active);
+    }
+
+    // Nothing is spoken over voice input (plan 20261023_02, the
+    // 2026-10-30 13:37 EDT amendment).
+
+    fn says(out: &[Output]) -> Vec<String> {
+        events(out)
+            .into_iter()
+            .filter_map(|e| match e {
+                Event::Say(t) => Some(t),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_notice_in_the_gap_between_dictated_sentences_waits_for_the_submit() {
+        let mut s = dictating();
+        speak(&mut s, 11.0, 12.0, "Run the tests");
+        // The gate closed after the sentence, before it is armed again.
+        s.input(Input::Listening(false));
+        assert!(says(&s.incoming(notice("Codex is done."))).is_empty());
+        let out = speak(&mut s, 13.0, 14.0, "and fix what fails.");
+        assert!(says(&out).is_empty(), "{out:?}");
+        let out = s.input(Input::Submit);
+        assert!(message_send(&out).is_some());
+        assert_eq!(says(&out), vec!["Codex is done.".to_string()]);
+    }
+
+    #[test]
+    fn held_speech_comes_out_in_order_when_the_dictation_is_cleared() {
+        let mut s = dictating();
+        s.incoming(notice("one"));
+        s.incoming(notice("two"));
+        assert_eq!(s.held_notices(), 2);
+        assert_eq!(
+            says(&s.input(Input::Clear)),
+            vec!["one".to_string(), "two".to_string()]
+        );
+    }
+
+    #[test]
+    fn the_dictations_own_speech_is_still_said() {
+        let mut s = dictating();
+        speak(&mut s, 11.0, 12.0, "Run the tests.");
+        s.incoming(notice("Codex is done."));
+        let out = s.input(Input::Utterance("Read it back.".into()));
+        assert_eq!(says(&out), vec!["Run the tests.".to_string()]);
+        // The read-back ends; the gate is armed again, and the notice
+        // still waits for the message.
+        s.input(Input::Speaking(true));
+        let out = s.input(Input::Speaking(false));
+        assert!(events(&out).contains(&Event::Arm));
+        assert!(says(&out).is_empty(), "{out:?}");
+        assert_eq!(s.held_notices(), 1);
+    }
+
+    #[test]
+    fn a_gemini_line_during_a_dictated_message_waits_for_it() {
+        let mut s = online();
+        s.input(Input::Tap);
+        start(&mut s, "what is claude doing");
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        let out = s.input(Input::StartDictation);
+        assert!(events(&out).contains(&Event::Arm));
+        let out = s.incoming(note(
+            "turn.say",
+            json!({"turn_id": 1, "seq": 0, "text": "Claude is running the tests."}),
+        ));
+        // Shown, not said.
+        assert!(events(&out).contains(&Event::Conversation {
+            speaker: Speaker::Gemini,
+            text: "Claude is running the tests.".into()
+        }));
+        assert!(says(&out).is_empty(), "{out:?}");
+        assert_eq!(
+            says(&s.input(Input::Clear)),
+            vec!["Claude is running the tests.".to_string()]
+        );
+    }
+
+    #[test]
+    fn notices_wait_for_gemini_voice_prompt_until_it_is_submitted() {
+        let mut s = online();
+        s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        speak(&mut s, 10.0, 12.0, "what is flankr");
+        assert!(says(&s.incoming(notice("Claude is done."))).is_empty());
+        let out = s.input(Input::Tick(secs(13.0)));
+        assert_eq!(requests(&out, wire::methods::TURN_START).len(), 1);
+        assert_eq!(says(&out), vec!["Claude is done.".to_string()]);
+    }
+
+    #[test]
+    fn a_typed_prompt_is_not_voice_input() {
+        let mut s = online();
+        s.input(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+        assert_eq!(
+            says(&s.incoming(notice("Claude is done."))),
+            vec!["Claude is done.".to_string()]
+        );
+    }
+
+    #[test]
+    fn starting_voice_input_stops_what_is_playing() {
+        let mut s = online();
+        s.incoming(note("focus.changed", json!({"focus": claude()})));
+        s.input(Input::Speaking(true));
+        let out = s.input(Input::StartDictation);
+        let ev = events(&out);
+        let stop = ev.iter().position(|e| *e == Event::StopSpeaking);
+        let arm = ev.iter().position(|e| *e == Event::Arm);
+        assert!(stop.is_some() && stop < arm, "{out:?}");
+        // Not while quiet.
+        let mut s = online();
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        assert!(!events(&out).contains(&Event::StopSpeaking));
+    }
+
+    #[test]
+    fn with_sound_off_held_speech_is_never_said() {
+        let mut s = dictating();
+        s.incoming(notice("one"));
+        s.input(Input::Settings(Settings {
+            sound: false,
+            ..Settings::default()
+        }));
+        assert!(says(&s.input(Input::Clear)).is_empty());
+        assert_eq!(s.held_notices(), 0);
     }
 
     // Plugins (docs/design/20261028_04_PLUGINS_PLAN.md, 3.10 and section 5).

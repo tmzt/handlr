@@ -843,3 +843,22 @@ Strictly additive:
 - **Added:** `RemoteState::agents()` and `RemoteState::set_agents(&[AgentInfo])`:
   the remote's last agent list, kept in its `state.redb` (an `agents`
   table).
+
+## flankr-companion 0.6.0 — 2026-10-30 (the commit tagged `flankr-companion-v0.6.0`)
+
+Plan 20261023_02 (dictated messages), its 2026-10-30 13:37 EDT amendment.
+Not strictly additive: no API item changes, but when `State` gives
+`Event::Say` does (Rule 5.4, behaviour a caller can observe):
+
+- **Breaking (behaviour):** while a voice prompt is collecting (a dictated
+  message, or Gemini's prompt, in `PromptMode::Voice`), replies read aloud,
+  the daemon's notices, `turn.say` lines and a tapped turn's "stopped"
+  sentence are held in the notice queue (cap 8, the oldest dropped) and
+  given as `Event::Say`, in order, once the prompt is submitted, cleared or
+  closed, under the queue's usual rules. The prompt's own speech (read-back,
+  "The message is empty/full.", refusals, a failed send), confirmation
+  questions and `Input::Replay` are said at once, as before.
+- **Breaking (behaviour):** `Input::StartDictation`, a voice
+  `Input::StartGeneralAgentPrompt`, `Input::ContinueByVoice` and a
+  suggestion that starts a message give `Event::StopSpeaking` before
+  `Event::Arm` while speech plays.

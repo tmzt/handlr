@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "flankr-companion"
-version = "0.5.8"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "flankr-speech",
