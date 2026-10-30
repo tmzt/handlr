@@ -1,7 +1,7 @@
 ---
 title: Spoken summaries of complex replies, from structured prompts
 date: 2026-10-23
-status: Implemented
+status: In implementation
 covers:
   - "Read aloud (the agent view's play button) sends a reply that is
     complex, by a basic coding measure or because it has backquotes, to
@@ -496,3 +496,10 @@ stays `Implemented` for what it built; this adds to it:
 4. **Failures.** No model, a refused or failed generation, or an empty
    answer gives `summary: None`, logged once with the reason, never an
    error to the client.
+
+## Amendment — 2026-10-30 14:24 EDT: back in implementation for the 2026-10-30 13:52 EDT amendment
+
+The status returns from `Implemented` to `In implementation` for the
+2026-10-30 13:52 EDT amendment (shorter spoken summaries and
+`speech.catch_up`). The document stays immutable; it returns to
+`Implemented` when that amendment is built.

@@ -862,3 +862,19 @@ Not strictly additive: no API item changes, but when `State` gives
   `Input::StartGeneralAgentPrompt`, `Input::ContinueByVoice` and a
   suggestion that starts a message give `Event::StopSpeaking` before
   `Event::Arm` while speech plays.
+
+## libflankr_proto 0.5.7 — 2026-10-30 (the commit tagged `libflankr_proto-v0.5.7`)
+
+Plan 20261023_05 (spoken summaries), its 2026-10-30 13:52 EDT amendment,
+item 2. Strictly additive:
+
+- **Added:** `methods::SPEECH_CATCH_UP` (`speech.catch_up`), companions
+  only: one spoken catch-up for the speech held during a voice input,
+  offered while the daemon has a spoken summaries model (`LlmInfo::summaries`)
+  and under the same `client.options` (`spoken_output`) as
+  `speech.summarize`.
+- **Added:** `common::SpeechCatchUpParams` (`held`, `said`),
+  `common::HeldSpeech` (`pane_id`, `ts`, `text`), `common::SaidInput`
+  (`text`, `pane_id`) and `common::SpeechCatchUpResult` (`summary`); each
+  `Default`, optional fields defaulted when absent and left off the wire
+  when `None`.

@@ -34,6 +34,12 @@ pub mod methods {
     /// A reply read aloud, measured and, when complex, summarised for the
     /// ear (plan 20261023_05, as amended at 15:45 EDT). Companions only.
     pub const SPEECH_SUMMARIZE: &str = "speech.summarize";
+    /// One spoken catch-up for the speech held during a voice input (plan
+    /// 20261023_05, the 2026-10-30 13:52 EDT amendment, item 2): offered
+    /// only while the daemon has a spoken summaries model, under the same
+    /// `client.options` as `speech.summarize`. Companions only. Added in
+    /// libflankr_proto 0.5.7.
+    pub const SPEECH_CATCH_UP: &str = "speech.catch_up";
     /// A companion's options for its connection, such as whether its
     /// output is spoken (plan 20261023_05, the 16:28 EDT amendment, A4).
     /// Answered `{}`.
@@ -378,6 +384,51 @@ pub struct SpeechSummarizeResult {
     /// Whether the daemon measured the reply as complex.
     #[serde(default)]
     pub complex: bool,
+}
+
+/// `speech.catch_up`: the speech held while the user spoke, and what they
+/// said (plan 20261023_05, the 2026-10-30 13:52 EDT amendment, item 2).
+/// Added in libflankr_proto 0.5.7.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SpeechCatchUpParams {
+    /// The held speech, oldest first.
+    pub held: Vec<HeldSpeech>,
+    /// What the voice input was: the message as sent, or Gemini's
+    /// prompt; None when it was cancelled or cleared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub said: Option<SaidInput>,
+}
+
+/// One item of held speech, for [`SpeechCatchUpParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct HeldSpeech {
+    /// The pane it came from, if any (a notice or a reply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+    /// A reply's entry `ts`, RFC 3339, when it is one: the daemon reads
+    /// the whole reply from the transcript, as `speech.summarize` does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ts: Option<String>,
+    /// The text that would have been said.
+    pub text: String,
+}
+
+/// What a voice input was, for [`SpeechCatchUpParams`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SaidInput {
+    pub text: String,
+    /// The message's target pane; None for Gemini's prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+/// `speech.catch_up`'s result.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SpeechCatchUpResult {
+    /// The catch-up to say; None when none was made (the client then
+    /// says the held speech as it is).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 /// `client.options`: a companion's options for its connection (plan
@@ -2643,6 +2694,54 @@ mod tests {
             summary: None,
             complex: false,
         });
+        // speech.catch_up (the 2026-10-30 13:52 EDT amendment).
+        assert_eq!(methods::SPEECH_CATCH_UP, "speech.catch_up");
+        round_trip(SpeechCatchUpParams {
+            held: vec![
+                HeldSpeech {
+                    pane_id: Some("w2:pZ".to_string()),
+                    ts: Some("2026-10-30T17:52:00.000Z".to_string()),
+                    text: "The tests pass.".to_string(),
+                },
+                HeldSpeech {
+                    pane_id: None,
+                    ts: None,
+                    text: "Claude is running the tests.".to_string(),
+                },
+            ],
+            said: Some(SaidInput {
+                text: "Now push it.".to_string(),
+                pane_id: Some("w2:pZ".to_string()),
+            }),
+        });
+        round_trip(SpeechCatchUpParams {
+            held: vec![],
+            said: Some(SaidInput {
+                text: "what is flankr".to_string(),
+                pane_id: None,
+            }),
+        });
+        round_trip(SpeechCatchUpResult {
+            summary: Some("Claude pushed it.".to_string()),
+        });
+        // Left off the wire when absent, and read back as absent.
+        assert_eq!(
+            serde_json::to_value(SpeechCatchUpParams {
+                held: vec![HeldSpeech {
+                    text: "Done.".to_string(),
+                    ..HeldSpeech::default()
+                }],
+                said: None,
+            })
+            .unwrap(),
+            serde_json::json!({"held": [{"text": "Done."}]})
+        );
+        assert_eq!(
+            serde_json::to_value(SpeechCatchUpResult::default()).unwrap(),
+            serde_json::json!({})
+        );
+        let none: SpeechCatchUpResult = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(none.summary, None);
         round_trip(PingParams {
             active: Some(false),
         });
