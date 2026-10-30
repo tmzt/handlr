@@ -147,3 +147,19 @@ is being said. Still spoken at once: the dictation's own read-back, its
 empty, full and send-failure lines, replays you tap, and confirmation
 questions (the next sentence answers them). The done ding still plays.
 Installed on the S23 the same day.
+
+## 2026-10-30 15:12 EDT — Owner: the record button does nothing
+
+Device: Galaxy S23 Ultra, the build installed 2026-10-30 14:47 EDT (app
+0.2.0, the voice catch-up).
+
+**Report.** "tapped the record button and got no response".
+
+**Seen.** The app's log (`adb logcat -s flankr`, read 15:12 EDT) has five
+taps on record between 15:10:45 and 15:11:05, each a release logged as
+`hold: pressed Message` then `agent_hit: Message`, so the tap reached the
+app and `StartDictation` was sent. The client logged nothing after any of
+them: no dictation started, no refusal. Before them: 15:09:21 a tap on an
+answer chip; 15:10:16 the viewed agent finished and a reply was spoken;
+15:10:21 "no answer in time; reading the reply here". Handed to a subagent
+in its own worktree.
