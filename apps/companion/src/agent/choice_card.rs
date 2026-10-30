@@ -469,7 +469,7 @@ impl ChoiceCard {
         self.sending = false;
         self.line =
             result_line(outcome, got, code, agent).map(|(text, color)| Line { text, color });
-        if outcome == "answered" {
+        if matches!(outcome, "answered" | "cancelled") {
             self.question = 0;
             self.review = false;
         }
@@ -486,7 +486,10 @@ pub fn result_line(
 ) -> Option<(String, [f32; 4])> {
     let reason = got.first().map(String::as_str).unwrap_or("");
     let text = match (outcome, code) {
-        ("answered", _) => return None,
+        ("answered" | "cancelled", _) => return None,
+        // The drag's cancel (plan 20261029_01, the 2026-10-30 16:42 EDT
+        // amendment, item 4): the card springs back with this line.
+        ("not_cancelled", _) => copy::CHOICE_NOT_DISMISSED.text.to_string(),
         ("mismatch", _) => {
             return Some((
                 copy::CHOICE_RECORDED

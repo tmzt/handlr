@@ -215,3 +215,8 @@ These changes came before the app had version numbers.
 
 **Changed**
 - Going back from a session to the overview makes the overview what opens next time, with *Last session* on.
+
+## 0.6.0 — 2026-10-30
+
+**Added**
+- A question with options from Claude can be dragged away like the other cards: it is dismissed as pressing Esc at the Mac would, and a dim line in the session says "Dismissed the question". If it can't be dismissed, the card springs back and says "Couldn't dismiss the question".

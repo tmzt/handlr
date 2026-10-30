@@ -85,6 +85,13 @@ No result in time (`no_result`) or a screen check that failed
 
 - text: Not answered: finish on the Mac
 
+The card dragged away and not cancelled (`choice.cancel` answered
+`cancelled: false`, or refused): it springs back with this line.
+
+# [Copy] choice_not_dismissed
+
+- text: Couldn't dismiss the question
+
 `CHOICE_STALE`: the question was answered or closed on the Mac.
 
 # [Copy] choice_stale

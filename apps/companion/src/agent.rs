@@ -185,6 +185,9 @@ pub const PIN_LESS: &str = "Less";
 /// The dim lines for a card answered by dragging it away (item 4).
 pub const DENIED_BY_DISMISSING: &str = "Denied by dismissing";
 pub const NO_BY_DISMISSING: &str = "Answered No by dismissing";
+/// A choice question cancelled by the drag (plan 20261029_01, the
+/// 2026-10-30 16:42 EDT amendment, item 4), once the daemon says so.
+pub const DISMISSED_THE_QUESTION: &str = "Dismissed the question";
 
 /// A line height for type of `px` pixels.
 pub(crate) fn line_h(px: f32) -> f32 {
@@ -2545,6 +2548,9 @@ pub enum Dismissal {
         serial: Serial,
         answer: Option<libflankr_proto::common::Answer>,
     },
+    /// A choice question: cancelled with `choice.cancel` for its set `id`
+    /// (plan 20261029_01, the 2026-10-30 16:42 EDT amendment, item 4).
+    CancelChoice { serial: Serial, id: String },
 }
 
 impl Dismissal {
@@ -2552,7 +2558,9 @@ impl Dismissal {
     pub fn serial(&self) -> Serial {
         match self {
             Dismissal::Shrunk(s) | Dismissal::Removed(s) => *s,
-            Dismissal::Denied { serial, .. } | Dismissal::AnsweredNo { serial, .. } => *serial,
+            Dismissal::Denied { serial, .. }
+            | Dismissal::AnsweredNo { serial, .. }
+            | Dismissal::CancelChoice { serial, .. } => *serial,
         }
     }
 }
@@ -2655,6 +2663,11 @@ pub struct AgentScreen {
     /// The dim lines of cards answered by a drag, by the card's packed
     /// serial (item 4).
     notes: HashMap<u64, &'static str>,
+    /// A choice question dragged away whose `choice.cancel` is on its way
+    /// (plan 20261029_01, the 2026-10-30 16:42 EDT amendment, item 4): its
+    /// card's packed serial, its set's id, and the offset it left at, to
+    /// spring back from when it is not cancelled.
+    cancelling: Option<(u64, String, f32)>,
     /// *All sound* is on: summary cards draw their replay button.
     sound: bool,
     /// Seconds since the entries or the status last changed.
@@ -3785,10 +3798,9 @@ impl AgentScreen {
     }
 
     /// Whether the pinned card at `(x, y)` can be dragged away: shown in
-    /// full, live, and not a card a drag cannot answer. A choice question
-    /// is not: nothing on the phone or in the daemon cancels one yet (plan
-    /// 20261029_01 never sends Esc). Nor is a card a subagent's view would
-    /// answer, whose answers are inactive.
+    /// full, live, and not a card a drag cannot answer: a card a subagent's
+    /// view would answer, whose answers are inactive, or a choice question
+    /// whose answer or cancel is on its way.
     fn swipeable_at(&self, x: f32, y: f32) -> bool {
         let Some(p) = self.frame.pin.as_ref() else {
             return false;
@@ -3800,7 +3812,9 @@ impl AgentScreen {
             return false;
         };
         match card.kind {
-            CardKind::Question if card.choices.is_some() => false,
+            CardKind::Question if card.choices.is_some() => {
+                !self.answers_inactive() && !self.choice.sending() && self.cancelling.is_none()
+            }
             CardKind::Question if card.about_plan => true,
             CardKind::Question => !self.answers_inactive(),
             CardKind::Approval => card.confirm_id.is_some() && !self.answers_inactive(),
@@ -3811,16 +3825,26 @@ impl AgentScreen {
     /// The pinned card was dragged away (the L3 amendment of 2026-10-30
     /// 15:20 EDT, items 3 and 4): a Finished card or a plan question goes
     /// to one line in its place, unanswered; an approval is denied and a
-    /// yes/no question answered No, each with its dim line in the flow;
-    /// anything else (something broke) leaves the pinned place. What the
-    /// app is to send for it, if it was there to drag.
+    /// yes/no question answered No, each with its dim line in the flow; a
+    /// choice question leaves the pinned place while it is cancelled (plan
+    /// 20261029_01, the 2026-10-30 16:42 EDT amendment, item 4; its line
+    /// comes with the result, [`AgentScreen::choice_answered`]); anything
+    /// else (something broke) leaves the pinned place. What the app is to
+    /// send for it, if it was there to drag.
     pub fn dismiss_pinned(&mut self) -> Option<Dismissal> {
         let serial = self.pinned?;
         let card = self.pinned_card().filter(|c| c.live)?.clone();
         let key = serial.to_u64();
         let dismissal = match card.kind {
             CardKind::Finished => Dismissal::Shrunk(serial),
-            CardKind::Question if card.choices.is_some() => return None,
+            CardKind::Question if card.choices.is_some() => {
+                if self.choice.sending() || self.cancelling.is_some() {
+                    return None;
+                }
+                let id = card.choices.as_ref().map(|c| c.id.clone())?;
+                self.cancelling = Some((key, id.clone(), self.pin_dx));
+                Dismissal::CancelChoice { serial, id }
+            }
             CardKind::Question if card.about_plan => Dismissal::Shrunk(serial),
             CardKind::Question if !card.answers.is_empty() => match no_answer(&card) {
                 Some(i) => Dismissal::AnsweredNo {
@@ -3844,6 +3868,7 @@ impl AgentScreen {
             Dismissal::Removed(_) => (Gone::Removed, None),
             Dismissal::Denied { .. } => (Gone::Removed, Some(DENIED_BY_DISMISSING)),
             Dismissal::AnsweredNo { .. } => (Gone::Removed, Some(NO_BY_DISMISSING)),
+            Dismissal::CancelChoice { .. } => (Gone::Removed, None),
         };
         log::info!(
             "agent view: the pinned {:?} card dragged away: {gone:?}",
@@ -3972,8 +3997,37 @@ impl AgentScreen {
         action
     }
 
-    /// `choice.answer`'s result or refusal, for the set `id`.
+    /// `choice.answer`'s or `choice.cancel`'s result or refusal, for the
+    /// set `id`. A cancel's (plan 20261029_01, the 2026-10-30 16:42 EDT
+    /// amendment, item 4): `cancelled` leaves the dim line *Dismissed the
+    /// question* in the flow; `not_cancelled` springs the card back into
+    /// its pinned place, its line saying it could not be dismissed.
     pub fn choice_answered(&mut self, id: &str, outcome: &str, got: &[String], code: Option<i64>) {
+        if matches!(outcome, "cancelled" | "not_cancelled")
+            && let Some((key, _, dx)) = self.cancelling.take_if(|(_, c, _)| c == id)
+        {
+            if outcome == "cancelled" {
+                self.notes.insert(key, DISMISSED_THE_QUESTION);
+            } else {
+                self.gone.remove(&key);
+                // Live again, as the client still gives it pinned.
+                if self.view_pinned.is_some_and(|p| p.to_u64() == key)
+                    && let Some(b) = self.blocks.get_mut(&key)
+                    && let Shows::Card(card) = &mut b.shows
+                    && !card.live
+                {
+                    card.live = true;
+                    b.stale = true;
+                }
+                // From where it left: `tick` springs it back.
+                self.pin_dx = dx;
+                self.dirty = true;
+            }
+            self.refresh_blocks();
+            self.flow_stale = true;
+            self.repin();
+            self.sync_choice();
+        }
         let agent = if self.name.is_empty() {
             "The agent".to_string()
         } else {
@@ -11533,18 +11587,93 @@ mod tests {
         assert!(flow_notes(&a).is_empty());
     }
 
+    /// Drags the choice card 60 pt left at the S23's scale: the hit.
+    fn drag_choice(a: &mut AgentScreen) -> Option<AgentHit> {
+        swipe_pin(a, -60.0 * S23.scale, 20, Duration::from_secs(1), MS)
+    }
+
     #[test]
-    fn a_choice_question_is_not_dragged_away() {
+    fn a_choice_question_dragged_away_is_cancelled_with_its_line() {
         let mut a = choice_screen(choice_set(None));
-        let s = S23.scale;
-        let pin = a.frame().pin.as_ref().unwrap().rect;
-        let (x, y) = (pin.x + pin.w * 0.5, pin.y + 4.0 * s);
-        a.touch(9, TouchPhase::Started, x, y, Duration::ZERO);
-        for i in 1..=10 {
-            a.touch(9, TouchPhase::Moved, x - 6.0 * s * i as f32, y, MS * i);
+        let serial = a.pinned.unwrap();
+        assert_eq!(drag_choice(&mut a), Some(AgentHit::PinSwipe));
+        assert_eq!(
+            a.dismiss_pinned(),
+            Some(Dismissal::CancelChoice {
+                serial,
+                id: "toolu_1".into()
+            })
+        );
+        // Out of the pinned place while the cancel is on its way, with no
+        // line yet; not dragged again meanwhile.
+        assert!(a.frame().pin.is_none());
+        assert!(flow_notes(&a).is_empty());
+        assert!(a.dismiss_pinned().is_none());
+        // Cancelled: the line, and the client then leaves the card out.
+        a.choice_answered("toolu_1", "cancelled", &[], None);
+        assert_eq!(flow_notes(&a), [format!("-- {DISMISSED_THE_QUESTION}")]);
+        flat(&mut a, "idle", 0, conversation(3), vec![], None);
+        assert_eq!(flow_notes(&a), [format!("-- {DISMISSED_THE_QUESTION}")]);
+        assert!(a.choice().line().is_none());
+    }
+
+    #[test]
+    fn a_choice_question_not_cancelled_springs_back_with_a_note() {
+        for (got, code) in [
+            (vec![], None),
+            (
+                vec!["not the open choice question".to_string()],
+                Some(libflankr_proto::envelope::codes::CHOICE_STALE),
+            ),
+        ] {
+            let mut a = choice_screen(choice_set(None));
+            assert_eq!(drag_choice(&mut a), Some(AgentHit::PinSwipe));
+            assert!(matches!(
+                a.dismiss_pinned(),
+                Some(Dismissal::CancelChoice { .. })
+            ));
+            assert!(a.frame().pin.is_none());
+            // Another set's result is not this cancel's.
+            a.choice_answered("toolu_other", "not_cancelled", &[], None);
+            assert!(a.frame().pin.is_none());
+            a.choice_answered("toolu_1", "not_cancelled", &got, code);
+            assert!(
+                a.pinned_card()
+                    .is_some_and(|c| c.live && c.choices.is_some())
+            );
+            assert!(a.frame().pin.is_some(), "back in its place");
+            assert!(a.pin_offset() < 0.0, "from where it left");
+            let mut frames = 0;
+            while a.pin_offset() != 0.0 {
+                a.tick(MS);
+                frames += 1;
+                assert!(frames < 60);
+            }
+            assert_eq!(
+                a.choice().line().map(|l| l.text.as_str()),
+                Some("Couldn't dismiss the question")
+            );
+            assert!(flow_notes(&a).is_empty());
+            // It may be dragged again.
+            assert_eq!(drag_choice(&mut a), Some(AgentHit::PinSwipe));
+            assert!(a.dismiss_pinned().is_some());
         }
+    }
+
+    #[test]
+    fn a_choice_question_being_answered_is_not_dragged_away() {
+        let mut a = choice_screen(choice_set(None));
+        // Red, then Nuts and Done, then Submit: the answer is on its way.
+        a.choose(ChoiceHit::Option(0));
+        a.choose(ChoiceHit::Option(0));
+        a.choose(ChoiceHit::Done);
+        assert!(matches!(
+            a.choose(ChoiceHit::Submit),
+            Some(ChoiceAction::Send { .. })
+        ));
+        assert!(a.choice().sending());
+        assert_eq!(drag_choice(&mut a), None);
         assert_eq!(a.pin_offset(), 0.0, "the card does not follow");
-        a.touch(9, TouchPhase::Ended, x - 60.0 * s, y, MS * 11);
         assert!(a.dismiss_pinned().is_none());
         assert!(a.pinned_card().is_some_and(|c| c.choices.is_some()));
     }

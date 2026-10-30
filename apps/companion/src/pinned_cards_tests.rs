@@ -11,13 +11,17 @@
 
 use flankr_companion::{AgentCard, CardKind, Event, RemoteId, RemoteInfo, Shows, ViewSection};
 use libcontrols::Rect;
-use libflankr_proto::common::{AgentInfo, Entry, EntryKind, Role, Serial};
+use libflankr_proto::common::{
+    AgentInfo, ChoiceOption, ChoiceQuestion, ChoiceSet, Entry, EntryKind, Role, Serial,
+};
 use libmorph::script::{OutDir, Script, ScriptRun};
 use libmorph::{GpuError, MorphError};
 
 use super::App;
 use super::probe::{self, PinProbe, Probe};
-use crate::agent::{AgentHit, BUTTON_H, DENIED_BY_DISMISSING, PIN_LESS, PIN_MORE};
+use crate::agent::{
+    AgentHit, BUTTON_H, DENIED_BY_DISMISSING, DISMISSED_THE_QUESTION, PIN_LESS, PIN_MORE,
+};
 
 const READY: u32 = 4;
 const SETTLE: u32 = 8;
@@ -143,6 +147,12 @@ fn view(card: AgentCard) -> Event {
 }
 
 fn run(script: &str, card: &AgentCard) -> Option<Probe> {
+    run_with(script, card, Vec::new())
+}
+
+/// [`run`], with `after`'s events given as the client's once the app has
+/// sent an input starting with their text.
+fn run_with(script: &str, card: &AgentCard, after: Vec<(&'static str, Event)>) -> Option<Probe> {
     let dir = tempfile::tempdir().unwrap();
     let keys = dir.path().join("keys");
     let data = dir.path().join("data");
@@ -169,6 +179,16 @@ fn run(script: &str, card: &AgentCard) -> Option<Probe> {
     );
     probe::inject(READY, Event::Agents(vec![agent()]));
     probe::inject_after("OpenAgent", view(card.clone()));
+    // The test's choice results stand in for the daemon's.
+    if after
+        .iter()
+        .any(|(_, e)| matches!(e, Event::ChoiceAnswered { .. }))
+    {
+        probe::daemon_choices();
+    }
+    for (input, event) in after {
+        probe::inject_after(input, event);
+    }
     let script = Script::parse(script).unwrap();
     match libmorph::script::run::<App>(&script, run) {
         Err(MorphError::Gpu(GpuError::Adapter(error))) => {
@@ -375,4 +395,103 @@ fn a_short_drag_springs_back_and_does_nothing() {
     for part in ["Answer {", "DropSpeech", "Respond"] {
         assert_eq!(inputs_with(&p, part), 0, "{part}: {:?}", p.inputs);
     }
+}
+
+/// A live choice question's card (plan 20261029_01): one single-select
+/// question.
+fn choice_card() -> AgentCard {
+    let set = ChoiceSet::new(
+        "toolu_1",
+        vec![ChoiceQuestion::new(
+            "Colour",
+            "Which colour should the badge be?",
+            false,
+            true,
+            vec![
+                ChoiceOption::new("Teal", "matches the bar", None),
+                ChoiceOption::new("Amber", "stands out", None),
+            ],
+        )],
+        "claude_code/AskUserQuestion",
+    );
+    AgentCard {
+        choices: Some(set),
+        ..live(
+            CardKind::Question,
+            "Claude is asking",
+            "Which colour should the badge be?",
+        )
+    }
+}
+
+fn cancel_answered(outcome: &str, got: Vec<String>) -> Event {
+    Event::ChoiceAnswered {
+        id: "toolu_1".into(),
+        pane_id: "p1".into(),
+        outcome: outcome.into(),
+        got,
+        code: None,
+    }
+}
+
+#[test]
+fn a_choice_question_dragged_away_is_cancelled_with_its_line() {
+    let card = choice_card();
+    let Some((open, at, s)) = open_view(&card) else {
+        return;
+    };
+    let p = run_with(
+        &format!("{open}{}frames 4\n", sideways(&at, -60.0 * s, 6, 0)),
+        &card,
+        vec![("CancelChoice", cancel_answered("cancelled", Vec::new()))],
+    )
+    .unwrap();
+    assert_eq!(
+        inputs_with(&p, "CancelChoice { id: \"toolu_1\" }"),
+        1,
+        "{:?}",
+        p.inputs
+    );
+    assert_eq!(inputs_with(&p, "Choose {"), 0, "not answered");
+    assert_eq!(inputs_with(&p, "DropSpeech(Card("), 1, "{:?}", p.inputs);
+    assert!(p.drawer.pin.is_none(), "out of the pinned place");
+    assert!(
+        p.drawer
+            .flow_notes
+            .contains(&format!("-- {DISMISSED_THE_QUESTION}")),
+        "{:?}",
+        p.drawer.flow_notes
+    );
+}
+
+#[test]
+fn a_choice_question_not_cancelled_springs_back_with_a_note() {
+    let card = choice_card();
+    let Some((open, at, s)) = open_view(&card) else {
+        return;
+    };
+    let p = run_with(
+        &format!("{open}{}frames 20\n", sideways(&at, -60.0 * s, 6, 0)),
+        &card,
+        vec![("CancelChoice", cancel_answered("not_cancelled", Vec::new()))],
+    )
+    .unwrap();
+    assert_eq!(inputs_with(&p, "CancelChoice {"), 1, "{:?}", p.inputs);
+    let back = pin(&p);
+    assert_eq!(back.offset, 0.0, "sprung back into place");
+    assert!(!back.compact);
+    assert!(
+        back.texts
+            .iter()
+            .any(|t| t == "Couldn't dismiss the question"),
+        "{:?}",
+        back.texts
+    );
+    assert!(
+        !p.drawer
+            .flow_notes
+            .contains(&format!("-- {DISMISSED_THE_QUESTION}")),
+        "{:?}",
+        p.drawer.flow_notes
+    );
 }

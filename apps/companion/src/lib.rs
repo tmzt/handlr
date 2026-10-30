@@ -2911,7 +2911,8 @@ impl App {
                 self.send(Input::DropSpeech(SpeechOf::CatchUp));
             }
             // The pinned card dragged away: by its kind, answered Deny or
-            // No, or not answered; its speech goes either way.
+            // No, a choice question cancelled, or not answered; its speech
+            // goes either way.
             AgentHit::PinSwipe => {
                 let Some(dismissal) = self.agent.as_mut().and_then(|a| a.dismiss_pinned()) else {
                     return;
@@ -2927,6 +2928,8 @@ impl App {
                         answer: Some(answer),
                         ..
                     } => self.send(Input::Suggested(answer)),
+                    // Plan 20261029_01, the 2026-10-30 16:42 EDT amendment.
+                    Dismissal::CancelChoice { id, .. } => self.send(Input::CancelChoice { id }),
                     Dismissal::Shrunk(_) | Dismissal::Removed(_) => {}
                 }
             }
@@ -4574,7 +4577,10 @@ impl MorphApp for App {
             None => Vec::new(),
         };
         #[cfg(test)]
-        events.extend(probe::injected(self.updates));
+        {
+            events.retain(probe::from_client);
+            events.extend(probe::injected(self.updates));
+        }
         for event in events {
             self.on_event(event);
         }
@@ -5302,6 +5308,24 @@ pub(crate) mod probe {
     }
 
     thread_local! {
+        static DAEMON_CHOICES: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    /// The test gives the daemon's choice results (`inject_after`): the
+    /// client's own `Event::ChoiceAnswered`, which it gives at once since
+    /// no daemon is attached ("no session is open"), are dropped until the
+    /// next [`take`].
+    pub fn daemon_choices() {
+        DAEMON_CHOICES.with(|d| d.set(true));
+    }
+
+    /// Whether the client's `event` reaches the app.
+    pub fn from_client(event: &flankr_companion::Event) -> bool {
+        !(DAEMON_CHOICES.with(|d| d.get())
+            && matches!(event, flankr_companion::Event::ChoiceAnswered { .. }))
+    }
+
+    thread_local! {
         static SPEAKING: RefCell<Vec<(u32, bool)>> = const { RefCell::new(Vec::new()) };
     }
 
@@ -5525,6 +5549,7 @@ pub(crate) mod probe {
 
     /// The probe so far, emptied.
     pub fn take() -> Probe {
+        DAEMON_CHOICES.with(|d| d.set(false));
         PROBE.with(|p| std::mem::take(&mut *p.borrow_mut()))
     }
 
