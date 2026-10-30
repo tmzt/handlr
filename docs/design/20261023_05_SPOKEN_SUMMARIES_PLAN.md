@@ -431,3 +431,68 @@ The status returns from `Implemented` to `In implementation` for step
 Step 10 is done and its **Done when:** holds: libhandlr_proto 0.2.0
 (`b4f4fa1`, tag `libhandlr_proto-v0.2.0`), the daemon (`b7c9e8b`) and the client
 (`94c1c8f`). Every step is done; the status returns to `Implemented`.
+
+## Amendment — 2026-10-30 13:52 EDT: shorter spoken summaries, and the catch-up after voice input
+
+On the owner's instruction (Rule 1.5), 2026-10-30 (quoted in the dictated
+messages plan's amendment of the same time), agreed as proposed. The plan
+stays `Implemented` for what it built; this adds to it:
+
+1. **Shorter spoken summaries.** `spoken_summary` in
+   `ADDITIONAL_PROMPTS.md` also leaves out, unless the reply is only about
+   them: which files changed, worktrees and branches, log and report
+   entries, and test counts. It keeps what was done, what was found, and
+   any question for the user, in one to three sentences as now. The
+   on-screen `POINTS:` lines may still name files. `PROMPT.md` does not
+   change.
+2. **`speech.catch_up`,** a new companion method (libflankr_proto,
+   additive):
+
+   ```rust
+   pub struct SpeechCatchUpParams {
+       /// The held speech, oldest first.
+       pub held: Vec<HeldSpeech>,
+       /// What the voice input was: the message as sent, or Gemini's
+       /// prompt; None when it was cancelled or cleared.
+       #[serde(default, skip_serializing_if = "Option::is_none")]
+       pub said: Option<SaidInput>,
+   }
+   pub struct HeldSpeech {
+       /// The pane it came from, if any (a notice or a reply).
+       #[serde(default, skip_serializing_if = "Option::is_none")]
+       pub pane_id: Option<String>,
+       /// A reply's entry `ts`, RFC 3339, when it is one: the daemon reads
+       /// the whole reply from the transcript, as `speech.summarize` does.
+       #[serde(default, skip_serializing_if = "Option::is_none")]
+       pub ts: Option<String>,
+       /// The text that would have been said.
+       pub text: String,
+   }
+   pub struct SaidInput {
+       pub text: String,
+       /// The message's target pane; None for Gemini's prompt.
+       #[serde(default, skip_serializing_if = "Option::is_none")]
+       pub pane_id: Option<String>,
+   }
+   pub struct SpeechCatchUpResult {
+       /// The catch-up to say; None when none was made (the client then
+       /// says the held speech as it is).
+       #[serde(default, skip_serializing_if = "Option::is_none")]
+       pub summary: Option<String>,
+   }
+   ```
+
+   It is offered only while the daemon has a spoken summaries model, under
+   the same `client.options` as `speech.summarize`.
+3. **The `spoken_catch_up` prompt,** in `ADDITIONAL_PROMPTS.md`, on the
+   spoken summaries model: `max_words` 40, temperature 0.2. Its system
+   text: the user has just spoken or sent the given message (or nothing);
+   these replies and notices arrived while they spoke; say in one to three
+   short spoken sentences where things stand now, in light of what the
+   user just said; leave out what the new message has overtaken, and the
+   details item 1 leaves out; end with a question only if one is still
+   open. Its user text lists the held items with their agent and project,
+   then the message.
+4. **Failures.** No model, a refused or failed generation, or an empty
+   answer gives `summary: None`, logged once with the reason, never an
+   error to the client.

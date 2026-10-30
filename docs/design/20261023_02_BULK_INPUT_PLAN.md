@@ -428,3 +428,40 @@ The 13:37 EDT amendment's item 7 names "the record chimes" among the
 sounds that are not speech; the app has no record chime. The only such
 sound is the done ding (`Event::Ding`), which still plays during voice
 input. Nothing else changes.
+
+## Amendment — 2026-10-30 13:52 EDT: after voice input, one catch-up instead of the held speech
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "you have it just
+queuing up messages to play after, after the input. One of the reasons I
+was asking about the Gemini summaries was for, first of all, for it to be
+a shorter, more useful summary that doesn't have all the details like
+what file was updated, like in the observation logs and the individual
+work tree data and all that stuff. But also, it would be useful to have a
+summary that is more current and topical after the user has entered
+another round through their voice message", agreed as proposed. This
+replaces the 13:37 EDT amendment's item 3 when a catch-up can be made;
+its other items stand.
+
+1. **One catch-up.** When voice input ends and speech was held, the client
+   does not give the held items as they are. It asks the daemon for one
+   catch-up (`speech.catch_up`, the spoken summaries plan's amendment of
+   the same time) with the held items, oldest first, and what the voice
+   input was: the message as sent (its text and its target pane) or
+   Gemini's prompt, or nothing when the input was cancelled or cleared.
+2. **What is said.** The daemon's catch-up, given as one `Say`, under the
+   queue's usual rules. It is about where things stand now, in light of
+   what was just said: what the held replies did, found or ask, leaving
+   out what the new message has overtaken, at most about 40 words.
+3. **While it is made,** the held items stay held, and speech that
+   arrives meanwhile joins them for the next catch-up, not this one.
+4. **Fallback.** With spoken summaries off, no Gemini summary model, a
+   refused or failed request, or no answer within 8 s, the held items are
+   given as they are, as the 13:37 EDT amendment's item 3 says.
+5. **Only what was held.** A voice input with nothing held asks for no
+   catch-up. Muted, *Stop reading* or *All sound* off, nothing is held,
+   so nothing is asked (the 13:37 EDT amendment, item 4). What the 13:37
+   EDT amendment's item 6 still speaks during voice input is never part of
+   a catch-up.
+6. **Order of work.** This waits on spoken summaries working: today every
+   summary request fails on its model name (libinfer's Gemini model choice
+   plan, 20261030_01, fixes the model).
