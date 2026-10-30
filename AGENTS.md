@@ -215,6 +215,30 @@ These rules are flankr's own, beside the critical rules above.
 8. The commit that bumps the app's version is tagged
    `flankr-app-v<version>`, as Critical Rule 5.1 tags crate versions.
 
+### FLANKR RULE 2: THE DAEMON'S VERSION AND `UPDATES.md`
+
+1. `UPDATES.md` at the repository root is the changelog of the flankr
+   daemon and CLI, for the person who runs `flankr`. It lists only what
+   they can see or do differently: commands, subcommands and flags,
+   config keys and their defaults, what the daemon does with herdr and
+   the agents, what it logs or refuses that they act on, and the files it
+   reads or writes in their folders.
+2. The daemon's version is `version` in the root `Cargo.toml` (the
+   `flankr` crate). The root crate has no public API, so Critical Rule 5
+   gives it no bumps of its own; this rule is what moves it.
+3. FLANKR RULE 1's items 3 to 6 apply to it as they do to the app, with
+   the daemon's version and this file: every commit that makes a change
+   visible to the person running `flankr` bumps the daemon's version and
+   appends its entry here, in that same commit; minor for a new feature
+   or behaviour they would notice changing, patch for fixes and polish;
+   entries headed `## <version> — YYYY-MM-DD`, in plain language, a flag
+   or config key named as it is typed; append-only, with the "History
+   before versioning" section not added to.
+4. A daemon change the app's user also notices gets an entry in both
+   logs, each in its own reader's terms, and bumps both versions.
+5. The commit that bumps the daemon's version is tagged `v<version>`, as
+   Critical Rule 5.1 says for a crate, following the existing `v0.1.0`.
+
 ---
 
 ## 1. Core Architecture
