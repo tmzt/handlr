@@ -110,7 +110,7 @@ use tokio::time::timeout;
 use crate::CompanionConfig;
 use crate::client::{DeviceCodeFallback, Event, Input, Output, Settings, State, TICK, UNPAIR_WAIT};
 use crate::keys::{KeyStore, MAX_REMOTES, RemoteId, RemoteInfo, Remotes, ServerRecord};
-use crate::remote_state::RemoteState;
+use crate::remote_state::{LastSession, RemoteState};
 use crate::scan::{self, Pairing};
 use crate::terminal::Terminals;
 
@@ -293,6 +293,9 @@ struct LinkSlot {
     state: State,
     /// The remote's `state.redb`, open while it is listed.
     remote_state: Option<RemoteState>,
+    /// The session last open on it, as kept there (plan 20261024_02, the
+    /// 2026-10-30 15:20 EDT amendment, item 3).
+    last_session: Option<LastSession>,
     backoff: Backoff,
     /// Bumped with each attempt and each end: what an older attempt or
     /// connection reports is dropped.
@@ -702,6 +705,27 @@ impl Net {
                 let outputs = state.restore_agents(list);
                 self.pending.push_back((key, outputs));
             }
+            // The last session's view, shown at once when it is opened, and
+            // which session that was (plan 20261023_03 and plan 20261024_02,
+            // their 2026-10-30 15:20 EDT amendments).
+            let view = remote_state.as_ref().and_then(|r| match r.view() {
+                Ok(view) => view,
+                Err(e) => {
+                    log::warn!("state: reading the kept view: {e}");
+                    None
+                }
+            });
+            if let Some(view) = view {
+                let outputs = state.restore_view(view);
+                self.pending.push_back((key, outputs));
+            }
+            let last_session = remote_state.as_ref().and_then(|r| match r.last_session() {
+                Ok(last) => last,
+                Err(e) => {
+                    log::warn!("state: reading the last session: {e}");
+                    None
+                }
+            });
             log::info!(
                 "links: {}",
                 match key {
@@ -720,6 +744,7 @@ impl Net {
                 key,
                 state,
                 remote_state,
+                last_session,
                 backoff: Backoff::new(self.config.backoff_initial, self.config.backoff_max),
                 generation: 0,
                 conn: LinkConn::Waiting(tokio::time::Instant::now()),
@@ -746,6 +771,36 @@ impl Net {
             && let Err(e) = r.set_agents(&list)
         {
             log::warn!("state: keeping the agent list: {e}");
+        }
+    }
+
+    /// Keeps what `key`'s state has to keep of its agent view in its
+    /// `state.redb`: the view, and the last session (plan 20261023_03 and
+    /// plan 20261024_02, their 2026-10-30 15:20 EDT amendments).
+    fn keep_view(&mut self, key: LinkKey) {
+        let Some(slot) = self.slot_mut(key) else {
+            return;
+        };
+        if let Some(mut view) = slot.state.take_kept_view() {
+            view.set_kept_at(unix_now());
+            if let Some(r) = &slot.remote_state {
+                match r.set_view(&view) {
+                    Ok(()) => log::info!("state: the view kept, {} section(s)", view.sections()),
+                    Err(e) => log::warn!("state: keeping the view: {e}"),
+                }
+            }
+        }
+        if let Some(last) = slot.state.take_last_session() {
+            let last = last.map(|pane_id| LastSession {
+                pane_id,
+                shown: unix_now(),
+            });
+            if let Some(r) = &slot.remote_state
+                && let Err(e) = r.set_last_session(last.as_ref())
+            {
+                log::warn!("state: keeping the last session: {e}");
+            }
+            slot.last_session = last;
         }
     }
 
@@ -847,11 +902,22 @@ impl Net {
     /// Gives [`Event::Remotes`] if the rows changed since last given.
     fn show_remotes(&mut self) {
         let links = &self.links;
-        let rows = self.remotes.info_with(|id| {
+        let mut rows = self.remotes.info_with(|id| {
             links
                 .iter()
                 .any(|l| l.key == LinkKey::Remote(id) && l.state.online())
         });
+        // Each remote's last session, while its pane is listed.
+        for row in &mut rows {
+            row.last_session = links
+                .iter()
+                .find(|l| l.key == LinkKey::Remote(row.id))
+                .and_then(|l| {
+                    l.last_session
+                        .clone()
+                        .filter(|last| l.state.lists(&last.pane_id))
+                });
+        }
         if self.shown.as_ref() != Some(&rows) {
             self.shown = Some(rows.clone());
             self.emit(Event::Remotes(rows));
@@ -931,6 +997,7 @@ impl Net {
         let mut outputs = slot.state.input(tick);
         outputs.extend(slot.state.input(input));
         self.pending.push_back((key, outputs));
+        self.keep_view(key);
     }
 
     fn give_all(&mut self, input: Input) {

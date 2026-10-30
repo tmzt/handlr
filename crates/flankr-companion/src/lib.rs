@@ -52,14 +52,16 @@ pub use keys::{
 pub use net::{
     Backoff, CHECK_TIMEOUT, PAIRING_RETRY, PAIRING_WINDOW, RESULT_GRACE, REVOKE_TIMEOUT,
 };
-pub use remote_state::RemoteState;
+pub use remote_state::{LastSession, RemoteState};
 pub use terminal::{TerminalStatus, Terminals, key_batches};
 // What the app draws and reads of a terminal.
 pub use libflankr_proto::common::{
     MouseButton, TerminalClosedReason, TerminalMouseKind, TerminalSource,
 };
 pub use libflankr_term::{Cursor, Grid, Screen};
-pub use view::{AgentCard, Bookend, CardKind, Shows, ViewSection};
+pub use view::{
+    AgentCard, Bookend, CardKind, KEPT_BYTES, KEPT_SECTIONS, KeptView, Shows, ViewSection,
+};
 
 /// How the client runs.
 #[derive(Debug, Clone, PartialEq, Eq)]

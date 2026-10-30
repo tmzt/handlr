@@ -23,9 +23,9 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use flankr_companion::{
-    Companion, CompanionConfig, Event, FileKeyStore, Input, KeyStore, LEGACY_KEY_NAME, MAX_REMOTES,
-    PAIRING_WINDOW, REVOKE_TIMEOUT, RemoteId, RemoteInfo, RemoteState, Remotes, ServerRecord,
-    Speaker,
+    Companion, CompanionConfig, Event, FileKeyStore, Input, KeptView, KeyStore, LEGACY_KEY_NAME,
+    LastSession, MAX_REMOTES, PAIRING_WINDOW, REVOKE_TIMEOUT, RemoteId, RemoteInfo, RemoteState,
+    Remotes, ServerRecord, Speaker,
 };
 use libflankr_proto::link::{
     self, DeviceCode, Incoming, OFFER_LEN, PairAck, PairRefusal, PairRequest, PairResult,
@@ -1836,4 +1836,91 @@ fn the_drawer_lists_the_active_remote_every_3_s_with_a_view_open() {
     c.send(Input::DrawerShown(false));
     std::thread::sleep(Duration::from_millis(3300));
     assert_eq!(a.seen("agents.list").len(), before_a + 2);
+}
+
+/// The kept agent list of one agent in `pane`, as `state.redb` holds it.
+fn kept_agents(pane: &str) -> Vec<libflankr_proto::common::AgentInfo> {
+    serde_json::from_value(json!([{"pane_id": pane, "name": "the flankr agent",
+        "spoken": "the flankr agent", "agent": "claude", "project": "flankr",
+        "tab_label": "17-fl", "tab_number": 17, "status": "idle", "focused": false}]))
+    .unwrap()
+}
+
+#[test]
+fn the_last_session_and_its_view_come_from_state_redb_at_start() {
+    // Plan 20261024_02 and plan 20261023_03, their 2026-10-30 15:20 EDT
+    // amendments: a's last session is listed, b's is not; neither is
+    // reachable, so all of it is from the files.
+    let (a, b) = (Server::start(), Server::start());
+    let dir = tempfile::tempdir().unwrap();
+    let mut keys = FileKeyStore::new(keys_dir(&dir));
+    let ra = remote(&mut keys, &a, vec![closed_addr()], Some(10), true);
+    let rb = remote(&mut keys, &b, vec![closed_addr()], Some(20), true);
+    keys.set_remotes(&Remotes {
+        active: Some(ra.id),
+        list: vec![ra.clone(), rb.clone()],
+    })
+    .unwrap();
+    let data = data_dir(&dir);
+    let view: KeptView = serde_json::from_value(json!({
+        "pane_id": "w2:pZ", "session_id": "s1", "status": "idle",
+        "sections": [{"section": {"serial": "3fa9c21e:1.0", "kind": "text", "entries": [
+            {"ts": "1", "role": "assistant", "kind": "text", "summary": "Kept."}]}}]}))
+    .unwrap();
+    {
+        let state = RemoteState::open(&data, &ra).unwrap();
+        state.set_agents(&kept_agents("w2:pZ")).unwrap();
+        state.set_view(&view).unwrap();
+        let last = LastSession {
+            pane_id: "w2:pZ".into(),
+            shown: 1_700_000_000,
+        };
+        state.set_last_session(Some(&last)).unwrap();
+        let state = RemoteState::open(&data, &rb).unwrap();
+        state.set_agents(&kept_agents("w9:p1")).unwrap();
+        let last = LastSession {
+            pane_id: "w9:pGone".into(),
+            shown: 1_700_100_000,
+        };
+        state.set_last_session(Some(&last)).unwrap();
+    }
+    let c = companion(&dir);
+    let rows = expect_remotes(&c, "the last sessions", |rows| rows.len() == 2);
+    assert_eq!(
+        rows[0].last_session.as_ref().map(|l| l.pane_id.as_str()),
+        Some("w2:pZ")
+    );
+    assert_eq!(rows[1].last_session, None, "its pane is not listed");
+
+    // Opened offline: the kept view at once, cached.
+    c.send(Input::OpenAgent("w2:pZ".into()));
+    let view = expect_event(&c, "the kept view", |e| {
+        matches!(e, Event::AgentView { cached: true, .. })
+    });
+    let Event::AgentView {
+        sections, loading, ..
+    } = view
+    else {
+        unreachable!()
+    };
+    assert!(!loading);
+    assert_eq!(sections.len(), 1);
+    // Shown now: the time is the new one.
+    let rows = expect_remotes(&c, "shown again", |rows| {
+        rows[0]
+            .last_session
+            .as_ref()
+            .is_some_and(|l| l.shown > 1_700_000_000)
+    });
+    assert_eq!(rows[0].last_session.as_ref().unwrap().pane_id, "w2:pZ");
+    // Closed back to the overview: a's entry goes, and the view is kept.
+    c.send(Input::CloseAgent);
+    expect_remotes(&c, "cleared", |rows| rows[0].last_session.is_none());
+    drop(c);
+    eventually("a's state closed", || RemoteState::open(&data, &ra).is_ok());
+    let state = RemoteState::open(&data, &ra).unwrap();
+    assert_eq!(state.last_session().unwrap(), None);
+    let kept = state.view().unwrap().expect("kept as it closed");
+    assert_eq!(kept.pane_id(), "w2:pZ");
+    assert!(kept.kept_at() > 0);
 }

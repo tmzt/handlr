@@ -950,3 +950,48 @@ and a caller that gives neither sees no change.
   view's card at that section serial (the replies on its line, waiting to
   be summarized, read aloud or held for a catch-up), or `CatchUp`, the
   catch-up last given as `Event::CatchUp`.
+
+## flankr-companion 0.7.3 — 2026-10-30 (the commit tagged `flankr-companion-v0.7.3`)
+
+Plan 20261023_03 (session subscriptions) and plan 20261024_02 (the
+settings screen), their 2026-10-30 15:20 EDT amendments: the last view
+cached, shown at start and refreshed on connect, and *At startup*'s last
+session. Additive: the new fields are appended to a struct
+(`RemoteInfo`) and to a variant of the `#[non_exhaustive]` `Event`, which
+the owner's ruling of 2026-10-23 counts as additive ("appending to a
+struct is additive"); a pattern that names every field of
+`Event::AgentView` without `..` has to name the two new ones.
+
+- **Added:** `State::restore_view(KeptView)`: a session's view kept from
+  an earlier run goes into the cache of closed views; opening its pane
+  (`Input::OpenAgent`), even offline, shows it at once. Once online its
+  subscription resumes where the kept view ends and deliveries merge in
+  by serial. Gives `Event::Cache` when the cache's size changed.
+- **Added:** `Event::AgentView::cached`: the view shows what was kept,
+  and no delivery has come since; the first one clears it.
+- **Added:** `Event::AgentView::ended`: the restored session is gone (no
+  longer in the daemon's agent list, or its subscription said there is
+  no session); the view holds nothing. A view opened as before is never
+  `ended`.
+- **Added:** `State::take_kept_view()`: once, the view to keep, after the
+  agent view closed or `Input::Background(true)` came with it open: its
+  outline and the sections of the last screenful and a screenful either
+  side (the newest without a window), at most `KEPT_SECTIONS` (200) or
+  `KEPT_BYTES` (512 KiB) of section JSON. None for a subagent's view or
+  an ended one.
+- **Added:** `State::take_last_session()`: once, the last session's
+  change: `Some(Some(pane))` when a view opens or the app goes to the
+  background with it open, `Some(None)` on `Input::CloseAgent`.
+- **Added:** `State::lists(pane_id)`: whether the agent list as last
+  known has the pane.
+- **Added:** `KeptView` (with `pane_id()`, `session_id()`, `kept_at()`,
+  `sections()`, `set_kept_at()`), `KEPT_SECTIONS`, `KEPT_BYTES`, and
+  `LastSession { pane_id, shown }`.
+- **Added:** `RemoteState::view()`, `set_view()`, `last_session()` and
+  `set_last_session()`: `state.redb`'s new `view` table (one entry,
+  replaced each time) and `last_session` table (deleted with `None`).
+- **Added:** `RemoteInfo::last_session`: the remote's last open session
+  from its `state.redb`, while its pane is in the remote's agent list as
+  last known. The `net` thread keeps both tables as the view opens,
+  closes and goes to the background, and gives `Event::Remotes` when a
+  last session changes.

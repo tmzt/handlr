@@ -666,6 +666,151 @@ fn card_of(body: &CardBody, at: usize) -> AgentCard {
     }
 }
 
+/// The most sections a kept view holds (plan 20261023_03, the 2026-10-30
+/// 15:20 EDT amendment, item 1).
+pub const KEPT_SECTIONS: usize = 200;
+/// The most section JSON a kept view holds, in bytes.
+pub const KEPT_BYTES: usize = 512 * 1024;
+
+/// A session's view as kept in its remote's `state.redb` (plan 20261023_03,
+/// the 2026-10-30 15:20 EDT amendment, item 1): its outline, the sections
+/// around the last screenful (at most [`KEPT_SECTIONS`] or [`KEPT_BYTES`]
+/// of their JSON, whichever is less), its pane, its session id and when it
+/// was kept. Given back with
+/// [`State::restore_view`](crate::client::State::restore_view). Added in
+/// 0.7.3.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct KeptView {
+    pub(crate) pane_id: String,
+    #[serde(default)]
+    pub(crate) session_id: Option<String>,
+    #[serde(default)]
+    pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) outline_mode: bool,
+    #[serde(default)]
+    pub(crate) start: bool,
+    #[serde(default)]
+    pub(crate) outline: KeptOutline,
+    #[serde(default)]
+    pub(crate) sections: Vec<KeptSection>,
+    /// Unix seconds; set by the `net` thread as it writes it.
+    #[serde(default)]
+    pub(crate) kept_at: u64,
+}
+
+/// An outline as kept: its slots, the indexes known removed, its last
+/// index and epoch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct KeptOutline {
+    #[serde(default)]
+    slots: Vec<Slot>,
+    #[serde(default)]
+    removed: Vec<u64>,
+    #[serde(default)]
+    last: Option<u64>,
+    #[serde(default)]
+    epoch: Option<u64>,
+}
+
+/// A section as kept, with the slot `rev` its contents are of.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct KeptSection {
+    section: Section,
+    #[serde(default)]
+    rev: u32,
+}
+
+#[cfg(test)]
+impl KeptSection {
+    pub(crate) fn line(&self) -> u32 {
+        self.section.serial.line
+    }
+}
+
+impl KeptView {
+    /// The pane whose session it is.
+    pub fn pane_id(&self) -> &str {
+        &self.pane_id
+    }
+
+    /// The session's id, when the daemon named it.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// When it was kept, in Unix seconds (0 until written).
+    pub fn kept_at(&self) -> u64 {
+        self.kept_at
+    }
+
+    /// How many sections it holds.
+    pub fn sections(&self) -> usize {
+        self.sections.len()
+    }
+
+    /// Sets when it was kept.
+    pub fn set_kept_at(&mut self, secs: u64) {
+        self.kept_at = secs;
+    }
+}
+
+impl Outline {
+    /// The outline as kept.
+    pub(crate) fn kept(&self) -> KeptOutline {
+        KeptOutline {
+            slots: self.slots.values().copied().collect(),
+            removed: self.removed.iter().copied().collect(),
+            last: self.last,
+            epoch: self.epoch,
+        }
+    }
+
+    /// An outline from one kept.
+    pub(crate) fn from_kept(kept: &KeptOutline) -> Outline {
+        let mut outline = Outline::new(kept.epoch);
+        for &index in &kept.removed {
+            outline.remove(index);
+        }
+        for &slot in &kept.slots {
+            outline.put(slot);
+        }
+        outline.set_last(kept.last);
+        outline
+    }
+}
+
+impl Sections {
+    /// The sections `pick` gives, in its order, as kept: at most
+    /// [`KEPT_SECTIONS`], and no more once [`KEPT_BYTES`] of their JSON is
+    /// reached.
+    pub(crate) fn kept<'a>(&self, pick: impl Iterator<Item = &'a Section>) -> Vec<KeptSection> {
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        for section in pick.take(KEPT_SECTIONS) {
+            let size = serde_json::to_vec(section).map_or(usize::MAX, |j| j.len());
+            if bytes.saturating_add(size) > KEPT_BYTES {
+                break;
+            }
+            bytes += size;
+            out.push(KeptSection {
+                section: section.clone(),
+                rev: self.rev(section.serial).unwrap_or(0),
+            });
+        }
+        out
+    }
+
+    /// Sections from those kept.
+    pub(crate) fn from_kept(kept: &[KeptSection]) -> Sections {
+        let mut sections = Sections::default();
+        for k in kept {
+            sections.put_rev(k.section.clone(), k.rev);
+        }
+        sections
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;

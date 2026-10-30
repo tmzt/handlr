@@ -252,7 +252,15 @@ fn print_event(event: Event) {
             bookends: _,
             child,
             children: _,
+            cached,
+            ended,
         } => {
+            if cached {
+                println!("* cached");
+            }
+            if ended {
+                println!("* this session has ended");
+            }
             if new_content {
                 println!("* new content");
             }

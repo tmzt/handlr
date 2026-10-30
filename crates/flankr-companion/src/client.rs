@@ -832,6 +832,17 @@ pub enum Event {
         /// the running first, then the finished, newest first within
         /// each. Empty when it has none.
         children: Vec<common::ChildInfo>,
+        /// The view shows what was kept in the remote's `state.redb` from
+        /// an earlier run ([`State::restore_view`]), and no delivery has
+        /// come yet: the app shows the pull-to-refresh indicator until it
+        /// is `false` (plan 20261023_03, the 2026-10-30 15:20 EDT
+        /// amendment, items 2 and 3). Added in 0.7.3.
+        cached: bool,
+        /// The restored session is gone: no longer listed, or its
+        /// subscription said there is no session. The view holds nothing,
+        /// and the app says *This session has ended* (item 4). Added in
+        /// 0.7.3.
+        ended: bool,
     },
     /// An agent finished a turn: a new Finished card, on the overview's
     /// list or in the agent view (plan 20261024_02, decision 3). Play the
@@ -1605,6 +1616,13 @@ pub struct State {
     plugin_waiting: Vec<(String, u64)>,
     /// Binary transfers (plan 20261028_05, step 7).
     blobs: crate::blob::Blobs,
+    /// A view to keep in the remote's `state.redb`, not yet taken
+    /// ([`State::take_kept_view`]).
+    keep_view: Option<crate::view::KeptView>,
+    /// The last session changed, not yet taken
+    /// ([`State::take_last_session`]): `Some(pane)` shown, `None` closed
+    /// back to the overview.
+    last_session: Option<Option<String>>,
 }
 
 /// A refresh running (plan 20261022_03, the L3 amendment of 2026-10-24
@@ -1696,6 +1714,15 @@ struct AgentView {
     /// The memory pressure the view is under, until the app is back in
     /// front: it keeps and fetches contents only that close to the window.
     pressure: Option<Pressure>,
+    /// The session's id, as the daemon's last delivery named it.
+    session_id: Option<String>,
+    /// Restored from the remote's `state.redb` ([`State::restore_view`]),
+    /// and no delivery has come since (plan 20261023_03, the 2026-10-30
+    /// 15:20 EDT amendment, items 2 and 3).
+    cached: bool,
+    /// Restored, and then the session was no longer listed or the
+    /// subscription said there is none: *This session has ended* (item 4).
+    ended: bool,
 }
 
 impl AgentView {
@@ -1732,6 +1759,9 @@ impl AgentView {
             worked: false,
             backfill: false,
             pressure: None,
+            session_id: None,
+            cached: false,
+            ended: false,
         }
     }
 
@@ -1908,6 +1938,101 @@ impl AgentView {
             self.seen_replies.insert(e.ts.clone());
         }
     }
+
+    /// The view to keep in the remote's `state.redb` (plan 20261023_03,
+    /// the 2026-10-30 15:20 EDT amendment, item 1): its outline and the
+    /// sections of the last screenful and a screenful either side, the
+    /// nearest first, up to the caps ([`crate::view::KEPT_SECTIONS`],
+    /// [`crate::view::KEPT_BYTES`]). Without a window, the newest first.
+    /// `None` for a subagent's view, an ended one, or one holding nothing.
+    fn kept(&self) -> Option<crate::view::KeptView> {
+        if self.child.is_some() || self.ended {
+            return None;
+        }
+        if self.sections.is_empty() && self.outline.is_empty() {
+            return None;
+        }
+        let mut pick: Vec<(u64, u64, &common::Section)> = Vec::new();
+        if self.outline_mode {
+            let newest = self
+                .outline
+                .last()
+                .or_else(|| self.outline.slots().next_back().map(|s| s.index))
+                .unwrap_or(0);
+            let (lo, hi, reach) = match self.window {
+                Some(w) => (
+                    w.shown.0,
+                    w.shown.1,
+                    w.shown.1.saturating_sub(w.shown.0) + 1,
+                ),
+                None => (newest, newest, u64::MAX),
+            };
+            for s in self.sections.iter() {
+                let Some(slot) = self.outline.slot_of(s.serial) else {
+                    continue;
+                };
+                let i = slot.index;
+                let distance = if i < lo { lo - i } else { i.saturating_sub(hi) };
+                if distance <= reach {
+                    // Ties: the newer first.
+                    pick.push((distance, u64::MAX - i, s));
+                }
+            }
+        } else {
+            let n = self.sections.len() as u64;
+            for (i, s) in self.sections.iter().enumerate() {
+                pick.push((n - i as u64, 0, s));
+            }
+        }
+        pick.sort_by_key(|&(d, t, _)| (d, t));
+        Some(crate::view::KeptView {
+            pane_id: self.pane_id.clone(),
+            session_id: self.session_id.clone(),
+            status: self.status.clone(),
+            outline_mode: self.outline_mode,
+            start: self.start,
+            outline: if self.outline_mode {
+                self.outline.kept()
+            } else {
+                Default::default()
+            },
+            sections: self.sections.kept(pick.into_iter().map(|(_, _, s)| s)),
+            kept_at: 0,
+        })
+    }
+
+    /// A view restored from a remote's `state.redb`, as a closed view
+    /// kept in the cache: reopened, it shows at once.
+    fn from_kept(kept: crate::view::KeptView) -> AgentView {
+        let mut v = AgentView::new(kept.pane_id, None, kept.status);
+        v.session_id = kept.session_id;
+        v.outline_mode = kept.outline_mode;
+        v.start = kept.start;
+        v.outline = Outline::from_kept(&kept.outline);
+        v.sections = Sections::from_kept(&kept.sections);
+        // Usable at once: not "loading", and what it holds was seen.
+        v.answered = true;
+        v.cached = true;
+        v.reflatten();
+        v.see_all();
+        v
+    }
+
+    /// The restored view's session is gone (item 4): it holds nothing and
+    /// says so.
+    fn end(&mut self) {
+        log::info!("view: the restored session has ended");
+        self.ended = true;
+        self.cached = false;
+        self.sections.clear();
+        self.entries.clear();
+        self.outline = Outline::default();
+        self.incoming = None;
+        self.appending = false;
+        self.orphans = false;
+        self.pending_question = None;
+        self.generation += 1;
+    }
 }
 
 /// The serials of `now` whose sections differ from `before`'s, and those of
@@ -1958,6 +2083,8 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 bookends,
                 child,
                 children,
+                cached,
+                ended,
             },
             Event::AgentView {
                 name: name_b,
@@ -1976,6 +2103,8 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 bookends: bookends_b,
                 child: child_b,
                 children: children_b,
+                cached: cached_b,
+                ended: ended_b,
             },
         ) => {
             name == name_b
@@ -1992,6 +2121,8 @@ fn same_view(a: &Event, b: &Event) -> bool {
                 && bookends == bookends_b
                 && child == child_b
                 && children == children_b
+                && cached == cached_b
+                && ended == ended_b
                 && sections == sections_b
         }
         _ => a == b,
@@ -2072,6 +2203,8 @@ impl State {
             plugins: Vec::new(),
             plugin_waiting: Vec::new(),
             blobs: crate::blob::Blobs::new(),
+            keep_view: None,
+            last_session: None,
         }
     }
 
@@ -2170,6 +2303,65 @@ impl State {
     /// what showed: the list to keep.
     pub fn take_new_list(&mut self) -> Option<Vec<common::AgentInfo>> {
         std::mem::take(&mut self.new_list).then(|| self.agents.clone())
+    }
+
+    /// Whether the agent list as last known (kept, or the daemon's) has
+    /// `pane_id`. Added in 0.7.3.
+    pub fn lists(&self, pane_id: &str) -> bool {
+        self.agents.iter().any(|a| a.pane_id == pane_id)
+    }
+
+    /// Takes in `view`, a session's view kept from an earlier run (plan
+    /// 20261023_03, the 2026-10-30 15:20 EDT amendment, item 2), as a
+    /// closed view in the cache: when its pane's view is opened
+    /// ([`Input::OpenAgent`]), even before the connection is up, it shows
+    /// at once as the usual [`Event::AgentView`] with `cached`, usable for
+    /// scrolling, reading and links. Once online its subscription resumes
+    /// where the kept view ends and its deliveries merge in by serial;
+    /// the first clears `cached`. If the session is no longer listed, or
+    /// the subscription says there is none, the view is `ended`. Gives
+    /// [`Event::Cache`] if the cache's size changed; nothing when a view of
+    /// that pane is already open or cached. Added in 0.7.3.
+    pub fn restore_view(&mut self, view: crate::view::KeptView) -> Vec<Output> {
+        let mut out = Vec::new();
+        let pane = view.pane_id.clone();
+        let held = self
+            .view
+            .iter()
+            .chain(self.closed.iter())
+            .any(|v| v.pane_id == pane && v.child.is_none());
+        if held {
+            return out;
+        }
+        let v = AgentView::from_kept(view);
+        log::info!(
+            "view: restored from the state, {} section(s), {} slot(s)",
+            v.sections.len(),
+            v.outline.len()
+        );
+        self.closed.push_back(v);
+        while self.closed.len() > CACHED_VIEWS {
+            self.closed.pop_front();
+        }
+        self.show_cache(&mut out);
+        out
+    }
+
+    /// The view to keep in the remote's `state.redb`, once, after the
+    /// agent view closed or the app went to the background with it open
+    /// (plan 20261023_03, the 2026-10-30 15:20 EDT amendment, item 1).
+    /// Added in 0.7.3.
+    pub fn take_kept_view(&mut self) -> Option<crate::view::KeptView> {
+        self.keep_view.take()
+    }
+
+    /// The last session's change, once (plan 20261024_02, the 2026-10-30
+    /// 15:20 EDT amendment, item 3): `Some(Some(pane))` when a session's
+    /// view was opened or the app went to the background with it open,
+    /// `Some(None)` when the agent view was closed back to the overview
+    /// ([`Input::CloseAgent`]). Added in 0.7.3.
+    pub fn take_last_session(&mut self) -> Option<Option<String>> {
+        self.last_session.take()
     }
 
     /// Sets the session to continue, such as one stored from an earlier run.
@@ -2610,6 +2802,10 @@ impl State {
             Input::OpenChild(id) => self.open_child(Some(id), &mut out),
             Input::CloseChild => self.open_child(None, &mut out),
             Input::CloseAgent => {
+                // Back to the overview: the overview opens next time.
+                if self.view.is_some() {
+                    self.last_session = Some(None);
+                }
                 self.close_view(&mut out);
                 // Back on the overview: its list is refreshed.
                 self.list_wanted = true;
@@ -2642,7 +2838,17 @@ impl State {
             Input::Respond(response) => self.respond(response, &mut out),
             Input::Suggested(answer) => self.suggested(answer, &mut out),
             Input::Choose { id, answers } => self.choose(id, answers, &mut out),
-            Input::Background(on) => self.set_background(on, &mut out),
+            Input::Background(on) => {
+                // Gone to the background with a view open: it is kept, and
+                // is the last session, shown now.
+                if on && let Some(v) = &self.view {
+                    self.last_session = Some(Some(v.pane_id.clone()));
+                    if let Some(kept) = v.kept() {
+                        self.keep_view = Some(kept);
+                    }
+                }
+                self.set_background(on, &mut out)
+            }
             Input::Skip => {
                 if self.speaking {
                     out.push(event(Event::StopSpeaking));
@@ -2958,6 +3164,13 @@ impl State {
         let Some(mut v) = self.view.take() else {
             return;
         };
+        if let Some(kept) = v.kept() {
+            self.keep_view = Some(kept);
+        }
+        if v.ended {
+            // Nothing to reopen.
+            return;
+        }
         v.park();
         self.closed
             .retain(|c| c.pane_id != v.pane_id || c.child != v.child);
@@ -3318,6 +3531,8 @@ impl State {
                 .find(|a| a.pane_id == v.pane_id)
                 .map(|a| a.children.clone())
                 .unwrap_or_default(),
+            cached: v.cached,
+            ended: v.ended,
         })
     }
 
@@ -3430,6 +3645,7 @@ impl State {
     /// `child` (the subagents plan, step 4).
     fn open_view(&mut self, pane_id: String, child: Option<String>, out: &mut Vec<Output>) {
         self.interact(&pane_id);
+        self.last_session = Some(Some(pane_id.clone()));
         // Its own cards are seen.
         self.cross.dismiss(&pane_id, true);
         if self
@@ -3833,6 +4049,22 @@ impl State {
         {
             self.open_agent(focus.pane_id.clone(), out);
         }
+    }
+
+    /// The restored view's pane is no longer in the daemon's list: its
+    /// session has ended (plan 20261023_03, the 2026-10-30 15:20 EDT
+    /// amendment, item 4).
+    fn end_unlisted(&mut self, out: &mut Vec<Output>) {
+        let agents = &self.agents;
+        let Some(v) = self
+            .view
+            .as_mut()
+            .filter(|v| v.cached && !agents.iter().any(|a| a.pane_id == v.pane_id))
+        else {
+            return;
+        };
+        v.end();
+        self.show_view(out);
     }
 
     /// Gives the pending panes if they changed, and the view if it did.
@@ -5219,6 +5451,7 @@ impl State {
                     }
                     self.listed = true;
                     self.agents = list.agents;
+                    self.end_unlisted(out);
                     self.list_learned(out);
                     self.set_focus(list.focus, out);
                     if let Some(d) = self.dictation.as_mut() {
@@ -5612,6 +5845,12 @@ impl State {
         };
         let first = !v.answered || std::mem::take(&mut v.backfill);
         v.answered = true;
+        // The first delivery since the view was restored: it is no longer
+        // only what was kept.
+        let restored = std::mem::take(&mut v.cached);
+        if let Some(session) = &d.session {
+            v.session_id = session.session_id.clone();
+        }
         if let Some(status) = d.status.take() {
             v.status = status;
         }
@@ -5635,6 +5874,9 @@ impl State {
             if d.reason.as_deref() == Some(common::delivery_reasons::PANE_CLOSED) {
                 // No more deliveries come; the subscription is over.
                 v.subscription = None;
+            }
+            if restored {
+                v.end();
             }
         } else if v.outline_mode {
             take_outline(v, d, now);
@@ -9798,6 +10040,212 @@ mod tests {
         assert_eq!(s.take_new_list(), None, "once");
         // Listed: a kept list no longer replaces what the daemon gave.
         assert!(s.restore_agents(kept).is_empty());
+    }
+
+    // The last view kept, shown at start and refreshed on connect (plan
+    // 20261023_03, the 2026-10-30 15:20 EDT amendment).
+
+    /// The view of w2:pZ seen with `asking()` and closed: what was kept.
+    fn kept_view() -> crate::view::KeptView {
+        let mut s = viewing("idle", asking());
+        assert_eq!(s.take_last_session(), Some(Some("w2:pZ".to_string())));
+        s.input(Input::CloseAgent);
+        assert_eq!(s.take_last_session(), Some(None), "closed to the overview");
+        let kept = s.take_kept_view().expect("kept as it closed");
+        assert_eq!(s.take_kept_view(), None, "once");
+        // As state.redb holds it.
+        serde_json::from_str(&serde_json::to_string(&kept).unwrap()).unwrap()
+    }
+
+    /// A new run's state: the kept list with w2:pZ and the kept view, the
+    /// view opened before the connection is up.
+    fn restored() -> (State, Vec<Output>) {
+        let mut s = State::new("test");
+        s.restore_agents(serde_json::from_value(json!([agent_info("w2:pZ", "idle")])).unwrap());
+        let out = s.restore_view(kept_view());
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Cache { bytes } if *bytes > 0))
+        );
+        let out = s.input(Input::OpenAgent("w2:pZ".into()));
+        (s, out)
+    }
+
+    /// The last view given in `out`: its `cached`, `ended` and `loading`.
+    fn view_flags(out: &[Output]) -> Option<(bool, bool, bool)> {
+        out.iter().rev().find_map(|o| match o {
+            Output::Event(Event::AgentView {
+                cached,
+                ended,
+                loading,
+                ..
+            }) => Some((*cached, *ended, *loading)),
+            _ => None,
+        })
+    }
+
+    /// `s` connects and `hello` is answered: what it sent then.
+    fn connect(s: &mut State) -> Vec<Output> {
+        let out = s.connected();
+        let id = sent(&out)[0].id.clone();
+        s.incoming(response(
+            id,
+            json!({"server": "flankr", "session_id": "companion:test", "vocabulary": []}),
+        ))
+    }
+
+    #[test]
+    fn a_kept_view_shows_at_once_offline_and_is_refreshed_on_connect() {
+        let (mut s, out) = restored();
+        assert_eq!(
+            view_flags(&out),
+            Some((true, false, false)),
+            "cached, usable"
+        );
+        assert_eq!(
+            summaries(&s),
+            ["go", "Done.\n\nShall I go on?"],
+            "what was kept"
+        );
+        assert!(sent(&out).is_empty(), "offline: nothing sent");
+        assert_eq!(s.take_last_session(), Some(Some("w2:pZ".to_string())));
+        // Connected: the subscription resumes after the newest kept serial.
+        let out = connect(&mut s);
+        let sub = requests(&out, "session.subscribe")
+            .first()
+            .map(|r| (*r).clone())
+            .expect("subscribed on connect");
+        // After the newest kept: the question card on line 2.
+        assert_eq!(
+            sub.params["after"],
+            json!(serial(2, 128)),
+            "{:?}",
+            sub.params
+        );
+        assert_eq!(view_flags(&out).map(|f| f.0), None, "still as it was");
+        assert!(matches!(
+            s.agent_view(),
+            Some(Event::AgentView { cached: true, .. })
+        ));
+        // Its first delivery merges in by serial, and it is cached no more.
+        let out = s.incoming(response(
+            sub.id,
+            json!({"subscription_id": 1, "delivery": {
+                "subscription_id": 1, "pane_id": "w2:pZ", "agent": "claude",
+                "reset": false, "session": {"session_id": "s1", "matched": "id"},
+                "reason": null, "sections": [text_at(3, 0, "And on.")], "removed": [],
+                "status": "idle"}}),
+        ));
+        assert_eq!(view_flags(&out), Some((false, false, false)));
+        assert_eq!(summaries(&s), ["go", "Done.\n\nShall I go on?", "And on."]);
+        // Its earlier replies were seen: none is read aloud.
+        assert!(!events(&out).iter().any(|e| matches!(e, Event::Say(_))));
+    }
+
+    #[test]
+    fn a_kept_view_whose_session_is_gone_says_it_has_ended() {
+        // The subscription says there is no session.
+        let (mut s, _) = restored();
+        let out = connect(&mut s);
+        let out = session_answer(&mut s, &out, "idle", json!(null));
+        assert_eq!(view_flags(&out), Some((false, true, false)));
+        assert!(summaries(&s).is_empty());
+        // Closed: nothing kept of it, nothing cached.
+        s.take_kept_view();
+        s.input(Input::CloseAgent);
+        assert_eq!(s.take_kept_view(), None);
+        assert!(s.cached_panes().is_empty());
+
+        // The daemon's list no longer has the pane.
+        let (mut s, _) = restored();
+        let out = connect(&mut s);
+        let out = answer_list(&mut s, &out, json!([agent_info("w2:pA", "idle")]));
+        assert_eq!(view_flags(&out), Some((false, true, false)));
+        assert!(!s.lists("w2:pZ"));
+
+        // A view opened as usual with no session is not "ended".
+        let s = viewing("idle", json!(null));
+        assert!(matches!(
+            s.agent_view(),
+            Some(Event::AgentView {
+                ended: false,
+                cached: false,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_outline_views_kept_sections_are_the_screenful_and_one_either_side() {
+        let mut v = AgentView::new("w2:pZ".into(), None, "idle".into());
+        v.outline_mode = true;
+        for i in 0..100u32 {
+            let mut section = crate::view::tests::text(i + 1, 0, "a line");
+            section.index = u64::from(i);
+            v.outline.put(common::Slot {
+                index: u64::from(i),
+                serial: section.serial,
+                kind: common::SectionKind::Text,
+                lines: 1,
+                chars: 6,
+                rev: 0,
+                bookend: false,
+            });
+            v.sections.put(section);
+        }
+        v.outline.set_last(Some(99));
+        v.window = Some(ViewWindow {
+            shown: (40, 44),
+            close: (35, 49),
+            near: (30, 54),
+            keep: (0, 99),
+            scrolled_back: true,
+        });
+        let kept = v.kept().unwrap();
+        let mut lines: Vec<u32> = kept.sections.iter().map(|k| k.line()).collect();
+        lines.sort();
+        // Indexes 35 to 49: lines 36 to 50.
+        assert_eq!(lines, (36..=50).collect::<Vec<_>>());
+        // The whole outline is kept, and comes back as it was.
+        let back = AgentView::from_kept(kept);
+        assert_eq!(back.outline.len(), 100);
+        assert_eq!(back.outline.last(), Some(99));
+        assert_eq!(back.outline.resume(), v.outline.resume());
+        assert!(back.cached && back.answered && back.outline_mode);
+        // Without a window, the newest first.
+        v.window = None;
+        let kept = v.kept().unwrap();
+        assert_eq!(kept.sections(), 100);
+        // A subagent's view is not kept.
+        v.child = Some("a1".into());
+        assert!(v.kept().is_none());
+    }
+
+    #[test]
+    fn going_to_the_background_keeps_the_view_up_to_the_caps() {
+        let mut s = viewing("idle", asking());
+        s.take_last_session();
+        let many: Vec<Value> = (10..310).map(|l| text_at(l, 0, "a line")).collect();
+        deliver(&mut s, many, Vec::new());
+        s.input(Input::Background(true));
+        let kept = s.take_kept_view().expect("kept in the background");
+        assert_eq!(kept.sections(), crate::view::KEPT_SECTIONS);
+        // The newest first: the last line is in it, the first is not.
+        let lines: Vec<u32> = kept.sections.iter().map(|k| k.line()).collect();
+        assert!(lines.contains(&309) && !lines.contains(&1), "{lines:?}");
+        assert_eq!(s.take_last_session(), Some(Some("w2:pZ".to_string())));
+        s.input(Input::Background(false));
+        assert_eq!(s.take_kept_view(), None, "only going to the background");
+
+        // At most 512 KiB of section JSON.
+        let mut s = viewing("idle", asking());
+        let big = "x".repeat(100 * 1024);
+        let large: Vec<Value> = (10..20).map(|l| text_at(l, 0, &big)).collect();
+        deliver(&mut s, large, Vec::new());
+        s.input(Input::Background(true));
+        let kept = s.take_kept_view().unwrap();
+        assert_eq!(kept.sections(), 5, "five of 100 KiB fit, a sixth does not");
     }
 
     /// Online at 0 s, hello's list answered with one working agent.

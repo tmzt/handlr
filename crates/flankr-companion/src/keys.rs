@@ -339,6 +339,13 @@ pub struct RemoteInfo {
     pub nickname: Option<String>,
     /// The name shown ([`Remotes::display_names`]).
     pub display_name: String,
+    /// The session last open on it, from its `state.redb`, while that
+    /// session's pane is in the remote's agent list as last known (kept
+    /// from the last run, or the daemon's): for *At startup*'s *Last
+    /// session* (plan 20261024_02, the 2026-10-30 15:20 EDT amendment,
+    /// item 3). `None` from [`Remotes::info_with`], which does not read
+    /// the state; the `net` thread fills it in. Added in 0.7.3.
+    pub last_session: Option<crate::remote_state::LastSession>,
 }
 
 impl Remotes {
@@ -370,6 +377,7 @@ impl Remotes {
                     fingerprint_words: link::fingerprint_words_text(&r.public_key),
                     nickname: r.nickname.clone(),
                     display_name,
+                    last_session: None,
                 }
             })
             .collect()

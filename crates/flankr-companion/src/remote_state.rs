@@ -8,7 +8,14 @@
 //! eviction and no session count (plan 20261028_01, the 13:06 EDT
 //! amendment). It also holds `agents`: the remote's last agent list, as
 //! JSON under `list`, kept so the list shows at once at the next start
-//! (plan 20261028_03, the 2026-10-30 13:15 EDT amendment).
+//! (plan 20261028_03, the 2026-10-30 13:15 EDT amendment). Since 0.7.3,
+//! `view`: under `view`, the last session's view as JSON ([`KeptView`]),
+//! replaced each time the agent view closes or the app goes to the
+//! background with it open (plan 20261023_03, the 2026-10-30 15:20 EDT
+//! amendment, item 1); and `last_session`: under `last`, the last open
+//! session's pane and when it was last shown ([`LastSession`]), deleted
+//! when the agent view is closed back to the overview (plan 20261024_02,
+//! the 2026-10-30 15:20 EDT amendment, item 3).
 //!
 //! The directories are made 0700 and a new file 0600 as they are created,
 //! never loosened and then tightened (plan 20261028_01, the 14:37 EDT
@@ -27,12 +34,28 @@ use base64::engine::general_purpose::STANDARD;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::keys::{RemoteId, Remotes, ServerRecord};
+use crate::view::KeptView;
+
+/// The session last open on a remote (plan 20261024_02, the 2026-10-30
+/// 15:20 EDT amendment, item 3): its pane, and when it was last shown, in
+/// Unix seconds. Added in 0.7.3.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LastSession {
+    pub pane_id: String,
+    pub shown: u64,
+}
 
 /// The `meta` table: names to values, all text.
 const META: TableDefinition<&str, &str> = TableDefinition::new("meta");
 
 /// The `agents` table: `list`, the last agent list as JSON.
 const AGENTS: TableDefinition<&str, &str> = TableDefinition::new("agents");
+
+/// The `view` table: `view`, the last session's view as JSON.
+const VIEW: TableDefinition<&str, &str> = TableDefinition::new("view");
+
+/// The `last_session` table: `last`, the last open session as JSON.
+const LAST_SESSION: TableDefinition<&str, &str> = TableDefinition::new("last_session");
 
 /// The layout of `state.redb` this crate writes.
 pub const STATE_SCHEMA: u32 = 1;
@@ -259,6 +282,83 @@ impl RemoteState {
         write.commit().map_err(|e| db_err(path, e))
     }
 
+    /// The last session's view as kept, or `None` if none was (or what was
+    /// kept no longer reads). Added in 0.7.3.
+    pub fn view(&self) -> Result<Option<KeptView>, String> {
+        self.read_json(VIEW, "view", "the kept view")
+    }
+
+    /// Keeps `view` as the last session's view, replacing the one before.
+    /// Added in 0.7.3.
+    pub fn set_view(&self, view: &KeptView) -> Result<(), String> {
+        self.write_json(VIEW, "view", Some(view))
+    }
+
+    /// The last open session, or `None`. Added in 0.7.3.
+    pub fn last_session(&self) -> Result<Option<LastSession>, String> {
+        self.read_json(LAST_SESSION, "last", "the last session")
+    }
+
+    /// Keeps `last` as the last open session, or with `None` deletes it.
+    /// Added in 0.7.3.
+    pub fn set_last_session(&self, last: Option<&LastSession>) -> Result<(), String> {
+        self.write_json(LAST_SESSION, "last", last)
+    }
+
+    fn read_json<T: serde::de::DeserializeOwned>(
+        &self,
+        table: TableDefinition<&str, &str>,
+        key: &str,
+        what: &str,
+    ) -> Result<Option<T>, String> {
+        let path = &self.path;
+        let read = self.db.begin_read().map_err(|e| db_err(path, e))?;
+        let table = match read.open_table(table) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(e) => return Err(db_err(path, e)),
+        };
+        let Some(json) = table.get(key).map_err(|e| db_err(path, e))? else {
+            return Ok(None);
+        };
+        match serde_json::from_str(json.value()) {
+            Ok(value) => Ok(Some(value)),
+            Err(e) => {
+                log::warn!("state: {}: {what}: {e}", path.display());
+                Ok(None)
+            }
+        }
+    }
+
+    /// Writes `value` as JSON under `key`, or deletes `key` with `None`.
+    fn write_json<T: serde::Serialize>(
+        &self,
+        table: TableDefinition<&str, &str>,
+        key: &str,
+        value: Option<&T>,
+    ) -> Result<(), String> {
+        let path = &self.path;
+        let json = value
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| db_err(path, e))?;
+        let write = self.db.begin_write().map_err(|e| db_err(path, e))?;
+        {
+            let mut table = write.open_table(table).map_err(|e| db_err(path, e))?;
+            match &json {
+                Some(json) => {
+                    table
+                        .insert(key, json.as_str())
+                        .map_err(|e| db_err(path, e))?;
+                }
+                None => {
+                    table.remove(key).map_err(|e| db_err(path, e))?;
+                }
+            }
+        }
+        write.commit().map_err(|e| db_err(path, e))
+    }
+
     /// Deletes `<data dir>/remotes/<id>/`, which must not be open. Nothing
     /// there is not an error.
     pub fn delete(data_dir: &Path, id: RemoteId) -> Result<(), String> {
@@ -391,6 +491,35 @@ mod tests {
         // Replaced, not added to.
         again.set_agents(&[]).unwrap();
         assert_eq!(again.agents().unwrap(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn the_view_and_the_last_session_are_kept_and_read_back_after_reopening() {
+        let data = tempfile::tempdir().unwrap();
+        let r = remote(1);
+        let state = RemoteState::open(data.path(), &r).unwrap();
+        assert_eq!(state.view().unwrap(), None);
+        assert_eq!(state.last_session().unwrap(), None);
+        let view: KeptView = serde_json::from_value(serde_json::json!({
+            "pane_id": "w1:p1", "session_id": "s1", "status": "idle",
+            "kept_at": 1_793_400_000u64}))
+        .unwrap();
+        state.set_view(&view).unwrap();
+        let last = LastSession {
+            pane_id: "w1:p1".into(),
+            shown: 1_793_400_000,
+        };
+        state.set_last_session(Some(&last)).unwrap();
+        drop(state);
+        let again = RemoteState::open(data.path(), &r).unwrap();
+        assert_eq!(again.view().unwrap(), Some(view));
+        assert_eq!(again.last_session().unwrap(), Some(last));
+        // Closed back to the overview: deleted; the view stays.
+        again.set_last_session(None).unwrap();
+        assert_eq!(again.last_session().unwrap(), None);
+        assert!(again.view().unwrap().is_some());
+        // Nothing to delete: not an error.
+        again.set_last_session(None).unwrap();
     }
 
     #[test]
