@@ -62,6 +62,7 @@ pub mod link_spans;
 mod notice_line;
 pub mod subagent_link;
 pub mod subagent_menu;
+pub mod swipe;
 pub mod terminal_view;
 pub use choice_card::{ChoiceAction, ChoiceCard, ChoiceHit};
 use input_box::InputBox;
@@ -176,6 +177,14 @@ pub const SPOKEN: &str = "spoken";
 const BULLET: &str = "\u{2022} ";
 /// Lines of the pinned card's text.
 const PIN_LINES: usize = 3;
+/// The pinned card's link at its bottom right, the only thing that
+/// changes its size (plan 20261022_03, the L3 amendment of 2026-10-30
+/// 15:20 EDT, item 1): cut off, *More*; shown whole, *Less*.
+pub const PIN_MORE: &str = "More";
+pub const PIN_LESS: &str = "Less";
+/// The dim lines for a card answered by dragging it away (item 4).
+pub const DENIED_BY_DISMISSING: &str = "Denied by dismissing";
+pub const NO_BY_DISMISSING: &str = "Answered No by dismissing";
 
 /// A line height for type of `px` pixels.
 pub(crate) fn line_h(px: f32) -> f32 {
@@ -354,6 +363,14 @@ pub enum AgentHit {
     /// The *While you spoke* card's ✕: dismiss the catch-up (plan
     /// 20261023_02, the 2026-10-30 15:10 EDT amendment).
     CatchUpDismiss,
+    /// The *While you spoke* card dragged sideways off the screen (plan
+    /// 20261022_03, the L3 amendment of 2026-10-30 15:20 EDT, item 3):
+    /// dismissed, with its speech.
+    CatchUpSwipe,
+    /// The pinned card dragged sideways off the screen (the same
+    /// amendment, items 2 to 4): [`AgentScreen::dismiss_pinned`] says what
+    /// that does for its kind.
+    PinSwipe,
     /// A key of the terminal's keys row (plan 20261022_03, the L3
     /// amendment of 2026-10-28 10:42 EDT): its keys go to the pane, and a
     /// tap on it never reaches the terminal or the soft keyboard.
@@ -454,6 +471,9 @@ pub struct BlockState {
     /// Its calls that started a subagent, drawn as links to it (the
     /// subagents plan, decision 4).
     pub subagents: Vec<subagent_link::SubagentLink>,
+    /// Dim lines after it: a card answered by dragging it away (plan
+    /// 20261022_03, the L3 amendment of 2026-10-30 15:20 EDT, item 4).
+    pub notes: Vec<&'static str>,
 }
 
 impl Default for BlockState {
@@ -465,6 +485,7 @@ impl Default for BlockState {
             context: None,
             choice: None,
             subagents: Vec::new(),
+            notes: Vec::new(),
         }
     }
 }
@@ -674,6 +695,88 @@ pub fn finished_line(card: &AgentCard, context: Option<&str>) -> String {
     } else {
         format!("{}: {first}", card.title)
     }
+}
+
+/// A card dragged down to one line in the pinned card's place (plan
+/// 20261022_03, the L3 amendment of 2026-10-30 15:20 EDT, item 3):
+/// `<title> · <the first line>` of the reply it closes (`context`), else
+/// of its own text.
+pub fn shrunk_line(card: &AgentCard, context: Option<&str>) -> String {
+    let first = context
+        .unwrap_or(&card.text)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    if first.is_empty() {
+        card.title.clone()
+    } else {
+        format!("{} \u{b7} {first}", card.title)
+    }
+}
+
+/// The *More* or *Less* link (`label`) at the bottom right of a card laid
+/// out by [`card_block`] at `(x, y)`, `w` wide and `h` tall, into `flow`
+/// from the marks `from` (its rows, fills and buttons before it): a
+/// summary card's own dim "more" becomes it; otherwise a line for it is
+/// added under the text, above the buttons. The card's new height, and
+/// the link's tap area.
+#[allow(clippy::too_many_arguments)]
+fn add_more_link(
+    flow: &mut Flow,
+    from: (usize, usize, usize),
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    label: &'static str,
+    s: f32,
+) -> (f32, Rect) {
+    let pad = CARD_PAD * s;
+    let px = TOOL_PT * s;
+    let lh = line_h(px);
+    let right = x + w - pad;
+    let lw = label.len() as f32 * px * 0.5;
+    // A tap area of at least 40 pt square, within the card.
+    let area = |row_y: f32, h: f32| {
+        let tw = (lw + 2.0 * pad).max(40.0 * s);
+        let th = (lh + 8.0 * s).max(40.0 * s);
+        let top = (row_y + lh * 0.5 - th * 0.5).max(y);
+        Rect::new(right - tw + pad * 0.5, top, tw, th.min(y + h - top))
+    };
+    if let Some(r) = flow.rows[from.0..]
+        .iter_mut()
+        .find(|r| r.text == MORE && r.color == theme().dim)
+    {
+        r.text = label.to_string();
+        r.x = right - lw;
+        r.color = theme().link;
+        let row_y = r.y;
+        return (h, area(row_y, h));
+    }
+    // Under the text: above the buttons, or above the bottom padding.
+    let row_y = flow.buttons[from.2..]
+        .iter()
+        .map(|b| b.rect.y - pad * 0.5)
+        .reduce(f32::min)
+        .unwrap_or(y + h - pad);
+    for b in &mut flow.buttons[from.2..] {
+        b.rect.y += lh;
+    }
+    for f in &mut flow.fills[from.1..] {
+        if (f.rect.h - h).abs() < 0.01 {
+            f.rect.h += lh;
+        }
+    }
+    flow.rows.push(Row {
+        text: label.to_string(),
+        x: right - lw,
+        y: row_y,
+        px,
+        color: theme().link,
+        mono: false,
+    });
+    (h + lh, area(row_y, h + lh))
 }
 
 /// How an answer's style is drawn (plan 20261027_06, decision 3): its
@@ -1816,12 +1919,33 @@ pub fn lay_out_block_as(
             y = lay_out_pending(*kind, *lines, *chars, pen, &mut flow);
         }
     }
+    let folded_h = y;
+    for note in &state.notes {
+        y = lay_out_note(note, y, pen, &mut flow);
+    }
     flow.height = y;
     if folds {
-        flow.taps
-            .push((AgentHit::Fold(state.key), Rect::new(0.0, 0.0, width, y)));
+        flow.taps.push((
+            AgentHit::Fold(state.key),
+            Rect::new(0.0, 0.0, width, folded_h),
+        ));
     }
     flow
+}
+
+/// A dim line in the flow saying how a card was answered by a drag (the
+/// 15:20 EDT amendment, item 4), at `y`; where the next thing starts.
+fn lay_out_note(text: &str, y: f32, pen: Pen, flow: &mut Flow) -> f32 {
+    let px = TOOL_PT * pen.s;
+    flow.rows.push(Row {
+        text: format!("-- {text}"),
+        x: pen.pad,
+        y: y + 2.0 * pen.s,
+        px,
+        color: theme().dim,
+        mono: true,
+    });
+    y + 2.0 * pen.s + term_h(px) + 4.0 * pen.s
 }
 
 /// One sweep of the shimmer, in seconds.
@@ -2276,6 +2400,8 @@ pub fn suggestion_colour(s: Suggestion) -> [f32; 4] {
 pub struct Pinned {
     pub compact: bool,
     pub rect: Rect,
+    /// Its *More* or *Less* link's tap area, when it has one.
+    pub more: Option<Rect>,
     /// Laid out at the screen's coordinates.
     pub flow: Flow,
 }
@@ -2382,6 +2508,60 @@ impl Block {
     }
 }
 
+/// What dragging a card away left of it (plan 20261022_03, the L3
+/// amendment of 2026-10-30 15:20 EDT, item 3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gone {
+    /// One line in the pinned card's place.
+    Shrunk,
+    /// Out of the pinned card's place: in the flow as a resolved card.
+    Removed,
+}
+
+/// What the app does for a pinned card dragged away (the same amendment,
+/// item 3); each drops the card's speech ([`flankr_companion::SpeechOf`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Dismissal {
+    /// A Finished card, a plan question or a question with no No: one
+    /// line now, not answered.
+    Shrunk(Serial),
+    /// Something broke, or another card: gone from the pinned place.
+    Removed(Serial),
+    /// An approval: answered Deny.
+    Denied { serial: Serial, confirm_id: u64 },
+    /// A yes/no question: answered No, with the daemon's No when it gave
+    /// its answers, else the app's own.
+    AnsweredNo {
+        serial: Serial,
+        answer: Option<libflankr_proto::common::Answer>,
+    },
+}
+
+impl Dismissal {
+    /// The card's section serial.
+    pub fn serial(&self) -> Serial {
+        match self {
+            Dismissal::Shrunk(s) | Dismissal::Removed(s) => *s,
+            Dismissal::Denied { serial, .. } | Dismissal::AnsweredNo { serial, .. } => *serial,
+        }
+    }
+}
+
+/// The No among a question's answers from the daemon: one labelled No, or
+/// else the one styled `deny`, that sends rather than opening the message
+/// card.
+pub fn no_answer(card: &AgentCard) -> Option<usize> {
+    let sends = |a: &&libflankr_proto::common::Answer| a.sends.is_some();
+    card.answers
+        .iter()
+        .position(|a| sends(&a) && a.label.trim().eq_ignore_ascii_case("no"))
+        .or_else(|| {
+            card.answers
+                .iter()
+                .position(|a| sends(&a) && a.style == "deny")
+        })
+}
+
 /// The agent view's screen: content, scroll state and layout.
 #[derive(Default)]
 pub struct AgentScreen {
@@ -2447,6 +2627,17 @@ pub struct AgentScreen {
     /// The sections the user expanded (tool calls, diffs, summary cards),
     /// by packed serial, while the view is open.
     expanded: HashSet<u64>,
+    /// A finger on the pinned card, and the card's sideways offset in
+    /// pixels: the finger's while it drags, springing back after (plan
+    /// 20261022_03, the L3 amendment of 2026-10-30 15:20 EDT, item 2).
+    pin_swipe: Option<swipe::Swipe>,
+    pin_dx: f32,
+    /// Cards dragged away, by packed serial, while the view is open
+    /// (items 3 and 4).
+    gone: HashMap<u64, Gone>,
+    /// The dim lines of cards answered by a drag, by the card's packed
+    /// serial (item 4).
+    notes: HashMap<u64, &'static str>,
     /// *All sound* is on: summary cards draw their replay button.
     sound: bool,
     /// Seconds since the entries or the status last changed.
@@ -2923,11 +3114,39 @@ impl AgentScreen {
             })
             .map(|slot| (slot.serial.to_u64(), self.context_of(slot.serial)))
             .collect();
+        // Each dim line of a card answered by a drag goes after the card,
+        // or, while the card is not shown (an answered question leaves the
+        // view until it resolves), after the last section before it.
+        let mut notes: HashMap<u64, Vec<&'static str>> = HashMap::new();
+        let mut noted: Vec<(&u64, &&'static str)> = self.notes.iter().collect();
+        noted.sort();
+        for (&card, &note) in noted {
+            let at = if self.slot_index.contains_key(&card) {
+                Some(card)
+            } else {
+                self.slots
+                    .iter()
+                    .map(|slot| slot.serial.to_u64())
+                    .filter(|&k| k < card)
+                    .max()
+            };
+            if let Some(at) = at {
+                notes.entry(at).or_default().push(note);
+            }
+        }
         #[cfg(test)]
         let mut laid = 0;
         for slot in &mut self.slots {
             let key = slot.serial.to_u64();
             let b = self.blocks.get_mut(&key).expect("a block for each slot");
+            // A live card dragged away is in the flow as a resolved one.
+            if self.gone.get(&key) == Some(&Gone::Removed)
+                && let Shows::Card(card) = &mut b.shows
+                && card.live
+            {
+                card.live = false;
+                b.stale = true;
+            }
             let choice = b
                 .card()
                 .filter(|c| c.live && c.choices.is_some())
@@ -2943,6 +3162,7 @@ impl AgentScreen {
                 context: contexts.get(&key).cloned().flatten(),
                 choice,
                 subagents,
+                notes: notes.remove(&key).unwrap_or_default(),
             };
             if b.state != state {
                 b.state = state;
@@ -3447,7 +3667,16 @@ impl AgentScreen {
     }
 
     /// Shows all of the pinned card's text, or folds it to its first lines.
+    /// A card dragged down to one line shows in full again, folded.
     pub fn toggle_expand(&mut self) {
+        if self.pin_shrunk() {
+            if let Some(p) = self.pinned {
+                self.gone.remove(&p.to_u64());
+            }
+            self.pin_expanded = false;
+            self.settle();
+            return;
+        }
         self.pin_expanded = !self.pin_expanded;
         if self.dictating() {
             self.pin_overridden = true;
@@ -3460,20 +3689,97 @@ impl AgentScreen {
         self.pin_expanded
     }
 
-    /// Whether the pinned card's text is longer than its first lines.
-    fn pin_is_cut(&self) -> bool {
-        let Some(card) = self.pinned_card().filter(|c| c.choices.is_none()) else {
+    /// Whether the pinned card was dragged down to one line (the L3
+    /// amendment of 2026-10-30 15:20 EDT, item 3).
+    pub fn pin_shrunk(&self) -> bool {
+        self.pinned
+            .is_some_and(|p| self.gone.get(&p.to_u64()) == Some(&Gone::Shrunk))
+    }
+
+    /// The pinned card's sideways offset, in pixels, while it is dragged
+    /// or springs back.
+    pub fn pin_offset(&self) -> f32 {
+        self.pin_dx
+    }
+
+    /// Whether the pinned card at `(x, y)` can be dragged away: shown in
+    /// full, live, and not a card a drag cannot answer. A choice question
+    /// is not: nothing on the phone or in the daemon cancels one yet (plan
+    /// 20261029_01 never sends Esc). Nor is a card a subagent's view would
+    /// answer, whose answers are inactive.
+    fn swipeable_at(&self, x: f32, y: f32) -> bool {
+        let Some(p) = self.frame.pin.as_ref() else {
             return false;
         };
-        let s = self.scale();
-        let w = self.layout.w - 2.0 * PAD * s;
-        let inner_w = w - EDGE * s - 2.0 * CARD_PAD * s;
-        let cols = columns(inner_w, CARD_PT * s);
-        if card.is_summary() {
-            let context = self.pinned.and_then(|p| self.context_of(p));
-            return summary_folds(card, context.as_deref(), cols);
+        if p.compact || !p.rect.contains([x, y]) {
+            return false;
         }
-        wrap_hard(card.text.trim(), cols).len() > PIN_LINES
+        let Some(card) = self.pinned_card().filter(|c| c.live) else {
+            return false;
+        };
+        match card.kind {
+            CardKind::Question if card.choices.is_some() => false,
+            CardKind::Question if card.about_plan => true,
+            CardKind::Question => !self.answers_inactive(),
+            CardKind::Approval => card.confirm_id.is_some() && !self.answers_inactive(),
+            _ => true,
+        }
+    }
+
+    /// The pinned card was dragged away (the L3 amendment of 2026-10-30
+    /// 15:20 EDT, items 3 and 4): a Finished card or a plan question goes
+    /// to one line in its place, unanswered; an approval is denied and a
+    /// yes/no question answered No, each with its dim line in the flow;
+    /// anything else (something broke) leaves the pinned place. What the
+    /// app is to send for it, if it was there to drag.
+    pub fn dismiss_pinned(&mut self) -> Option<Dismissal> {
+        let serial = self.pinned?;
+        let card = self.pinned_card().filter(|c| c.live)?.clone();
+        let key = serial.to_u64();
+        let dismissal = match card.kind {
+            CardKind::Finished => Dismissal::Shrunk(serial),
+            CardKind::Question if card.choices.is_some() => return None,
+            CardKind::Question if card.about_plan => Dismissal::Shrunk(serial),
+            CardKind::Question if !card.answers.is_empty() => match no_answer(&card) {
+                Some(i) => Dismissal::AnsweredNo {
+                    serial,
+                    answer: Some(card.answers[i].clone()),
+                },
+                None => Dismissal::Shrunk(serial),
+            },
+            CardKind::Question => Dismissal::AnsweredNo {
+                serial,
+                answer: None,
+            },
+            CardKind::Approval => match card.confirm_id {
+                Some(confirm_id) => Dismissal::Denied { serial, confirm_id },
+                None => return None,
+            },
+            _ => Dismissal::Removed(serial),
+        };
+        let (gone, note) = match dismissal {
+            Dismissal::Shrunk(_) => (Gone::Shrunk, None),
+            Dismissal::Removed(_) => (Gone::Removed, None),
+            Dismissal::Denied { .. } => (Gone::Removed, Some(DENIED_BY_DISMISSING)),
+            Dismissal::AnsweredNo { .. } => (Gone::Removed, Some(NO_BY_DISMISSING)),
+        };
+        log::info!(
+            "agent view: the pinned {:?} card dragged away: {gone:?}",
+            card.kind
+        );
+        self.gone.insert(key, gone);
+        if let Some(note) = note {
+            self.notes.insert(key, note);
+        }
+        self.pin_swipe = None;
+        self.pin_dx = 0.0;
+        self.pin_expanded = false;
+        self.pin_saved_expanded = None;
+        self.pin_overridden = false;
+        self.refresh_blocks();
+        self.flow_stale = true;
+        self.repin();
+        Some(dismissal)
     }
 
     /// Whether something is being said: the volume glyph's waves step.
@@ -3633,8 +3939,12 @@ impl AgentScreen {
     /// answered; any other live card (a finished turn, something broke)
     /// gives it its place and goes back to the flow while it shows.
     fn rank_catch_up(&mut self) {
-        let waits = self
+        // A card dragged away is no longer pinned (the L3 amendment of
+        // 2026-10-30 15:20 EDT, item 3).
+        let view_pinned = self
             .view_pinned
+            .filter(|p| self.gone.get(&p.to_u64()) != Some(&Gone::Removed));
+        let waits = view_pinned
             .and_then(|p| self.blocks.get(&p.to_u64()))
             .and_then(Block::card)
             .is_some_and(|c| {
@@ -3647,7 +3957,7 @@ impl AgentScreen {
         self.pinned = if catch_up && !waits {
             None
         } else {
-            self.view_pinned
+            view_pinned
         };
     }
 
@@ -3678,8 +3988,9 @@ impl AgentScreen {
     pub fn compact(&self) -> bool {
         // A finger moving at the bottom (a pull to refresh) leaves it whole
         // (owner, 2026-10-24): it folds once the view leaves the bottom.
-        !self.pin_expanded
-            && (!self.follow || self.thumb.is_some() || self.finished_over_terminal())
+        self.pin_shrunk()
+            || (!self.pin_expanded
+                && (!self.follow || self.thumb.is_some() || self.finished_over_terminal()))
     }
 
     /// The pinned card is a Finished card and the terminal shows: it is one
@@ -3838,26 +4149,29 @@ impl AgentScreen {
             // first PIN_LINES.
             let view_top = header.y + header.h;
             let fit = ((above - view_top - 120.0 * s - 80.0 * s) / line_h(CARD_PT * s)).max(0.0);
-            let max_lines = if self.pin_expanded {
-                (fit as usize).max(PIN_LINES)
-            } else {
-                PIN_LINES
-            };
             // A summary card folds to its short form, and expands to its
             // reply, points and spoken text (the 12:03 EDT amendment).
             let context = self.pinned.and_then(|p| self.context_of(p));
-            let form = match (card.is_summary(), self.pin_expanded) {
-                (false, _) => CardForm::Text { max_lines },
-                (true, false) => CardForm::Short {
-                    context: context.as_deref(),
-                },
-                (true, true) => CardForm::Expanded {
-                    context: context.as_deref(),
-                    max_lines,
-                    key: self.pinned.map_or(0, Serial::to_u64),
-                    sound: self.sound,
-                },
+            let form_of = |expanded: bool| {
+                let max_lines = if expanded {
+                    (fit as usize).max(PIN_LINES)
+                } else {
+                    PIN_LINES
+                };
+                match (card.is_summary(), expanded) {
+                    (false, _) => CardForm::Text { max_lines },
+                    (true, false) => CardForm::Short {
+                        context: context.as_deref(),
+                    },
+                    (true, true) => CardForm::Expanded {
+                        context: context.as_deref(),
+                        max_lines,
+                        key: self.pinned.map_or(0, Serial::to_u64),
+                        sound: self.sound,
+                    },
+                }
             };
+            let form = form_of(self.pin_expanded);
             // The full card, laid out once to know its height. A choice
             // question's card is its own (plan 20261029_01, step 6), its
             // expanded previews cut to leave the flow 120 pt.
@@ -3869,6 +4183,32 @@ impl AgentScreen {
                 .as_ref()
                 .filter(|_| card.live)
                 .map(|set| (set, self.choice_preview_max(set, l.w - 2.0 * pad, s, room)));
+            // *More* or *Less* at its bottom right, when the other form
+            // differs (the L3 amendment of 2026-10-30 15:20 EDT, item 1).
+            let more = choice
+                .is_none()
+                .then(|| {
+                    let mut other = Flow::default();
+                    let mut t = Vec::new();
+                    let w = l.w - 2.0 * pad;
+                    let alt = card_block(
+                        card,
+                        pad,
+                        0.0,
+                        w,
+                        s,
+                        form_of(!self.pin_expanded),
+                        &mut t,
+                        &mut other,
+                    );
+                    let this = card_block(card, pad, 0.0, w, s, form, &mut t, &mut Flow::default());
+                    ((alt - this).abs() > 0.5).then_some(if self.pin_expanded {
+                        PIN_LESS
+                    } else {
+                        PIN_MORE
+                    })
+                })
+                .flatten();
             let h = match choice {
                 Some((set, max)) => choice_card::lay_out(
                     set,
@@ -3880,16 +4220,34 @@ impl AgentScreen {
                     max,
                     &mut full,
                 ),
-                None => card_block(
-                    card,
-                    pad,
-                    0.0,
-                    l.w - 2.0 * pad,
-                    s,
-                    form,
-                    &mut targets,
-                    &mut full,
-                ),
+                None => {
+                    let h = card_block(
+                        card,
+                        pad,
+                        0.0,
+                        l.w - 2.0 * pad,
+                        s,
+                        form,
+                        &mut targets,
+                        &mut full,
+                    );
+                    match more {
+                        Some(label) => {
+                            add_more_link(
+                                &mut full,
+                                (0, 0, 0),
+                                pad,
+                                0.0,
+                                l.w - 2.0 * pad,
+                                h,
+                                label,
+                                s,
+                            )
+                            .0
+                        }
+                        None => h,
+                    }
+                }
             };
             full_top = above - h;
             if compact {
@@ -3906,7 +4264,9 @@ impl AgentScreen {
                     radius: 3.0 * s,
                 });
                 let px = TITLE_PT * s;
-                let text = if self.finished_over_terminal() {
+                let text = if self.pin_shrunk() {
+                    shrunk_line(card, context.as_deref())
+                } else if self.finished_over_terminal() {
                     finished_line(card, context.as_deref())
                 } else {
                     format!("{}: {}", card.title, card.text.replace('\n', " "))
@@ -3922,10 +4282,12 @@ impl AgentScreen {
                 pin = Some(Pinned {
                     compact: true,
                     rect: bar,
+                    more: None,
                     flow,
                 });
             } else {
                 let mut flow = Flow::default();
+                let mut more_rect = None;
                 match choice {
                     Some((set, max)) => {
                         choice_card::lay_out(
@@ -3940,7 +4302,7 @@ impl AgentScreen {
                         );
                     }
                     None => {
-                        card_block(
+                        let laid = card_block(
                             card,
                             pad,
                             full_top,
@@ -3950,12 +4312,26 @@ impl AgentScreen {
                             &mut targets,
                             &mut flow,
                         );
+                        if let Some(label) = more {
+                            let (_, r) = add_more_link(
+                                &mut flow,
+                                (0, 0, 0),
+                                pad,
+                                full_top,
+                                l.w - 2.0 * pad,
+                                laid,
+                                label,
+                                s,
+                            );
+                            more_rect = Some(r);
+                        }
                     }
                 }
                 flow.targets = targets;
                 pin = Some(Pinned {
                     compact: false,
                     rect: Rect::new(pad, full_top, l.w - 2.0 * pad, h),
+                    more: more_rect,
                     flow,
                 });
             }
@@ -4584,9 +4960,10 @@ impl AgentScreen {
             self.hits.push((AgentHit::JumpToEnd, j.rect));
         }
         if let Some(p) = &self.frame.pin {
-            if p.compact && self.finished_over_terminal() {
+            if p.compact && (self.finished_over_terminal() || (self.pin_shrunk() && self.follow)) {
                 // Over the terminal there is no transcript to jump to: a
                 // tap shows the card whole, and a tap on it folds it again.
+                // A card dragged down to one line shows whole again too.
                 self.hits.push((AgentHit::Expand, p.rect));
             } else if p.compact {
                 self.hits.push((AgentHit::Pin, p.rect));
@@ -4607,9 +4984,11 @@ impl AgentScreen {
                     let rect = link_spans::rect(&p.flow.rows[span.row], span, 0.0);
                     self.hits.push((AgentHit::Link(span.link), rect));
                 }
-                // The rest of the card, when its text is cut or shown all.
-                if self.pin_expanded || self.pin_is_cut() {
-                    self.hits.push((AgentHit::Expand, p.rect));
+                // Only *More* or *Less* changes its size (the L3 amendment
+                // of 2026-10-30 15:20 EDT, item 1): every other tap goes
+                // to what is under it.
+                if let Some(r) = p.more {
+                    self.hits.push((AgentHit::Expand, r));
                 }
             }
         }
@@ -4646,9 +5025,16 @@ impl AgentScreen {
         }
     }
 
-    /// The link a [`AgentHit::Link`] names.
+    /// The link a [`AgentHit::Link`] names. The pinned card's links are
+    /// the flow's as it was laid out with them, and then its own (a
+    /// Markdown link in its text): looked up there first, so a tap on its
+    /// own reaches it (the L3 amendment of 2026-10-30 15:20 EDT, item 1).
     pub fn link(&self, index: usize) -> Option<&Link> {
-        self.flow.targets.get(index)
+        self.frame
+            .pin
+            .as_ref()
+            .and_then(|p| p.flow.targets.get(index))
+            .or_else(|| self.flow.targets.get(index))
     }
 
     /// The live question card's answer at `index` (plan 20261027_06,
@@ -4694,6 +5080,12 @@ impl AgentScreen {
             HEADER_H * s,
             s,
         )
+    }
+
+    /// The flow's texts as put together, for the scripted runs.
+    #[cfg(test)]
+    pub fn flow_texts(&self) -> Vec<String> {
+        self.flow.rows.iter().map(|r| r.text.clone()).collect()
     }
 
     pub fn frame(&self) -> &Frame {
@@ -4758,7 +5150,7 @@ impl AgentScreen {
             return match touched {
                 PromptTouched::Held => None,
                 PromptTouched::Hit(hit) => {
-                    if hit == AgentHit::CatchUpDismiss {
+                    if matches!(hit, AgentHit::CatchUpDismiss | AgentHit::CatchUpSwipe) {
                         // The view's pinned card comes back.
                         self.repin();
                     } else if matches!(
@@ -4780,6 +5172,16 @@ impl AgentScreen {
                 if self.thumb.is_some() {
                     // Another finger while the thumb is held: ignored.
                     return None;
+                }
+                // A finger dragging the pinned card sideways keeps it; one
+                // not yet decided is a scroll once another finger comes.
+                if let Some(w) = &self.pin_swipe
+                    && w.id() != id
+                {
+                    if w.way() == swipe::Way::Sideways {
+                        return None;
+                    }
+                    self.pin_swipe = None;
                 }
                 if let Some(d) = self.drag.as_mut() {
                     // A second finger joins the drag (the 11:09 EDT
@@ -4821,6 +5223,11 @@ impl AgentScreen {
                     self.placed();
                     return None;
                 }
+                // On the pinned card, a sideways drag may take it away
+                // (the L3 amendment of 2026-10-30 15:20 EDT, item 2).
+                self.pin_swipe = self
+                    .swipeable_at(x, y)
+                    .then(|| swipe::Swipe::new(id, x, y, now));
                 let carried = std::mem::take(&mut self.fling);
                 self.drag = Some(Drag {
                     fingers: vec![Finger {
@@ -4846,6 +5253,22 @@ impl AgentScreen {
                         self.drag_thumb(y);
                     }
                     return None;
+                }
+                let way = self
+                    .pin_swipe
+                    .as_mut()
+                    .filter(|w| w.id() == id)
+                    .map(|w| (w.moved(x, y, now, SLOP * s), w.dx()));
+                match way {
+                    Some((swipe::Way::Sideways, dx)) => {
+                        // The card's, not the flow's: no scroll, no tap.
+                        self.pin_dx = dx;
+                        self.drag = None;
+                        self.dirty = true;
+                        return None;
+                    }
+                    Some((swipe::Way::Vertical, _)) => self.pin_swipe = None,
+                    _ => {}
                 }
                 let d = self.drag.as_mut()?;
                 let n = d.fingers.len();
@@ -4890,6 +5313,19 @@ impl AgentScreen {
                         self.scroll_to(self.offset);
                     }
                     return None;
+                }
+                if let Some(w) = self.pin_swipe.take_if(|w| w.id() == id)
+                    && w.way() == swipe::Way::Sideways
+                {
+                    self.dirty = true;
+                    return match w.release(now, s) {
+                        swipe::Release::Removes => {
+                            log::info!("agent view: the pinned card dragged away at {:.0}", w.dx());
+                            Some(AgentHit::PinSwipe)
+                        }
+                        // `tick` springs it back.
+                        swipe::Release::SpringsBack => None,
+                    };
                 }
                 let d = self.drag.as_mut()?;
                 let i = d.fingers.iter().position(|f| f.id == id)?;
@@ -4946,6 +5382,8 @@ impl AgentScreen {
                 self.hit(x, y).filter(|&hit| self.live(hit))
             }
             TouchPhase::Cancelled => {
+                // A card being dragged springs back.
+                self.pin_swipe = None;
                 if self.pull > 0.0 && self.pull_state == PullState::Idle {
                     self.springing = true;
                 }
@@ -5277,6 +5715,11 @@ impl AgentScreen {
         if self.term.tick(dt) {
             self.dirty = true;
         }
+        // The pinned card springs back once let go short.
+        if self.pin_swipe.is_none() && self.pin_dx != 0.0 {
+            self.pin_dx = swipe::spring(self.pin_dx, dt, self.scale());
+            self.dirty = true;
+        }
         moved
     }
 
@@ -5554,6 +5997,7 @@ impl AgentScreen {
             );
         }
         if let Some(p) = &self.frame.pin {
+            let start = list.instances.len();
             for f in &p.flow.fills {
                 fill(list, f.rect, f.color, f.radius);
             }
@@ -5578,6 +6022,14 @@ impl AgentScreen {
                 );
                 if inactive && is_answer(b.hit) {
                     crate::settings::dim_since(list, start);
+                }
+            }
+            // Dragged sideways: it follows the finger, fading as it goes.
+            if self.pin_dx != 0.0 {
+                list.translate_from(start, self.pin_dx, 0.0);
+                let alpha = swipe::fade(self.pin_dx, l.w);
+                for instance in list.instances.iter_mut().skip(start) {
+                    instance.color[3] *= alpha;
                 }
             }
         }
@@ -7526,7 +7978,13 @@ mod tests {
         a.toggle_expand();
         let open = a.frame().pin.clone().unwrap();
         assert!(!open.compact);
-        assert_eq!(tap_bar(&mut a, 2, open.rect), Some(AgentHit::Expand));
+        // Whole, only its *Less* folds it (the L3 amendment of 2026-10-30
+        // 15:20 EDT, item 1).
+        assert_eq!(tap_bar(&mut a, 2, open.rect), None);
+        assert_eq!(
+            tap_bar(&mut a, 3, open.more.expect("Less")),
+            Some(AgentHit::Expand)
+        );
         a.toggle_expand();
         assert!(a.frame().pin.as_ref().unwrap().compact);
         // Back in the transcript: whole again.
@@ -8077,10 +8535,26 @@ mod tests {
                 .count()
         };
         assert_eq!(text_rows(&a), PIN_LINES, "cut to its first lines");
-        // A tap on the card's text, not its buttons, expands it.
+        // Only *More* at its bottom right expands it (the L3 amendment of
+        // 2026-10-30 15:20 EDT, item 1); a tap on its text does nothing.
         let pin = a.frame().pin.as_ref().unwrap().rect;
-        assert_eq!(a.hit(pin.x + 40.0, pin.y + 40.0), Some(AgentHit::Expand));
+        assert_eq!(a.hit(pin.x + 40.0, pin.y + 40.0), None);
+        let more = a.frame().pin.as_ref().unwrap().more.expect("More");
+        assert!(more.x > pin.x + pin.w * 0.6, "at the right");
+        let label = |a: &AgentScreen| {
+            a.frame()
+                .pin
+                .as_ref()
+                .unwrap()
+                .flow
+                .rows
+                .iter()
+                .any(|r| r.text == PIN_LESS)
+        };
+        assert!(!label(&a));
+        assert_eq!(a.hit(more.x + 5.0, more.y + 5.0), Some(AgentHit::Expand));
         a.toggle_expand();
+        assert!(label(&a), "Less once expanded");
         assert!(text_rows(&a) > PIN_LINES, "all of it");
         let taller = a.frame().pin.as_ref().unwrap().rect;
         assert!(taller.h > pin.h);
@@ -8097,6 +8571,7 @@ mod tests {
         );
         let pin = a.frame().pin.as_ref().unwrap().rect;
         assert_ne!(a.hit(pin.x + 40.0, pin.y + 40.0), Some(AgentHit::Expand));
+        assert!(a.frame().pin.as_ref().unwrap().more.is_none(), "no More");
     }
 
     #[test]
@@ -9790,9 +10265,12 @@ mod tests {
         live.live = true;
         let mut a = screen(conversation(40), vec![live], Some(0));
         let pin_texts = |a: &AgentScreen| texts(&a.frame().pin.as_ref().unwrap().flow);
-        assert_eq!(pin_texts(&a), ["Finished", "Landed the settings screen."]);
-        let pin = a.frame().pin.as_ref().unwrap().rect;
-        assert_eq!(a.hit(pin.x + 40.0, pin.y + 40.0), Some(AgentHit::Expand));
+        assert_eq!(
+            pin_texts(&a),
+            ["Finished", "Landed the settings screen.", PIN_MORE]
+        );
+        let more = a.frame().pin.as_ref().unwrap().more.expect("More");
+        assert_eq!(a.hit(more.x + 5.0, more.y + 5.0), Some(AgentHit::Expand));
         a.toggle_expand();
         let open = pin_texts(&a);
         assert!(open.contains(&format!("{BULLET}One.")), "{open:?}");
@@ -10694,5 +11172,368 @@ mod tests {
         a.set_catch_up(Some("Codex finished.".into()));
         assert!(!a.prompts().catch_up_shown());
         assert!(a.pinned_card().is_some_and(|c| c.choices.is_some()));
+    }
+
+    // Pinned cards: More and Less, a sideways drag removes, by kind (plan
+    // 20261022_03, the L3 amendment of 2026-10-30 15:20 EDT).
+
+    /// A finger on the pinned card's title row, moved `dx` pixels across
+    /// in `steps` of 16 ms from `t`, then lifted `hold` after: the hit.
+    fn swipe_pin(
+        a: &mut AgentScreen,
+        dx: f32,
+        steps: u32,
+        t: Duration,
+        hold: Duration,
+    ) -> Option<AgentHit> {
+        let pin = a.frame().pin.as_ref().expect("pinned").rect;
+        let (x, y) = (pin.x + pin.w * 0.5, pin.y + 20.0);
+        a.touch(9, TouchPhase::Started, x, y, t);
+        let mut now = t;
+        for i in 1..=steps {
+            now += MS;
+            a.touch(
+                9,
+                TouchPhase::Moved,
+                x + dx * i as f32 / steps as f32,
+                y,
+                now,
+            );
+        }
+        a.touch(9, TouchPhase::Ended, x + dx, y, now + hold)
+    }
+
+    /// Drags the pinned card 50 pt away, slowly: dismissed.
+    fn drag_away(a: &mut AgentScreen) -> Option<Dismissal> {
+        let s = PHONE.scale;
+        let hit = swipe_pin(a, -50.0 * s, 20, Duration::from_secs(1), MS);
+        assert_eq!(hit, Some(AgentHit::PinSwipe));
+        a.dismiss_pinned()
+    }
+
+    fn pinned_serial(at: usize) -> Serial {
+        Serial::new(FILE, 2 * at as u32 + 1, 0)
+    }
+
+    fn flow_notes(a: &AgentScreen) -> Vec<String> {
+        a.flow
+            .rows
+            .iter()
+            .filter(|r| r.text.starts_with("-- ") && !r.text.contains(':'))
+            .map(|r| r.text.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_finished_card_dragged_away_is_one_line_in_its_place() {
+        let entries = conversation(4);
+        let n = entries.len();
+        let finished = AgentCard {
+            title: "Finished".into(),
+            text: "Landed the settings screen.\nThen pushed it.".into(),
+            ..card(CardKind::Finished, n, true)
+        };
+        let mut a = screen(entries, vec![finished], Some(0));
+        let full = a.frame().pin.clone().unwrap();
+        assert!(!full.compact);
+        let offset = a.offset();
+        assert_eq!(drag_away(&mut a), Some(Dismissal::Shrunk(pinned_serial(n))));
+        assert_eq!(a.offset(), offset, "the flow did not scroll");
+        let bar = a.frame().pin.clone().expect("still in its place");
+        assert!(bar.compact && a.pin_shrunk());
+        assert_eq!(bar.flow.rows.len(), 1);
+        assert!(
+            bar.flow.rows[0]
+                .text
+                .starts_with("Finished \u{b7} Landed the settings screen."),
+            "{:?}",
+            bar.flow.rows[0].text
+        );
+        assert!(bar.rect.h < full.rect.h);
+        assert_eq!(a.pin_offset(), 0.0);
+        // The line can't be dragged again; a tap shows the card whole.
+        assert_eq!(
+            swipe_pin(&mut a, -60.0 * PHONE.scale, 20, Duration::from_secs(5), MS),
+            None
+        );
+        assert_eq!(
+            tap(&mut a, 3, bar.rect, Duration::from_secs(9)),
+            Some(AgentHit::Expand)
+        );
+        a.toggle_expand();
+        assert!(!a.frame().pin.as_ref().unwrap().compact);
+        assert!(!a.pin_shrunk());
+    }
+
+    #[test]
+    fn a_short_drag_springs_back_and_a_fling_removes() {
+        let n = conversation(4).len();
+        let mut a = screen(
+            conversation(4),
+            vec![card(CardKind::Broke, n, true)],
+            Some(0),
+        );
+        let s = PHONE.scale;
+        // 30 pt, slowly: back where it was.
+        let hit = swipe_pin(&mut a, 30.0 * s, 20, Duration::from_secs(1), MS);
+        assert_eq!(hit, None);
+        assert!(a.pin_offset() > 0.0, "let go out of place");
+        let mut frames = 0;
+        while a.pin_offset() != 0.0 {
+            a.tick(MS);
+            frames += 1;
+            assert!(frames < 60);
+        }
+        assert!(a.pinned_card().is_some(), "still pinned");
+        // 30 pt in two quick moves: flung, it goes.
+        let hit = swipe_pin(&mut a, 30.0 * s, 2, Duration::from_secs(3), MS);
+        assert_eq!(hit, Some(AgentHit::PinSwipe));
+        // Short and held still before lifting: no fling.
+        let mut b = screen(
+            conversation(4),
+            vec![card(CardKind::Broke, n, true)],
+            Some(0),
+        );
+        let hit = swipe_pin(
+            &mut b,
+            30.0 * s,
+            2,
+            Duration::from_secs(1),
+            Duration::from_millis(300),
+        );
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn something_broke_dragged_away_leaves_the_pinned_place() {
+        let n = conversation(4).len();
+        let mut a = screen(
+            conversation(4),
+            vec![card(CardKind::Broke, n, true)],
+            Some(0),
+        );
+        assert_eq!(
+            drag_away(&mut a),
+            Some(Dismissal::Removed(pinned_serial(n)))
+        );
+        assert!(a.frame().pin.is_none());
+        assert!(a.pinned_card().is_none());
+        // In the flow as a resolved card, with no line of its own.
+        assert!(
+            a.flow
+                .rows
+                .iter()
+                .any(|r| r.text.starts_with("-- Claude is asking")),
+            "{:?}",
+            texts(&a.flow)
+        );
+        assert!(flow_notes(&a).is_empty());
+        // Given again by the client, still out of the pinned place.
+        flat(
+            &mut a,
+            "idle",
+            0,
+            conversation(4),
+            vec![card(CardKind::Broke, n, true)],
+            Some(0),
+        );
+        assert!(a.frame().pin.is_none());
+    }
+
+    #[test]
+    fn an_approval_dragged_away_is_denied_with_its_line() {
+        let n = conversation(4).len();
+        let mut a = screen(
+            conversation(4),
+            vec![card(CardKind::Approval, n, true)],
+            Some(0),
+        );
+        assert_eq!(
+            drag_away(&mut a),
+            Some(Dismissal::Denied {
+                serial: pinned_serial(n),
+                confirm_id: 7
+            })
+        );
+        assert!(a.frame().pin.is_none());
+        assert_eq!(flow_notes(&a), [format!("-- {DENIED_BY_DISMISSING}")]);
+        // Resolved by the daemon: the line stays after it.
+        flat(
+            &mut a,
+            "idle",
+            0,
+            conversation(4),
+            vec![card(CardKind::Approval, n, false)],
+            None,
+        );
+        assert_eq!(flow_notes(&a), [format!("-- {DENIED_BY_DISMISSING}")]);
+    }
+
+    #[test]
+    fn a_yes_no_question_dragged_away_is_answered_no() {
+        let n = conversation(4).len();
+        let mut a = screen(
+            conversation(4),
+            vec![card(CardKind::Question, n, true)],
+            Some(0),
+        );
+        assert_eq!(
+            drag_away(&mut a),
+            Some(Dismissal::AnsweredNo {
+                serial: pinned_serial(n),
+                answer: None
+            })
+        );
+        assert_eq!(flow_notes(&a), [format!("-- {NO_BY_DISMISSING}")]);
+        // The client leaves the answered question out: the line stays, on
+        // the section before it.
+        flat(&mut a, "idle", 0, conversation(4), vec![], None);
+        assert_eq!(flow_notes(&a), [format!("-- {NO_BY_DISMISSING}")]);
+        // With the daemon's answers: its No.
+        let no = answer("No", "deny", Some("no"), None);
+        let asked = AgentCard {
+            answers: vec![answer("Yes", "approve", Some("yes"), None), no.clone()],
+            ..card(CardKind::Question, n, true)
+        };
+        let mut a = screen(conversation(4), vec![asked], Some(0));
+        assert_eq!(
+            drag_away(&mut a),
+            Some(Dismissal::AnsweredNo {
+                serial: pinned_serial(n),
+                answer: Some(no)
+            })
+        );
+        // Answers with no No: not answered, one line, as a plan question.
+        let other = AgentCard {
+            answers: vec![answer("Continue", "green", Some("continue"), None)],
+            ..card(CardKind::Question, n, true)
+        };
+        let mut a = screen(conversation(4), vec![other], Some(0));
+        assert_eq!(drag_away(&mut a), Some(Dismissal::Shrunk(pinned_serial(n))));
+        assert!(flow_notes(&a).is_empty());
+    }
+
+    #[test]
+    fn a_plan_question_dragged_away_is_one_line_unanswered() {
+        let n = conversation(4).len();
+        let plan = AgentCard {
+            about_plan: true,
+            ..card(CardKind::Question, n, true)
+        };
+        let mut a = screen(conversation(4), vec![plan], Some(0));
+        assert_eq!(drag_away(&mut a), Some(Dismissal::Shrunk(pinned_serial(n))));
+        let bar = a.frame().pin.clone().unwrap();
+        assert!(bar.compact);
+        assert_eq!(
+            bar.flow.rows[0].text,
+            "Claude is asking \u{b7} Shall I go on?"
+        );
+        assert!(flow_notes(&a).is_empty());
+    }
+
+    #[test]
+    fn a_choice_question_is_not_dragged_away() {
+        let mut a = choice_screen(choice_set(None));
+        let s = S23.scale;
+        let pin = a.frame().pin.as_ref().unwrap().rect;
+        let (x, y) = (pin.x + pin.w * 0.5, pin.y + 4.0 * s);
+        a.touch(9, TouchPhase::Started, x, y, Duration::ZERO);
+        for i in 1..=10 {
+            a.touch(9, TouchPhase::Moved, x - 6.0 * s * i as f32, y, MS * i);
+        }
+        assert_eq!(a.pin_offset(), 0.0, "the card does not follow");
+        a.touch(9, TouchPhase::Ended, x - 60.0 * s, y, MS * 11);
+        assert!(a.dismiss_pinned().is_none());
+        assert!(a.pinned_card().is_some_and(|c| c.choices.is_some()));
+    }
+
+    #[test]
+    fn up_and_down_on_the_pinned_card_still_scroll_the_flow() {
+        let n = conversation(20).len();
+        let mut a = screen(
+            conversation(20),
+            vec![card(CardKind::Broke, n, true)],
+            Some(0),
+        );
+        let pin = a.frame().pin.as_ref().unwrap().rect;
+        let before = a.offset();
+        let (x, y) = (pin.x + pin.w * 0.5, pin.y + 20.0);
+        a.touch(9, TouchPhase::Started, x, y, Duration::ZERO);
+        for i in 1..=20 {
+            a.touch(
+                9,
+                TouchPhase::Moved,
+                x + 2.0 * i as f32,
+                y + 20.0 * i as f32,
+                MS * i,
+            );
+        }
+        a.touch(
+            9,
+            TouchPhase::Ended,
+            x + 40.0,
+            y + 400.0,
+            MS * 21 + Duration::from_millis(200),
+        );
+        assert!(a.offset() < before, "scrolled back");
+        assert_eq!(a.pin_offset(), 0.0);
+        assert!(a.pinned_card().is_some());
+    }
+
+    #[test]
+    fn a_markdown_link_on_the_pinned_card_reaches_its_target() {
+        let n = conversation(2).len();
+        let asked = AgentCard {
+            text: "Built **the cards**: see [the plan](https://example.com/plan) and \
+                   `docs/design/x.md`.\n\n- one\n- two\n- three\n- four"
+                .into(),
+            ..card(CardKind::Question, n, true)
+        };
+        let a = screen(conversation(2), vec![asked], Some(0));
+        let pin = a.frame().pin.as_ref().unwrap();
+        let span = pin
+            .flow
+            .links
+            .iter()
+            .find(|l| pin.flow.targets[l.link].url == "https://example.com/plan")
+            .expect("the link is spanned");
+        let r = link_spans::rect(&pin.flow.rows[span.row], span, 0.0);
+        let hit = a.hit(r.x + r.w * 0.5, r.y + r.h * 0.5);
+        assert_eq!(hit, Some(AgentHit::Link(span.link)));
+        assert_eq!(
+            a.link(span.link).map(|l| l.url.as_str()),
+            Some("https://example.com/plan")
+        );
+    }
+
+    #[test]
+    fn the_catch_up_dragged_away_goes_and_short_springs_back() {
+        let mut a = screen(conversation(4), vec![], None);
+        a.set_catch_up(Some("Codex finished the tests.".into()));
+        let r = a.prompts().catch_up().rect();
+        assert!(r.h > 0.0);
+        let s = PHONE.scale;
+        let (x, y) = (r.x + r.w * 0.5, r.y + r.h * 0.5);
+        let drag = |a: &mut AgentScreen, id: u64, dx: f32, t: Duration| {
+            a.touch(id, TouchPhase::Started, x, y, t);
+            let mut now = t;
+            for i in 1..=20 {
+                now += MS;
+                a.touch(id, TouchPhase::Moved, x + dx * i as f32 / 20.0, y, now);
+            }
+            a.touch(id, TouchPhase::Ended, x + dx, y, now + MS)
+        };
+        assert_eq!(drag(&mut a, 1, 30.0 * s, Duration::from_secs(1)), None);
+        assert!(a.prompts().catch_up().offset() > 0.0);
+        while a.prompts().catch_up().offset() != 0.0 {
+            a.tick(MS);
+        }
+        assert!(a.prompts().catch_up_shown(), "still there");
+        assert_eq!(
+            drag(&mut a, 2, -50.0 * s, Duration::from_secs(3)),
+            Some(AgentHit::CatchUpSwipe)
+        );
+        assert!(a.prompts().catch_up().text().is_none());
+        assert!(!a.prompts().catch_up_shown());
     }
 }

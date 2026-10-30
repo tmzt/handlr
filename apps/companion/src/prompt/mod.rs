@@ -164,6 +164,10 @@ pub struct Prompts {
     /// The agent view's live question, approval or choice outranks it:
     /// not shown until that is answered.
     catch_up_outranked: bool,
+    /// A finger on the catch-up, which a sideways drag takes away (plan
+    /// 20261022_03, the L3 amendment of 2026-10-30 15:20 EDT, items 2 and
+    /// 3).
+    catch_up_swipe: Option<crate::agent::swipe::Swipe>,
     /// The Gemini card shown over an open message, from a tap on its bars.
     peek: bool,
     touch: Option<(u64, Target)>,
@@ -187,6 +191,7 @@ impl Prompts {
             overlay: PromptOverlay::new(),
             catch_up: CatchUpCard::new(),
             catch_up_outranked: false,
+            catch_up_swipe: None,
             peek: false,
             touch: None,
             scale: 1.0,
@@ -522,6 +527,8 @@ impl Prompts {
                 return None;
             };
             self.touch = Some((id, target));
+            self.catch_up_swipe = (target == Target::Pinned && self.catch_up.contains(x, y))
+                .then(|| crate::agent::swipe::Swipe::new(id, x, y, now));
         }
         let (held, target) = self.touch?;
         if held != id {
@@ -531,6 +538,35 @@ impl Prompts {
             self.touch = None;
         }
         let ended = phase == TouchPhase::Ended;
+        // The catch-up dragged sideways follows the finger; past the
+        // distance, or flung, it goes with its speech; short, it springs
+        // back. Nothing on it is tapped.
+        if let Some(w) = self.catch_up_swipe.as_mut() {
+            use crate::agent::swipe::{Release, Way};
+            let s = self.scale;
+            match phase {
+                TouchPhase::Moved => match w.moved(x, y, now, crate::agent::SLOP * s) {
+                    Way::Sideways => {
+                        self.catch_up.set_offset(w.dx());
+                        return Some(PromptTouched::Held);
+                    }
+                    Way::Vertical => self.catch_up_swipe = None,
+                    Way::Undecided => {}
+                },
+                TouchPhase::Ended if w.way() == Way::Sideways => {
+                    let release = w.release(now, s);
+                    self.catch_up_swipe = None;
+                    if release == Release::Removes {
+                        log::info!("catch-up: dragged away");
+                        self.set_catch_up(None);
+                        return Some(PromptTouched::Hit(AgentHit::CatchUpSwipe));
+                    }
+                    return Some(PromptTouched::Held);
+                }
+                TouchPhase::Ended | TouchPhase::Cancelled => self.catch_up_swipe = None,
+                TouchPhase::Started => {}
+            }
+        }
         let hit = match target {
             Target::Sheet => {
                 let Some(kind) = self.expanded() else {
@@ -583,7 +619,9 @@ impl Prompts {
     /// Carries the overlay's slide and the history's fling on. Returns
     /// whether anything moved.
     pub fn tick(&mut self, dt: Duration) -> bool {
-        let slid = self.overlay.tick(dt);
+        // The catch-up springs back once let go short.
+        let sprang = self.catch_up_swipe.is_none() && self.catch_up.spring(dt, self.scale);
+        let slid = self.overlay.tick(dt) || sprang;
         let scrolled = match self.expanded() {
             Some(kind) if self.overlay.is_shown() => self.card_mut(kind).history_mut().tick(dt),
             _ => false,

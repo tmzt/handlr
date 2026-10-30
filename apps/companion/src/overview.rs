@@ -582,6 +582,7 @@ impl Overview {
                             | AgentHit::PromptCollapse
                             | AgentHit::PromptBars
                             | AgentHit::CatchUpDismiss
+                            | AgentHit::CatchUpSwipe
                     ) {
                         self.settle();
                     }

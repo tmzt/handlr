@@ -1,6 +1,6 @@
 [package]
 name = "companion"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 publish = false
 description = "flankr's companion app: a libmorph window on the desktop and on Android, on flankr-companion and flankr-audio"

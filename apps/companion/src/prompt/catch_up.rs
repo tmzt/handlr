@@ -39,6 +39,8 @@ pub struct CatchUpCard {
     fills: Vec<Fill>,
     rows: Vec<Row>,
     scale: f32,
+    /// Its sideways offset while dragged or springing back, in pixels.
+    dx: f32,
 }
 
 impl CatchUpCard {
@@ -54,6 +56,7 @@ impl CatchUpCard {
             return false;
         }
         self.text = text;
+        self.dx = 0.0;
         if self.text.is_none() {
             self.clear_layout();
         }
@@ -62,6 +65,24 @@ impl CatchUpCard {
 
     pub fn text(&self) -> Option<&str> {
         self.text.as_deref()
+    }
+
+    /// Its offset while a finger drags it sideways.
+    pub fn set_offset(&mut self, dx: f32) {
+        self.dx = dx;
+    }
+
+    pub fn offset(&self) -> f32 {
+        self.dx
+    }
+
+    /// Springs back by `dt`, at scale `s`. Returns whether it moved.
+    pub fn spring(&mut self, dt: std::time::Duration, s: f32) -> bool {
+        if self.dx == 0.0 {
+            return false;
+        }
+        self.dx = crate::agent::swipe::spring(self.dx, dt, s);
+        true
     }
 
     pub fn clear_layout(&mut self) {
@@ -167,6 +188,7 @@ impl CatchUpCard {
             return;
         }
         let s = self.scale;
+        let start = list.instances.len();
         for f in &self.fills {
             fill(list, f.rect, f.color, f.radius);
         }
@@ -177,6 +199,13 @@ impl CatchUpCard {
         let (h, t) = (CROSS * s, 2.0 * s);
         list.push_line([cx - h, cy - h], [cx + h, cy + h], t, theme().dim);
         list.push_line([cx - h, cy + h], [cx + h, cy - h], t, theme().dim);
+        if self.dx != 0.0 {
+            list.translate_from(start, self.dx, 0.0);
+            let alpha = crate::agent::swipe::fade(self.dx, self.rect.w);
+            for instance in list.instances.iter_mut().skip(start) {
+                instance.color[3] *= alpha;
+            }
+        }
     }
 }
 

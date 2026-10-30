@@ -190,3 +190,18 @@ These changes came before the app had version numbers.
 
 **Fixed**
 - Replies are spoken and summarized on their cards again.
+
+## 0.4.0 — 2026-10-30
+
+**Added**
+- Drag the card above the buttons left or right to put it away; let go early and it springs back. Scrolling up and down still scrolls the session.
+- A Finished card dragged away stays as one line, "Finished · " and the reply's first line; tap the line to see it whole. Its reading aloud is dropped.
+- Something broke and other spoken cards dragged away are gone, with what was waiting to be said about them.
+- An approval dragged away is denied, and a yes or no question is answered No; a dim line in the session says so. A question about a plan is not answered: it stays as one line.
+- The "While you spoke" card can be dragged away too, which also stops its update being read.
+
+**Changed**
+- A tap on the card above the buttons no longer folds or expands it. A long card shows More at its bottom right, and Less once open; only those change its size.
+
+**Fixed**
+- Links in that card's text open when tapped.

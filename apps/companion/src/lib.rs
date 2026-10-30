@@ -77,6 +77,8 @@ pub mod notify;
 pub mod overview;
 #[cfg(all(test, not(target_os = "android")))]
 mod pairing_scan_tests;
+#[cfg(all(test, not(target_os = "android")))]
+mod pinned_cards_tests;
 pub mod plugins;
 pub mod preview;
 pub mod prompt;
@@ -100,7 +102,7 @@ use flankr_audio::libvoicexn::vad::GateState;
 use flankr_audio::{AudioConfig, AudioEvent, AudioSession};
 use flankr_companion::{
     Companion, CompanionConfig, Dictation, DictationPhase, Event, FileKeyStore, Input, KeyStore,
-    Pressure, PromptMode, RemoteId, RemoteInfo, Speaker, Suggestion,
+    Pressure, PromptMode, RemoteId, RemoteInfo, Speaker, SpeechOf, Suggestion,
 };
 use libcontrols::{DrawContext, DrawerLayers};
 use libflankr_proto::common::AgentInfo;
@@ -118,7 +120,8 @@ use libmsdf::font::{
 };
 
 use crate::agent::{
-    AgentHit, AgentScreen, ChoiceAction, TermAsk, TermKey, TermState, Terminal, TerminalSessions,
+    AgentHit, AgentScreen, ChoiceAction, Dismissal, TermAsk, TermKey, TermState, Terminal,
+    TerminalSessions,
 };
 use crate::controls::Hold;
 use crate::controls::square_button::Volume;
@@ -2840,6 +2843,34 @@ impl App {
                 log::info!("catch-up: dismissed");
                 self.set_catch_up(None);
             }
+            // Dragged away (plan 20261022_03, the L3 amendment of
+            // 2026-10-30 15:20 EDT, item 3): gone from both screens, and
+            // its speech with it.
+            AgentHit::CatchUpSwipe => {
+                log::info!("catch-up: dragged away, with its speech");
+                self.set_catch_up(None);
+                self.send(Input::DropSpeech(SpeechOf::CatchUp));
+            }
+            // The pinned card dragged away: by its kind, answered Deny or
+            // No, or not answered; its speech goes either way.
+            AgentHit::PinSwipe => {
+                let Some(dismissal) = self.agent.as_mut().and_then(|a| a.dismiss_pinned()) else {
+                    return;
+                };
+                log::info!("agent view: dragged away: {dismissal:?}");
+                self.send(Input::DropSpeech(SpeechOf::Card(dismissal.serial())));
+                match dismissal {
+                    Dismissal::Denied { confirm_id, .. } => self.answer(confirm_id, false),
+                    Dismissal::AnsweredNo { answer: None, .. } => {
+                        self.send(Input::Respond(Suggestion::No));
+                    }
+                    Dismissal::AnsweredNo {
+                        answer: Some(answer),
+                        ..
+                    } => self.send(Input::Suggested(answer)),
+                    Dismissal::Shrunk(_) | Dismissal::Removed(_) => {}
+                }
+            }
             // The keys row (plan 20261022_03, the L3 amendment of
             // 2026-10-28 10:42 EDT): CTRL and ALT latch, the others go to
             // the pane with them. The soft keyboard is left as it is.
@@ -4645,6 +4676,8 @@ impl MorphApp for App {
             links.extend(screen.take_links());
         }
         for url in links {
+            #[cfg(test)]
+            probe::opened(&url);
             open_link(ctx, &url);
         }
         self.run_camera(ctx);
@@ -5098,6 +5131,8 @@ pub(crate) mod probe {
         /// What the app handed the audio, in order, as `{:?}` of its
         /// `flankr_audio::Action` (`Speak(..)`, `Chime`, ...).
         pub audio: Vec<String>,
+        /// The links the app opened, in order.
+        pub opened: Vec<String>,
         /// The drawer as last updated: shown, its cards' and rows' places
         /// when open, the rows' panes, the ≡ of the screen shown, and the
         /// pane of the agent view open.
@@ -5152,6 +5187,22 @@ pub(crate) mod probe {
         /// EDT amendment).
         pub catch_up: Option<String>,
         pub catch_up_x: Option<Rect>,
+        /// The agent view's pinned card as last laid out (plan 20261022_03,
+        /// the L3 amendment of 2026-10-30 15:20 EDT): its place, whether
+        /// it is one line, its texts, its *More* or *Less* and its links'
+        /// places; and the flow's dim lines (`-- ...`).
+        pub pin: Option<PinProbe>,
+        pub flow_notes: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct PinProbe {
+        pub rect: Rect,
+        pub compact: bool,
+        pub texts: Vec<String>,
+        pub more: Option<Rect>,
+        pub links: Vec<Rect>,
+        pub offset: f32,
     }
 
     /// When an injected event is given.
@@ -5225,6 +5276,10 @@ pub(crate) mod probe {
 
     pub fn audio(action: &flankr_audio::Action) {
         PROBE.with(|p| p.borrow_mut().audio.push(format!("{action:?}")));
+    }
+
+    pub fn opened(url: &str) {
+        PROBE.with(|p| p.borrow_mut().opened.push(url.to_string()));
     }
 
     pub fn drawer(app: &super::App) {
@@ -5309,6 +5364,34 @@ pub(crate) mod probe {
                 Some(agent) => agent.rect_of(crate::agent::AgentHit::CatchUpDismiss),
                 None => app.overview.rect_of(crate::agent::AgentHit::CatchUpDismiss),
             },
+            pin: app.agent.as_ref().and_then(|a| {
+                let p = a.frame().pin.as_ref()?;
+                Some(PinProbe {
+                    rect: p.rect,
+                    compact: p.compact,
+                    texts: p.flow.rows.iter().map(|r| r.text.clone()).collect(),
+                    more: p.more,
+                    links: p
+                        .flow
+                        .links
+                        .iter()
+                        .map(|span| {
+                            crate::agent::link_spans::rect(&p.flow.rows[span.row], span, 0.0)
+                        })
+                        .collect(),
+                    offset: a.pin_offset(),
+                })
+            }),
+            flow_notes: app
+                .agent
+                .as_ref()
+                .map(|a| {
+                    a.flow_texts()
+                        .into_iter()
+                        .filter(|t| t.starts_with("-- "))
+                        .collect()
+                })
+                .unwrap_or_default(),
         };
         PROBE.with(|p| p.borrow_mut().drawer = probe);
     }
