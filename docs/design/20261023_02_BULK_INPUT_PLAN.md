@@ -465,3 +465,34 @@ its other items stand.
 6. **Order of work.** This waits on spoken summaries working: today every
    summary request fails on its model name (libinfer's Gemini model choice
    plan, 20261030_01, fixes the model).
+
+## Amendment — 2026-10-30 15:10 EDT: the catch-up is also a pinned card, muted or not
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "I think it's worth
+keeping the summary as the pinned card even if muted", agreed as
+proposed. This adds to the 13:52 EDT amendment and replaces its item 5's
+reading that a muted phone asks for nothing: the app's mute (the
+speaker's tap, `muted`) never stops a catch-up being asked for.
+
+1. **A new event.** When the client has a catch-up's text, it gives
+   `Event::CatchUp { text: String }` (flankr-companion, on the
+   `#[non_exhaustive]` `Event`: additive) beside the `Say` it gives
+   now. The `Say` is unchanged: spoken when unmuted, dropped by the app
+   when muted, as every `Say` is.
+2. **The pinned card.** The app shows the text as a card headed *While
+   you spoke*, on the screen shown:
+   - **agent view:** in the pinned card's place above the buttons, when no
+     live card outranks it (a question, an approval or a choice waiting
+     wins; the catch-up then shows once that is answered);
+   - **overview:** pinned with the prompt cards, above Gemini's card.
+   It carries an **✕**: a tap dismisses it. It stays until dismissed or
+   replaced by the next catch-up, and is not kept across restarts.
+3. **Muted or not,** the card shows the same; only the speech follows
+   mute.
+4. **The fallback is unchanged.** With no catch-up (the 13:52 EDT
+   amendment, item 4) nothing is pinned: the held replies already have
+   their own cards.
+5. **Versions.** flankr-companion takes the next patch (additive). The
+   card is a user-visible change: the app's version takes the next minor
+   with its `apps/UPDATES.md` entry (FLANKR RULE 1), in the commit that
+   adds the card.
