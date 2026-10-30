@@ -215,7 +215,23 @@ pub(crate) fn run(
         bytes,
         tap,
     };
-    runtime.block_on(net.run());
+    // A panic here ends the thread, and with it every link: the app's
+    // inputs go nowhere from then on. It is logged, as Android drops
+    // stderr (the owner's report of 2026-10-30 15:12 EDT).
+    let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(net.run());
+    }));
+    match run {
+        Ok(()) => log::info!("net: the thread ended (the app dropped its companion)"),
+        Err(panic) => {
+            let why = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "a panic with no message".to_string());
+            log::error!("net: the thread panicked and ended: {why}");
+        }
+    }
 }
 
 struct Net {
@@ -1714,6 +1730,7 @@ impl Net {
         let delay = slot.backoff.next_delay();
         slot.stop(tokio::time::Instant::now() + delay);
         let retry_in_ms = u32::try_from(delay.as_millis()).unwrap_or(u32::MAX);
+        log::info!("net: the connection to {key:?} ended; retrying in {retry_in_ms} ms");
         let outputs = slot.state.disconnected(retry_in_ms);
         self.pending.push_back((key, outputs));
     }
