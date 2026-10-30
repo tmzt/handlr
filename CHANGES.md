@@ -3747,3 +3747,19 @@ Plan 20261023_02 (dictated messages), the 2026-10-30 15:10 EDT amendment:
 5. **Not settled:** muting (the volume tap sends *Stop reading*) while a
    catch-up is being made drops it, as *Stop reading* does (the 13:52 EDT
    amendment's addendum, item 8), so no card follows for it.
+
+## 2026-10-30 15:53 EDT — Clients built from the choice: small departures in the build
+
+Plan: `docs/design/20261027_02_INFERENCE_CONFIG_PLAN.md`, the
+2026-10-30 15:39 EDT amendment, item 1.
+
+- `ClientSpec` carries the use's choice and its backend's model list
+  (`Catalogs::catalog`, which counts an empty list as none). Clients are
+  kept by the choice's text form as well as the target and profile, so
+  two uses whose choices resolve to the same model each step by their
+  own rule when it is refused; a reload drops a client whose use's
+  choice changed.
+- libinfer-gemini's `choice()` resolves the choice again when a client
+  is built, so each new client logs one more `gemini: <choice> is
+  <model>` info line from libinfer-gemini; the daemon's own start log
+  (item 3) is unchanged.
