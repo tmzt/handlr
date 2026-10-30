@@ -1816,3 +1816,27 @@ entries (the pinned card's tap anywhere expanding or folding it):
    queued speech (by the card's section serial), taking the next patch.
    The app's version takes the next minor with its `apps/UPDATES.md`
    entry (FLANKR RULE 1).
+
+## Amendment — 2026-10-30 16:02 EDT: implementation record: the pinned cards' More and Less and sideways drag (living section L3)
+
+The L3 entry of the 2026-10-30 15:20 EDT amendment ("pinned cards: More
+and Less, a sideways drag removes, by kind"), built on the `pinned-drag`
+branch:
+
+- **Item 5:** `de2f586`, flankr-companion 0.7.2, `Input::DropSpeech` with
+  `SpeechOf::Card(serial)` and `SpeechOf::CatchUp`.
+- **Items 1 to 4:** `86b49a4`, the companion app 0.4.0: *More* and *Less*
+  alone change the pinned card's size; the sideways drag; Finished and
+  plan questions to one line; something broke and the *While you spoke*
+  card dismissed with their speech; approvals denied and yes/no questions
+  answered No, each with its dim line.
+- Small departures: `bb4d675`, the CHANGES.md addendum of 2026-10-30
+  16:02 EDT.
+
+Not built: item 3's choice question (cancelled, as the agent's own
+dismiss does) and its line *Dismissed the question* (item 4). Nothing on
+the phone or in the daemon cancels a choice question: plan 20261029_01
+never sends Esc, and its approved open question 2 left no dismiss. A
+choice question's card is not dragged until the owner decides how it is
+cancelled. This entry stays open for it.
+
