@@ -2228,16 +2228,24 @@ impl App {
             // The new remote's own card: its answers are untagged now.
             self.card_remote = None;
         }
-        // The new remote's state comes in the switch's replay; until then
-        // nothing of the old one's shows.
-        self.agents.clear();
-        self.pending.clear();
+        // The new remote's last list shows at once, from what it gave in
+        // the background (kept or listed; the 2026-10-30 13:15 EDT
+        // amendment); the switch's replay then brings it up to date. With
+        // none, nothing of the old one's shows and no empty line either.
+        let last = self.background.get(&id).cloned().unwrap_or_default();
+        self.agents = last.agents;
+        self.pending = last.pending;
         self.active_cards.clear();
-        self.overview.set_agents(Vec::new(), &[]);
-        self.drawer
-            .content_mut()
-            .set_agents(Vec::new(), self.started.elapsed());
-        self.drawer.content_mut().set_pending(Vec::new());
+        if self.agents.is_empty() {
+            self.overview.unload();
+            self.drawer.content_mut().unload();
+        } else {
+            self.overview.set_agents(self.agents.clone(), &self.pending);
+            self.drawer
+                .content_mut()
+                .set_agents(self.agents.clone(), self.started.elapsed());
+        }
+        self.drawer.content_mut().set_pending(self.pending.clone());
         self.drawer.content_mut().set_open_pane(None);
         self.background.remove(&id);
         // The cards show the new one in use, connecting until its replay.

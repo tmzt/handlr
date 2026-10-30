@@ -44,8 +44,6 @@ const NOTE_PT: f32 = 14.0;
 /// The list's one row while it has no sessions to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Note {
-    /// The remote in use is not yet connected.
-    Connecting,
     /// Its connection failed; the next try in this many seconds.
     Unreachable(u32),
     /// Connected, and no sessions.
@@ -124,6 +122,9 @@ pub struct DrawerContent {
     /// Background remotes with a question or an approval waiting.
     waiting: HashSet<RemoteId>,
     agents: Vec<AgentInfo>,
+    /// A list has been given (kept or the daemon's), since the last
+    /// [`DrawerContent::unload`].
+    listed: bool,
     /// When the list came, on the app's clock.
     received_at: Duration,
     pending: Vec<String>,
@@ -155,6 +156,7 @@ impl Default for DrawerContent {
             remotes: Vec::new(),
             waiting: HashSet::new(),
             agents: Vec::new(),
+            listed: false,
             received_at: Duration::ZERO,
             pending: Vec::new(),
             open_pane: None,
@@ -206,7 +208,16 @@ impl DrawerContent {
     /// A list of the remote in use's agents, received at `now`.
     pub fn set_agents(&mut self, agents: Vec<AgentInfo>, now: Duration) {
         self.agents = agents;
+        self.listed = true;
         self.received_at = now;
+        self.dirty = true;
+    }
+
+    /// No list: the rows go and no note shows until one is given (a switch
+    /// to a remote with none kept).
+    pub fn unload(&mut self) {
+        self.agents.clear();
+        self.listed = false;
         self.dirty = true;
     }
 
@@ -257,16 +268,19 @@ impl DrawerContent {
         self.dirty = true;
     }
 
-    /// The list's one note row, if it shows one.
+    /// The list's one note row, if it shows one: none while there are
+    /// rows, and no looking-for message (plan 20261028_03, the 2026-10-30
+    /// 13:15 EDT amendment): with no rows, a failed connection's next
+    /// try, or *No sessions* once a list came empty.
     pub fn note(&self) -> Option<Note> {
         let active = self.active()?;
-        if !active.online {
-            return Some(match self.retry_in {
-                Some(secs) => Note::Unreachable(secs),
-                None => Note::Connecting,
-            });
+        if !self.agents.is_empty() {
+            return None;
         }
-        self.agents.is_empty().then_some(Note::NoSessions)
+        if !active.online {
+            return self.retry_in.map(Note::Unreachable);
+        }
+        self.listed.then_some(Note::NoSessions)
     }
 
     /// The note's words.
@@ -276,7 +290,6 @@ impl DrawerContent {
             .map(|r| r.display_name.as_str())
             .unwrap_or_default();
         let text = match note {
-            Note::Connecting => copy::DRAWER_CONNECTING.fill(None, &[("nickname", name)]),
             Note::Unreachable(secs) => copy::DRAWER_UNREACHABLE
                 .fill(None, &[("nickname", name), ("seconds", &secs.to_string())]),
             Note::NoSessions => copy::DRAWER_NO_SESSIONS.fill(None, &[("nickname", name)]),
@@ -345,18 +358,16 @@ impl DrawerContent {
             );
             y += row_h;
         }
-        let online = self.active().is_some_and(|r| r.online);
-        if online {
-            for agent in &self.agents {
-                let approval = self.pending.contains(&agent.pane_id);
-                let open = self.open_pane.as_deref() == Some(agent.pane_id.as_str());
-                let mut row =
-                    SessionRow::new(agent, approval, self.activity_of(agent, now), open, s);
-                row.rect = Rect::new(self.list.x, y, self.list.w, row_h);
-                let id = router.add(Some(pane), row);
-                self.rows.push((id, agent.pane_id.clone()));
-                y += row_h;
-            }
+        // The rows show online or not: a kept list shows at once (the
+        // 13:15 EDT amendment, item 2).
+        for agent in &self.agents {
+            let approval = self.pending.contains(&agent.pane_id);
+            let open = self.open_pane.as_deref() == Some(agent.pane_id.as_str());
+            let mut row = SessionRow::new(agent, approval, self.activity_of(agent, now), open, s);
+            row.rect = Rect::new(self.list.x, y, self.list.w, row_h);
+            let id = router.add(Some(pane), row);
+            self.rows.push((id, agent.pane_id.clone()));
+            y += row_h;
         }
         if let Some(p) = router.get::<ScrollPane>(pane) {
             p.set_content_size(Some([self.list.w, y - list_top]));
@@ -559,6 +570,26 @@ mod tests {
     }
 
     #[test]
+    fn a_kept_list_shows_its_rows_while_offline_and_unload_shows_nothing() {
+        crate::theme::testing::use_theme("dark_gray");
+        let mut c = DrawerContent::default();
+        let mut rs = remotes(1);
+        rs[0].online = false;
+        c.set_remotes(rs);
+        c.set_frame([326.0, 800.0], [0.0, 0.0], 1.0);
+        c.set_retry(Some(4));
+        c.set_agents(vec![agent("p1", Some(1), None)], Duration::ZERO);
+        let mut router = Router::new();
+        c.build(&mut router, Duration::ZERO);
+        assert_eq!(c.row_panes(), ["p1"]);
+        assert_eq!(c.note(), None, "rows, not the retry");
+        c.unload();
+        c.build(&mut router, Duration::ZERO);
+        assert!(c.row_panes().is_empty());
+        assert_eq!(c.note(), Some(Note::Unreachable(4)));
+    }
+
+    #[test]
     fn the_rows_are_the_list_in_order_and_the_note_shows_without_one() {
         crate::theme::testing::use_theme("dark_gray");
         let mut c = DrawerContent::default();
@@ -568,8 +599,8 @@ mod tests {
         c.set_frame([326.0, 800.0], [0.0, 0.0], 1.0);
         let mut router = Router::new();
         c.build(&mut router, Duration::ZERO);
-        assert_eq!(c.note(), Some(Note::Connecting));
-        assert_eq!(c.note_text(&Note::Connecting), "Connecting to m0…");
+        // Connecting: no looking-for message.
+        assert_eq!(c.note(), None);
         c.set_retry(Some(4));
         assert_eq!(
             c.note_text(&c.note().unwrap()),
@@ -578,6 +609,9 @@ mod tests {
         rs[0].online = true;
         c.set_remotes(rs);
         c.set_retry(None);
+        // Online with no list yet: nothing; an empty list: No sessions.
+        assert_eq!(c.note(), None);
+        c.set_agents(Vec::new(), Duration::ZERO);
         assert_eq!(c.note(), Some(Note::NoSessions));
         assert_eq!(c.note_text(&Note::NoSessions), "No sessions on m0");
         c.set_agents(

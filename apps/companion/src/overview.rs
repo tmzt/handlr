@@ -198,6 +198,16 @@ impl Overview {
         }
     }
 
+    /// No list (a switch to a remote with none kept): no cards and no
+    /// line until one is given.
+    pub fn unload(&mut self) {
+        self.loaded = false;
+        self.agents.clear();
+        self.pending.clear();
+        self.grid.unload();
+        self.dirty = true;
+    }
+
     /// The agents as listed, and the panes with a confirmation waiting.
     pub fn set_agents(&mut self, agents: Vec<AgentInfo>, pending: &[String]) {
         if self.loaded && agents == self.agents && pending == self.pending {

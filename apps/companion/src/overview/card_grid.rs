@@ -269,13 +269,23 @@ impl CardGrid {
     /// The line shown in place of cards: before the first list, and when
     /// it has none.
     pub fn empty_line(&self) -> Option<&'static str> {
+        // No looking-for line before a list (plan 20261028_03, the
+        // 2026-10-30 13:15 EDT amendment, item 3).
         if !self.loaded {
-            Some("Looking for agents\u{2026}")
+            None
         } else if self.agents.is_empty() {
             Some("No agents in herdr.")
         } else {
             None
         }
+    }
+
+    /// No list: no cards and no line until one is given.
+    pub fn unload(&mut self) {
+        self.loaded = false;
+        self.agents.clear();
+        self.pending.clear();
+        self.relayout();
     }
 
     pub fn touch(&mut self, id: u64, phase: TouchPhase, x: f32, y: f32, now: Duration) -> Touched {
@@ -521,7 +531,7 @@ mod tests {
     fn the_empty_and_loading_lines() {
         let mut g = CardGrid::new();
         g.set_viewport(HALF, 2.0);
-        assert_eq!(g.empty_line(), Some("Looking for agents\u{2026}"));
+        assert_eq!(g.empty_line(), None, "no looking-for line");
         g.set_agents(&[], &[]);
         assert_eq!(g.empty_line(), Some("No agents in herdr."));
         g.set_agents(&[agent("p2", "w1", 1, None)], &[]);
