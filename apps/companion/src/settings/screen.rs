@@ -10,6 +10,9 @@
 //! - **Voice**: *Microphone*, *General agent (Gemini)*, and *Tab follows
 //!   focus* (off), inactive while the general agent is off or the daemon
 //!   offers none (plan 20261024_02, the 2026-10-27 11:27 EDT amendment);
+//!   then *At startup*, "‹ Overview ›" or "‹ Last session ›", on
+//!   libcontrols' `SelectableLabel` ([`StartupRow`]; the 2026-10-30 15:20
+//!   EDT amendment);
 //! - **Display**: *Scrollbar*, "‹ Hidden ›"; then *Appearance* (*System*,
 //!   *Always light*, *Always dark*), *Light theme* and *Dark theme*, the
 //!   themes of each kind by name, each step applied at once; with *Always
@@ -51,7 +54,7 @@
 //!   gone: each remote's X replaces it.
 //!
 //! Rows with a long explanation have an ⓘ that opens it in a modal
-//! ([`InfoModal`]): *Voice*, *General agent*, *Tab follows focus*, *Appearance*, the two above, *Battery optimization*,
+//! ([`InfoModal`]): *Voice*, *General agent*, *Tab follows focus*, *At startup*, *Appearance*, the two above, *Battery optimization*,
 //! *Samsung battery (app sleeping)*, and the Remotes title. All the copy is in
 //! `copy/SETTINGS_COPY.md` ([`copy`]), drawn as Markdown where it is more than a
 //! label; a link in it is tappable, and the app opens it with libmorph's
@@ -87,6 +90,7 @@ use super::option_row::OptionRow;
 use super::plugin_row::PluginRow;
 use super::remote_details::{DetailsModal, DetailsState};
 use super::remote_row::{REMOVE_PART, RemoteRow};
+use super::startup_row::StartupRow;
 use super::toggle_row::ToggleRow;
 use super::voice;
 use super::{Settings, dim_since, scrollbar_label, step_scrollbar};
@@ -175,6 +179,7 @@ enum Info {
     Voice,
     GeneralAgent,
     TabFollowsFocus,
+    AtStartup,
     Background,
     Alerts,
     Optimization,
@@ -191,6 +196,7 @@ impl Info {
             Info::Voice => copy::VOICE,
             Info::GeneralAgent => copy::GENERAL_AGENT,
             Info::TabFollowsFocus => copy::TAB_FOLLOWS_FOCUS,
+            Info::AtStartup => copy::AT_STARTUP,
             Info::Background => copy::BACKGROUND,
             Info::Alerts => copy::ALERTS,
             Info::Optimization => copy::BATTERY_OPTIMIZATION,
@@ -320,6 +326,7 @@ impl Asking {
             Asking::Info(Info::Voice) => "info_voice",
             Asking::Info(Info::GeneralAgent) => "info_general_agent",
             Asking::Info(Info::TabFollowsFocus) => "info_tab_follows_focus",
+            Asking::Info(Info::AtStartup) => "info_at_startup",
             Asking::Info(Info::Background) => "info_background",
             Asking::Info(Info::Alerts) => "info_alerts",
             Asking::Info(Info::Optimization) => "info_optimization",
@@ -346,6 +353,8 @@ struct Nodes {
     microphone: NodeId,
     general_agent: NodeId,
     tab_follows_focus: NodeId,
+    /// *At startup*, after *Tab follows focus*.
+    startup: NodeId,
     scrollbar: NodeId,
     appearance: NodeId,
     light_theme: NodeId,
@@ -1068,6 +1077,11 @@ impl SettingsScreen {
         let microphone = toggle(&mut router, copy::MICROPHONE.label(), false);
         let general_agent = toggle(&mut router, copy::GENERAL_AGENT.label(), true);
         let tab_follows_focus = toggle(&mut router, copy::TAB_FOLLOWS_FOCUS.label(), true);
+        let startup = {
+            let mut row = StartupRow::new(copy::AT_STARTUP.label(), self.settings.startup, s);
+            row.label_w = self.label_w(copy::AT_STARTUP.label());
+            router.add(under, row)
+        };
         let scrollbar = router.add(
             under,
             OptionRow::new(
@@ -1161,6 +1175,7 @@ impl SettingsScreen {
             microphone,
             general_agent,
             tab_follows_focus,
+            startup,
             scrollbar,
             appearance,
             light_theme,
@@ -1312,6 +1327,11 @@ impl SettingsScreen {
                             t.on = on;
                             t.enabled = enabled;
                         }
+                    }
+                    let rect = row(&mut y);
+                    if let Some(r) = router.get_mut::<StartupRow>(n.startup) {
+                        r.set_rect(rect);
+                        r.set_value(settings.startup);
                     }
                 }
                 Section::Display => {
@@ -1526,6 +1546,10 @@ impl SettingsScreen {
             .into_iter()
             .filter_map(|id| r.get::<OptionRow>(id).map(|o| (o.label.clone(), o.rect))),
         )
+        .chain(
+            r.get::<StartupRow>(n.startup)
+                .map(|row| (row.label.clone(), row.rect)),
+        )
         .chain([n.optimization, n.vendor].into_iter().filter_map(|id| {
             r.get::<LinkRow>(id)
                 .filter(|_| shown(id))
@@ -1606,6 +1630,14 @@ impl SettingsScreen {
         .filter_map(|id| self.router.get::<OptionRow>(id))
         .find(|o| o.label == label)
         .map(|o| (o.value(), o.enabled))
+    }
+
+    /// The *At startup* row: its value as shown, and its arrows' rects.
+    pub fn startup_shown(&self) -> Option<(String, Rect, Rect)> {
+        let n = self.nodes.as_ref()?;
+        let row = self.router.get::<StartupRow>(n.startup)?;
+        let (left, right) = row.arrows();
+        Some((row.select.display_string(), left, right))
     }
 
     /// The *Voice* row's value as shown.
@@ -1729,6 +1761,7 @@ impl SettingsScreen {
                 (n.voice, Info::Voice),
                 (n.general_agent, Info::GeneralAgent),
                 (n.tab_follows_focus, Info::TabFollowsFocus),
+                (n.startup, Info::AtStartup),
                 (n.background, Info::Background),
                 (n.alerts, Info::Alerts),
                 (n.optimization, Info::Optimization),
@@ -1774,6 +1807,13 @@ impl SettingsScreen {
             s.general_agent = !s.general_agent;
         } else if target == n.tab_follows_focus {
             s.tab_follows_focus = !s.tab_follows_focus;
+        } else if target == n.startup {
+            // The label stepped itself: its selection is the setting.
+            step(action)?;
+            s.startup = self
+                .router
+                .get::<StartupRow>(n.startup)
+                .map(StartupRow::value)?;
         } else if target == n.background {
             s.background = !s.background;
         } else if target == n.alerts {
@@ -2280,6 +2320,13 @@ impl SettingsScreen {
         {
             return o.info.then(|| o.info_rect().center());
         }
+        if let Some(r) = self
+            .router
+            .get::<StartupRow>(n.startup)
+            .filter(|r| r.label == label)
+        {
+            return r.info.then(|| r.info_rect().center());
+        }
         [n.optimization, n.vendor]
             .into_iter()
             .filter(|&id| !self.router.flags(id).contains(NodeFlags::HIDDEN))
@@ -2702,6 +2749,50 @@ mod tests {
     }
 
     #[test]
+    fn at_startup_steps_between_overview_and_last_session_beside_tab_follows_focus() {
+        // Plan 20261024_02, the 2026-10-30 15:20 EDT amendment, items 1,
+        // 2 and 5.
+        let mut s = plain();
+        let tab = s.row_rect("Tab follows focus").unwrap();
+        let r = s.row_rect("At startup").unwrap();
+        assert_eq!(r.y, tab.y + tab.h, "right after Tab follows focus");
+        let (shown, left, right) = s.startup_shown().unwrap();
+        assert_eq!(shown, "Overview", "the default");
+        assert_eq!(s.settings().startup, super::super::Startup::Overview);
+        // The left arrow at the first value does nothing.
+        assert_eq!(tap(&mut s, left.center()[0], left.center()[1]), None);
+        let Some(SettingsHit::Changed(now)) = tap(&mut s, right.center()[0], right.center()[1])
+        else {
+            panic!("the right arrow steps");
+        };
+        assert_eq!(now.startup, super::super::Startup::LastSession);
+        assert_eq!(s.startup_shown().unwrap().0, "Last session");
+        assert_eq!(tap(&mut s, right.center()[0], right.center()[1]), None);
+        // A tap on the label is not an arrow.
+        assert_eq!(tap(&mut s, r.x + 40.0, r.y + r.h * 0.5), None);
+        // Kept across a new layout.
+        s.set_layout(Layout { w: 1200.0, ..PHONE });
+        assert_eq!(s.startup_shown().unwrap().0, "Last session");
+        let (_, left, _) = s.startup_shown().unwrap();
+        let Some(SettingsHit::Changed(now)) = tap(&mut s, left.center()[0], left.center()[1])
+        else {
+            panic!("the left arrow steps back");
+        };
+        assert_eq!(now.startup, super::super::Startup::Overview);
+        // Its ⓘ text, as the amendment's item 5 has it.
+        assert_eq!(
+            copy::AT_STARTUP
+                .text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+            "Open the overview, or go back to the session you last had open, on the \
+             remote you last used. The saved session shows at once and updates once \
+             connected."
+        );
+    }
+
+    #[test]
     fn appearance_steps_and_dims_the_other_kinds_row() {
         let mut s = plain();
         let (right, left) = arrows(&s, "Appearance");
@@ -2895,6 +2986,7 @@ mod tests {
             fingerprint_words: "zoo zone youth wrist wrong yellow".into(),
             nickname: None,
             display_name: format!("m{n}"),
+            last_session: None,
         }
     }
 
@@ -3751,7 +3843,8 @@ mod tests {
                 ready: true,
                 asked: Rc::clone(&asked),
             }));
-        s.set_layout(PHONE);
+        // Tall enough that the alerts row is on screen under *At startup*.
+        s.set_layout(TALL);
         s.tick(Duration::from_millis(16));
         let mut list = DrawList::new();
         s.draw(&mut list, &DrawContext::default(), None);
@@ -3834,6 +3927,7 @@ mod tests {
             ("Voice", Info::Voice),
             ("General agent (Gemini)", Info::GeneralAgent),
             ("Tab follows focus", Info::TabFollowsFocus),
+            ("At startup", Info::AtStartup),
             (BACKGROUND, Info::Background),
             (ALERTS, Info::Alerts),
             ("Battery optimization", Info::Optimization),
@@ -3950,6 +4044,8 @@ mod tests {
             }
         }
         let mut s = screen(true, Box::new(Changing(Rc::clone(&state))));
+        // Tall enough that the battery rows are on screen under *At startup*.
+        s.set_layout(TALL);
         let enable = s.enable_rect("Battery optimization").unwrap();
         tap(&mut s, enable.x + enable.w * 0.5, enable.y + enable.h * 0.5);
         // The user allows it in Android's dialog, which takes no surface.

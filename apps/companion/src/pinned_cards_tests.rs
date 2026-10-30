@@ -37,6 +37,7 @@ fn remote() -> RemoteInfo {
         fingerprint_words: String::new(),
         nickname: None,
         display_name: "m4".into(),
+        last_session: None,
     }
 }
 
@@ -136,6 +137,8 @@ fn view(card: AgentCard) -> Event {
         bookends: Vec::new(),
         child: None,
         children: Vec::new(),
+        cached: false,
+        ended: false,
     }
 }
 

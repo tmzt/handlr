@@ -43,8 +43,10 @@ const PLUS_PT: f32 = 22.0;
 const DOT: f32 = 7.0;
 const RADIUS: f32 = 10.0;
 
-/// What a card is of.
+/// What a card is of. At most `MAX_REMOTES` and one **+** are held, so
+/// the size between the variants does not matter.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Slot {
     Remote(RemoteInfo),
     /// The **+** after the last card.
@@ -259,6 +261,7 @@ pub(crate) mod tests {
             fingerprint_words: String::new(),
             nickname: None,
             display_name: name.to_string(),
+            last_session: None,
         }
     }
 }

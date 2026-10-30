@@ -97,6 +97,7 @@ fn run_events(
             fingerprint_words: String::new(),
             nickname: None,
             display_name: "m4".into(),
+            last_session: None,
         }]),
     );
     probe::inject(

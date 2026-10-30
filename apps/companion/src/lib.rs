@@ -87,6 +87,8 @@ pub mod scanner;
 pub mod session_cards;
 pub mod settings;
 #[cfg(all(test, not(target_os = "android")))]
+mod startup_tests;
+#[cfg(all(test, not(target_os = "android")))]
 mod subagents_tests;
 pub mod terminal_keys;
 pub mod theme;
@@ -198,6 +200,29 @@ struct Args {
 /// 20261028_06, the 2026-10-29 00:52 EDT amendment, item 1).
 fn reaches_audio(muted: bool, event: &Event) -> bool {
     !(muted && matches!(event, Event::Say(_)))
+}
+
+/// Which session *Last session* opens at start (plan 20261024_02, the
+/// 2026-10-30 15:20 EDT amendment, item 3), from the remotes' rows: the
+/// remote in use's last session; else, of the others, the one whose last
+/// session was shown most recently, which is to come into use (`true`).
+/// `None`: the overview. A row has its last session only while its pane
+/// is listed.
+fn last_session_at_start(
+    rows: &[flankr_companion::RemoteInfo],
+) -> Option<(flankr_companion::RemoteId, String, bool)> {
+    if let Some((r, last)) = rows
+        .iter()
+        .filter(|r| r.active)
+        .find_map(|r| r.last_session.as_ref().map(|l| (r, l)))
+    {
+        return Some((r.id, last.pane_id.clone(), false));
+    }
+    rows.iter()
+        .filter(|r| !r.active)
+        .filter_map(|r| r.last_session.as_ref().map(|l| (r, l)))
+        .max_by_key(|(_, l)| l.shown)
+        .map(|(r, l)| (r.id, l.pane_id.clone(), true))
 }
 
 /// Seconds as a silence: a positive number, else `None`.
@@ -406,6 +431,10 @@ pub struct App {
     /// *While you spoke* card on both screens (plan 20261023_02, the
     /// 2026-10-30 15:10 EDT amendment). Not kept across restarts.
     catch_up: Option<String>,
+    /// *At startup* is *Last session* and the first remotes list has not
+    /// come: when it does, the session to open is chosen from it (plan
+    /// 20261024_02, the 2026-10-30 15:20 EDT amendment, item 3).
+    startup_pending: bool,
     /// What each session's message card keeps for the app's run, by pane
     /// (the amendment of 2026-10-27 01:14 EDT, item 2).
     sessions: HashMap<String, SessionPrompt>,
@@ -1095,6 +1124,8 @@ impl App {
                 bookends,
                 child,
                 children,
+                cached,
+                ended,
             } => {
                 // Paths and commit hashes as preview links (plan
                 // 20261028_05, decision 10.1).
@@ -1114,6 +1145,11 @@ impl App {
                     agent.set_held_end(held_end);
                     agent.set_held_newer(held_newer);
                     agent.set_bookends(bookends);
+                    // Kept from the last run until the first delivery, or
+                    // its session gone (plan 20261023_03, the 2026-10-30
+                    // 15:20 EDT amendment, items 3 and 4).
+                    agent.set_cached(cached);
+                    agent.set_ended(ended);
                 }
             }
             // The audio played the chime.
@@ -1147,6 +1183,9 @@ impl App {
                     .retain(|id, _| rows.iter().any(|r| r.id == *id && !r.active));
                 self.drawer.content_mut().set_remotes(self.remotes.clone());
                 self.show_background();
+                if std::mem::take(&mut self.startup_pending) {
+                    self.open_last_session();
+                }
             }
             Event::RemoteRemoved { id, name, daemon } => {
                 log::info!(
@@ -2114,6 +2153,26 @@ impl App {
         }
     }
 
+    /// *At startup*'s *Last session* (plan 20261024_02, the 2026-10-30
+    /// 15:20 EDT amendment, items 3 and 4), on the first remotes list: the
+    /// session last open on the remote in use, else the one shown most
+    /// recently on another (which comes into use), else the overview. The
+    /// client gives each remote's last session only while its pane is
+    /// listed. The view opens over the overview at once, on the kept list
+    /// and the kept view, before the connection is up.
+    fn open_last_session(&mut self) {
+        let Some((id, pane, switch)) = last_session_at_start(&self.remotes) else {
+            log::info!("startup: no last session; the overview");
+            return;
+        };
+        if switch {
+            log::info!("startup: the last session is on another remote");
+            self.switch_remote(id);
+        }
+        log::info!("startup: the last session");
+        self.open_agent(pane);
+    }
+
     /// Closes the agent view, back to the overview.
     fn close_agent(&mut self) {
         self.remember_prompts();
@@ -2657,7 +2716,7 @@ impl App {
     fn agent_hit(&mut self, hit: AgentHit) {
         log::info!("companion: agent_hit: {hit:?}");
         match hit {
-            AgentHit::Back => self.close_agent(),
+            AgentHit::Back | AgentHit::Overview => self.close_agent(),
             AgentHit::Message => self.send(Input::StartDictation),
             // The centre button: stops what is being said to Gemini, or
             // starts listening. Its card stays as the user left it (plan
@@ -4356,6 +4415,7 @@ impl MorphApp for App {
             paste_wanted: None,
             gemini_turns: Vec::new(),
             catch_up: None,
+            startup_pending: false,
             sessions: HashMap::new(),
             agent_gemini_expanded: false,
             terminal_panes: TerminalSessions::default(),
@@ -4383,6 +4443,7 @@ impl MorphApp for App {
             popup: None,
             layout: Layout::default(),
         };
+        app.startup_pending = app.settings.startup == settings::Startup::LastSession;
         app.notifier
             .set_alerts(app.settings.alerts && app.settings.background);
         // The toggle shows the real permission; nothing is asked at start.
@@ -5128,6 +5189,9 @@ pub(crate) mod probe {
         pub frames: Vec<(super::Shown, bool, bool)>,
         /// The inputs the app sent the client, in order, as `{:?}`.
         pub inputs: Vec<String>,
+        /// The agent view's pull line (*refreshing…* and the rest), each
+        /// change, `None` while none shows or no view is open.
+        pub pull_lines: Vec<Option<String>>,
         /// What the app handed the audio, in order, as `{:?}` of its
         /// `flankr_audio::Action` (`Speak(..)`, `Chime`, ...).
         pub audio: Vec<String>,
@@ -5193,6 +5257,12 @@ pub(crate) mod probe {
         /// places; and the flow's dim lines (`-- ...`).
         pub pin: Option<PinProbe>,
         pub flow_notes: Vec<String>,
+        /// The agent view shows the kept view, not yet refreshed; its
+        /// session has ended, and the button back to the overview (plan
+        /// 20261023_03, the 2026-10-30 15:20 EDT amendment).
+        pub agent_cached: bool,
+        pub agent_ended: bool,
+        pub ended_button: Option<Rect>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -5392,8 +5462,22 @@ pub(crate) mod probe {
                         .collect()
                 })
                 .unwrap_or_default(),
+            agent_cached: app.agent.as_ref().is_some_and(|a| a.cached()),
+            agent_ended: app.agent.as_ref().is_some_and(|a| a.ended()),
+            ended_button: app.agent.as_ref().and_then(|a| a.ended_button()),
         };
-        PROBE.with(|p| p.borrow_mut().drawer = probe);
+        let pull = app
+            .agent
+            .as_ref()
+            .and_then(|a| a.pull_line())
+            .map(|(text, _)| text);
+        PROBE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.drawer = probe;
+            if p.pull_lines.last() != Some(&pull) {
+                p.pull_lines.push(pull);
+            }
+        });
     }
 
     impl Probe {

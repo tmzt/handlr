@@ -671,6 +671,7 @@ mod tests {
             fingerprint_words: FINGERPRINT.into(),
             nickname: None,
             display_name: format!("m{n}"),
+            last_session: None,
         }
     }
 

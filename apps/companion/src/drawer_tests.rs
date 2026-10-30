@@ -44,6 +44,7 @@ fn remote(n: u8, name: &str, active: bool) -> RemoteInfo {
         fingerprint_words: String::new(),
         nickname: None,
         display_name: name.into(),
+        last_session: None,
     }
 }
 

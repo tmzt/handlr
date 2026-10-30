@@ -30,6 +30,7 @@ pub mod plugin_row;
 pub mod remote_details;
 pub mod remote_row;
 pub mod screen;
+pub mod startup_row;
 pub mod toggle_row;
 pub mod voice;
 
@@ -97,6 +98,49 @@ pub struct Settings {
     /// first of its kind. Kept as saved when no theme has it.
     pub light_theme: Option<String>,
     pub dark_theme: Option<String>,
+    /// *At startup* (plan 20261024_02, the 2026-10-30 15:20 EDT
+    /// amendment): the overview, or the session last open.
+    pub startup: Startup,
+}
+
+/// What the app opens on at start: *Overview* or *Last session*.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Startup {
+    #[default]
+    Overview,
+    LastSession,
+}
+
+/// *At startup*'s values, in the order its arrows step through them.
+pub static STARTUP_OPTIONS: [Startup; 2] = [Startup::Overview, Startup::LastSession];
+
+impl Startup {
+    /// As `settings.toml` writes it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Startup::Overview => "overview",
+            Startup::LastSession => "last_session",
+        }
+    }
+
+    /// As the screen shows it.
+    pub fn label(self) -> &'static str {
+        match self {
+            Startup::Overview => copy::AT_STARTUP_OVERVIEW.text,
+            Startup::LastSession => copy::AT_STARTUP_LAST_SESSION.text,
+        }
+    }
+
+    /// Its place in [`STARTUP_OPTIONS`].
+    pub fn index(self) -> usize {
+        STARTUP_OPTIONS.iter().position(|&o| o == self).unwrap_or(0)
+    }
+}
+
+impl std::fmt::Display for Startup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
 }
 
 /// Which kind of theme is in force: the phone's (*System*), or always one.
@@ -176,6 +220,7 @@ impl Default for Settings {
             appearance: Appearance::System,
             light_theme: None,
             dark_theme: None,
+            startup: Startup::Overview,
         }
     }
 }
@@ -217,6 +262,13 @@ struct SettingsFile {
     light_theme: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dark_theme: Option<String>,
+    /// `overview` or `last_session`.
+    #[serde(default = "overview")]
+    startup: String,
+}
+
+fn overview() -> String {
+    Startup::Overview.name().to_string()
 }
 
 fn system() -> String {
@@ -328,6 +380,10 @@ impl Settings {
                 .unwrap_or_default(),
             light_theme: file.light_theme.filter(|t| !t.is_empty()),
             dark_theme: file.dark_theme.filter(|t| !t.is_empty()),
+            startup: STARTUP_OPTIONS
+                .into_iter()
+                .find(|o| o.name() == file.startup)
+                .unwrap_or_default(),
         }
     }
 
@@ -350,6 +406,7 @@ impl Settings {
             appearance: self.appearance.name().to_string(),
             light_theme: self.light_theme.clone(),
             dark_theme: self.dark_theme.clone(),
+            startup: self.startup.name().to_string(),
         };
         let text = toml::to_string(&file).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -648,6 +705,7 @@ mod tests {
             appearance: Appearance::Light,
             light_theme: Some("solarized_light".into()),
             dark_theme: Some("nord".into()),
+            startup: Startup::LastSession,
         };
         s.save(dir.path()).unwrap();
         assert_eq!(Settings::load(dir.path()), s);
@@ -660,6 +718,7 @@ mod tests {
         assert!(text.contains("appearance = \"light\""), "{text}");
         assert!(text.contains("light_theme = \"solarized_light\""), "{text}");
         assert!(text.contains("dark_theme = \"nord\""), "{text}");
+        assert!(text.contains("startup = \"last_session\""), "{text}");
         // *Default* is left out of the file.
         Settings::default().save(dir.path()).unwrap();
         let text = std::fs::read_to_string(dir.path().join(FILE)).unwrap();
@@ -669,6 +728,10 @@ mod tests {
             "the first of each kind is left out: {text}"
         );
         assert!(text.contains("appearance = \"system\""), "{text}");
+        // *At startup* is the overview unless chosen.
+        assert!(text.contains("startup = \"overview\""), "{text}");
+        std::fs::write(dir.path().join(FILE), "startup = \"sideways\"\n").unwrap();
+        assert_eq!(Settings::load(dir.path()).startup, Startup::Overview);
 
         std::fs::write(
             dir.path().join(FILE),

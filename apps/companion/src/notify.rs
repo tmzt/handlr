@@ -819,6 +819,7 @@ mod tests {
                 fingerprint_words: String::new(),
                 nickname: None,
                 display_name: name.into(),
+                last_session: None,
             })
             .collect()
     }

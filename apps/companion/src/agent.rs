@@ -380,6 +380,9 @@ pub enum AgentHit {
     /// A subagent's link in the parent's flow (the subagents plan,
     /// decision 4): open it. Its index in the view's children.
     Child(usize),
+    /// *Back to the overview*, under *This session has ended* (plan
+    /// 20261023_03, the 2026-10-30 15:20 EDT amendment, item 4).
+    Overview,
 }
 
 /// Whether `hit` answers the live card: drawn inactive, and taking no
@@ -2279,6 +2282,13 @@ pub const PULL_TO_REFRESH: &str = "-- pull to refresh --";
 pub const RELEASE_TO_REFRESH: &str = "-- release to refresh --";
 pub const REFRESHING: &str = "-- refreshing\u{2026} --";
 pub const UP_TO_DATE: &str = "-- up to date --";
+/// A session restored at start that is gone (plan 20261023_03, the
+/// 2026-10-30 15:20 EDT amendment, item 4), and its button.
+pub const SESSION_ENDED: &str = "This session has ended";
+pub const BACK_TO_OVERVIEW: &str = "Back to the overview";
+/// The button's height and side padding, in points.
+const ENDED_BUTTON_H: f32 = 44.0;
+const ENDED_BUTTON_PAD: f32 = 18.0;
 /// A section label's text before its card's summary arrives.
 pub const DONE: &str = "Done";
 
@@ -2615,6 +2625,13 @@ pub struct AgentScreen {
     speaking: bool,
     /// The session has not answered yet.
     loading: bool,
+    /// The view shows what was kept from the last run, and nothing has
+    /// come since: the pull's *refreshing* line shows (plan 20261023_03,
+    /// the 2026-10-30 15:20 EDT amendment, item 3).
+    cached: bool,
+    /// The restored session is gone: *This session has ended*, with a
+    /// button back to the overview (item 4).
+    ended: bool,
     /// The pinned card shows all its text (owner, 2026-10-23: "clicking an
     /// abbreviated question should expand the text and card").
     pin_expanded: bool,
@@ -3646,6 +3663,71 @@ impl AgentScreen {
             attach: mobile.then_some(false),
             ime: mobile.then_some((self.keys_row, !self.tools.physical)),
         }
+    }
+
+    /// Whether the view shows only what was kept from the last run (plan
+    /// 20261023_03, the 2026-10-30 15:20 EDT amendment, item 3): the
+    /// pull-to-refresh line holds at *refreshing…* until the first
+    /// delivery, then springs back as after a pull.
+    pub fn set_cached(&mut self, on: bool) {
+        if on == self.cached {
+            return;
+        }
+        self.cached = on;
+        if on {
+            if self.pull_state == PullState::Idle {
+                log::info!("agent view: from the cache, refreshing");
+                self.pull = PULL_ARM * self.scale();
+                self.springing = false;
+                self.pull_state = PullState::Refreshing;
+            }
+        } else if self.pull_state == PullState::Refreshing && !self.wants_refresh {
+            log::info!("agent view: refreshed from the cache");
+            self.pull_state = PullState::Idle;
+            self.springing = true;
+        }
+        self.dirty = true;
+    }
+
+    /// Whether the view shows the kept view, not yet refreshed.
+    pub fn cached(&self) -> bool {
+        self.cached
+    }
+
+    /// The restored session is gone (item 4): *This session has ended*
+    /// and *Back to the overview* instead of an empty view.
+    pub fn set_ended(&mut self, on: bool) {
+        if on == self.ended {
+            return;
+        }
+        log::info!("agent view: the session has ended");
+        self.ended = on;
+        if on {
+            self.set_cached(false);
+        }
+        self.dirty = true;
+    }
+
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// *Back to the overview*'s button, on screen, while the session has
+    /// ended and the transcript shows.
+    pub fn ended_button(&self) -> Option<Rect> {
+        if !self.ended || self.term_shown {
+            return None;
+        }
+        let s = self.scale();
+        let v = self.frame.viewport;
+        let px = TEXT_PT * s;
+        let w = BACK_TO_OVERVIEW.chars().count() as f32 * px * 0.5 + 2.0 * ENDED_BUTTON_PAD * s;
+        Some(Rect::new(
+            PAD * s,
+            v.y + 16.0 * s + line_h(px) + 16.0 * s,
+            w,
+            ENDED_BUTTON_H * s,
+        ))
     }
 
     /// Whether the session is still loading: "(loading session)" until it
@@ -5053,6 +5135,9 @@ impl AgentScreen {
         if let Some(b) = self.frame.buttons.iter().find(|b| b.rect.contains([x, y])) {
             return Some(b.hit);
         }
+        if self.ended_button().is_some_and(|r| r.contains([x, y])) {
+            return Some(AgentHit::Overview);
+        }
         self.prompts.hit(x, y).or_else(|| {
             self.hits
                 .iter()
@@ -5866,7 +5951,24 @@ impl AgentScreen {
                 }
             }
         }
-        if self.slots.is_empty() {
+        if let Some(button) = self.ended_button() {
+            // The restored session is gone (plan 20261023_03, the
+            // 2026-10-30 15:20 EDT amendment, item 4).
+            let px = TEXT_PT * s;
+            ctx.draw_text(
+                list,
+                SESSION_ENDED,
+                [PAD * s, v.y + 16.0 * s],
+                px,
+                theme().fg,
+            );
+            fill(list, button, theme().card, 8.0 * s);
+            let pos = [
+                button.x + ENDED_BUTTON_PAD * s,
+                button.y + (button.h - line_h(px)) * 0.5,
+            ];
+            ctx.draw_text(list, BACK_TO_OVERVIEW, pos, px, theme().fg);
+        } else if self.slots.is_empty() {
             let px = TEXT_PT * s;
             ctx.draw_text(
                 list,

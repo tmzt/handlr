@@ -122,6 +122,22 @@ The two speak options, shared by the Sound rows and the volume menu
     used when you ask to be shown a pane, moves herdr's focus either way;
     this switch does not change it. Needs *General agent (Gemini)* on.
 
+# [Copy] at_startup
+
+- title: At startup
+- text: |
+    Open the overview, or go back to the session you last had open, on the
+    remote you last used. The saved session shows at once and updates once
+    connected.
+
+# [Copy] at_startup_overview
+
+- text: Overview
+
+# [Copy] at_startup_last_session
+
+- text: Last session
+
 # [Copy] scrollbar
 
 - text: Scrollbar

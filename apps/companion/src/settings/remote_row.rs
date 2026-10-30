@@ -280,6 +280,7 @@ mod tests {
             fingerprint_words: "able baker charlie delta echo fox".into(),
             nickname: None,
             display_name: name.into(),
+            last_session: None,
         }
     }
 

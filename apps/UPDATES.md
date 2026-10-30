@@ -205,3 +205,13 @@ These changes came before the app had version numbers.
 
 **Fixed**
 - Links in that card's text open when tapped.
+
+## 0.5.0 — 2026-10-30
+
+**Added**
+- Settings has *At startup*, beside *Tab follows focus*: *Overview* (as before) or *Last session*. With *Last session* the app opens on the session you last had open, on the remote you last used; if that session is gone, on the most recent session of another remote, and otherwise on the overview.
+- The session you return to shows at once as you left it, scrolling and links working, with "refreshing…" at the bottom until it has caught up.
+- A session that no longer exists when you come back to it says "This session has ended", with a button back to the overview.
+
+**Changed**
+- Going back from a session to the overview makes the overview what opens next time, with *Last session* on.
