@@ -232,3 +232,22 @@ types a command into a coding agent's pane after the owner approves it,
 but no tool that waits for the agent's reply and gives it back, so it
 cannot ask an agent and summarize what it says. Handed to a subagent to
 amend the general agent planning plan and build it.
+
+## 2026-10-30 22:37 EDT — Owner: Gemini's turn feedback and asking the agent, done
+
+This follows the two entries before ("a Gemini turn shows no sign it is
+working" and "Gemini should ask the coding agent and summarize its
+answer").
+
+**Done.**
+- **Asking the agent:** daemon 0.4.0. Gemini has `ask_agent`: after the
+  owner approves the question on its card, it is typed into the agent's
+  pane, the same turn waits up to 120 s for the agent's finished reply,
+  and Gemini summarizes it as a short list; past 120 s it says the reply
+  will show on the agent's card. Daemon 0.4.1: a tap that stops Gemini
+  leaves an agent it only asked alone, and no longer interrupts the
+  focused agent.
+- **Feedback:** app 0.7.0 and daemon 0.5.0. While a turn runs, Gemini's
+  card shows a spinner and *Thinking…*, or what it is doing (*Looking at
+  recent commits…*, *Asking Claude…*), and the centre button spins until
+  the turn ends.
