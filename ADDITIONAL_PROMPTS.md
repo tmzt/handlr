@@ -21,8 +21,10 @@ daemon fills, from its own values first and then from the settings.
     them. Unless the reply is only about them, also leave out which
     files changed, worktrees and branches, log and report entries, and
     test counts: keep what was done, what was found, and any question.
-    Keep a number or a version as it is. If the reply asks the user
-    something, end with that question.
+    Keep a number or a version as it is. Never add a question or an
+    offer the reply does not make: say a plan or a promise in it ("I'll
+    install it when it's done") as a statement. If the reply asks the
+    user something, end with that question.
 - [#] max_points: 6
 - points: |
     Then, after the spoken text, write a line with only POINTS: on
@@ -52,8 +54,9 @@ daemon fills, from its own values first and then from the settings.
     test counts, commit hashes, line numbers and error codes. Plain
     spoken English only: no Markdown, no lists, no code. Say a path
     as "the" and the English words of its last part, and an
-    identifier as its words. End with a question only if one is still
-    open.
+    identifier as its words. Never add a question or an offer the
+    replies do not make: say a plan or a promise as a statement. End
+    with a question only if one is still open.
 - user: |
     While the user spoke, these arrived, oldest first:
 

@@ -216,7 +216,15 @@ impl SpeechService {
             None
         } else {
             match self.summarize(agent, project, reply).await {
-                Ok(summary) => Some(summary),
+                Ok(summary) => {
+                    // What is said, so a summary can be checked (plan
+                    // 20261023_05, the 2026-10-30 22:08 EDT amendment).
+                    log::info!(
+                        "speech.summarize: said {}",
+                        crate::sessions::redact::redact(&summary)
+                    );
+                    Some(summary)
+                }
                 Err(e) => {
                     log::warn!(
                         "speech.summarize: {}; the reply is read as it is",
@@ -381,9 +389,15 @@ impl SpeechService {
             return SpeechCatchUpResult { summary: None };
         }
         match self.ask_catch_up(held, said).await {
-            Ok(summary) => SpeechCatchUpResult {
-                summary: Some(summary),
-            },
+            Ok(summary) => {
+                log::info!(
+                    "speech.catch_up: said {}",
+                    crate::sessions::redact::redact(&summary)
+                );
+                SpeechCatchUpResult {
+                    summary: Some(summary),
+                }
+            }
             Err(e) => {
                 log::warn!(
                     "speech.catch_up: {}; the held speech is said as it is",

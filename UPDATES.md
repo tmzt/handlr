@@ -150,3 +150,9 @@ These changes came before the program had version numbers.
 
 **Added**
 - A choice question Claude is showing can be dismissed from the phone. The daemon presses Esc in Claude's question screen, as dismissing it at the Mac does, but only once it sees the question's first page there; otherwise it sends nothing and tells the phone.
+
+## 0.3.1 — 2026-10-30
+
+**Changed**
+- Spoken summaries no longer add a question or an offer the reply didn't make; a plan in the reply is said as a statement.
+- Each spoken summary and catch-up is written to the log (`speech.summarize: said …`, `speech.catch_up: said …`), so what was heard can be checked.
