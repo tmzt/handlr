@@ -1049,3 +1049,14 @@ semver-compatible.
   `turn.progress` for the running turn not tapped to interrupt:
   `Some(label)` while Gemini runs a tool ("Working…" when the daemon
   gave none), `None` once it is thinking again. Never spoken.
+
+## libflankr_proto 0.5.10 — 2026-10-30 (the commit tagged `libflankr_proto-v0.5.10`)
+
+Plan 20261027_04 (the general agent's planning tools), its 2026-10-30
+22:50 EDT amendment, item 17. Strictly additive (a field appended to a
+struct, absent on the wire when `None`):
+
+- **Added:** `companion::ConfirmRequested::turn_id` (`Option<u64>`): the
+  Gemini turn that opened the confirmation, as `turn.start`'s `turn_id`;
+  `None` for a dictated message and for other principals'
+  confirmations.

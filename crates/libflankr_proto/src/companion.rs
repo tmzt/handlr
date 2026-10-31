@@ -489,6 +489,13 @@ pub struct ConfirmRequested {
     /// `Approve sending "<command>" to <spoken name>?`, then ` For <handle
     /// words>.` when there is a handle (plan 02, 12:06 EDT amendment).
     pub text: String,
+    /// The Gemini turn that opened it, as `turn.start`'s `turn_id`: such a
+    /// confirmation is answered only by a tap on its card or the owner's
+    /// next voice reply to Gemini (plan 20261027_04, the 2026-10-30 22:50
+    /// EDT amendment, items 17 and 20). `None` (absent) for a dictated
+    /// message and for other principals' confirmations. Added in 0.5.10.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<u64>,
 }
 
 /// `notice`: speak when free.
@@ -676,7 +683,34 @@ mod tests {
             token: Some("copper-lantern-ninety".into()),
             reminder: false,
             text: "Approve sending \"continue\" to Claude? For keep going.".into(),
+            turn_id: None,
         });
+        round_trip(ConfirmRequested {
+            confirm_id: 4,
+            pane_id: "w2:pZ".into(),
+            agent: "claude".into(),
+            name: None,
+            spoken: None,
+            project: None,
+            command: "What did we ship today?".into(),
+            requested_by: "paired:s23".into(),
+            handle: None,
+            token: None,
+            reminder: false,
+            text: "Approve sending \"What did we ship today?\" to Claude?".into(),
+            turn_id: Some(7),
+        });
+        // Without `turn_id` on the wire: none, and left off when `None`.
+        let plain: ConfirmRequested =
+            serde_json::from_value(serde_json::json!({"confirm_id": 3, "text": "Approve?"}))
+                .unwrap();
+        assert_eq!(plain.turn_id, None);
+        assert!(
+            serde_json::to_value(&plain)
+                .unwrap()
+                .get("turn_id")
+                .is_none()
+        );
         round_trip(Notice {
             id: 1,
             kind: notice_kinds::AGENT_STATUS.into(),
