@@ -274,3 +274,27 @@ Device: Galaxy S23 Ultra, the build installed 2026-10-30 22:38 EDT (app
   so a message to another agent answered Gemini's approval.
 
 Handed to a subagent in its own worktree.
+
+## 2026-10-30 23:10 EDT — Owner: the ask_agent approval, done
+
+This follows the entry "no approval card for ask_agent, and nothing heard".
+
+**Cause.**
+- **No card:** the daemon numbers confirmations from 1 at every start,
+  and the session's approval journal already held a confirmation 1 from
+  2026-10-27, so the new one was skipped as a duplicate and the agent view
+  never made its card.
+- **Denied by the message:** the client answered a pending voice-turn
+  confirmation with the next thing said, so dictating to Claude denied
+  Gemini's question.
+- **What was heard:** Gemini's "I'll ask Claude in flankr once you
+  approve", then the question "Approve sending your message to Claude in
+  flankr?", which did not say what would be sent.
+
+**Done.** Daemon 0.5.1, client 0.8.0, app 0.7.1, installed 23:10 EDT:
+confirmation numbers continue past the journals', so the card shows;
+Gemini's questions quote the text (Approve sending "What did we ship
+today?" to Claude?); only a tap on the card or a reply to Gemini answers
+it, never a dictated or typed message; *Not sent: denied.* shows on
+Gemini's card; each line a turn speaks and each question it asks is
+logged.
