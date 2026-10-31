@@ -637,9 +637,14 @@ impl Prompts {
 
     /// Draws the pinned cards and the bars. Their buttons (a reply's
     /// controls) are the screen's to draw, from [`PromptCard::buttons`].
-    pub fn draw_pinned(&self, list: &mut DrawList, ctx: &DrawContext) {
-        self.message.draw(list, ctx);
-        self.gemini.draw(list, ctx);
+    pub fn draw_pinned(
+        &self,
+        list: &mut DrawList,
+        ctx: &DrawContext,
+        term: Option<&crate::agent::Terminal>,
+    ) {
+        self.message.draw(list, ctx, term);
+        self.gemini.draw(list, ctx, term);
         self.catch_up.draw(list, ctx);
     }
 

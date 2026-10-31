@@ -641,6 +641,15 @@ the general agent's two bars while its card is hidden.
 
 - text: Listening…
 
+Gemini's card while a turn runs and Gemini has said nothing yet, after the
+Braille spinner (docs/design/20261024_03_GENERAL_AGENT_CHAT_PLAN.md, the
+2026-10-30 22:08 EDT amendment); a tool's own label from the daemon
+replaces it while the tool runs.
+
+# [Copy] prompt_thinking
+
+- text: Thinking…
+
 # [Copy] prompt_ask_gemini
 
 - text: Ask Gemini…

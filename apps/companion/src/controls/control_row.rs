@@ -27,6 +27,10 @@ pub struct RowState {
     pub dictating: bool,
     /// Gemini listens: the centre is the listening button.
     pub general_agent_listening: bool,
+    /// A Gemini turn runs (plan 20261024_03, the 2026-10-30 22:08 EDT
+    /// amendment, item 2): the centre is the spinning button, unless
+    /// Gemini listens or a prompt with an input area is open.
+    pub general_agent_busy: bool,
     /// The terminal switch's label (`TERMINAL_LABEL` or `LIST_LABEL`), in
     /// slot 1 of 4; `None` for no switch (a terminal-only session, or a
     /// row of three). Not drawn while dictating.
@@ -43,8 +47,17 @@ impl RowState {
             slots: 3,
             dictating,
             general_agent_listening,
+            general_agent_busy: false,
             terminal: None,
             record: true,
+        }
+    }
+
+    /// The same, with a Gemini turn running or not.
+    pub fn busy(self, busy: bool) -> Self {
+        RowState {
+            general_agent_busy: busy,
+            ..self
         }
     }
 }
@@ -98,6 +111,15 @@ impl ControlRow {
             });
         } else if st.dictating {
             row.push(square(AgentHit::Clear, centre, theme().back));
+        } else if st.general_agent_busy {
+            // A turn runs: the drawer's spinner in place of the ✦; a tap
+            // still interrupts it.
+            row.push(FlowButton {
+                hit: AgentHit::GeneralAgent,
+                rect: Rect::new(at(centre), y, sq, sq),
+                label: "busy".into(),
+                bg: theme().back,
+            });
         } else if crate::settings::llm().general_agent {
             // The centre button: general agent (Gemini) idle in neutral
             // background, empty while the daemon offers none (plan
@@ -130,6 +152,7 @@ mod tests {
             slots: 4,
             dictating,
             general_agent_listening: listening,
+            general_agent_busy: false,
             terminal: terminal.then_some(TERMINAL_LABEL),
             record,
         }
@@ -186,6 +209,22 @@ mod tests {
             xs(&row),
             [(AgentHit::Volume, 12.0), (AgentHit::GeneralAgent, 235.3)]
         );
+    }
+
+    /// Plan 20261024_03, the 2026-10-30 22:08 EDT amendment, item 2.
+    #[test]
+    fn a_running_turn_spins_the_centre_unless_listening_or_dictating() {
+        let busy = RowState::three(false, false).busy(true);
+        let row = ControlRow::lay_out(X0, X1, 500.0, 1.0, &busy);
+        assert_eq!(row[1].hit, AgentHit::GeneralAgent);
+        assert_eq!(row[1].label, "busy");
+        assert_eq!(row[1].bg, theme().back);
+        assert_eq!(row[1].rect.x, ControlRow::slot_x(X0, X1, BUTTON_H, 3, 1));
+        // Listening keeps its pulse; a prompt open keeps its ✕.
+        let row = ControlRow::lay_out(X0, X1, 500.0, 1.0, &RowState::three(false, true).busy(true));
+        assert_eq!(row[1].label, "listening");
+        let row = ControlRow::lay_out(X0, X1, 500.0, 1.0, &RowState::three(true, false).busy(true));
+        assert_eq!(row[1].hit, AgentHit::Clear);
     }
 
     #[test]

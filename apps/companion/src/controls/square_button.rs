@@ -481,6 +481,17 @@ impl SquareButton {
             AgentHit::GeneralAgent if b.label == "listening" => {
                 draw_general_agent_listening(list, ctx, term, rect, b.bg, s);
             }
+            // A turn runs (plan 20261024_03, the 2026-10-30 22:08 EDT
+            // amendment, item 2): the drawer's Braille spinner, 80 ms a
+            // frame, in the Gemini accent, in place of the ✦.
+            AgentHit::GeneralAgent if b.label == "busy" => {
+                fill(list, rect, b.bg, 10.0 * s);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default();
+                let glyph = crate::drawer::spinner::glyph_at(now).to_string();
+                draw_glyph(list, ctx, term, &glyph, "*", rect, 24.0 * s, theme().accent);
+            }
             AgentHit::GeneralAgent if b.label.is_empty() => {
                 fill(list, rect, b.bg, 10.0 * s);
                 let px = 24.0 * s;

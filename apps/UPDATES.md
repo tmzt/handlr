@@ -220,3 +220,9 @@ These changes came before the app had version numbers.
 
 **Added**
 - A question with options from Claude can be dragged away like the other cards: it is dismissed as pressing Esc at the Mac would, and a dim line in the session says "Dismissed the question". If it can't be dismissed, the card springs back and says "Couldn't dismiss the question".
+
+## 0.7.0 — 2026-10-30
+
+**Added**
+- While Gemini works on an answer, its card shows a small spinner and "Thinking…", and the centre button spins until the answer is done; tapping it still stops Gemini.
+- While Gemini looks something up, the card says what, such as "Looking at recent commits…", and while it waits for a coding agent's answer to a question it asked, "Asking Claude…". None of this is spoken.

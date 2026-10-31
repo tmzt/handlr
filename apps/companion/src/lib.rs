@@ -427,6 +427,14 @@ pub struct App {
     /// The conversation with Gemini, as each screen's card is given it
     /// (plan 20261027_03, decision 1: each screen owns its own card).
     gemini_turns: Vec<(Speaker, String)>,
+    /// A Gemini turn runs and Gemini has said nothing in it yet (plan
+    /// 20261024_03, the 2026-10-30 22:08 EDT amendment): *Thinking…* or
+    /// the tool's label, after the spinner on both screens' cards, the
+    /// centre button spinning with it.
+    turn_busy: Option<String>,
+    /// A Gemini turn runs, from `TurnStarted` to `TurnEnded`: the centre
+    /// button spins (item 2).
+    turn_running: bool,
     /// The catch-up after a voice input, until dismissed or replaced: the
     /// *While you spoke* card on both screens (plan 20261023_02, the
     /// 2026-10-30 15:10 EDT amendment). Not kept across restarts.
@@ -985,9 +993,29 @@ impl App {
                 log::info!("confirmation {confirm_id}: {outcome}");
                 self.set_card(confirm_id, CardState::Done(outcome));
             }
+            // The turn's feedback (plan 20261024_03, the 2026-10-30 22:08
+            // EDT amendment): thinking from its start, a tool's label while
+            // it runs one, until Gemini's first line or the turn's end.
+            Event::TurnStarted { turn_id } => {
+                log::info!("turn {turn_id}: started");
+                self.turn_running = true;
+                self.set_busy(Some(settings::copy::PROMPT_THINKING.text.to_string()));
+            }
+            // While the turn runs: also after Gemini's first line, as
+            // when it waits for a coding agent's answer to `ask_agent`.
+            Event::TurnProgress { label } => {
+                if self.turn_running {
+                    log::info!("turn: {}", label.as_deref().unwrap_or("thinking"));
+                    let line =
+                        label.unwrap_or_else(|| settings::copy::PROMPT_THINKING.text.to_string());
+                    self.set_busy(Some(line));
+                }
+            }
             Event::TurnEnded { outcome, .. } => {
                 log::info!("turn: {outcome}");
                 self.set_listening(false);
+                self.turn_running = false;
+                self.set_busy(None);
             }
             Event::Error(e) => {
                 log::warn!("companion: {e}");
@@ -1070,6 +1098,9 @@ impl App {
                 self.drawer.content_mut().set_pending(self.pending.clone());
             }
             Event::Conversation { speaker, text } => {
+                if speaker == Speaker::Gemini {
+                    self.set_busy(None);
+                }
                 if let Some(agent) = &mut self.agent {
                     agent.push_turn(speaker, &text);
                 }
@@ -1910,6 +1941,8 @@ impl App {
             p.gemini_mut().set_listening(listening);
             p.gemini_mut().set_expanded(expanded);
         });
+        agent.set_busy(self.turn_busy.clone());
+        agent.set_general_agent_busy(self.turn_running);
         agent.set_catch_up(self.catch_up.clone());
         // A shell has only its terminal, shown at once (plan 20261022_03,
         // the L3 amendment of 2026-10-28 00:47 EDT); otherwise the terminal
@@ -2116,6 +2149,18 @@ impl App {
             }
             Ime::Stop => ctx.stop_text_input(),
             Ime::Keep => {}
+        }
+    }
+
+    /// The Gemini cards' busy line, on both screens, and the centre
+    /// buttons' spinner with it.
+    fn set_busy(&mut self, busy: Option<String>) {
+        self.turn_busy = busy.clone();
+        self.overview.set_busy(busy.clone());
+        self.overview.invalidate();
+        if let Some(agent) = &mut self.agent {
+            agent.set_busy(busy);
+            agent.invalidate();
         }
     }
 
@@ -3953,6 +3998,7 @@ impl App {
             self.overview.set_plugin_cards(heights);
             let o = &mut self.overview;
             o.set_general_agent_listening(ga_listening);
+            o.set_general_agent_busy(self.turn_running);
             let note = self
                 .note
                 .as_ref()
@@ -3978,6 +4024,7 @@ impl App {
             agent.set_volume(volume);
             agent.set_layout(layout);
             agent.set_general_agent_listening(ga_listening);
+            agent.set_general_agent_busy(self.turn_running);
             agent.set_dictation(message);
             agent.set_gemini_input(gemini);
             // The band in its session's colour.
@@ -4417,6 +4464,8 @@ impl MorphApp for App {
             attach_wanted: None,
             paste_wanted: None,
             gemini_turns: Vec::new(),
+            turn_busy: None,
+            turn_running: false,
             catch_up: None,
             startup_pending: false,
             sessions: HashMap::new(),
@@ -4878,7 +4927,8 @@ impl MorphApp for App {
         });
         // The listening button's dingbats, the volume glyph's waves while
         // something is said, and a held press's bar step every frame.
-        if ga_listening || self.speaking || self.hold.is_some() {
+        // So do the busy spinners while a turn runs.
+        if ga_listening || self.speaking || self.hold.is_some() || self.turn_running {
             self.overview.invalidate();
             if let Some(agent) = &mut self.agent {
                 agent.invalidate();
@@ -5181,6 +5231,10 @@ pub(crate) mod probe {
     pub struct Probe {
         /// The camera events, in order.
         pub log: Vec<String>,
+        /// The overview's Gemini card and centre button, at each change
+        /// (plan 20261024_03, the 2026-10-30 22:08 EDT amendment): the
+        /// card's busy line, its texts, and the centre's label.
+        pub gemini: Vec<(Option<String>, Vec<String>, Option<String>)>,
         /// The pairing window's texts, as last laid out, and each change.
         pub texts: Vec<String>,
         pub history: Vec<Vec<String>>,
@@ -5495,8 +5549,19 @@ pub(crate) mod probe {
             .as_ref()
             .and_then(|a| a.pull_line())
             .map(|(text, _)| text);
+        let gemini = {
+            let card = app.overview.prompts().gemini();
+            (
+                card.busy().map(str::to_string),
+                card.rows().iter().map(|r| r.text.clone()).collect(),
+                app.overview.centre_label().map(str::to_string),
+            )
+        };
         PROBE.with(|p| {
             let mut p = p.borrow_mut();
+            if p.gemini.last() != Some(&gemini) {
+                p.gemini.push(gemini);
+            }
             p.drawer = probe;
             if p.pull_lines.last() != Some(&pull) {
                 p.pull_lines.push(pull);

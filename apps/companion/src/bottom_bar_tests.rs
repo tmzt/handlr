@@ -58,6 +58,17 @@ fn run_events(
     speaking: bool,
     events: Vec<Event>,
 ) -> Option<Probe> {
+    let timed = events.into_iter().map(|e| (READY + 1, e)).collect();
+    run_timed(script, settings, speaking, timed)
+}
+
+/// As [`run_events`], each event given on its own update.
+fn run_timed(
+    script: &str,
+    settings: Option<&str>,
+    speaking: bool,
+    events: Vec<(u32, Event)>,
+) -> Option<Probe> {
     let dir = tempfile::tempdir().unwrap();
     let keys = dir.path().join("keys");
     let data = dir.path().join("data");
@@ -107,8 +118,8 @@ fn run_events(
         },
     );
     probe::inject(READY, Event::Agents(Vec::new()));
-    for event in events {
-        probe::inject(READY + 1, event);
+    for (update, event) in events {
+        probe::inject(update, event);
     }
     let script = Script::parse(script).unwrap();
     match libmorph::script::run::<App>(&script, run) {
@@ -499,4 +510,117 @@ fn a_catch_up_is_pinned_until_its_x_and_the_next_replaces_it() {
     assert_eq!(p.drawer.catch_up, None);
     assert_eq!(p.drawer.catch_up_x, None);
     assert!(p.drawer.menu_items.is_empty());
+}
+
+/// Plan 20261024_03, the 2026-10-30 22:08 EDT amendment: a turn shows
+/// *Thinking…* from its start, the tool's label while one runs, thinking
+/// again after it, then Gemini's reply; the centre button spins until the
+/// turn ends; nothing is spoken for any of it.
+#[test]
+fn a_turn_shows_thinking_then_the_tool_then_the_reply() {
+    let thinking = "Thinking\u{2026}".to_string();
+    let commits = "Looking at recent commits\u{2026}".to_string();
+    let events = vec![
+        (READY + 1, Event::TurnStarted { turn_id: 1 }),
+        (
+            READY + 1,
+            Event::Conversation {
+                speaker: Speaker::User,
+                text: "what changed today".into(),
+            },
+        ),
+        (
+            READY + 4,
+            Event::TurnProgress {
+                label: Some(commits.clone()),
+            },
+        ),
+        (READY + 7, Event::TurnProgress { label: None }),
+        (
+            READY + 10,
+            Event::Conversation {
+                speaker: Speaker::Gemini,
+                text: "Three commits today.".into(),
+            },
+        ),
+        // A wait after Gemini's line (ask_agent's) shows again.
+        (
+            READY + 12,
+            Event::TurnProgress {
+                label: Some("Asking Claude\u{2026}".into()),
+            },
+        ),
+        (
+            READY + 13,
+            Event::TurnEnded {
+                outcome: "done".into(),
+                stopped: vec![],
+            },
+        ),
+    ];
+    let Some(p) = run_timed("frames 24\n", None, false, events) else {
+        return;
+    };
+    let busy: Vec<Option<&str>> = p.gemini.iter().map(|(b, _, _)| b.as_deref()).collect();
+    // Thinking, the tool, thinking again, then none once Gemini spoke.
+    let mut steps: Vec<Option<&str>> = busy.clone();
+    steps.dedup();
+    let at = |line: Option<&str>| steps.iter().position(|b| *b == line);
+    let (t, c) = (at(Some(&thinking)), at(Some(&commits)));
+    assert!(t.is_some() && c.is_some(), "{:?}", p.gemini);
+    assert!(t < c, "{steps:?}");
+    assert_eq!(steps.last(), Some(&None), "{steps:?}");
+    let asking = at(Some("Asking Claude\u{2026}")).expect("the wait shown");
+    assert!(
+        steps[c.unwrap()..asking].contains(&None),
+        "the reply first: {steps:?}"
+    );
+    assert!(
+        steps[c.unwrap()..].contains(&Some(thinking.as_str())),
+        "thinking again after the tool: {steps:?}"
+    );
+    // While busy, the card shows the line and the centre spins.
+    for (b, texts, centre) in &p.gemini {
+        if let Some(line) = b {
+            assert!(texts.contains(line), "{texts:?}");
+            assert_eq!(centre.as_deref(), Some("busy"), "{:?}", p.gemini);
+        }
+    }
+    // The reply in its place; the centre spins until the turn ends, then
+    // is the ✦ again.
+    let replied = p
+        .gemini
+        .iter()
+        .position(|(_, t, _)| t.iter().any(|l| l == "< Three commits today."))
+        .expect("the reply shown");
+    assert!(p.gemini[replied].0.is_none());
+    assert!(
+        p.gemini[replied..]
+            .iter()
+            .any(|(b, _, _)| b.as_deref() == Some("Asking Claude\u{2026}")),
+        "{:?}",
+        p.gemini
+    );
+    assert_eq!(
+        p.gemini.last().unwrap().2.as_deref(),
+        Some(""),
+        "{:?}",
+        p.gemini
+    );
+    assert!(
+        p.gemini[replied..]
+            .iter()
+            .any(|(_, _, centre)| centre.as_deref() == Some("busy")),
+        "still spinning after the reply, until the turn ends: {:?}",
+        p.gemini
+    );
+    // Nothing was spoken for the progress (the reply's Say is the client's
+    // to send, not given here).
+    assert!(
+        !p.audio
+            .iter()
+            .any(|a| a.contains("Thinking") || a.contains("commits")),
+        "{:?}",
+        p.audio
+    );
 }

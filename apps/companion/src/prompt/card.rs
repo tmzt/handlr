@@ -28,7 +28,8 @@ use super::history::{History, Sent};
 use super::input_row::{InputRow, InputTools, ROW_GAP};
 use super::{PromptInput, PromptKind};
 use crate::agent::{
-    AgentHit, BUTTON_H, Fill, FlowButton, PAD, Row, columns, fill, line_h, one_line, wrap_hard,
+    AgentHit, BUTTON_H, Fill, FlowButton, PAD, Row, Terminal, columns, draw_row, fill, line_h,
+    one_line, wrap_hard,
 };
 use crate::controls::{ControlRow, RowState};
 use crate::settings;
@@ -55,6 +56,8 @@ const TYPED_PT: f32 = 12.0;
 const TYPED_LINES: usize = 3;
 /// The up arrow's square at the card's top right, in points.
 const ARROW: f32 = 36.0;
+/// The spinner's room before the busy line, in ems of its type size.
+const SPIN_EM: f32 = 1.3;
 
 /// The card a message replies to: its title and text, and its accent.
 #[derive(Clone, Debug, PartialEq)]
@@ -109,12 +112,19 @@ pub struct PromptCard {
     gemini: Option<String>,
     partial: Option<String>,
     listening: bool,
+    /// *General agent*: a turn runs and Gemini has said nothing in it yet
+    /// (plan 20261024_03, the 2026-10-30 22:08 EDT amendment): the line
+    /// shown after the spinner, *Thinking…* or a tool's label.
+    busy: Option<String>,
     history: History,
     // As laid out.
     rect: Rect,
     arrow: Rect,
     fills: Vec<Fill>,
     rows: Vec<Row>,
+    /// The Braille spinner's place before the busy line, in the terminal
+    /// face; its glyph is the frame at drawing time.
+    spinner: Option<Row>,
     text_area: Option<TextArea>,
     buttons: Vec<FlowButton>,
     bars: Bars,
@@ -143,11 +153,13 @@ impl PromptCard {
             gemini: None,
             partial: None,
             listening: false,
+            busy: None,
             history,
             rect: Rect::default(),
             arrow: Rect::default(),
             fills: Vec::new(),
             rows: Vec::new(),
+            spinner: None,
             text_area: None,
             buttons: Vec::new(),
             bars: Bars::default(),
@@ -188,6 +200,7 @@ impl PromptCard {
                 self.opened
                     || self.input.is_some()
                     || self.listening
+                    || self.busy.is_some()
                     || self.partial.is_some()
                     || self.user.is_some()
                     || self.gemini.is_some()
@@ -342,6 +355,25 @@ impl PromptCard {
         changed
     }
 
+    /// *General agent*: the busy line while a turn runs and Gemini has
+    /// said nothing yet (*Thinking…* or a tool's label), else `None`.
+    /// Returns whether it changed.
+    pub fn set_busy(&mut self, busy: Option<String>) -> bool {
+        let busy = busy.filter(|b| !b.trim().is_empty());
+        let changed = busy != self.busy;
+        self.busy = busy;
+        changed
+    }
+
+    pub fn busy(&self) -> Option<&str> {
+        self.busy.as_deref()
+    }
+
+    /// The spinner as laid out, before the busy line.
+    pub fn spinner(&self) -> Option<&Row> {
+        self.spinner.as_ref()
+    }
+
     /// *Message*: a message sent, in the history.
     pub fn push_sent(&mut self, sent: Sent) {
         self.history.push_sent(sent);
@@ -381,8 +413,12 @@ impl PromptCard {
         self.user.as_ref().map(|u| format!("> {u}"))
     }
 
-    /// The output bar's line: Gemini's newest.
+    /// The output bar's line: the busy line while a turn runs, else
+    /// Gemini's newest.
     fn output_line(&self) -> Option<String> {
+        if let Some(b) = &self.busy {
+            return Some(format!("< {b}"));
+        }
         self.gemini
             .as_ref()
             .map(|g| format!("< {}", g.replace('\n', " ")))
@@ -395,6 +431,7 @@ impl PromptCard {
         self.arrow = Rect::default();
         self.fills.clear();
         self.rows.clear();
+        self.spinner = None;
         self.text_area = None;
         self.buttons.clear();
         self.bars.clear();
@@ -425,6 +462,7 @@ impl PromptCard {
         let (header, colour) = self.header();
         // (text, px, colour, gap above)
         let mut rows: Vec<(String, f32, [f32; 4], f32)> = Vec::new();
+        let mut busy_row = None;
         let head_w = inner_w - ARROW * s;
         rows.push((
             one_line(&header, columns(head_w, HEADER_PT * s)),
@@ -467,7 +505,16 @@ impl PromptCard {
             if let Some((line, color)) = first {
                 wrapped(&mut rows, &line, EXCHANGE_PT, color, 4.0, 1);
             }
-            if let Some(g) = &self.gemini {
+            if let Some(b) = &self.busy {
+                // The spinner, then *Thinking…* or the tool's label, in
+                // place of Gemini's previous line.
+                busy_row = Some(rows.len());
+                let text = one_line(
+                    b,
+                    columns(inner_w - SPIN_EM * EXCHANGE_PT * s, EXCHANGE_PT * s),
+                );
+                rows.push((text, EXCHANGE_PT * s, theme().muted, 2.0 * s));
+            } else if let Some(g) = &self.gemini {
                 wrapped(
                     &mut rows,
                     &format!("< {g}"),
@@ -552,11 +599,23 @@ impl PromptCard {
             radius: 3.0 * s,
         });
         let mut y = top + pad;
-        for (text, px, color, gap) in rows {
+        for (i, (text, px, color, gap)) in rows.into_iter().enumerate() {
             y += gap;
+            let mut x = inner_x;
+            if busy_row == Some(i) {
+                self.spinner = Some(Row {
+                    text: String::new(),
+                    x: inner_x,
+                    y,
+                    px,
+                    color: theme().accent,
+                    mono: true,
+                });
+                x += SPIN_EM * px;
+            }
             self.rows.push(Row {
                 text,
-                x: inner_x,
+                x,
                 y,
                 px,
                 color,
@@ -683,7 +742,7 @@ impl PromptCard {
 
     /// Draws the pinned card, or the bars; not its buttons. A message being
     /// said without the microphone is dim (voice only).
-    pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext) {
+    pub fn draw(&self, list: &mut DrawList, ctx: &DrawContext, term: Option<&Terminal>) {
         self.bars.draw(list, ctx);
         if !self.pinned() {
             return;
@@ -695,6 +754,18 @@ impl PromptCard {
         }
         for r in &self.rows {
             ctx.draw_text(list, &r.text, [r.x, r.y], r.px, r.color);
+        }
+        // The drawer's spinner, its frame from the wall clock as the
+        // listening button's pulse is, so it steps every 80 ms.
+        if let Some(spin) = &self.spinner {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let row = Row {
+                text: crate::drawer::spinner::glyph_at(now).to_string(),
+                ..spin.clone()
+            };
+            draw_row(list, ctx, term, &row, [row.x, row.y]);
         }
         if let Some(ta) = &self.text_area {
             ta.draw(list, ctx);
@@ -731,6 +802,52 @@ mod tests {
 
     fn texts(card: &PromptCard) -> Vec<&str> {
         card.rows().iter().map(|r| r.text.as_str()).collect()
+    }
+
+    /// Plan 20261024_03, the 2026-10-30 22:08 EDT amendment, item 1.
+    #[test]
+    fn a_running_turn_shows_the_spinner_and_thinking_then_the_tool_then_the_reply() {
+        let mut c = PromptCard::new(PromptKind::GeneralAgent);
+        c.push_turn(Speaker::User, "first");
+        c.push_turn(Speaker::Gemini, "An old answer.");
+        c.push_turn(Speaker::User, "what changed today");
+        assert!(c.set_busy(Some("Thinking\u{2026}".into())));
+        assert!(!c.set_busy(Some("Thinking\u{2026}".into())), "unchanged");
+        laid(&mut c);
+        // Thinking… in place of Gemini's previous line, muted.
+        assert_eq!(
+            texts(&c),
+            [
+                "\u{2726} Gemini",
+                "> what changed today",
+                "Thinking\u{2026}"
+            ]
+        );
+        let line = &c.rows()[2];
+        assert_eq!(line.color, theme().muted);
+        // The spinner before it, in the terminal face, on its line.
+        let spin = c.spinner().expect("the spinner");
+        assert!(spin.mono);
+        assert_eq!(spin.y, line.y);
+        assert!(spin.x < line.x);
+        assert_eq!(spin.x, c.rows()[1].x);
+        // The hidden card's bar says it too.
+        assert_eq!(c.output_line().as_deref(), Some("< Thinking\u{2026}"));
+        // A tool's label in its place.
+        assert!(c.set_busy(Some("Looking at recent commits\u{2026}".into())));
+        laid(&mut c);
+        assert_eq!(texts(&c)[2], "Looking at recent commits\u{2026}");
+        assert!(c.spinner().is_some());
+        // The reply: the busy line and the spinner go.
+        c.push_turn(Speaker::Gemini, "Three commits today.");
+        assert!(c.set_busy(None));
+        laid(&mut c);
+        assert_eq!(texts(&c)[2], "< Three commits today.");
+        assert!(c.spinner().is_none());
+        // Busy alone is content: the card shows from the turn's start.
+        let mut empty = PromptCard::new(PromptKind::GeneralAgent);
+        empty.set_busy(Some("Thinking\u{2026}".into()));
+        assert!(empty.has_content());
     }
 
     #[test]
@@ -771,7 +888,7 @@ mod tests {
         assert_eq!(texts(&c)[1], "Listening\u{2026}");
         assert_eq!(c.rows()[1].color, theme().muted);
         let mut list = DrawList::new();
-        c.draw(&mut list, &DrawContext::default());
+        c.draw(&mut list, &DrawContext::default(), None);
         assert!(!list.instances.is_empty());
     }
 

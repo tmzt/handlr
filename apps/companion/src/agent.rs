@@ -2753,6 +2753,9 @@ pub struct AgentScreen {
     prompts_h: f32,
     /// Whether voice recognition is active for the general agent.
     general_agent_listening: bool,
+    /// A Gemini turn runs: the centre button spins (plan 20261024_03, the
+    /// 2026-10-30 22:08 EDT amendment, item 2).
+    general_agent_busy: bool,
     /// The terminal shows in place of the transcript (plan 20261027_07,
     /// step 5); the transcript keeps its place under it.
     term_shown: bool,
@@ -2867,6 +2870,24 @@ impl AgentScreen {
     pub fn set_listening(&mut self, listening: bool) {
         if self.prompts.gemini_mut().set_listening(listening) {
             self.settle();
+        }
+    }
+
+    /// The Gemini card's busy line while a turn runs and Gemini has said
+    /// nothing yet (plan 20261024_03, the 2026-10-30 22:08 EDT amendment).
+    pub fn set_busy(&mut self, busy: Option<String>) {
+        if self.prompts.gemini_mut().set_busy(busy) {
+            self.flow_stale = true;
+            self.settle();
+        }
+    }
+
+    /// Whether a Gemini turn runs, until it ends: the centre spins.
+    pub fn set_general_agent_busy(&mut self, busy: bool) {
+        if self.general_agent_busy != busy {
+            self.general_agent_busy = busy;
+            self.flow_stale = true;
+            self.dirty = true;
         }
     }
 
@@ -4233,6 +4254,7 @@ impl AgentScreen {
                     slots: 4,
                     dictating: self.prompts.taking_input(),
                     general_agent_listening: self.general_agent_listening,
+                    general_agent_busy: self.general_agent_busy,
                     terminal,
                     record: !self.terminal_only,
                 },
@@ -6138,7 +6160,7 @@ impl AgentScreen {
         }
         // The prompt cards (the message card dim without the microphone,
         // voice only), and a reply's controls in its card.
-        self.prompts.draw_pinned(list, ctx);
+        self.prompts.draw_pinned(list, ctx, term);
         for b in self.prompts.message().buttons() {
             SquareButton::draw(
                 list,

@@ -157,6 +157,9 @@ pub struct Overview {
     pub shader_panels: bool,
     /// Whether voice recognition is active for the general agent.
     general_agent_listening: bool,
+    /// A Gemini turn runs: the centre button spins (plan 20261024_03, the
+    /// 2026-10-30 22:08 EDT amendment, item 2).
+    general_agent_busy: bool,
 }
 
 impl Default for Overview {
@@ -195,6 +198,7 @@ impl Overview {
             cross_bottom: 0.0,
             shader_panels: false,
             general_agent_listening: false,
+            general_agent_busy: false,
         }
     }
 
@@ -341,6 +345,22 @@ impl Overview {
         }
     }
 
+    /// The Gemini card's busy line while a turn runs and Gemini has said
+    /// nothing yet (plan 20261024_03, the 2026-10-30 22:08 EDT amendment).
+    pub fn set_busy(&mut self, busy: Option<String>) {
+        if self.prompts.gemini_mut().set_busy(busy) {
+            self.settle();
+        }
+    }
+
+    /// Whether a Gemini turn runs, until it ends: the centre spins.
+    pub fn set_general_agent_busy(&mut self, busy: bool) {
+        if self.general_agent_busy != busy {
+            self.general_agent_busy = busy;
+            self.settle();
+        }
+    }
+
     /// The settings changed: what they turn off is redrawn, and without the
     /// general agent Gemini's card and its overlay go.
     pub fn settings_changed(&mut self) {
@@ -476,7 +496,8 @@ impl Overview {
             l.w - pad,
             row_bottom,
             s,
-            &RowState::three(self.prompts.taking_input(), self.general_agent_listening),
+            &RowState::three(self.prompts.taking_input(), self.general_agent_listening)
+                .busy(self.general_agent_busy),
         );
         let mut above = row_bottom - BUTTON_H * s - 12.0 * s;
         let mut panels = Vec::new();
@@ -528,6 +549,15 @@ impl Overview {
     }
 
     /// Where `hit` is, if it is shown.
+    /// The centre button's label as laid out: empty idle, `listening`,
+    /// `busy` while a turn runs; `None` without one.
+    pub fn centre_label(&self) -> Option<&str> {
+        self.buttons
+            .iter()
+            .find(|b| b.hit == AgentHit::GeneralAgent)
+            .map(|b| &b.label[..])
+    }
+
     pub fn rect_of(&self, hit: AgentHit) -> Option<Rect> {
         self.hits
             .iter()
@@ -676,7 +706,7 @@ impl Overview {
         }
         self.menu.draw(list, s, theme().muted);
         self.grid.draw(list, ctx, self.shader_panels);
-        self.prompts.draw_pinned(list, ctx);
+        self.prompts.draw_pinned(list, ctx, term);
         let recording = self.prompts.message_open();
         let volume = self.volume;
         let draw_button = |list: &mut DrawList, b: &FlowButton| {
