@@ -678,6 +678,7 @@ fn pairing_shows_the_code_and_connects_once_it_is_added() {
 
     // And the connection carries a turn.
     c.send(Input::Utterance("what is claude doing".into()));
+    assert!(matches!(next_event(&c), Event::TurnStarted { .. }));
     assert_eq!(
         next_event(&c),
         Event::Conversation {
@@ -849,6 +850,7 @@ fn connected_to(dir: &tempfile::TempDir, first: &Server) -> (Companion, ServerRe
 /// A turn goes over the open connection.
 fn assert_turn(c: &Companion) {
     c.send(Input::Utterance("status".into()));
+    assert!(matches!(next_event(c), Event::TurnStarted { .. }));
     assert!(matches!(next_event(c), Event::Conversation { .. }));
     assert!(matches!(next_event(c), Event::TurnEnded { .. }));
 }

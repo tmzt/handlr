@@ -1035,3 +1035,17 @@ amendment, item 4. Strictly additive:
 - **Added:** `companion::TurnProgress` (`turn_id`; `tool`, the tool the
   engine is calling, empty once it returned and the engine thinks again;
   `label`, its plain name to show, e.g. "Looking at recent commits…").
+
+## flankr-companion 0.7.5 — 2026-10-30 (the commit tagged `flankr-companion-v0.7.5`)
+
+Plan 20261024_03 (the general agent chat), its 2026-10-30 22:08 EDT
+amendment, item 3. Strictly additive: the variants are on the
+`#[non_exhaustive]` `Event`, and libflankr_proto 0.5.8 → 0.5.9 is
+semver-compatible.
+
+- **Added:** `Event::TurnStarted { turn_id }`, given as each
+  `turn.start` is sent, before the user's `Event::Conversation` line.
+- **Added:** `Event::TurnProgress { label: Option<String> }`, from
+  `turn.progress` for the running turn not tapped to interrupt:
+  `Some(label)` while Gemini runs a tool ("Working…" when the daemon
+  gave none), `None` once it is thinking again. Never spoken.

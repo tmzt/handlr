@@ -758,6 +758,21 @@ pub enum Event {
         confirm_id: u64,
         outcome: String,
     },
+    /// A Gemini turn started: its `turn.start` was sent (plan 20261024_03,
+    /// the 2026-10-30 22:08 EDT amendment, item 3). It runs until
+    /// [`Event::TurnEnded`]; until Gemini's first line in it, the app shows
+    /// it thinking. Added in 0.7.5.
+    TurnStarted {
+        turn_id: u64,
+    },
+    /// What the running turn is doing, from `turn.progress`: `Some(label)`
+    /// while Gemini runs a tool (e.g. "Looking at recent commits…"; an
+    /// empty label from the daemon is "Working…"), `None` once it is
+    /// thinking again. Only for the running turn, not one tapped to
+    /// interrupt. Never spoken. Added in 0.7.5.
+    TurnProgress {
+        label: Option<String>,
+    },
     /// A turn ended. `stopped` are the spoken names of the agents its
     /// interrupt stopped.
     TurnEnded {
@@ -1411,6 +1426,9 @@ enum Link {
     /// `hello` answered.
     Online,
 }
+
+/// A tool's label when the daemon sent none.
+const WORKING: &str = "Working\u{2026}";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Turn {
@@ -5233,6 +5251,7 @@ impl State {
         let id = self.next_turn;
         self.next_turn += 1;
         self.turn = Some(Turn { id, tapped: false });
+        out.push(event(Event::TurnStarted { turn_id: id }));
         out.push(event(Event::Conversation {
             speaker: Speaker::User,
             text: text.clone(),
@@ -6166,6 +6185,28 @@ impl State {
                         }
                     } else {
                         log::debug!("dropping a late turn.say for turn {}", say.turn_id);
+                    }
+                }
+            }
+            wire::methods::TURN_PROGRESS => {
+                if let Some(p) = parse_or_log::<wire::TurnProgress>(note) {
+                    // As for turn.say: only the running turn, not one the
+                    // user tapped to interrupt.
+                    let running = self
+                        .turn
+                        .as_ref()
+                        .is_some_and(|t| t.id == p.turn_id && !t.tapped);
+                    if running {
+                        let label = (!p.tool.is_empty()).then(|| {
+                            if p.label.trim().is_empty() {
+                                WORKING.to_string()
+                            } else {
+                                p.label.trim().to_string()
+                            }
+                        });
+                        out.push(event(Event::TurnProgress { label }));
+                    } else {
+                        log::debug!("dropping a turn.progress for turn {}", p.turn_id);
                     }
                 }
             }
@@ -7159,6 +7200,72 @@ mod tests {
         // Idle again: the next utterance is a new turn.
         let next = start(&mut s, "and codex");
         assert_eq!(next.params["turn_id"], 2);
+    }
+
+    /// Plan 20261024_03, the 2026-10-30 22:08 EDT amendment, item 3.
+    #[test]
+    fn a_turn_says_it_started_and_what_it_is_doing() {
+        let mut s = online();
+        let out = s.input(Input::Utterance("what changed today".into()));
+        let evs = events(&out);
+        assert_eq!(evs[0], Event::TurnStarted { turn_id: 1 }, "{evs:?}");
+        assert!(evs.contains(&Event::Conversation {
+            speaker: Speaker::User,
+            text: "what changed today".into()
+        }));
+        let req = sent(&out)[0].clone();
+        assert_eq!(req.method, "turn.start");
+        // A tool, with the daemon's label; nothing is spoken.
+        let out = s.incoming(note(
+            "turn.progress",
+            json!({"turn_id": 1, "tool": "recent_commits", "label": "Looking at recent commits\u{2026}"}),
+        ));
+        assert_eq!(
+            events(&out),
+            vec![Event::TurnProgress {
+                label: Some("Looking at recent commits\u{2026}".into())
+            }]
+        );
+        // Thinking again.
+        let out = s.incoming(note(
+            "turn.progress",
+            json!({"turn_id": 1, "tool": "", "label": ""}),
+        ));
+        assert_eq!(events(&out), vec![Event::TurnProgress { label: None }]);
+        // A tool with no label is "Working…".
+        let out = s.incoming(note(
+            "turn.progress",
+            json!({"turn_id": 1, "tool": "mystery"}),
+        ));
+        assert_eq!(
+            events(&out),
+            vec![Event::TurnProgress {
+                label: Some("Working\u{2026}".into())
+            }]
+        );
+        // Another turn's is dropped.
+        let out = s.incoming(note(
+            "turn.progress",
+            json!({"turn_id": 7, "tool": "read_file", "label": "Reading a file\u{2026}"}),
+        ));
+        assert!(events(&out).is_empty(), "{out:?}");
+        // Tapped to interrupt: dropped, as turn.say is.
+        s.input(Input::Tap);
+        let out = s.incoming(note(
+            "turn.progress",
+            json!({"turn_id": 1, "tool": "read_file", "label": "Reading a file\u{2026}"}),
+        ));
+        assert!(events(&out).is_empty(), "{out:?}");
+        s.incoming(response(
+            req.id,
+            json!({"outcome": "interrupted", "ran": []}),
+        ));
+        // Ended: dropped.
+        let out = s.incoming(note(
+            "turn.progress",
+            json!({"turn_id": 1, "tool": "read_file", "label": "Reading a file\u{2026}"}),
+        ));
+        assert!(events(&out).is_empty(), "{out:?}");
     }
 
     #[test]
@@ -10670,10 +10777,13 @@ mod tests {
         let out = s.input(Input::Utterance("what is claude doing".into()));
         assert_eq!(
             events(&out),
-            vec![Event::Conversation {
-                speaker: Speaker::User,
-                text: "what is claude doing".into()
-            }]
+            vec![
+                Event::TurnStarted { turn_id: 1 },
+                Event::Conversation {
+                    speaker: Speaker::User,
+                    text: "what is claude doing".into()
+                }
+            ]
         );
         let out = s.incoming(note(
             "turn.say",

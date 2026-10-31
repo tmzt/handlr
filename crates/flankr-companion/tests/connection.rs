@@ -135,8 +135,13 @@ fn expect_connected(c: &Companion) {
     assert_eq!(next_event(c), Event::Agents(vec![]));
 }
 
-/// The user's words of a turn, as the overview's conversation shows them.
+/// A turn's start, then the user's words of it, as the overview's
+/// conversation shows them.
 fn expect_user(c: &Companion, text: &str) {
+    assert!(
+        matches!(next_event(c), Event::TurnStarted { .. }),
+        "a turn starts"
+    );
     assert_eq!(
         next_event(c),
         Event::Conversation {
