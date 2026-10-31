@@ -1,7 +1,7 @@
 ---
 title: Spoken summaries of complex replies, from structured prompts
 date: 2026-10-23
-status: In implementation
+status: Implemented
 covers:
   - "Read aloud (the agent view's play button) sends a reply that is
     complex, by a basic coding measure or because it has backquotes, to
@@ -545,3 +545,9 @@ make both changes". Adds to item 1 of the 13:52 EDT amendment:
 
 Implementation of the 22:08 EDT amendment has started; the status is `In
 implementation` and the document is immutable again.
+
+## Amendment — 2026-10-30 22:09 EDT: implemented again
+
+The 22:08 EDT amendment is built in `a26b456` (flankr 0.3.1): both prompts
+say a summary never adds a question or an offer, and each summary and
+catch-up said is logged at `info`, redacted. The status is `Implemented`.
