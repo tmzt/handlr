@@ -203,3 +203,19 @@ is; the phone's connection thread now logs a crash that ends it and every
 connection that ends, and a tap that does nothing says why in the log.
 App 0.2.1 and daemon 0.2.1. The summary's model refusal is a separate
 fix, in progress.
+
+## 2026-10-30 22:05 EDT — Owner: a Gemini turn shows no sign it is working
+
+Device: Galaxy S23 Ultra, the build installed 2026-10-30 17:05 EDT (app
+0.6.0).
+
+**Report.** "The problem was it it didn't seem to do anything. It didn't
+have any any kind of thinking Feedback or anything else".
+
+**Seen.** At 21:59:57 a spoken question to Gemini was sent and the turn
+started; Gemini called `recent_commits` and was answering with its result
+when, at 22:00:03, a second tap on the centre button interrupted the turn,
+so no answer came. For those six seconds the phone showed nothing: the
+client keeps the turn internally but gives the app no event for it, and
+the daemon sends nothing while Gemini thinks or runs a tool. Handed to a
+subagent to amend the general agent chat plan and build the feedback.
