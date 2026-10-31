@@ -1098,6 +1098,14 @@ pub fn is_approval(utterance: &str) -> bool {
     matches!(kept.trim(), "approve" | "approved")
 }
 
+/// The line on Gemini's card for a turn's request that ended `outcome`,
+/// when it was not sent (plan 20261027_04, the 2026-10-30 22:50 EDT
+/// amendment, item 21).
+fn not_sent_line(outcome: &str) -> Option<String> {
+    matches!(outcome, "denied" | "expired" | "cancelled" | "failed")
+        .then(|| format!("Not sent: {outcome}."))
+}
+
 /// An utterance as control words are matched (plan 20261023_02, decision
 /// 2, as "approve" is): lowercased, everything but letters, digits and
 /// spaces dropped, spaces folded.
@@ -1448,6 +1456,10 @@ struct Confirmation {
     command: String,
     agent: String,
     project: Option<String>,
+    /// The Gemini turn that opened it: answered only by a tap on its card
+    /// or the owner's next voice reply to Gemini (plan 20261027_04, the
+    /// 2026-10-30 22:50 EDT amendment, item 20).
+    turn_id: Option<u64>,
 }
 
 /// What [`Input::Speaking`] means for a "read it back".
@@ -1528,6 +1540,10 @@ pub struct State {
     turn: Option<Turn>,
     /// Pending confirmations, the one being asked first.
     confirms: VecDeque<Confirmation>,
+    /// The Gemini turns' confirmations not yet resolved, answered or not:
+    /// their end is shown on Gemini's card (the 22:50 EDT amendment, item
+    /// 21).
+    turn_confirms: HashSet<u64>,
     /// A denying utterance to start as a turn once the running one ends.
     deferred: Option<String>,
     speaking: bool,
@@ -2182,6 +2198,7 @@ impl State {
             sent: HashMap::new(),
             turn: None,
             confirms: VecDeque::new(),
+            turn_confirms: HashSet::new(),
             deferred: None,
             speaking: false,
             listening: false,
@@ -4418,9 +4435,14 @@ impl State {
             log::info!("dictation: the microphone is off");
             return;
         }
+        // The turn waits on its confirmation: Gemini's prompt answers it,
+        // and must not withdraw it (the 22:50 EDT amendment, item 20).
+        let answers = self.turn_confirm_queued();
         if let Some(turn) = self.turn.as_mut() {
             out.push(event(Event::StopSpeaking));
-            if !turn.tapped {
+            if answers {
+                log::info!("dictation: Gemini's prompt answers the turn's confirmation");
+            } else if !turn.tapped {
                 turn.tapped = true;
                 let params = wire::TurnInterruptParams { turn_id: turn.id };
                 out.push(self.request(wire::methods::TURN_INTERRUPT, params, Sent::Interrupt));
@@ -4611,6 +4633,13 @@ impl State {
             }
             self.dictation = None;
             self.show_dictation(out);
+            // Typed, it never answers a turn's confirmation: it starts
+            // once that turn ends (the 22:50 EDT amendment, item 20).
+            if self.turn.is_some() && self.turn_confirm_queued() {
+                log::info!("Gemini's prompt waits for the turn's confirmation");
+                self.deferred = Some(text);
+                return;
+            }
             self.start_turn(text, out);
             return;
         }
@@ -5177,6 +5206,8 @@ impl State {
         }
         if !self.online() {
             out.push(event(Event::Error("not connected to flankr".to_string())));
+        } else if self.confirms.front().is_some_and(|c| c.turn_id.is_some()) {
+            self.turn_confirm_utterance(text, out);
         } else if !self.confirms.is_empty() {
             let approve = is_approval(&text);
             if self.dictation.is_some() {
@@ -5199,6 +5230,45 @@ impl State {
         } else {
             self.start_turn(text, out);
         }
+    }
+
+    /// An utterance while a Gemini turn's confirmation is asked (the
+    /// 22:50 EDT amendment, item 20): only the voice gate or Gemini's
+    /// voice prompt answers it. In a message prompt, or typed, it is the
+    /// prompt's text and the confirmation stays.
+    fn turn_confirm_utterance(&mut self, text: String, out: &mut Vec<Output>) {
+        let gemini_voice = self
+            .dictation
+            .as_ref()
+            .map(|d| d.general_agent && d.mode == PromptMode::Voice);
+        match gemini_voice {
+            // No prompt open: the voice gate, as before.
+            None => {
+                let approve = is_approval(&text);
+                self.answer(approve, (!approve).then_some(text), out);
+            }
+            Some(false) => {
+                log::info!("a turn's confirmation waits: this is the prompt's text");
+                self.dictation_utterance(text, out);
+            }
+            Some(true) => {
+                let approve = is_approval(&text);
+                let deny = control_words(&text) == "deny";
+                self.answer(approve, None, out);
+                if approve || deny {
+                    // Answered: Gemini's prompt has nothing more to take.
+                    self.dictation = None;
+                    self.show_dictation(out);
+                } else {
+                    self.dictation_utterance(text, out);
+                }
+            }
+        }
+    }
+
+    /// Whether a Gemini turn's confirmation is waiting.
+    fn turn_confirm_queued(&self) -> bool {
+        self.confirms.iter().any(|c| c.turn_id.is_some())
     }
 
     /// Answers the confirmation being asked. A denying utterance is then
@@ -6344,6 +6414,13 @@ impl State {
             self.reply(c.confirm_id, true, out);
             return;
         }
+        // A turn's confirmation is the owner using its agent's session,
+        // so its other-session card shows whenever another view is open
+        // (the 22:50 EDT amendment, item 19).
+        if c.turn_id.is_some() {
+            self.turn_confirms.insert(c.confirm_id);
+            self.interact(&c.pane_id);
+        }
         self.confirms.push_back(Confirmation {
             id: c.confirm_id,
             pane_id: c.pane_id,
@@ -6353,6 +6430,7 @@ impl State {
             command: c.command,
             agent: c.name.unwrap_or(c.agent),
             project: c.project,
+            turn_id: c.turn_id,
         });
         if self.confirms.len() == 1 {
             self.ask_next(out);
@@ -6408,6 +6486,17 @@ impl State {
             confirm_id: r.confirm_id,
             outcome: outcome.clone(),
         }));
+        // A turn's request not sent: one short line on Gemini's card, not
+        // spoken (the 22:50 EDT amendment, item 21).
+        if self.turn_confirms.remove(&r.confirm_id)
+            && let Some(line) = not_sent_line(&outcome)
+        {
+            log::info!("confirmation {}: {line}", r.confirm_id);
+            out.push(event(Event::Conversation {
+                speaker: Speaker::Gemini,
+                text: line,
+            }));
+        }
         let own = self
             .dictation
             .as_ref()
@@ -13674,5 +13763,145 @@ mod tests {
             [Event::Error(_)]
         ));
         assert!(plugin_refusal(&Input::Tap).is_none());
+    }
+
+    // ── A Gemini turn's confirmation (plan 20261027_04, the 2026-10-30
+    // 22:50 EDT amendment, items 19 to 21) ───────────────────────────────
+
+    /// A turn that asked `ask_agent`'s question and waits on its
+    /// confirmation 9, still running.
+    fn asking_turn() -> State {
+        let mut s = online();
+        let req = start(&mut s, "what did we ship today");
+        let turn_id = req.params["turn_id"].as_u64().unwrap();
+        let out = s.incoming(note(
+            "confirm.requested",
+            json!({
+                "confirm_id": 9, "pane_id": "w2:pZ", "agent": "claude",
+                "name": "Claude", "command": "What did we ship today?",
+                "requested_by": "companion:test", "label": "ask-what-did-we",
+                "text": "Approve sending \"What did we ship today?\" to Claude?",
+                "turn_id": turn_id
+            }),
+        ));
+        assert!(
+            events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Confirm { confirm_id: 9, .. })),
+            "the card: {out:?}"
+        );
+        s
+    }
+
+    fn replies(out: &[Output]) -> Vec<Value> {
+        sent(out)
+            .into_iter()
+            .filter(|r| r.method == "confirm.reply")
+            .map(|r| r.params.clone())
+            .collect()
+    }
+
+    #[test]
+    fn a_message_dictated_meanwhile_leaves_a_turns_confirmation_pending() {
+        let mut s = asking_turn();
+        let mut out = s.input(Input::StartDictation);
+        out.extend(s.input(Input::Utterance("please also run the tests".into())));
+        out.extend(s.input(Input::Utterance("deny".into())));
+        assert!(replies(&out).is_empty(), "nothing answered: {out:?}");
+        assert_eq!(s.pending_panes(), vec!["w2:pZ".to_string()]);
+        assert!(s.dictation().text.contains("please also run the tests"));
+        // The card's tap still answers it.
+        let out = s.input(Input::Answer {
+            confirm_id: 9,
+            approve: true,
+        });
+        assert_eq!(
+            replies(&out),
+            vec![json!({"confirm_id": 9, "approve": true})]
+        );
+    }
+
+    #[test]
+    fn gemini_s_voice_prompt_answers_a_turns_confirmation_without_interrupting() {
+        let mut s = asking_turn();
+        let out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        assert!(
+            !sent(&out).iter().any(|r| r.method == "turn.interrupt"),
+            "the waiting turn is not interrupted: {out:?}"
+        );
+        let out = s.input(Input::Utterance("Approve.".into()));
+        assert_eq!(
+            replies(&out),
+            vec![json!({"confirm_id": 9, "approve": true})]
+        );
+        assert!(!s.dictation().active, "answered: Gemini's prompt closes");
+        assert!(s.pending_panes().is_empty());
+    }
+
+    #[test]
+    fn other_words_in_gemini_s_prompt_deny_and_stay_its_prompt() {
+        let mut s = asking_turn();
+        s.input(Input::StartGeneralAgentPrompt(PromptMode::Voice));
+        let out = s.input(Input::Utterance("ask codex instead".into()));
+        assert_eq!(
+            replies(&out),
+            vec![json!({"confirm_id": 9, "approve": false})]
+        );
+        let d = s.dictation();
+        assert!(d.active && d.general_agent);
+        assert_eq!(d.text, "ask codex instead");
+    }
+
+    #[test]
+    fn a_typed_gemini_prompt_waits_for_the_turns_confirmation() {
+        let mut s = asking_turn();
+        let mut out = s.input(Input::StartGeneralAgentPrompt(PromptMode::Keyboard));
+        out.extend(s.input(Input::SetText("something else".into())));
+        out.extend(s.input(Input::Submit));
+        assert!(
+            !sent(&out).iter().any(|r| matches!(
+                r.method.as_str(),
+                "turn.start" | "turn.interrupt" | "confirm.reply"
+            )),
+            "{out:?}"
+        );
+        assert_eq!(s.pending_panes(), vec!["w2:pZ".to_string()]);
+    }
+
+    #[test]
+    fn a_turns_request_not_sent_says_so_on_gemini_s_card() {
+        let mut s = asking_turn();
+        let out = s.input(Input::Answer {
+            confirm_id: 9,
+            approve: false,
+        });
+        assert_eq!(replies(&out).len(), 1);
+        let out = s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 9, "outcome": "denied"}),
+        ));
+        let evs = events(&out);
+        assert!(
+            evs.contains(&Event::Conversation {
+                speaker: Speaker::Gemini,
+                text: "Not sent: denied.".into()
+            }),
+            "{evs:?}"
+        );
+        assert!(
+            !evs.iter().any(|e| matches!(e, Event::Say(_))),
+            "not spoken"
+        );
+        // Another confirmation's end says nothing on Gemini's card.
+        let mut s = confirming();
+        let out = s.incoming(note(
+            "confirm.resolved",
+            json!({"confirm_id": 7, "outcome": "expired"}),
+        ));
+        assert!(
+            !events(&out)
+                .iter()
+                .any(|e| matches!(e, Event::Conversation { .. }))
+        );
     }
 }

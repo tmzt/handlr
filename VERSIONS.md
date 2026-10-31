@@ -1060,3 +1060,33 @@ struct, absent on the wire when `None`):
   Gemini turn that opened the confirmation, as `turn.start`'s `turn_id`;
   `None` for a dictated message and for other principals'
   confirmations.
+
+## flankr-companion 0.8.0 — 2026-10-30 (the commit tagged `flankr-companion-v0.8.0`)
+
+Plan 20261027_04 (the general agent's planning tools), its 2026-10-30
+22:50 EDT amendment, items 19 to 21. Not strictly additive: no API item
+changes, but which inputs answer a confirmation, when a turn is
+interrupted and what `State` gives on a resolution do (Rule 5.4,
+behaviour a caller can observe). Takes libflankr_proto 0.5.10
+(semver-compatible).
+
+- **Breaking (behaviour):** a confirmation whose `confirm.requested` has
+  a `turn_id` (opened by a Gemini turn) is answered only by
+  `Input::Answer`, `Input::Approve` or `Input::Deny`, an
+  `Input::Utterance` with no prompt open, or one in Gemini's voice prompt
+  (`Input::StartGeneralAgentPrompt(PromptMode::Voice)`). There
+  "approve"/"approved" approves and "deny" denies, either closing the
+  prompt; other words deny and stay as the prompt's text. An utterance
+  in a message prompt or a typed prompt is that prompt's text and leaves
+  the confirmation queued. Other confirmations are answered as before.
+- **Breaking (behaviour):** while such a confirmation is queued,
+  `Input::StartGeneralAgentPrompt` sends no `turn.interrupt`, and a typed
+  Gemini prompt's `Input::Submit` is started as a turn only once the
+  running turn ends.
+- **Breaking (behaviour):** such a confirmation counts as using its
+  pane's session, so its other-session approval card is given even when
+  that session was not used within the hour.
+- **Breaking (behaviour):** when such a confirmation resolves `denied`,
+  `expired`, `cancelled` or `failed`, `State` also gives
+  `Event::Conversation { speaker: Speaker::Gemini, text: "Not sent:
+  <outcome>." }`, never as `Event::Say`.
