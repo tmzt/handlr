@@ -514,3 +514,112 @@ the focused agent while it works, gets its interrupt key:
    longer interrupted because it is working; only item 1's panes are.
 4. **The daemon** takes the next patch with its `UPDATES.md` entry
    (FLANKR RULE 2).
+
+## Amendment — 2026-10-30 22:50 EDT: a turn's confirmation has its card, and only Gemini's reply or a tap answers it
+
+The owner (2026-10-30, logged in `docs/OWNER_REPORTS.md` at 22:41 EDT):
+"Didn't get the approval card or the verbal". Gemini called `ask_agent`
+from Claude's agent view; the phone said two short lines, showed no
+approval card, and the owner's next dictated message to Claude, started
+with the record button, answered the confirmation as *denied*. This
+amendment adds items 16 to 21 and step 8. It replaces item 10.2's
+question wording for the general agent's requests (item 18) and adds to
+item 11 how a confirmation ending without `sent` is shown (item 20);
+nothing else earlier changes.
+
+**What happened, from the code.**
+- *The two lines* were the turn's `turn.say` (`seq` 0, Gemini's reply,
+  such as "I'll ask Claude in flankr once you approve.") and the
+  `confirm.requested` question the client says as it asks it: "Approve
+  sending your message to Claude in flankr?" (`message_confirm_text`),
+  which does not say what would be sent.
+- *No card.* On the overview the card comes from `Event::Confirm`; in an
+  agent view the card for the viewed agent comes only from the approval
+  journal (`subscriptions::journal_asked`), as for every confirmation.
+  Confirmation ids restart at 1 each time the daemon starts
+  (`Broker`'s `next_id`), while each session's journal
+  (`~/.local/state/flankr/sessions/<id>.jsonl`) keeps every run's ids, and
+  `Journal::asked` records nothing when the id is already in it. Claude's
+  journal had a confirmation 1 from 2026-10-27, so the new confirmation 1
+  was never journalled and no card was made. Any confirmation whose id an
+  earlier run used for that session is lost the same way.
+- *The wrong answer.* `State::utterance` (flankr-companion) answers the
+  confirmation at the front of the queue with any utterance while one is
+  queued; during a dictation, anything but "approve" denies it and then
+  becomes dictation. A message to a coding agent therefore denied
+  Gemini's question. The centre button would have done no better: a voice
+  Gemini prompt started while the turn runs interrupts it, which
+  withdraws the confirmation.
+
+16. **Confirmation ids continue across runs.** At start the daemon reads
+    every approval journal and its broker's ids continue after the
+    highest id found (`Journal::max_confirm_id`,
+    `Broker::continue_after`), so a new confirmation never shares an id
+    with one already journalled. `Journal::asked` logs a warning when it
+    skips an id already there.
+17. **A turn's confirmations are marked.** `companion::ConfirmRequested`
+    gets `turn_id: Option<u64>` (absent on the wire when `None`): the
+    Gemini turn that opened it, set by the turn's `work` for every
+    confirmation it asks (`send_agent_command` and `ask_agent` alike);
+    `None` for a dictated message and for confirmations of other
+    principals.
+18. **The card and the question show what will be typed.** For a
+    request by the general agent (a message confirmation typed with the
+    `via flankr: ` prefix, `ConfirmView::general_agent`), the question
+    and the journal's card text are `Approve sending "<text>" to
+    <Agent>?`, the text as typed without the prefix, as for a command. A
+    dictated message keeps "Approve sending your message to <Agent>?".
+    This replaces item 10.2's wording for the general agent's requests.
+19. **The card on the screen shown.** On the overview the confirmation
+    card shows as before. In the viewed agent's view its journal card
+    shows (item 16). For another agent, a turn's confirmation counts as
+    the owner using that agent's session (`interact`), so its
+    other-session approval card shows even when the session was not used
+    within the hour. Each card has Approve and Deny.
+20. **Only Gemini's reply or a tap answers it.** A confirmation with a
+    `turn_id` is answered by:
+    1. a tap on Approve or Deny on any of its cards
+       (`Input::Answer`, `Input::Approve`, `Input::Deny`);
+    2. the owner's next voice reply to Gemini: an utterance with no
+       prompt open (the voice gate), or one in Gemini's voice prompt (the
+       centre button). "approve" or "approved" approves it and "deny"
+       denies it, either closing Gemini's prompt; anything else denies it
+       and stays as Gemini's prompt, as today.
+
+    Nothing else answers it: an utterance in a message prompt (the record
+    button, the message card or a reply) is the message's text and the
+    confirmation stays queued; a typed line never answers it. While a
+    turn's confirmation is queued, the centre button and Gemini's typed
+    prompt do not interrupt the turn, and a typed Gemini prompt submitted
+    then waits until the turn ends (answered, or expired after
+    `VOICE_TURN_TTL`, 60 s) before it starts. A confirmation without a
+    `turn_id` is answered as before.
+21. **Not sent, said briefly.** When a turn's confirmation ends `denied`,
+    `expired`, `cancelled` or `failed`, Gemini's card gets one line,
+    *Not sent: denied.* (*expired*, *cancelled*, *failed*), shown and
+    not spoken.
+22. **What was heard is logged.** The daemon logs at info each
+    `turn.say` it sends and each confirmation question a turn asks, its
+    text redacted (`sessions::redact`), as the spoken summaries are
+    (`Turn <n> said (seq <s>): <text>`, `Turn <n> asked confirmation
+    <id>: <text>`).
+23. **Versions.** The daemon is a patch, 0.5.0 to 0.5.1 (FLANKR RULE 2):
+    fixes and log lines, no new feature. libflankr_proto takes an
+    additive patch, 0.5.9 to 0.5.10 (an appended field).
+    flankr-companion changes behaviour a caller observes (which inputs
+    answer a confirmation, an interrupt not sent, a new
+    `Event::Conversation`): a minor bump, 0.7.5 to 0.8.0 (Critical Rule
+    5.4, as 0.6.0 and 0.7.0 were). The app is a fix, 0.7.0 to 0.7.1
+    (FLANKR RULE 1), with its `apps/UPDATES.md` entry.
+
+**Step 8** (one commit each: libflankr_proto; the daemon; flankr-companion;
+the app's version). **Done when:** tests show: a daemon started with a
+journal holding confirmation 1 opens its first confirmation as 2 and
+journals it; an `ask_agent` turn's `confirm.requested` carries the turn's
+id and the question quoted; the client, given a turn's confirmation,
+leaves it queued through a dictated message's utterances and a typed
+line, does not interrupt the turn for the centre button, approves it on
+"approve" in Gemini's voice prompt or on a tap, and shows *Not sent:
+denied.* on a denial; and, in the app, a scripted run shows the card
+during the turn, Approve sends, and dictating to an agent leaves it
+pending.
