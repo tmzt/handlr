@@ -518,3 +518,25 @@ The 2026-10-30 13:52 EDT amendment is built; the status returns to
 Not yet checked on the S23: as that amendment's item 6 says, it waits on
 spoken summaries working (libinfer's Gemini model choice plan,
 20261030_01).
+
+## Amendment — 2026-10-30 22:08 EDT: a summary never adds a question, and what is said is logged
+
+On the owner's instruction (Rule 1.5), 2026-10-30, after a reply that
+ended with a plain statement ("When it reports back I'll land it,
+restart the daemons and install it on the S23") seemed to reach the
+owner as a question ("You asked if I should be notified when it
+completed"); asked to log what is spoken and tighten the prompt: "Yes,
+make both changes". Adds to item 1 of the 13:52 EDT amendment:
+
+1. **No added questions.** `spoken_summary` and `spoken_catch_up` say
+   that the summary never adds a question or an offer the reply did not
+   make: a plan or a promise in the reply ("I'll install it when it is
+   done") is said as a statement; a question is ended with only when the
+   reply itself asks one.
+2. **What is said is logged.** Each spoken summary and each catch-up
+   the daemon returns is logged once at `info`, redacted as the reply
+   is (`sessions::redact`): `speech.summarize: said <text>` and
+   `speech.catch_up: said <text>`, so a summary the owner questions can
+   be checked against the log.
+3. **The daemon** takes the next patch with its `UPDATES.md` entry
+   (FLANKR RULE 2).
