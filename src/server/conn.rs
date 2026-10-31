@@ -1592,7 +1592,7 @@ async fn send_message(
         });
         conn.send(&Notification::new(
             methods::CONFIRM_REQUESTED,
-            turns::confirm_requested(&view, &token, principal, false, pane_names),
+            turns::confirm_requested(&view, &token, principal, false, pane_names, None),
         ));
     }
     log::info!(
@@ -1773,7 +1773,7 @@ async fn send_parts(
         });
         conn.send(&Notification::new(
             methods::CONFIRM_REQUESTED,
-            turns::confirm_requested(&view, &token, principal, false, pane_names),
+            turns::confirm_requested(&view, &token, principal, false, pane_names, None),
         ));
     }
     log::info!(
@@ -1930,7 +1930,7 @@ async fn forward_events(conn: Arc<Conn>) {
                         let names = conn.daemon.names_for(&view.pane_id).await;
                         conn.send(&Notification::new(
                             methods::CONFIRM_REQUESTED,
-                            turns::confirm_requested(&view, &token, &principal, reminder, names),
+                            turns::confirm_requested(&view, &token, &principal, reminder, names, None),
                         ));
                     }
                 }

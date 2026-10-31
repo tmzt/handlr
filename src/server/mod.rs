@@ -166,6 +166,16 @@ impl Daemon {
         );
         let speech = speech::SpeechService::new(Arc::clone(&llm), turns.speech.clone());
         let hub = SessionHub::new(Arc::clone(&sessions), config.urls.repowiki_url.clone());
+        // Ids continue after every journalled one, so a journal never
+        // takes a new confirmation for one it already has (plan 20261027_04,
+        // the 2026-10-30 22:50 EDT amendment, item 16).
+        let journalled = hub.journal().max_confirm_id();
+        if journalled > 0 {
+            log::info!(
+                "Confirmation ids continue after {journalled}, the approval journals' highest"
+            );
+        }
+        broker.continue_after(journalled);
         let herdr_attach =
             attach_settings(&client, config, &turns).map(herdr_attach::HerdrAttach::new);
         // `[plugins]` comes from the file `[llm]` is read from.
@@ -531,6 +541,7 @@ mod tests {
             requested_by: "local:mcp".to_string(),
             lifetime: crate::core::confirm::Lifetime::Standing,
             message: false,
+            general_agent: false,
         }
     }
 

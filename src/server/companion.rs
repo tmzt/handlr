@@ -365,6 +365,25 @@ pub fn message_confirm_text(spoken: &str) -> String {
     format!("Approve sending your message to {spoken}?")
 }
 
+/// The question for `view`, its agent's spoken name `spoken`: a dictated
+/// message's leaves its text to the card; a command's and the general
+/// agent's requests quote what will be typed (plan 20261027_04, the
+/// 2026-10-30 22:50 EDT amendment, item 18). A voice turn's handle is not
+/// said.
+pub fn question_text(view: &ConfirmView, spoken: &str) -> String {
+    if view.message && !view.general_agent {
+        message_confirm_text(spoken)
+    } else {
+        confirm_text(
+            &view.command,
+            spoken,
+            view.handle
+                .as_deref()
+                .filter(|_| view.lifetime != Lifetime::VoiceTurn),
+        )
+    }
+}
+
 /// A sentence to speak for a turn that failed with `error`.
 pub fn spoken_error(error: &str) -> String {
     if error.contains("GEMINI_API_KEY") {
@@ -389,6 +408,7 @@ pub(super) fn confirm_requested(
     principal: &Principal,
     reminder: bool,
     names: Option<super::PaneNames>,
+    turn_id: Option<u64>,
 ) -> companion::ConfirmRequested {
     let (name, spoken, project) = match names {
         Some(n) => (Some(n.name), Some(n.spoken), n.project),
@@ -409,17 +429,8 @@ pub(super) fn confirm_requested(
         handle: view.handle.clone(),
         token: token.reveal_to(principal).map(str::to_string),
         reminder,
-        text: if view.message {
-            message_confirm_text(&say)
-        } else {
-            confirm_text(
-                &view.command,
-                &say,
-                view.handle
-                    .as_deref()
-                    .filter(|_| view.lifetime != Lifetime::VoiceTurn),
-            )
-        },
+        text: question_text(view, &say),
+        turn_id,
     }
 }
 
@@ -639,14 +650,7 @@ pub(super) async fn turn_start(
     let detail = match ended {
         Some(WorkEnd::Error(e)) => {
             log::warn!("Turn {turn_id} of {} failed: {e}", session.id);
-            conn.send(&Notification::new(
-                methods::TURN_SAY,
-                companion::TurnSay {
-                    turn_id,
-                    seq: 0,
-                    text: spoken_error(&e),
-                },
-            ));
+            say(conn, turn_id, 0, &spoken_error(&e));
             Some(e)
         }
         _ => None,
@@ -671,6 +675,24 @@ pub(super) async fn turn_start(
         interrupted,
         detail,
     })
+}
+
+/// Sends `turn.say` and logs what is said, redacted, so what was heard
+/// can be checked (plan 20261027_04, the 2026-10-30 22:50 EDT amendment,
+/// item 22).
+fn say(conn: &Conn, turn_id: u64, seq: u32, text: &str) {
+    log::info!(
+        "Turn {turn_id} said (seq {seq}): {}",
+        crate::sessions::redact::redact(text)
+    );
+    conn.send(&Notification::new(
+        methods::TURN_SAY,
+        companion::TurnSay {
+            turn_id,
+            seq,
+            text: text.to_string(),
+        },
+    ));
 }
 
 fn message(role: &str, content: &str) -> Message {
@@ -836,14 +858,7 @@ async fn work(
         .map(|r| r.trim().to_string())
         .filter(|r| !r.is_empty())
     {
-        conn.send(&Notification::new(
-            methods::TURN_SAY,
-            companion::TurnSay {
-                turn_id,
-                seq: 0,
-                text: reply.clone(),
-            },
-        ));
+        say(&conn, turn_id, 0, &reply);
         *said.lock().unwrap() = Some(reply);
     }
 
@@ -857,10 +872,12 @@ async fn work(
     for confirm_id in &opened {
         if let Some((view, token)) = daemon.broker.pending(*confirm_id) {
             let names = daemon.names_for(&view.pane_id).await;
-            conn.send(&Notification::new(
-                common_methods::CONFIRM_REQUESTED,
-                confirm_requested(&view, &token, &principal, false, names),
-            ));
+            let asked = confirm_requested(&view, &token, &principal, false, names, Some(turn_id));
+            log::info!(
+                "Turn {turn_id} asked confirmation {confirm_id}: {}",
+                crate::sessions::redact::redact(&asked.text)
+            );
+            conn.send(&Notification::new(common_methods::CONFIRM_REQUESTED, asked));
         }
     }
     let mut sent = Vec::new();
@@ -953,14 +970,7 @@ async fn work(
                 )
             }
         };
-        conn.send(&Notification::new(
-            methods::TURN_SAY,
-            companion::TurnSay {
-                turn_id,
-                seq,
-                text: text.clone(),
-            },
-        ));
+        say(&conn, turn_id, seq, &text);
         seq += 1;
         let mut said = said.lock().unwrap();
         *said = Some(match said.take() {

@@ -129,6 +129,31 @@ impl Journal {
         out
     }
 
+    /// The highest confirmation id in any journal here, 0 with none: the
+    /// daemon's ids continue after it (plan 20261027_04, the 2026-10-30
+    /// 22:50 EDT amendment, item 16).
+    pub fn max_confirm_id(&self) -> u64 {
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return 0;
+        };
+        let mut max = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines() {
+                if let Ok(l) = serde_json::from_str::<Line>(line) {
+                    max = max.max(l.confirm_id);
+                }
+            }
+        }
+        max
+    }
+
     /// The first free Approval slot on `line` among `known`, if any is.
     pub fn free_slot(known: &[Approval], line: u32) -> Option<u8> {
         (SLOT_APPROVAL_FIRST..=SLOT_APPROVAL_LAST)
@@ -148,6 +173,9 @@ impl Journal {
     ) -> std::io::Result<Option<Approval>> {
         let known = self.read(session);
         if known.iter().any(|a| a.confirm_id == confirm_id) {
+            log::warn!(
+                "The approval journal of {session} already has confirmation {confirm_id}; not recorded again"
+            );
             return Ok(None);
         }
         let Some(slot) = Self::free_slot(&known, line) else {
@@ -272,6 +300,20 @@ mod tests {
         assert_eq!(journal.path("../x"), None);
         assert!(journal.read("nope").is_empty());
         assert!(journal.asked("../x", 1, 1, "c", "t").is_err());
+    }
+
+    #[test]
+    fn the_highest_id_of_every_journal_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::new(dir.path().join("sessions"));
+        // None yet, not even the directory.
+        assert_eq!(journal.max_confirm_id(), 0);
+        journal.asked("s1", 3, 1, "continue", "Go?").unwrap();
+        journal.asked("s2", 4, 19, "continue", "Go?").unwrap();
+        journal.resolved("s2", 19, "sent").unwrap();
+        journal.asked("s1", 5, 4, "continue", "Go?").unwrap();
+        std::fs::write(journal.dir().join("notes.txt"), "{\"confirm_id\": 99}").unwrap();
+        assert_eq!(journal.max_confirm_id(), 19);
     }
 
     #[test]

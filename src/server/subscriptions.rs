@@ -41,7 +41,7 @@ use tokio_util::sync::CancellationToken;
 use super::conn::{self, Conn};
 use super::{CoreEvent, Daemon};
 use crate::core::agents::AgentRef;
-use crate::core::confirm::{ConfirmEvent, Lifetime};
+use crate::core::confirm::ConfirmEvent;
 use crate::sessions::hub::{self, Batch, LineIndex, Snapshot, Tailer};
 use crate::sessions::sections::REACH;
 use crate::sessions::{Located, redact};
@@ -1002,17 +1002,7 @@ async fn journal_asked(
         }
     };
     let spoken = named.spoken.clone();
-    let text = if view.message {
-        super::companion::message_confirm_text(&spoken)
-    } else {
-        super::companion::confirm_text(
-            &view.command,
-            &spoken,
-            view.handle
-                .as_deref()
-                .filter(|_| view.lifetime != Lifetime::VoiceTurn),
-        )
-    };
+    let text = super::companion::question_text(view, &spoken);
     let recorded = daemon.hub.journal().asked(
         &session,
         line,

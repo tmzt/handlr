@@ -171,3 +171,12 @@ These changes came before the program had version numbers.
 
 **Added**
 - While the general agent is answering from the phone, the daemon tells the phone what it is doing: each tool Gemini runs, by a plain name such as "Looking at recent commits…", and when it goes back to thinking. While it waits for a coding agent's answer to `ask_agent`, the phone reads "Asking Claude…" (the agent's name). Nothing more is said aloud.
+
+## 0.5.1 — 2026-10-30
+
+**Fixed**
+- A confirmation could be missing from its agent's session on the phone after the daemon restarted, because its number had been used before. Confirmation numbers now carry on after the highest one in the approval journals (`~/.local/state/flankr/sessions/`), and the log says where they start.
+
+**Changed**
+- When Gemini asks to send something to a coding agent (`ask_agent` or `send_agent_command`), the approval question and the card in the agent's session quote the exact text, such as `Approve sending "What did we ship today?" to Claude?`. A message you dictate still asks "Approve sending your message to Claude?".
+- Each line Gemini says to the phone, and each approval question its turn asks, is written to the log (`Turn 3 said (seq 0): …`, `Turn 3 asked confirmation 4: …`), redacted, so what was heard can be checked.

@@ -685,6 +685,11 @@ pub struct ConfirmView {
     /// A dictated message (plan 20261023_02), not a command: `command` is
     /// its text, and its question does not quote it.
     pub message: bool,
+    /// A request by the general agent: a message typed with its `via
+    /// flankr: ` prefix (`request_message_typed`), whose question quotes
+    /// `command` (plan 20261027_04, the 2026-10-30 22:50 EDT amendment,
+    /// item 18).
+    pub general_agent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -855,6 +860,15 @@ impl Broker {
             me: me.clone(),
             priors: Mutex::new(Arc::new(WordPriors::new())),
         })
+    }
+
+    /// Ids from now on continue after `id`: the daemon gives the highest
+    /// id in the approval journals, so a new confirmation never shares an
+    /// id with one an earlier run journalled (plan 20261027_04, the
+    /// 2026-10-30 22:50 EDT amendment, item 16). Never goes back.
+    pub fn continue_after(&self, id: u64) {
+        let mut state = self.state.lock().unwrap();
+        state.next_id = state.next_id.max(id);
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<ConfirmEvent> {
@@ -1041,6 +1055,7 @@ impl Broker {
                 requested_by: requester.id.clone(),
                 lifetime,
                 message,
+                general_agent: message && typed.is_some(),
             };
             let token = Token::generate();
             state.entries.insert(
@@ -1523,6 +1538,37 @@ mod tests {
         assert_eq!(again, Err(ConfirmError::NotFound));
         assert_eq!(again.unwrap_err().code(), -32006);
         assert_eq!(sent(&client).await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn ids_continue_after_the_journalled_ones() {
+        let (broker, _) = broker();
+        broker.continue_after(19);
+        // Never back.
+        broker.continue_after(3);
+        let id = broker
+            .request(&mcp(), "p1", "claude", "continue", None, Lifetime::Standing)
+            .unwrap();
+        assert_eq!(id, 20);
+        let typed = broker
+            .request_message_typed(
+                &mcp(),
+                "p1",
+                "claude",
+                "What shipped?",
+                "via flankr: What shipped?",
+                None,
+                Lifetime::VoiceTurn,
+            )
+            .unwrap();
+        assert_eq!(typed, 21);
+        let (view, _) = broker.pending(typed).unwrap();
+        assert!(view.message && view.general_agent);
+        let dictated = broker
+            .request_message(&mcp(), "p1", "claude", "hello", None, Lifetime::VoiceTurn)
+            .unwrap();
+        let (view, _) = broker.pending(dictated).unwrap();
+        assert!(view.message && !view.general_agent);
     }
 
     #[tokio::test]

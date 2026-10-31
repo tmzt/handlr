@@ -2847,10 +2847,13 @@ async fn ask_and_answer(c: &mut Client, env: &Env, approve: bool) -> i64 {
     let say = c.note("turn.say").await;
     assert_eq!(say["params"]["text"], "Asking Claude once you approve.");
     let asked = c.note("confirm.requested").await;
+    // The question says what will be typed, and names the turn (plan
+    // 20261027_04, the 2026-10-30 22:50 EDT amendment, items 17 and 18).
     assert_eq!(
-        asked["params"]["text"], "Approve sending your message to Claude?",
+        asked["params"]["text"], "Approve sending \"What did we ship today?\" to Claude?",
         "{asked}"
     );
+    assert_eq!(asked["params"]["turn_id"], 1, "{asked}");
     assert_eq!(asked["params"]["command"], "What did we ship today?");
     assert!(
         mock_logs(&env.daemon).await.0.is_empty(),
@@ -2927,6 +2930,82 @@ async fn ask_agent_waits_for_the_answer_and_summarizes_it() {
         said.starts_with("Asking Claude once you approve.\nSummary"),
         "{said}"
     );
+}
+
+/// Plan 20261027_04, the 2026-10-30 22:50 EDT amendment, items 16, 17
+/// and 20: with the agent's journal already holding confirmation 1 from
+/// an earlier run, the turn's confirmation is 2, is journalled as the
+/// agent view's card, and a message dictated to the agent meanwhile
+/// leaves it pending; the card's tap still answers it.
+#[tokio::test]
+async fn an_ask_turns_confirmation_is_journalled_and_a_message_leaves_it_pending() {
+    let home = speech_home(COMPLEX);
+    let journal = home.path().join(".local/state/flankr/sessions");
+    std::fs::create_dir_all(&journal).unwrap();
+    let file = journal.join("00000000-0000-4000-8000-0000000000a1.jsonl");
+    std::fs::write(
+        &file,
+        concat!(
+            r#"{"ts":"2026-10-27T15:30:10Z","line":1,"slot":64,"confirm_id":1,"command":"continue","text":"Go?"}"#,
+            "\n",
+            r#"{"ts":"2026-10-27T15:30:10Z","confirm_id":1,"outcome":"sent"}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+    let env = start_asking(home.path(), Duration::from_secs(1)).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let id = c
+        .request("turn.start", turn(1, "ask What did we ship today?"))
+        .await;
+    let asked = c.note("confirm.requested").await;
+    let confirm_id = asked["params"]["confirm_id"].as_u64().unwrap();
+    assert_eq!(confirm_id, 2, "after the journalled 1: {asked}");
+    assert_eq!(asked["params"]["turn_id"], 1, "{asked}");
+
+    // Journalled, so the agent view shows its card.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let text = std::fs::read_to_string(&file).unwrap();
+        if text.contains(r#""confirm_id":2"#) {
+            assert!(
+                text.contains(r#"Approve sending \"What did we ship today?\" to Claude?"#),
+                "{text}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "not journalled: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A message dictated to the agent goes as its own confirmation; the
+    // turn's stays pending.
+    let r = c
+        .call(
+            "agents.send",
+            json!({"pane_id": "p1", "text": "please also run the tests", "kind": "message",
+                   "handle": "message-claude-please-also"}),
+        )
+        .await;
+    assert_eq!(r["result"]["status"], "pending", "{r}");
+    let status = c
+        .call("confirm.status", json!({"confirm_id": confirm_id}))
+        .await;
+    assert_eq!(status["result"]["outcome"], "pending", "{status}");
+
+    // The card's Approve answers it.
+    let r = c
+        .call(
+            "confirm.reply",
+            json!({"confirm_id": confirm_id, "approve": true}),
+        )
+        .await;
+    assert_eq!(r["result"]["outcome"], "sent", "{r}");
+    let done = c.response(id).await;
+    assert_eq!(done["result"]["outcome"], "done", "{done}");
 }
 
 #[tokio::test]
