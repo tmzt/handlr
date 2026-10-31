@@ -2719,3 +2719,211 @@ async fn a_broken_llm_section_keeps_the_last_good_settings() {
     let r = c.call("turn.start", turn(1, "hello")).await;
     assert_eq!(r["result"]["outcome"], "done", "{r}");
 }
+
+/// `ask_agent` (plan 20261027_04, the 2026-10-30 22:15 EDT amendment):
+/// `ask <question>` asks the current agent; flankr's message with the
+/// answer is summarized, with a check that no tool may run.
+struct Asker;
+
+#[async_trait]
+impl MockHandler for Asker {
+    async fn handle(
+        &self,
+        text: &str,
+        executor: &dyn ToolExecutor,
+    ) -> Result<Option<String>, String> {
+        if let Some(question) = text.strip_prefix("ask ") {
+            let r = executor
+                .execute_tool(
+                    "ask_agent",
+                    &json!({"agent": "p1", "question": question, "handle": "ask-claude"}),
+                )
+                .await?;
+            assert_eq!(r["status"], "awaiting_user_approval", "{r}");
+            return Ok(Some("Asking Claude once you approve.".to_string()));
+        }
+        if text.starts_with("flankr: Claude answered") {
+            let refused = executor
+                .execute_tool("send_agent_command", &json!({"text": "continue"}))
+                .await
+                .is_err();
+            let body = text
+                .split("<<<\n")
+                .nth(1)
+                .unwrap_or("")
+                .replace("\n>>>", "");
+            return Ok(Some(format!("Summary (tools refused: {refused}): {body}")));
+        }
+        Ok(Some(format!("You said {text}.")))
+    }
+}
+
+/// A daemon with the `Asker` engine, reading `home`, waiting `wait` for
+/// answers.
+async fn start_asking(home: &Path, wait: Duration) -> Env {
+    let turns = TurnOptions {
+        engine: Some(Arc::new(MockReasoningEngine::with_handler(Asker))),
+        ask_wait: Some(wait),
+        ..TurnOptions::default()
+    };
+    let env = start_turns(confirming(), false, home, turns).await;
+    give_session(&env.daemon).await;
+    env
+}
+
+/// The `turn.say` of `seq`, kept or yet to arrive within `within`.
+async fn say_of(c: &mut Client, seq: u64, within: Duration) -> Option<Value> {
+    let found = |m: &Value| m["method"] == "turn.say" && m["params"]["seq"] == seq;
+    if let Some(m) = c.seen.iter().find(|m| found(m)) {
+        return Some(m.clone());
+    }
+    let end = tokio::time::Instant::now() + within;
+    while let Some(left) = end.checked_duration_since(tokio::time::Instant::now()) {
+        let msg = c.recv(left).await?;
+        if found(&msg) {
+            return Some(msg);
+        }
+    }
+    None
+}
+
+/// Ask, then answer the confirmation with `approve`; returns the turn's
+/// request id.
+async fn ask_and_answer(c: &mut Client, env: &Env, approve: bool) -> i64 {
+    let id = c
+        .request("turn.start", turn(1, "ask What did we ship today?"))
+        .await;
+    let say = c.note("turn.say").await;
+    assert_eq!(say["params"]["text"], "Asking Claude once you approve.");
+    let asked = c.note("confirm.requested").await;
+    assert_eq!(
+        asked["params"]["text"], "Approve sending your message to Claude?",
+        "{asked}"
+    );
+    assert_eq!(asked["params"]["command"], "What did we ship today?");
+    assert!(
+        mock_logs(&env.daemon).await.0.is_empty(),
+        "nothing typed yet"
+    );
+    let confirm_id = asked["params"]["confirm_id"].as_u64().unwrap();
+    let r = c
+        .call(
+            "confirm.reply",
+            json!({"confirm_id": confirm_id, "approve": approve}),
+        )
+        .await;
+    let outcome = if approve { "sent" } else { "denied" };
+    assert_eq!(r["result"]["outcome"], outcome, "{r}");
+    id
+}
+
+#[tokio::test]
+async fn ask_agent_waits_for_the_answer_and_summarizes_it() {
+    let home = speech_home(COMPLEX);
+    let env = start_asking(home.path(), Duration::from_secs(20)).await;
+    set_status(&env.daemon, AgentStatus::Working).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let id = ask_and_answer(&mut c, &env, true).await;
+    assert_eq!(
+        mock_logs(&env.daemon).await.0,
+        vec![(
+            "p1".to_string(),
+            "via flankr: What did we ship today?".to_string()
+        )],
+        "typed once, with its provenance"
+    );
+    // The turn waits: no answer in the session yet.
+    assert!(
+        say_of(&mut c, 1, Duration::from_millis(1500))
+            .await
+            .is_none()
+    );
+
+    // The agent answers in its session, then herdr says it is idle.
+    let path = home
+        .path()
+        .join(".claude/projects/-work-example/00000000-0000-4000-8000-0000000000a1.jsonl");
+    let user = json!({
+        "type": "user", "cwd": "/work/example", "timestamp": "2026-01-02T12:01:00.000Z",
+        "message": {"role": "user", "content": "via flankr: What did we ship today?"}
+    });
+    let reply = json!({
+        "type": "assistant", "cwd": "/work/example", "timestamp": "2026-01-02T12:01:30.000Z",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "Shipped:\n- ask_agent\n- 0.4.0"}]}
+    });
+    let mut text = std::fs::read_to_string(&path).unwrap();
+    text.push_str(&format!("{user}\n{reply}\n"));
+    std::fs::write(&path, text).unwrap();
+    set_status(&env.daemon, AgentStatus::Idle).await;
+
+    let summary = say_of(&mut c, 1, Duration::from_secs(10))
+        .await
+        .expect("the summary is said");
+    assert_eq!(
+        summary["params"]["text"], "Summary (tools refused: true): Shipped:\n- ask_agent\n- 0.4.0",
+        "{summary}"
+    );
+    let done = c.response(id).await;
+    assert_eq!(done["result"]["outcome"], "done", "{done}");
+    assert_eq!(
+        done["result"]["ran"][0]["command"],
+        "What did we ship today?"
+    );
+    assert_eq!(mock_logs(&env.daemon).await.0.len(), 1, "sent exactly once");
+    let h = history(&env, "companion:local:t");
+    let said = h.last().unwrap()["content"].as_str().unwrap().to_string();
+    assert!(
+        said.starts_with("Asking Claude once you approve.\nSummary"),
+        "{said}"
+    );
+}
+
+#[tokio::test]
+async fn ask_agent_says_the_agent_is_still_working_when_no_answer_comes() {
+    let home = speech_home(COMPLEX);
+    let env = start_asking(home.path(), Duration::from_secs(1)).await;
+    set_status(&env.daemon, AgentStatus::Working).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let id = ask_and_answer(&mut c, &env, true).await;
+    let said = say_of(&mut c, 1, Duration::from_secs(5))
+        .await
+        .expect("the wait ends");
+    assert_eq!(
+        said["params"]["text"],
+        "Claude is still working on your question; its reply will show on its card."
+    );
+    let done = c.response(id).await;
+    assert_eq!(done["result"]["outcome"], "done", "{done}");
+}
+
+#[tokio::test]
+async fn ask_agent_denied_types_nothing_and_says_nothing_more() {
+    let home = speech_home(COMPLEX);
+    let env = start_asking(home.path(), Duration::from_secs(20)).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let id = ask_and_answer(&mut c, &env, false).await;
+    let done = c.response(id).await;
+    assert_eq!(done["result"]["outcome"], "done", "{done}");
+    assert_eq!(done["result"]["ran"], json!([]));
+    assert!(mock_logs(&env.daemon).await.0.is_empty());
+    assert!(
+        say_of(&mut c, 1, Duration::from_millis(300))
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_new_turn_ends_the_wait_for_an_answer() {
+    let home = speech_home(COMPLEX);
+    let env = start_asking(home.path(), Duration::from_secs(60)).await;
+    set_status(&env.daemon, AgentStatus::Working).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let id = ask_and_answer(&mut c, &env, true).await;
+    let started = Instant::now();
+    let next = c.call("turn.start", turn(2, "hello")).await;
+    assert_eq!(next["result"]["outcome"], "done", "{next}");
+    assert!(started.elapsed() < Duration::from_secs(2), "no CLAIM_WAIT");
+    let done = c.response(id).await;
+    assert_eq!(done["result"]["outcome"], "done", "{done}");
+}

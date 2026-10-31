@@ -46,6 +46,23 @@ pub struct TurnLog {
     pub confirmations: Mutex<Vec<u64>>,
     /// The pane the turn last addressed: the session's current agent.
     pub addressed: Mutex<Option<String>>,
+    /// The questions `ask_agent` opened, in order (plan 20261027_04, the
+    /// 2026-10-30 22:15 EDT amendment, item 10.4).
+    pub asks: Mutex<Vec<Ask>>,
+}
+
+/// A question `ask_agent` opened: once approved, the turn waits for its
+/// answer in the agent's session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ask {
+    pub confirm_id: u64,
+    pub pane_id: String,
+    /// The agent's spoken name.
+    pub spoken: String,
+    /// The question as checked and typed (without the provenance prefix).
+    pub question: String,
+    /// The position of the session's newest entry when asked.
+    pub after: u64,
 }
 
 /// A companion turn: confirmation-required commands open a
@@ -611,12 +628,19 @@ impl HerdrToolExecutor {
     /// `policy::check` with the agent's `require_confirmation`, any other
     /// text by `policy::check_message`, always confirmed. Then a send, a
     /// voice-turn confirmation, or a refusal.
+    ///
+    /// With `ask` it is `ask_agent` (the 2026-10-30 22:15 EDT amendment,
+    /// decision 10): `question` is always checked and confirmed as a
+    /// request, the agent's session must be readable here, and the
+    /// question is recorded for the turn to wait on.
     async fn execute_send_agent_command(
         &self,
         args: &serde_json::Value,
+        ask: bool,
     ) -> Result<serde_json::Value, String> {
         let text = args
             .get("text")
+            .or_else(|| args.get("question"))
             .or_else(|| args.get("command"))
             .or_else(|| args.get("cmd"))
             .and_then(|v| v.as_str())
@@ -669,7 +693,33 @@ impl HerdrToolExecutor {
             return Err(reason);
         }
 
-        let message = !policy::is_allow_listed(&self.agents, &agent_name, text);
+        // A question's answer is read from the agent's session, so it must
+        // be on this machine and found; then the newest entry is where the
+        // answer is looked for after (item 10.3).
+        let after = if ask {
+            let found = match (&self.sessions, &snapshot, &self.voice_turn) {
+                (Some(sessions), Some(snap), Some(_))
+                    if !matches!(self.client.transport(), HerdrTransport::RemoteSsh { .. }) =>
+                {
+                    current_ref(snap, &pane_id).and_then(|pane| sessions.newest_pos(&pane))
+                }
+                _ => None,
+            };
+            let Some(after) = found else {
+                log::warn!(
+                    "Refused ask_agent for pane '{pane_id}': its session is not readable here"
+                );
+                return Err(format!(
+                    "flankr can't read {}'s replies here; use send_agent_command instead.",
+                    crate::core::naming::capitalise(&agent_name)
+                ));
+            };
+            Some(after)
+        } else {
+            None
+        };
+
+        let message = ask || !policy::is_allow_listed(&self.agents, &agent_name, text);
         log::info!(
             "Permission check: agent='{}' pane='{}' {}='{}'",
             agent_name,
@@ -751,7 +801,8 @@ impl HerdrToolExecutor {
             // its first words, as for one typed in the app.
             let fallback = if message {
                 let first_words: Vec<&str> = final_cmd.split(' ').take(3).collect();
-                format!("message {}", first_words.join(" "))
+                let kind = if ask { "ask" } else { "message" };
+                format!("{kind} {}", first_words.join(" "))
             } else {
                 final_cmd.clone()
             };
@@ -804,6 +855,24 @@ impl HerdrToolExecutor {
                 turn.utterance
             );
             turn.log.confirmations.lock().unwrap().push(confirm_id);
+            if let Some(after) = after {
+                turn.log.asks.lock().unwrap().push(Ask {
+                    confirm_id,
+                    pane_id: pane_id.clone(),
+                    spoken: spoken.clone(),
+                    question: final_cmd.clone(),
+                    after,
+                });
+                return Ok(serde_json::json!({
+                    "status": "awaiting_user_approval",
+                    "question": final_cmd,
+                    "agent": spoken,
+                    "handle": handle,
+                    "note": format!(
+                        "Not sent yet. Right after your reply, flankr asks the user to approve sending this question to {spoken}. If they approve, flankr waits for {spoken}'s answer and gives it to you to summarize. Say in a few words that you will ask {spoken} once they approve; do not ask for confirmation yourself and do not call ask_agent again for this."
+                    ),
+                }));
+            }
             return Ok(serde_json::json!({
                 "status": "awaiting_user_approval",
                 "command": final_cmd,
@@ -874,8 +943,9 @@ impl libinfer::ToolExecutor for HerdrToolExecutor {
         match name {
             "watch_pane" | "unwatch_pane" => self.execute_watch_tool(name, args).await,
             crate::reasoning::SEND_AGENT_COMMAND | "run_command" | "send_command" => {
-                self.execute_send_agent_command(args).await
+                self.execute_send_agent_command(args, false).await
             }
+            crate::reasoning::ASK_AGENT => self.execute_send_agent_command(args, true).await,
             crate::reasoning::FOCUS_PROJECT => self.execute_focus_project(args).await,
             crate::reasoning::LIST_FILES => self.execute_list_files(args).await,
             crate::reasoning::READ_FILE => self.execute_read_file(args).await,
@@ -2544,6 +2614,84 @@ mod tests {
         Arc::new(Sessions::with_home(
             &crate::sessions::test_support::fixture("home"),
         ))
+    }
+
+    /// Plan 20261027_04, the 2026-10-30 22:15 EDT amendment, decision 10:
+    /// `ask_agent` is always a confirmed request, recorded for the turn,
+    /// and refused when the agent's session can't be read or messages are
+    /// off.
+    #[tokio::test]
+    async fn test_ask_agent_is_a_confirmed_request_recorded_for_the_turn() {
+        use crate::core::confirm::{DEFAULT_TTL, StatusKey};
+        let client = session_mock().await;
+        let broker = Broker::new(Arc::new(client.clone()), DEFAULT_TTL);
+        let log = Arc::new(TurnLog::default());
+        // Even an allowed command's text is a question, never sent at once.
+        let agents = vec![AgentConfig::new(
+            "claude",
+            vec!["continue".to_string()],
+            false,
+        )];
+        let executor = voice_executor(&client, &broker, &log, agents.clone())
+            .with_sessions(fixture_sessions());
+        let res = executor
+            .execute_tool(
+                "ask_agent",
+                &json!({ "agent": "p1", "question": "What did we ship today?", "handle": "ask-shipped-claude" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "awaiting_user_approval", "{res}");
+        assert_eq!(res["question"], "What did we ship today?");
+        let (view, _) = broker
+            .status(
+                &Principal::local("flankr"),
+                &StatusKey::Handle("ask-shipped-claude".to_string()),
+            )
+            .unwrap();
+        assert!(view.message);
+        assert_eq!(view.command, "What did we ship today?");
+        let asks = log.asks.lock().unwrap().clone();
+        assert_eq!(asks.len(), 1);
+        assert_eq!(asks[0].confirm_id, view.confirm_id);
+        assert_eq!(asks[0].pane_id, "p1");
+        assert!(asks[0].after > 0, "{asks:?}");
+        let res = executor
+            .execute_tool(
+                "ask_agent",
+                &json!({ "agent": "p1", "question": "continue", "handle": "ask-continue-claude" }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res["status"], "awaiting_user_approval", "{res}");
+        assert!(command_log(&client).await.is_empty(), "nothing typed");
+
+        // Without the session readers, or with messages off: refused, and
+        // nothing opened.
+        let opened = log.confirmations.lock().unwrap().len();
+        let unread = voice_executor(&client, &broker, &log, agents);
+        let e = unread
+            .execute_tool(
+                "ask_agent",
+                &json!({ "agent": "p1", "question": "What shipped?", "handle": "ask-x" }),
+            )
+            .await
+            .unwrap_err();
+        assert!(e.contains("can't read Claude's replies"), "{e}");
+        let mut quiet = AgentConfig::new("claude", vec![], false);
+        quiet.allow_messages = false;
+        let off =
+            voice_executor(&client, &broker, &log, vec![quiet]).with_sessions(fixture_sessions());
+        assert!(
+            off.execute_tool(
+                "ask_agent",
+                &json!({ "agent": "p1", "question": "What shipped?", "handle": "ask-y" }),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(log.confirmations.lock().unwrap().len(), opened);
+        assert_eq!(log.asks.lock().unwrap().len(), 2);
     }
 
     async fn read_log(client: &HerdrClient) -> Vec<(String, ReadSource, usize)> {

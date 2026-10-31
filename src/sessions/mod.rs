@@ -1033,6 +1033,49 @@ impl Sessions {
     }
 }
 
+/// The most characters of an agent's answer to `ask_agent` given to
+/// Gemini (plan 20261027_04, the 2026-10-30 22:15 EDT amendment, item 11).
+pub const ANSWER_MAX: usize = 16 * 1024;
+
+impl Sessions {
+    /// Whether a session reader finds `pane`'s session, and the position
+    /// of its newest entry (0 for an empty one): where an `ask_agent`
+    /// answer is looked for after. `None` when no session is found.
+    pub fn newest_pos(&self, pane: &AgentRef) -> Option<u64> {
+        let read = self.read(pane, |items| !items.is_empty())?;
+        Some(read.items.iter().map(|i| i.pos).max().unwrap_or(0))
+    }
+
+    /// The agent's answer to `question` in `pane`'s session (the 22:15 EDT
+    /// amendment, item 11): a user entry after position `after` holding
+    /// `question`, an agent text reply after it, and the agent's turn
+    /// stopped. The answer is the text entries of that last reply (one
+    /// timestamp), joined, redacted and cut to [`ANSWER_MAX`]. `None`
+    /// while it is not there.
+    pub fn answer_after(&self, pane: &AgentRef, after: u64, question: &str) -> Option<String> {
+        let read = self.read(pane, |items| items.first().is_some_and(|i| i.pos <= after))?;
+        let items = &read.items;
+        let asked = items
+            .iter()
+            .position(|i| i.pos > after && i.role == Role::User && i.text.contains(question))?;
+        let is_reply = |i: &Item| i.is_text() && i.role == Role::Assistant && i.origin.is_none();
+        let last = items[asked + 1..].iter().rfind(|i| is_reply(i))?;
+        let quiet = read.located.quiet();
+        if !matches!(
+            turn::turn(items, &pane.status, quiet),
+            turn::Turn::Stopped { .. }
+        ) {
+            return None;
+        }
+        let parts: Vec<&str> = items[asked + 1..]
+            .iter()
+            .filter(|i| is_reply(i) && i.ts == last.ts)
+            .map(|i| i.text.as_str())
+            .collect();
+        Some(cut(&redact::redact(&parts.join("\n\n")), ANSWER_MAX))
+    }
+}
+
 impl From<Matched> for libflankr_proto::common::SessionMatched {
     fn from(m: Matched) -> Self {
         match m {
@@ -1143,6 +1186,50 @@ mod tests {
             session: None,
         };
         (home, sessions, pane)
+    }
+
+    /// The 2026-10-30 22:15 EDT amendment of plan 20261027_04, item 11:
+    /// an answer is the reply after the question, once the turn stopped.
+    #[test]
+    fn an_answer_is_the_reply_after_the_question_once_stopped() {
+        let (home, sessions, mut pane) = asking("Anything else?");
+        let after = sessions.newest_pos(&pane).unwrap();
+        assert_eq!(after, 2);
+        let question = "What did we ship today?";
+        assert_eq!(sessions.answer_after(&pane, after, question), None);
+        let path = home.path().join(".claude/projects/-work-example/s1.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let line = |l: serde_json::Value| format!("{l}\n");
+        file.write_all(
+            line(
+                serde_json::json!({"type": "user", "timestamp": "2026-01-02T00:01:00.000Z",
+                "isSidechain": false,
+                "message": {"role": "user", "content": format!("via flankr: {question}")}}),
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        // Asked, not answered yet.
+        assert_eq!(sessions.answer_after(&pane, after, question), None);
+        file.write_all(
+            line(serde_json::json!({"type": "assistant", "timestamp": "2026-01-02T00:01:05.000Z",
+                "isSidechain": false, "message": {"role": "assistant", "type": "message",
+                "content": [{"type": "text", "text": "Shipped:\n- ask_agent\n- key sk-ant-api03-abcdefghijklmnopqrstuvwxyz"}]}}))
+            .as_bytes(),
+        )
+        .unwrap();
+        // Still working, by herdr and a fresh file: not yet.
+        pane.status = libherdr::protocol::AgentStatus::Working;
+        assert_eq!(sessions.answer_after(&pane, after, question), None);
+        pane.status = libherdr::protocol::AgentStatus::Idle;
+        let answer = sessions.answer_after(&pane, after, question).unwrap();
+        assert!(answer.starts_with("Shipped:\n- ask_agent"), "{answer}");
+        assert!(!answer.contains("abcdefghijklmnop"), "redacted: {answer}");
+        // A question asked before `after` is not this one.
+        assert_eq!(sessions.answer_after(&pane, 4, question), None);
     }
 
     fn answers(sessions: &Sessions, pane: &AgentRef) -> Vec<(String, Option<String>)> {

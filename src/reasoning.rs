@@ -147,6 +147,23 @@ impl SendAgentCommandParams {
     }
 }
 
+/// Parameters for the `ask_agent` tool (plan 20261027_04, the 2026-10-30
+/// 22:15 EDT amendment, decision 10): a question to a coding agent, sent
+/// as a request the user approves, whose answer comes back to summarize.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct AskAgentParams {
+    /// The coding agent to ask: its name, its tab label or its pane id.
+    /// Left out, the current agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The question, in words, as the agent should read it (e.g. "What did
+    /// we ship today?").
+    pub question: String,
+    /// Required. A short name for this question in lowercase words joined
+    /// by '-', naming it and the agent (e.g. ask-shipped-today-claude).
+    pub handle: String,
+}
+
 /// Parameters for the `send_keys` tool.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub struct SendKeysParams {
@@ -225,6 +242,9 @@ impl WatchPaneParams {
 /// 20261027_04, decision 1). The executor also takes the old names
 /// `run_command` and `send_command`.
 pub const SEND_AGENT_COMMAND: &str = "send_agent_command";
+/// The tool that asks a coding agent a question and gives Gemini its
+/// answer (plan 20261027_04, the 2026-10-30 22:15 EDT amendment).
+pub const ASK_AGENT: &str = "ask_agent";
 /// The tool that makes an agent the conversation's current one (plan
 /// 20261027_04, the 11:25 EDT amendment).
 pub const FOCUS_PROJECT: &str = "focus_project";
@@ -308,10 +328,11 @@ pub fn tool_names(tools: &[Tool]) -> Vec<String> {
 /// declared, the old names the executor still takes, and herdr's own
 /// tools it passes through. A plugin's tool may not take one (plan
 /// 20261028_04, the 02:10 EDT amendment of 2026-10-29, item 2).
-pub const OWN_TOOL_NAMES: [&str; 14] = [
+pub const OWN_TOOL_NAMES: [&str; 15] = [
     "focus",
     FOCUS_PROJECT,
     SEND_AGENT_COMMAND,
+    ASK_AGENT,
     "watch_pane",
     "unwatch_pane",
     LIST_FILES,
@@ -388,6 +409,12 @@ pub fn declare_gemini_tools_with(set: ToolSet, plugin_tools: &[AgentTool]) -> Ve
             None,
         )
         .with_parameters::<SendAgentCommandParams>(),
+        FunctionDeclaration::new(
+            ASK_AGENT,
+            "Asks a coding agent a question it can answer better than you (what it did, shipped or changed, where its work stands, its plans) and gives you its answer to summarize. flankr asks the user to approve sending the question, then waits for the agent's answer.",
+            None,
+        )
+        .with_parameters::<AskAgentParams>(),
         FunctionDeclaration::new(
             "watch_pane",
             "Start watching a pane so the user is told out loud when the agent there needs input or finishes its task. Use when the user asks to be notified about, watched, or told about a pane or agent.",
@@ -574,7 +601,7 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 5);
+        assert_eq!(decls.len(), 6);
 
         let names: Vec<&str> = decls.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(
@@ -583,6 +610,7 @@ mod tests {
                 "focus",
                 "focus_project",
                 "send_agent_command",
+                "ask_agent",
                 "watch_pane",
                 "unwatch_pane"
             ]
@@ -597,6 +625,7 @@ mod tests {
                 "focus",
                 "focus_project",
                 "send_agent_command",
+                "ask_agent",
                 "watch_pane",
                 "unwatch_pane",
                 "list_files",
@@ -612,7 +641,7 @@ mod tests {
             file_tools: false,
             recent_commits: true,
         });
-        assert_eq!(tool_names(&commits_only).len(), 6);
+        assert_eq!(tool_names(&commits_only).len(), 7);
     }
 
     #[test]
@@ -771,7 +800,7 @@ mod tests {
             } => function_declarations,
             _ => panic!("expected function tool"),
         };
-        assert_eq!(decls.len(), 5);
+        assert_eq!(decls.len(), 6);
         assert!(decls.iter().any(|d| d.name == "watch_pane"));
     }
 }
