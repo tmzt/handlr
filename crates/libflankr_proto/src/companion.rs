@@ -19,6 +19,10 @@ pub mod methods {
     pub const TURN_INTERRUPT: &str = "turn.interrupt";
     /// Notifications from the daemon.
     pub const TURN_SAY: &str = "turn.say";
+    /// What the running turn is doing: a tool it runs, or thinking again
+    /// ([`TurnProgress`](super::TurnProgress); plan 20261024_03, the
+    /// 2026-10-30 22:08 EDT amendment). Added in libflankr_proto 0.5.9.
+    pub const TURN_PROGRESS: &str = "turn.progress";
     pub const NOTICE: &str = "notice";
     pub const VOCABULARY_CHANGED: &str = "vocabulary.changed";
     /// herdr's focus changed (plan 20261023_02, decision 4).
@@ -441,6 +445,19 @@ pub struct TurnSay {
     pub text: String,
 }
 
+/// `turn.progress`: the running turn's engine is calling `tool`, shown as
+/// `label` (e.g. "Looking at recent commits…"); an empty `tool` means the
+/// call returned and the engine is thinking again. Nothing is spoken for
+/// it. Added in libflankr_proto 0.5.9.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnProgress {
+    pub turn_id: u64,
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub label: String,
+}
+
 /// `confirm.requested`, as sent to a companion: plan 01's fields
 /// (`common::ConfirmRequested`) plus the question to speak. `handle` and
 /// `token` also read as `label` and `phrase`, plan 02's earlier names.
@@ -636,6 +653,16 @@ mod tests {
             seq: 0,
             text: "Done.".into(),
         });
+        round_trip(TurnProgress {
+            turn_id: 4,
+            tool: "recent_commits".into(),
+            label: "Looking at recent commits\u{2026}".into(),
+        });
+        // Thinking again: no tool, no label; both default.
+        let thinking: TurnProgress =
+            serde_json::from_value(serde_json::json!({"turn_id": 4})).unwrap();
+        assert_eq!(thinking.tool, "");
+        assert_eq!(thinking.label, "");
         round_trip(ConfirmRequested {
             confirm_id: 3,
             pane_id: "w2:pZ".into(),

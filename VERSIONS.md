@@ -1024,3 +1024,14 @@ item 3. Strictly additive: the variant is on the `#[non_exhaustive]`
   card goes at once), and `not_cancelled`, with `got` empty when the
   agent's screen did not show the question, or the reason and the
   daemon's `code` when the request did not go through.
+
+## libflankr_proto 0.5.9 — 2026-10-30 (the commit tagged `libflankr_proto-v0.5.9`)
+
+Plan 20261024_03 (the general agent chat), its 2026-10-30 22:08 EDT
+amendment, item 4. Strictly additive:
+
+- **Added:** `companion::methods::TURN_PROGRESS` (`turn.progress`), a
+  notification from the daemon while a turn runs.
+- **Added:** `companion::TurnProgress` (`turn_id`; `tool`, the tool the
+  engine is calling, empty once it returned and the engine thinks again;
+  `label`, its plain name to show, e.g. "Looking at recent commits…").
