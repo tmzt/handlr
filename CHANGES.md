@@ -3885,3 +3885,24 @@ dismissed from the phone is a new feature, which FLANKR RULES 1.4 and 2.3
 make a minor bump, and the rules win: the daemon is 0.3.0 and the app
 0.6.0, not 0.2.4 and 0.5.1 (never pushed or tagged). libflankr_proto 0.5.8
 and flankr-companion 0.7.4 are additive patches as the item says.
+
+## 2026-10-30 22:35 EDT — a Gemini turn's progress: small departures in the build (plan 20261024_03, the 22:08 EDT amendment)
+
+1. **Item 6, the daemon's version.** The amendment says 0.3.0 → 0.4.0.
+   Main moved on while this was built: 0.3.1, then `ask_agent` took 0.4.0
+   and the interrupt change 0.4.1. This build is 0.5.0, still a minor
+   bump as item 6 says, its `UPDATES.md` entry after 0.4.1's.
+2. **Item 4, `ask_agent`'s label.** `ask_agent` landed after the table was
+   written (plan 20261027_04, the 22:15 EDT amendment, leaves its label to
+   this plan). It reads *Asking <agent>…*, the agent's spoken name as
+   herdr's snapshot resolves the call's `agent` (or the current agent),
+   *Asking the agent…* when it cannot. The same `turn.progress` is sent
+   while the turn waits for the agent's answer after approval, and an
+   empty one when the wait ends, so the summary shows *Thinking…*.
+3. **Item 1, after Gemini's first line.** That wait comes after Gemini's
+   first line ("Asking Claude once you approve."), so the app takes a
+   `turn.progress` at any time while the turn runs, not only before
+   Gemini's first line: the busy line comes back for the wait and goes
+   again with the summary.
+4. **The amendment's commit** also dropped the three blank lines that
+   ended the plan before it; no text changed.
