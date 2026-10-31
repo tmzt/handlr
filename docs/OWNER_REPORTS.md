@@ -219,3 +219,16 @@ so no answer came. For those six seconds the phone showed nothing: the
 client keeps the turn internally but gives the app no event for it, and
 the daemon sends nothing while Gemini thinks or runs a tool. Handed to a
 subagent to amend the general agent chat plan and build the feedback.
+
+## 2026-10-30 22:11 EDT — Owner: Gemini should ask the coding agent and summarize its answer
+
+**Report.** "I asked the general agent what we shipped today. I would
+expect it to use a tool call to pass that request to you Get the response
+back and summarize it as a list of changes".
+
+**Seen.** At 21:59:57 Gemini answered the question itself: it called
+`recent_commits` (5 commits) instead. It has `send_agent_command`, which
+types a command into a coding agent's pane after the owner approves it,
+but no tool that waits for the agent's reply and gives it back, so it
+cannot ask an agent and summarize what it says. Handed to a subagent to
+amend the general agent planning plan and build it.
