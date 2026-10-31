@@ -3906,3 +3906,21 @@ and flankr-companion 0.7.4 are additive patches as the item says.
    again with the summary.
 4. **The amendment's commit** also dropped the three blank lines that
    ended the plan before it; no text changed.
+
+## 2026-10-30 23:05 EDT — a turn's confirmation and its card: small departures in the build (plan 20261027_04, the 22:50 EDT amendment)
+
+1. **The amendment's count.** Its introduction says it adds "items 16 to
+   21"; it adds items 16 to 23 (versions are 23, logging 22). The items
+   themselves stand as written.
+2. **Item 20, the overview's message.** The overview hid the message
+   prompt while a confirmation card asked ("the message makes way for
+   it"), since a dictated utterance used to answer the confirmation
+   first. With a Gemini turn's confirmation no longer answered by a
+   message, the dictated message would be invisible, so the message
+   prompt now shows above the card for every confirmation (app 0.7.1,
+   `overview.rs`).
+3. **Item 23, flankr-audio.** flankr-companion 0.7.5 → 0.8.0 is not
+   semver-compatible, and flankr-audio depends on it by path. As for
+   flankr-companion 0.5.0, 0.6.0 and 0.7.0, flankr-audio's version is not
+   moved here; Rule 5.5 may ask for flankr-audio 0.3.0, which is left to
+   the owner.
