@@ -492,3 +492,25 @@ as `turn.say` `seq` 1, made by a call that got the answer and had no
 tools; with a short wait in the test, the "still working" line when no
 answer comes; a denial typing nothing and saying nothing more; and a
 refusal, with nothing opened, for an agent with `allow_messages = false`.
+
+## Amendment — 2026-10-30 22:27 EDT: stopping Gemini stops only the work it started
+
+On the owner's instruction (Rule 1.5), 2026-10-30: "The tool call is in
+progress such as a call to claude that should be stopped But it doesn't
+mean that ... the full agent should be interrupted ... claude shouldn't be
+interrupted just because you" [stopped Gemini], and, offered a narrow and
+a broad way, "Yes, make the narrow change". This replaces, for a tap that
+interrupts a Gemini turn, the rule that every pane the turn sent to, and
+the focused agent while it works, gets its interrupt key:
+
+1. **Commands are stopped.** A pane the turn sent a command to (through
+   `send_agent_command`) still gets its interrupt key: that work is the
+   turn's.
+2. **Questions are not.** A pane only asked a question (`ask_agent`) is
+   not interrupted: the turn stops waiting, and the agent finishes its
+   answer, which shows on its card as any reply does. A pane both
+   commanded and asked in the turn is interrupted, for the command.
+3. **The focused agent is not.** The agent herdr has in focus is no
+   longer interrupted because it is working; only item 1's panes are.
+4. **The daemon** takes the next patch with its `UPDATES.md` entry
+   (FLANKR RULE 2).
