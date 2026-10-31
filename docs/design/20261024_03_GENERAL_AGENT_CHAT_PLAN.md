@@ -296,6 +296,77 @@ The owner (2026-10-26): "tapping the general wg3nt butyon should be immediate st
    - When a turn completes (VAD silence submission, cancellation, or `TurnEnded`), general agent dictation and listening states are cleared cleanly.
    - Pressing the centre button from the idle state cleanly activates another turn without stale dictation or turn state blocking initiation.
 
+## Amendment — 2026-10-30 22:08 EDT: a Gemini turn shows it is thinking, and which tool it runs
 
+The owner's report (2026-10-30, `docs/OWNER_REPORTS.md`, the 22:05 EDT
+entry): "The problem was it it didn't seem to do anything. It didn't have
+any any kind of thinking Feedback or anything else". A spoken question
+was sent, Gemini called `recent_commits` and was answering, and for six
+seconds the phone showed nothing, so a second tap interrupted the turn.
+This adds to the turn's display; nothing earlier is replaced except the
+Gemini card's second line while a turn runs (item 1).
 
+1. **Thinking.** From the moment a Gemini turn starts until Gemini's
+   first line in it (`Event::Conversation` from Gemini) or the turn's end
+   (`Event::TurnEnded`), Gemini's pinned card, on the overview and in the
+   agent view (one `PromptCard` in `apps/companion/src/prompt/`), shows
+   under the user's line, in place of Gemini's previous line, the
+   drawer's Braille spinner (`apps/companion/src/drawer/spinner.rs`, ten
+   frames of 80 ms, in the terminal face) and then *Thinking…* in the
+   muted colour. With the card hidden, its output bar reads
+   *< Thinking…*. The overlay's history is unchanged.
+2. **The centre button while a turn runs.** When Gemini is not
+   listening and a turn runs, the centre button keeps its neutral
+   background and shows the same Braille spinner, in the Gemini accent,
+   in place of the ✦. Listening's pulse (the 11:41 EDT amendment) keeps
+   priority over it. A tap on it still interrupts the turn, as now; the
+   owner declined changing that.
+3. **The client's events.** flankr-companion gives the app
+   `Event::TurnStarted { turn_id: u64 }` as it sends each `turn.start`
+   (also for a turn deferred behind a confirmation), and
+   `Event::TurnProgress { label: Option<String> }` for a `turn.progress`
+   of the running turn that the user has not tapped to interrupt, as
+   `turn.say` is filtered: `Some(label)` while a tool runs (an empty
+   label from the daemon reads *Working…*), `None` once Gemini is
+   thinking again. `Event::TurnEnded` ends it as before. Both variants
+   are additive (`Event` is `#[non_exhaustive]`).
+4. **Tools: `turn.progress`.** libflankr_proto adds the notification
+   `turn.progress` (`methods::TURN_PROGRESS`) with
+   `TurnProgress { turn_id: u64, tool: String, label: String }`
+   (`label` defaults to empty). The daemon's turn (`work()` in
+   `src/server/companion.rs`) passes the engine a wrapper around its
+   `HerdrToolExecutor` that, for each tool call, sends
+   `turn.progress { turn_id, tool: <name>, label }` before the call and
+   `turn.progress { turn_id, tool: "", label: "" }` after it returns
+   (Gemini thinking again). No libinfer change. The app shows the label
+   in place of *Thinking…*, with the spinner. The labels:
 
+   | Tool | Label |
+   |---|---|
+   | `focus` | Moving the focus… |
+   | `focus_project` | Switching the current agent… |
+   | `send_agent_command`, `run_command`, `send_command` | Sending to the agent… |
+   | `watch_pane` | Setting up a watch… |
+   | `unwatch_pane` | Stopping a watch… |
+   | `list_files` | Looking at the project's files… |
+   | `read_file` | Reading a file… |
+   | `recent_commits` | Looking at recent commits… |
+   | `planning_plans_list` | Looking at the plans… |
+   | `planning_plan_show` | Reading a plan… |
+   | any other plugin tool | Asking <the plugin's name>…, e.g. *Asking Planning…* |
+   | anything else | Working… |
+
+5. **Speech.** Nothing is spoken for any of this.
+6. **Versions.** libflankr_proto 0.5.8 → 0.5.9 and flankr-companion
+   0.7.4 → 0.7.5 (additive, patch). The daemon 0.3.0 → 0.4.0, with a root
+   `UPDATES.md` entry: it now reports a turn's progress. The app 0.6.0 →
+   0.7.0, with an `apps/UPDATES.md` entry: Gemini shows it is thinking
+   and what it is looking at.
+7. **Done when:** a daemon test's scripted tool call yields
+   `turn.progress` with the tool's label before `turn.say`, and the empty
+   one after the tool; the client turns `turn.start` and `turn.progress`
+   into `Event::TurnStarted` and `Event::TurnProgress`, dropping a
+   tapped or ended turn's; the card's unit tests show the spinner and
+   *Thinking…*, then a tool's label, then Gemini's reply; and a scripted
+   run of the app goes Thinking → *Looking at recent commits…* → the
+   reply, the centre button spinning until the turn ends.
