@@ -251,3 +251,26 @@ answer").
   card shows a spinner and *Thinking…*, or what it is doing (*Looking at
   recent commits…*, *Asking Claude…*), and the centre button spins until
   the turn ends.
+
+## 2026-10-30 22:41 EDT — Owner: no approval card for ask_agent, and nothing heard
+
+Device: Galaxy S23 Ultra, the build installed 2026-10-30 22:38 EDT (app
+0.7.0, daemon 0.5.0).
+
+**Report.** "Didn't get the approval card or the verbal".
+
+**Seen** (phone and daemon logs):
+- 22:39:53 the spoken question went to Gemini; 22:39:58 Gemini called
+  `ask_agent` (agent "Claude in flankr", question "What did we ship
+  today?") and the daemon opened confirmation 1; the card showed
+  *Asking Claude in flankr…*.
+- 22:40:03 and 22:40:06 two short lines were played (4 s and 3 s; not
+  muted). Turn lines are not logged, so what they said is not known; the
+  owner heard nothing useful.
+- No approval card was shown: the phone logged none.
+- 22:40:30 the owner tapped record and dictated a message to Claude; at
+  22:40:36, as speech was heard, confirmation 1 resolved *denied*: a
+  pending voice-turn confirmation takes the next utterance as its answer,
+  so a message to another agent answered Gemini's approval.
+
+Handed to a subagent in its own worktree.
