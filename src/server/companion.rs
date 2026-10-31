@@ -805,12 +805,20 @@ async fn work(
         Some((config, _)) => executor.with_planning(config),
         None => executor,
     };
+    // Each tool call is reported to the phone as `turn.progress` (the
+    // 22:08 EDT amendment, item 4).
+    let progress = Progress {
+        inner: &executor,
+        conn: &conn,
+        current: &session.current_agent,
+        turn_id,
+    };
     // Subscribed before any confirmation can be opened, so no resolution
     // is missed.
     let mut events = daemon.broker.subscribe();
     let reply = match tokio::time::timeout(
         ENGINE_TIMEOUT,
-        engine.process_turns(&messages, &executor),
+        engine.process_turns(&messages, &progress),
     )
     .await
     {
@@ -887,10 +895,14 @@ async fn work(
     let asks: Vec<Ask> = log.asks.lock().unwrap().clone();
     let mut seq = 1;
     for ask in asks.iter().filter(|a| sent.contains(&a.confirm_id)) {
+        // The wait shows as the tool's progress, then thinking again for
+        // the summary (plan 20261024_03, the 22:08 EDT amendment, item 4).
+        progress.send(crate::reasoning::ASK_AGENT, &ask_label(&ask.spoken));
         let waited = tokio::select! {
             answer = wait_for_answer(daemon, ask) => Some(answer),
             _ = superseded.cancelled() => None,
         };
+        progress.send("", "");
         let Some(answer) = waited else {
             log::info!(
                 "Turn {turn_id}: a new turn came; stopped waiting for {}'s answer",
@@ -998,6 +1010,113 @@ impl libinfer::ToolExecutor for NoTools {
         log::warn!("Refused {name} in the summary of an agent's answer");
         Err(format!("no tools are available here ({name})"))
     }
+}
+
+/// The turn's tool executor as the engine is given it (plan 20261024_03,
+/// the 2026-10-30 22:08 EDT amendment, item 4): each call goes to the
+/// `HerdrToolExecutor`, with a `turn.progress` naming it before and an
+/// empty one once it returns, when the engine is thinking again.
+struct Progress<'a> {
+    inner: &'a HerdrToolExecutor,
+    conn: &'a Conn,
+    /// The session's current agent, whom `ask_agent` asks by default.
+    current: &'a CurrentAgent,
+    turn_id: u64,
+}
+
+impl Progress<'_> {
+    /// The spoken name of the agent `ask_agent`'s `args` ask: its `agent`
+    /// (a name, tab label or pane id) or the current agent, as herdr's
+    /// snapshot names it within `NAME_LOOKUP_TIMEOUT`; else "the agent".
+    async fn asked(&self, args: &Value) -> String {
+        let target = args
+            .get("agent")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|a| !a.is_empty())
+            .map(str::to_string)
+            .or_else(|| self.current.lock().unwrap().clone());
+        let daemon = &self.conn.daemon;
+        let spoken = match target {
+            Some(target) => {
+                tokio::time::timeout(super::NAME_LOOKUP_TIMEOUT, daemon.client.list_panes())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .and_then(|snap| {
+                        let names = daemon.names(&snap);
+                        names.resolve(&target).ok().map(|a| a.spoken.clone())
+                    })
+            }
+            None => None,
+        };
+        spoken.unwrap_or_else(|| "the agent".to_string())
+    }
+
+    fn send(&self, tool: &str, label: &str) {
+        self.conn.send(&Notification::new(
+            methods::TURN_PROGRESS,
+            companion::TurnProgress {
+                turn_id: self.turn_id,
+                tool: tool.to_string(),
+                label: label.to_string(),
+            },
+        ));
+    }
+}
+
+#[async_trait::async_trait]
+impl libinfer::ToolExecutor for Progress<'_> {
+    async fn execute_tool(&self, name: &str, args: &Value) -> Result<Value, String> {
+        let label = if name == crate::reasoning::ASK_AGENT {
+            ask_label(&self.asked(args).await)
+        } else {
+            let plugin = self.conn.daemon.plugins.agent_tool(name).map(|t| t.plugin);
+            tool_label(name, plugin)
+        };
+        self.send(name, &label);
+        let result = libinfer::ToolExecutor::execute_tool(self.inner, name, args).await;
+        self.send("", "");
+        result
+    }
+}
+
+/// What the phone shows while the general agent runs `tool` (the 22:08 EDT
+/// amendment's table): a short plain label for flankr's own tools, *Asking
+/// <plugin>…* for another plugin's tool (`plugin` is its name), else
+/// *Working…*. `ask_agent` names its agent ([`Progress`]); here it is
+/// *Asking the agent…*.
+pub fn tool_label(tool: &str, plugin: Option<&str>) -> String {
+    if tool == crate::reasoning::ASK_AGENT {
+        return ask_label("the agent");
+    }
+    use crate::reasoning::{
+        FOCUS_PROJECT, LIST_FILES, READ_FILE, RECENT_COMMITS, SEND_AGENT_COMMAND,
+    };
+    let fixed = match tool {
+        "focus" => Some("Moving the focus"),
+        FOCUS_PROJECT => Some("Switching the current agent"),
+        SEND_AGENT_COMMAND | "run_command" | "send_command" => Some("Sending to the agent"),
+        "watch_pane" => Some("Setting up a watch"),
+        "unwatch_pane" => Some("Stopping a watch"),
+        LIST_FILES => Some("Looking at the project's files"),
+        READ_FILE => Some("Reading a file"),
+        RECENT_COMMITS => Some("Looking at recent commits"),
+        "planning_plans_list" => Some("Looking at the plans"),
+        "planning_plan_show" => Some("Reading a plan"),
+        _ => None,
+    };
+    match (fixed, plugin) {
+        (Some(label), _) => format!("{label}\u{2026}"),
+        (None, Some(plugin)) => format!("Asking {plugin}\u{2026}"),
+        (None, None) => "Working\u{2026}".to_string(),
+    }
+}
+
+/// *Asking <agent>…*: `ask_agent`'s label, as it is called and while the
+/// turn waits for the agent's answer.
+fn ask_label(agent: &str) -> String {
+    format!("Asking {agent}\u{2026}")
 }
 
 /// Send `vocabulary.changed` if the vocabulary differs from what this
@@ -1242,6 +1361,28 @@ mod tests {
             session_id(&Principal::local("text")),
             "companion:local:text"
         );
+    }
+
+    #[test]
+    fn tools_have_plain_labels() {
+        assert_eq!(
+            tool_label("recent_commits", None),
+            "Looking at recent commits\u{2026}"
+        );
+        assert_eq!(
+            tool_label("run_command", None),
+            "Sending to the agent\u{2026}"
+        );
+        assert_eq!(
+            tool_label("planning_plans_list", Some("Planning")),
+            "Looking at the plans\u{2026}"
+        );
+        assert_eq!(
+            tool_label("weather_today", Some("Weather")),
+            "Asking Weather\u{2026}"
+        );
+        assert_eq!(tool_label("list_panes", None), "Working\u{2026}");
+        assert_eq!(tool_label("ask_agent", None), "Asking the agent\u{2026}");
     }
 
     #[test]

@@ -669,6 +669,54 @@ async fn the_current_agent_is_not_interrupted_even_while_working() {
     assert!(mock_logs(&env.daemon).await.1.is_empty(), "no key");
 }
 
+/// Plan 20261024_03, the 2026-10-30 22:08 EDT amendment, item 4: each tool
+/// call is reported as `turn.progress` with its label, then an empty one
+/// once it returns, all before the reply; nothing is said for it.
+#[tokio::test]
+async fn a_tool_call_is_reported_as_turn_progress_before_the_reply() {
+    let env = start(direct("esc")).await;
+    let (mut c, _) = Client::companion(&env).await;
+    let r = c.call("turn.start", turn(1, "watch claude")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    let say = c.note("turn.say").await;
+    assert_eq!(say["params"]["text"], "Watching.");
+    let progress: Vec<&Value> = c
+        .seen
+        .iter()
+        .filter(|m| m["method"] == "turn.progress")
+        .collect();
+    assert_eq!(progress.len(), 2, "{progress:?}");
+    assert_eq!(progress[0]["params"]["turn_id"], 1);
+    assert_eq!(progress[0]["params"]["tool"], "watch_pane");
+    assert_eq!(progress[0]["params"]["label"], "Setting up a watch\u{2026}");
+    assert_eq!(progress[1]["params"]["tool"], "");
+    assert_eq!(progress[1]["params"]["label"], "");
+    let at = |p: &Value| {
+        let p = p.clone();
+        c.position(move |m| *m == p).unwrap()
+    };
+    let first = at(progress[0]);
+    let last = at(progress[1]);
+    let said = c.position(|m| m["method"] == "turn.say").unwrap();
+    assert!(first < last && last < said, "{:?}", c.seen);
+    // Only the one turn.say: progress is never spoken.
+    assert_eq!(
+        c.seen.iter().filter(|m| m["method"] == "turn.say").count(),
+        1
+    );
+
+    // A turn with no tool calls reports none.
+    let r = c.call("turn.start", turn(2, "hello")).await;
+    assert_eq!(r["result"]["outcome"], "done", "{r}");
+    assert_eq!(
+        c.seen
+            .iter()
+            .filter(|m| m["method"] == "turn.progress")
+            .count(),
+        2
+    );
+}
+
 #[tokio::test]
 async fn an_empty_interrupt_key_sends_nothing() {
     let env = start(direct("")).await;
@@ -2897,6 +2945,40 @@ async fn ask_agent_says_the_agent_is_still_working_when_no_answer_comes() {
     );
     let done = c.response(id).await;
     assert_eq!(done["result"]["outcome"], "done", "{done}");
+    // Plan 20261024_03, the 22:08 EDT amendment, item 4: the tool call,
+    // then the wait, each as "Asking Claude…" (the call names the pane,
+    // which herdr's snapshot names), each followed by thinking again; the
+    // wait's before its say.
+    let progress: Vec<(String, String)> = c
+        .seen
+        .iter()
+        .filter(|m| m["method"] == "turn.progress")
+        .map(|m| {
+            (
+                m["params"]["tool"].as_str().unwrap().to_string(),
+                m["params"]["label"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let pair = |tool: &str, label: &str| (tool.to_string(), label.to_string());
+    assert_eq!(
+        progress,
+        [
+            pair("ask_agent", "Asking Claude\u{2026}"),
+            pair("", ""),
+            pair("ask_agent", "Asking Claude\u{2026}"),
+            pair("", ""),
+        ]
+    );
+    let waited = c
+        .position(|m| {
+            m["method"] == "turn.progress" && m["params"]["label"] == "Asking Claude\u{2026}"
+        })
+        .unwrap();
+    let said_at = c
+        .position(|m| m["method"] == "turn.say" && m["params"]["seq"] == 1)
+        .unwrap();
+    assert!(waited < said_at);
 }
 
 #[tokio::test]

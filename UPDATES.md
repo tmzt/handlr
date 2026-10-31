@@ -166,3 +166,8 @@ These changes came before the program had version numbers.
 
 **Changed**
 - Stopping a Gemini turn (a tap on the phone's centre button) now interrupts only the agents Gemini sent a command to. An agent it only asked a question (`ask_agent`) keeps working, and its answer shows on its card; the agent in focus is no longer interrupted just because it is working.
+
+## 0.5.0 — 2026-10-30
+
+**Added**
+- While the general agent is answering from the phone, the daemon tells the phone what it is doing: each tool Gemini runs, by a plain name such as "Looking at recent commits…", and when it goes back to thinking. While it waits for a coding agent's answer to `ask_agent`, the phone reads "Asking Claude…" (the agent's name). Nothing more is said aloud.
