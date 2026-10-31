@@ -161,3 +161,8 @@ These changes came before the program had version numbers.
 
 **Added**
 - Gemini can ask a coding agent a question with the new `ask_agent` tool, such as "what did we ship today?". The question goes through the same approval as any request typed to an agent (the phone asks "Approve sending your message to Claude?"; nothing is typed until you approve, and an agent with `allow_messages = false` is never asked). Once approved, the daemon waits up to 2 minutes for the agent's answer in its session, gives it to Gemini (redacted, at most 16 KiB) with no tools available, and Gemini says a short summary. If no answer comes in time, Gemini says the agent is still working and its reply will show on its card. Not available when herdr is reached with `--remote`, since the agent's session files are not on this machine.
+
+## 0.4.1 — 2026-10-30
+
+**Changed**
+- Stopping a Gemini turn (a tap on the phone's centre button) now interrupts only the agents Gemini sent a command to. An agent it only asked a question (`ask_agent`) keeps working, and its answer shows on its card; the agent in focus is no longer interrupted just because it is working.

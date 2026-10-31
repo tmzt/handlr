@@ -569,8 +569,16 @@ pub(super) async fn turn_start(
     if addressed.is_some() {
         *session.current.lock().unwrap() = addressed;
     }
-    let current = session.current.lock().unwrap().clone();
     let ran_raw: Vec<(String, String)> = log.ran.lock().unwrap().clone();
+    // What `ask_agent` only asked, never interrupted (plan 20261027_04, the
+    // 2026-10-30 22:27 EDT amendment, item 2).
+    let asked: Vec<(String, String)> = log
+        .asks
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|a| (a.pane_id.clone(), a.question.clone()))
+        .collect();
     // An interrupt answers within 500 ms, so its snapshot waits less.
     let lookup = if ended.is_none() {
         INTERRUPT_SNAPSHOT_TIMEOUT
@@ -590,14 +598,8 @@ pub(super) async fn turn_start(
         None => {
             log::info!("Turn {turn_id} of {} interrupted", session.id);
             if let Some(snap) = &snap {
-                let keys = interrupt_keys(
-                    &daemon,
-                    &principal,
-                    snap,
-                    names.as_ref(),
-                    &ran_raw,
-                    current.as_deref(),
-                );
+                let keys =
+                    interrupt_keys(&daemon, &principal, snap, names.as_ref(), &ran_raw, &asked);
                 match tokio::time::timeout(INTERRUPT_KEYS_TIMEOUT, keys).await {
                     Ok(stopped) => interrupted = stopped,
                     Err(_) => log::warn!("Sending interrupt keys took too long; gave up"),
@@ -683,28 +685,29 @@ fn message(role: &str, content: &str) -> Message {
 /// The interrupt (18:03 EDT amendment): the key to every pane the turn
 /// sent a command to, whatever its status, and to the session's current
 /// agent if herdr reports it working.
+/// The panes a tap on an interrupted turn stops (plan 20261027_04, the
+/// 2026-10-30 22:27 EDT amendment): each pane the turn sent a command to,
+/// once; not a pane only asked a question, and not the focused agent.
+fn interrupt_targets(ran: &[(String, String)], asked: &[(String, String)]) -> Vec<String> {
+    let mut targets: Vec<String> = Vec::new();
+    for entry in ran {
+        if asked.contains(entry) || targets.contains(&entry.0) {
+            continue;
+        }
+        targets.push(entry.0.clone());
+    }
+    targets
+}
+
 async fn interrupt_keys(
     daemon: &Daemon,
     principal: &Principal,
     snap: &Value,
     names: Option<&Names>,
     ran: &[(String, String)],
-    current: Option<&str>,
+    asked: &[(String, String)],
 ) -> Vec<companion::Interrupted> {
-    let mut targets: Vec<String> = Vec::new();
-    for (pane_id, _) in ran {
-        if !targets.contains(pane_id) {
-            targets.push(pane_id.clone());
-        }
-    }
-    if let Some(current) = current {
-        let working = names
-            .and_then(|n| n.get(current))
-            .is_some_and(|a| a.agent.status == AgentStatus::Working);
-        if working && !targets.iter().any(|t| t == current) {
-            targets.push(current.to_string());
-        }
-    }
+    let targets = interrupt_targets(ran, asked);
     let mut stopped = Vec::new();
     for pane_id in targets {
         let agent = extract_agent_name_for_pane(snap, &pane_id);
@@ -1188,6 +1191,27 @@ pub(super) fn is_own_voice_turn(event: &ConfirmEvent, principal: &Principal) -> 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_tap_stops_commanded_panes_only_not_asked_ones() {
+        let cmd = |p: &str, c: &str| (p.to_string(), c.to_string());
+        let ran = [
+            cmd("w1:p1", "run the tests"),
+            cmd("w1:p2", "what shipped today?"),
+            cmd("w1:p1", "and lint"),
+            cmd("w1:p3", "what are you doing?"),
+            cmd("w1:p3", "stop that"),
+        ];
+        let asked = [
+            cmd("w1:p2", "what shipped today?"),
+            cmd("w1:p3", "what are you doing?"),
+        ];
+        // p1 commanded twice (once), p2 only asked (left alone), p3 both
+        // asked and commanded (stopped, for the command).
+        assert_eq!(interrupt_targets(&ran, &asked), ["w1:p1", "w1:p3"]);
+        assert!(interrupt_targets(&[], &[]).is_empty());
+    }
+
     use super::*;
 
     #[test]

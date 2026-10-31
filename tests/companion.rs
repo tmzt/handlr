@@ -641,19 +641,22 @@ async fn an_interrupt_sends_the_key_to_the_pane_the_turn_sent_to() {
 }
 
 #[tokio::test]
-async fn the_current_agent_is_interrupted_only_while_working() {
+async fn the_current_agent_is_not_interrupted_even_while_working() {
     let env = start(direct("esc")).await;
     let (mut c, _) = Client::companion(&env).await;
 
-    // Working (the mock's default): the current agent gets the key.
+    // Working (the mock's default): stopping Gemini leaves the current
+    // agent alone (plan 20261027_04, the 2026-10-30 22:27 EDT amendment,
+    // item 3).
     let id = c
         .request("turn.start", turn(1, "watch claude then slow"))
         .await;
     tokio::time::sleep(Duration::from_millis(100)).await;
     c.request("turn.interrupt", json!({"turn_id": 1})).await;
     let r = c.response(id).await;
-    assert_eq!(r["result"]["interrupted"][0]["pane_id"], "p1", "{r}");
-    assert_eq!(mock_logs(&env.daemon).await.1.len(), 1);
+    assert_eq!(r["result"]["outcome"], "interrupted", "{r}");
+    assert_eq!(r["result"]["interrupted"], json!([]), "{r}");
+    assert!(mock_logs(&env.daemon).await.1.is_empty(), "no key");
 
     // Idle: left alone, with nothing sent this turn.
     set_status(&env.daemon, AgentStatus::Idle).await;
@@ -663,7 +666,7 @@ async fn the_current_agent_is_interrupted_only_while_working() {
     let r = c.response(id).await;
     assert_eq!(r["result"]["outcome"], "interrupted", "{r}");
     assert_eq!(r["result"]["interrupted"], json!([]));
-    assert_eq!(mock_logs(&env.daemon).await.1.len(), 1, "no second key");
+    assert!(mock_logs(&env.daemon).await.1.is_empty(), "no key");
 }
 
 #[tokio::test]
