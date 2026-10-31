@@ -226,3 +226,15 @@ These changes came before the app had version numbers.
 **Added**
 - While Gemini works on an answer, its card shows a small spinner and "Thinking…", and the centre button spins until the answer is done; tapping it still stops Gemini.
 - While Gemini looks something up, the card says what, such as "Looking at recent commits…", and while it waits for a coding agent's answer to a question it asked, "Asking Claude…". None of this is spoken.
+
+## 0.7.1 — 2026-10-30
+
+**Fixed**
+- When Gemini asks to send something to a coding agent, its approval card now also shows in that agent's session, with Approve and Deny; before, it could be missing there after the server restarted. For another agent, its card shows above the session too.
+- The approval question and the card say exactly what will be sent, such as "Approve sending "What did we ship today?" to Claude?".
+- A message you dictate to an agent while Gemini waits for your approval no longer answers Gemini's question: it stays on its card until you tap Approve or Deny, or answer Gemini by voice with the centre button ("approve" or "deny").
+- The centre button no longer cancels Gemini's waiting question; a message typed to Gemini meanwhile goes once the question is answered.
+- On the overview, the message you are dictating shows beside an approval card instead of being hidden by it.
+
+**Changed**
+- If Gemini's request is denied or not answered in time, Gemini's card says so briefly, such as "Not sent: denied."

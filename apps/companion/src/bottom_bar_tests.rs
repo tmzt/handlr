@@ -624,3 +624,89 @@ fn a_turn_shows_thinking_then_the_tool_then_the_reply() {
         p.audio
     );
 }
+
+/// Plan 20261027_04, the 2026-10-30 22:50 EDT amendment, items 19 and 20:
+/// a Gemini turn asking `ask_agent`'s question, its confirmation given
+/// while the turn runs.
+fn asking_turn() -> Vec<(u32, Event)> {
+    vec![
+        (READY + 1, Event::TurnStarted { turn_id: 1 }),
+        (
+            READY + 2,
+            Event::Conversation {
+                speaker: Speaker::Gemini,
+                text: "I'll ask Claude once you approve.".into(),
+            },
+        ),
+        (
+            READY + 3,
+            Event::Confirm {
+                confirm_id: 9,
+                text: "Approve sending \"What did we ship today?\" to Claude?".into(),
+                label: Some("ask-what-did-we".into()),
+                phrase: String::new(),
+                command: "What did we ship today?".into(),
+                agent: "Claude".into(),
+                project: Some("flankr".into()),
+            },
+        ),
+    ]
+}
+
+#[test]
+fn a_turns_confirmation_shows_its_card_and_approve_answers_it() {
+    let script = format!("frames {SETTLE}\nframes 4\n");
+    let Some(p) = run_timed(&script, None, false, asking_turn()) else {
+        return;
+    };
+    assert_eq!(p.drawer.card, Some(("Claude".to_string(), None)));
+    let approve = p.drawer.approve.expect("the card's Approve");
+    let [x, y] = approve.center();
+    let p = run_timed(
+        &format!("{script}tap {x} {y}\nframes 2\n"),
+        None,
+        false,
+        asking_turn(),
+    )
+    .unwrap();
+    assert_eq!(
+        inputs_with(&p, "Answer { confirm_id: 9, approve: true }"),
+        1,
+        "{:?}",
+        p.inputs
+    );
+}
+
+#[test]
+fn dictating_to_an_agent_leaves_a_turns_confirmation_on_its_card() {
+    let Some((_, _, message)) = bar() else { return };
+    let [x, y] = message.center();
+    let mut events = asking_turn();
+    // The client's message prompt, as it gives it for the record button.
+    events.push((
+        READY + 14,
+        Event::Dictation(flankr_companion::Dictation {
+            active: true,
+            mode: flankr_companion::PromptMode::Voice,
+            text: "please also run the tests".into(),
+            target: None,
+            focus_moved: None,
+            phase: flankr_companion::DictationPhase::Collecting,
+            submit_in: None,
+            general_agent: false,
+        }),
+    ));
+    let p = run_timed(
+        &format!("frames {SETTLE}\ntap {x} {y}\nframes 8\n"),
+        None,
+        false,
+        events,
+    )
+    .unwrap();
+    assert_eq!(inputs_with(&p, "StartDictation"), 1, "{:?}", p.inputs);
+    assert_eq!(inputs_with(&p, "Answer"), 0, "{:?}", p.inputs);
+    // Both show: the card, still asking, and the message.
+    assert_eq!(p.drawer.card, Some(("Claude".to_string(), None)));
+    assert!(p.drawer.approve.is_some(), "still asking");
+    assert!(p.drawer.message, "the message prompt shows");
+}

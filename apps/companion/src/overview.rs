@@ -484,10 +484,10 @@ impl Overview {
         self.headings = headings;
         let top = divider_y + 12.0 * s;
 
-        // While a confirmation asks, the message makes way for it.
-        let asking = self.card.as_ref().is_some_and(|c| c.confirm.is_some());
-        let message = self.message.clone().filter(|_| !asking);
-        self.prompts.set_message(message);
+        // The message shows beside a confirmation that asks: a message
+        // dictated meanwhile does not answer a Gemini turn's (plan
+        // 20261027_04, the 2026-10-30 22:50 EDT amendment, item 20).
+        self.prompts.set_message(self.message.clone());
 
         // The bottom row, then the cards above it.
         let row_bottom = l.h - l.bottom - 16.0 * s;
@@ -1363,9 +1363,11 @@ mod tests {
             lines: vec![line("Approve?"), line("\"continue\" to Claude in flankr")],
             confirm: Some(7),
         }));
-        // The message makes way for the question.
+        // The message stays beside the question, above it (plan
+        // 20261027_04, the 2026-10-30 22:50 EDT amendment, item 20).
         assert_eq!(o.panels.len(), 1);
-        assert!(!o.prompts().message_open());
+        assert!(o.prompts().message_open());
+        assert!(message(&o).y + message(&o).h <= o.panels[0].fills[0].rect.y);
         let approve = o.rect_of(AgentHit::Approve(7)).unwrap();
         let deny = o.rect_of(AgentHit::Deny(7)).unwrap();
         assert!(approve.x + approve.w < deny.x);
@@ -1373,7 +1375,7 @@ mod tests {
             tap(&mut o, deny.x + 5.0, deny.y + 5.0),
             Some(OverviewHit::Bottom(AgentHit::Deny(7)))
         );
-        // Answered: the card stays without buttons, and the message is back.
+        // Answered: the card stays without buttons, the message above it.
         o.set_card(Some(Panel {
             lines: vec![line("Sent")],
             confirm: None,
