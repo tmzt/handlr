@@ -1090,3 +1090,12 @@ behaviour a caller can observe). Takes libflankr_proto 0.5.10
   `expired`, `cancelled` or `failed`, `State` also gives
   `Event::Conversation { speaker: Speaker::Gemini, text: "Not sent:
   <outcome>." }`, never as `Event::Say`.
+
+## flankr-audio 0.3.0 — 2026-10-30 (the commit tagged `flankr-audio-v0.3.0`)
+
+- **Breaking**: flankr-companion 0.3.0 → 0.8.0 (Rule 5.5). flankr-audio's
+  public API carries `flankr_companion::Event` and `flankr_companion::Input`
+  (the pump's events and the inputs it gives for `Companion::send`), and
+  flankr-companion's minor versions 0.4.0 through 0.8.0 are not
+  semver-compatible with 0.3. flankr-audio 0.2.0 took the earlier ones
+  without its own bump; this one catches up. No other API change.

@@ -1,6 +1,6 @@
 [package]
 name = "flankr-audio"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Audio for the companion front ends: libvoicexn speech in and out, joined to flankr-companion"
 
